@@ -162,14 +162,19 @@ PrusaLink has no write endpoint for filament, so the bridge uploads a small
 G-code job, `spoolman-sync.gcode` on the USB drive, and runs it as a print.
 The printer only accepts it while idle or finished, and each run appears in
 the printer's job history. The job starts with the printer's compatibility
-checks (`gcode_preamble`), sets the filament with `M865` without moving any,
+checks (`gcode_preamble`), then `G28 O` to home only if the position isn't
+known: every job ends by lowering the bed, and with Z unhomed (as after a
+boot) the printer would drive the bed into its stop. It then sets the
+filament with `M865` without moving any,
 sets the instance UUID with `M865.1` on tool 0, and ends with an `M117`
 message naming the spool.
 
 The bridge writes a tool once the printer is idle, after a swap takes effect
 or the tool unloads. A menu load replaces the filament with a preset, which
 drops the color and UUID, so a write is expected then. It waits while a swap
-is unconfirmed or staged, and while the tool is empty. If the printer still
+is staged and while the tool is empty. During an unconfirmed swap it writes
+the spool Spoolman still assigns, so the `M117` shows you what Spoolman
+thinks is loaded; confirming a different spool rewrites the printer. If the printer still
 differs after two jobs, it stops and flags the spool.
 
 A mismatch with no swap or unload behind it is drift. The bridge flags it and

@@ -430,3 +430,31 @@ async def test_dry_run_never_uploads(tmp_path, caplog):
     assert jobs(printer) == [] and "WOULD RUN printer job" in caplog.text
     assert not [w for w in fake.writes if w[0] != "field"]
     await bridge.aclose()
+
+
+async def test_unconfirmed_swap_still_writes_assigned_spool(tmp_path):
+    # A jam: unload, reload the same spool from the menu (color dropped), no new print.
+    bridge, fake, printer = make(tmp_path, [spool(19)])
+    await bridge.poll()
+    printer.unloads, printer.at_unload, printer.material = 1, 1000, {"name": "PLA"}
+    await bridge.poll()
+    (gcode,) = jobs(printer)
+    assert gcode.splitlines()[3].startswith("G28 O")
+    assert 'O"#73767d" L0' in gcode
+    assert bridge.tools[0].swap is not None  # Writing doesn't confirm the swap.
+    await bridge.aclose()
+
+
+async def test_staged_swap_waits_for_unload_before_writing(tmp_path):
+    bridge, fake, printer = make(tmp_path, [spool(19)], sync_drift=True)
+    printer.material = {"name": "PLA"}
+    fake.spools[20] = spool_x(20)
+    await bridge.poll()  # baseline with 19 and 20 in the location: ambiguous, skipped
+    fake.spools.pop(20)
+    await bridge.poll()  # baseline on 19; sync_drift writes 19
+    assert len(jobs(printer)) == 1
+    printer.material = {"name": "PLA"}  # Menu load again
+    fake.spools[20] = spool_x(20)  # 20 staged
+    await bridge.poll()
+    assert len(jobs(printer)) == 1
+    await bridge.aclose()

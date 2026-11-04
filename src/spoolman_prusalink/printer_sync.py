@@ -113,14 +113,21 @@ def filament_lines(write: ToolWrite) -> list[str]:
     return lines
 
 
+# Every print job ends with the firmware lowering the bed. With Z unhomed, as after a
+# boot, it can't tell the bed is already at the bottom and drives it into the stop, so
+# home first. `O` skips homing when the position is already known.
+HOME_IF_NEEDED = "G28 O ; home only if not homed, so the end-of-job bed move is safe"
+
+
 def build_job(
     preamble: tuple[str, ...] | list[str],
     writes: list[ToolWrite],
     notices: list[str],
     multi_tool: bool,
 ) -> str:
-    """Return the job file: compatibility checks, filament writes, then one `M117`."""
-    lines = list(preamble)
+    """Return the job file: compatibility checks, homing if needed, filament writes, then
+    one `M117`."""
+    lines = [*preamble, HOME_IF_NEEDED]
     labels = []
     for w in writes:
         lines += filament_lines(w)

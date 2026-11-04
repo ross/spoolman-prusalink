@@ -210,12 +210,18 @@ class Bridge:
         """Decide whether a printer/spool mismatch is a pending write or drift."""
         detail = "; ".join(diffs)
         expected = st.needs_sync or self.config.sync_drift
-        settled = st.swap is None and st.assigned == st.active
+        # Wait while a swap is staged: the active spool is about to change. During an
+        # unconfirmed swap, write the assigned spool: the M117 then shows the user what
+        # Spoolman thinks is loaded, and confirming a different spool rewrites it.
+        settled = st.assigned == st.active
         if self.config.printer_sync and expected and st.sync_attempts < MAX_SYNC_ATTEMPTS:
             if settled:
                 self._pending_writes.append(tool)
                 notes.append(f"[{location}] printer will be set to spool {active.id} when "
                              f"idle: {detail}")
+            else:
+                notes.append(f"[{location}] printer will be set once spool {st.assigned} "
+                             f"is loaded")
             return
         if self.config.printer_sync and expected:
             notes.append(f"[{location}] printer still differs from spool {active.id} after "

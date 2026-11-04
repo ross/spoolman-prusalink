@@ -56,4 +56,7 @@ def test_job_message_is_ascii_and_multi_tool_uses_screen_numbers():
 
 def test_notice_only_job():
     job = build_job(COREONEL_PREAMBLE, [], ["Core One L+: a; b"], multi_tool=False)
-    assert job.splitlines()[3:] == ["M117 Spoolman: Core One L+: a, b"]
+    assert job.splitlines()[3:] == [
+        "G28 O ; home only if not homed, so the end-of-job bed move is safe",
+        "M117 Spoolman: Core One L+: a, b",
+    ]
