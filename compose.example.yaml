@@ -1,0 +1,20 @@
+# Example: run the bridge next to Spoolman.
+services:
+  spoolman:
+    image: ghcr.io/donkie/spoolman:latest
+    ports:
+      - "7912:8000"
+    volumes:
+      - ./spoolman-data:/home/app/.local/share/spoolman
+
+  spoolman-prusalink:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      - spoolman
+    environment:
+      PRUSALINK_API_KEY: ${PRUSALINK_API_KEY:?set PRUSALINK_API_KEY}
+      SPOOLMAN_PRUSALINK_CONFIG: /config/config.toml
+    volumes:
+      - ./config.toml:/config/config.toml:ro
+      - ./bridge-data:/data

@@ -1,0 +1,43 @@
+# spoolman-prusalink configuration.
+# The PrusaLink API key comes from the PRUSALINK_API_KEY environment variable.
+# PRUSALINK_URL and SPOOLMAN_URL, when set, override the URLs below.
+
+[printer]
+url = "http://192.168.1.22"
+
+[spoolman]
+url = "http://spoolman:8000"
+
+# One entry per tool. `location` is matched exactly against the spool's location.
+# A single-tool printer uses one location named for the printer.
+[[tools]]
+index = 0
+location = "Core One L+"
+
+# A multi-tool printer (INDX, XL) uses one location per tool instead. `index` is
+# the 0-based index from PrusaLink and G-code; name locations with the 1-based
+# number the printer's screen shows:
+# [[tools]]
+# index = 0
+# location = "Core One L+ T1"
+# [[tools]]
+# index = 1
+# location = "Core One L+ T2"
+
+[bridge]
+state_file = "/data/state.json"
+# Every charge the bridge would make (phase 1) or made, one JSON object per line.
+ledger_file = "/data/ledger.jsonl"
+# Seconds between polls while printing or paused, and otherwise.
+poll_printing = 30
+poll_idle = 60
+# Spool extra field (type text) holding the OpenPrintTag instance UUID. "" disables it.
+uuid_field = "instance_uuid"
+# Where a spool goes when another spool moves into its tool location. "" = no location.
+# Not used until phase 3.
+eviction_location = ""
+# Multiplier applied to the printer's extruded length before charging. 1.0 charges
+# what the printer reports, which runs about 5% below slicer estimates.
+length_factor = 1.0
+# Phase 1 is read-only; false is rejected.
+dry_run = true

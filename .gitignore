@@ -1,0 +1,12 @@
+__pycache__/
+*.egg-info/
+.venv/
+.pytest_cache/
+.ruff_cache/
+build/
+dist/
+/config.toml
+/data/
+/bridge-data/
+/spoolman-data/
+.env
