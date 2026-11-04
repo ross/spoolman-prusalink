@@ -21,36 +21,52 @@ writes the loaded spool's name, color and UUID to the printer.
 
 ## Run it
 
-1. Copy the example config and edit the URLs and tool locations:
+The image needs only environment variables for a single-tool printer:
 
-   ```sh
-   cp config.example.toml config.toml
-   ```
+```sh
+docker build -t spoolman-prusalink .
+docker run -d --name spoolman-prusalink --restart unless-stopped \
+  -e PRUSALINK_URL=http://PRINTER_HOST \
+  -e PRUSALINK_API_KEY=API_KEY \
+  -e SPOOLMAN_URL=http://SPOOLMAN_HOST:7912 \
+  -e "SPOOLMAN_PRUSALINK_LOCATION=Core One L+" \
+  -e SPOOLMAN_PRUSALINK_DRY_RUN=false \
+  -v spoolman-prusalink-data:/data \
+  spoolman-prusalink
+```
 
-   The location must match the spool's Spoolman location exactly, including
-   case. The bridge doesn't use Spoolman's location filter, because that
-   filter matches partial text.
+Replace `PRINTER_HOST`, `API_KEY` and `SPOOLMAN_HOST`. The location must match
+the spool's Spoolman location exactly, including case. The bridge doesn't use
+Spoolman's location filter, because that filter matches partial text.
 
-1. Build and run the container:
+| Variable | Meaning |
+|---|---|
+| `PRUSALINK_URL` | The printer's PrusaLink URL. |
+| `PRUSALINK_API_KEY` | The printer's PrusaLink API key. |
+| `SPOOLMAN_URL` | Spoolman's base URL. |
+| `SPOOLMAN_PRUSALINK_LOCATION` | The Spoolman location that stands for the printer's single tool. |
+| `SPOOLMAN_PRUSALINK_DRY_RUN` | `true` (the default) logs what the bridge would do and writes nothing. |
+| `SPOOLMAN_PRUSALINK_CONFIG` | Optional path to a TOML config file. `/config/config.toml` is read if it exists. |
+| `LOG_LEVEL` | `INFO` by default. `DEBUG` also logs every HTTP request. |
 
-   ```sh
-   docker build -t spoolman-prusalink .
-   docker run --rm -e PRUSALINK_API_KEY=API_KEY \
-     -v "$PWD/config.toml:/config/config.toml:ro" \
-     -v "$PWD/bridge-data:/data" \
-     spoolman-prusalink
-   ```
+Keep `/data` on a persistent volume: it holds the state file, which the
+bridge needs to avoid dropping or repeating charges across restarts. The
+container runs as UID 1000, so a bind-mounted directory must be writable by
+that user. Run only one bridge per printer: two would charge the same usage
+twice.
 
-   Replace `API_KEY` with the printer's key. `compose.example.yaml` runs the
-   bridge next to Spoolman.
+For multi-tool printers and the other settings, mount a config file based on
+`config.example.toml` at `/config/config.toml`. The environment variables
+above override the file. `compose.example.yaml` runs the bridge next to
+Spoolman.
 
-1. To verify, look for a `baseline` line for each tool in the log. After the
-   printer extrudes, look for lines like this one (`CHARGE` instead of
-   `WOULD CHARGE` when `dry_run = false`):
+To verify, look for a `baseline` line for each tool in the log. After the
+printer extrudes, look for lines like this one (`WOULD CHARGE` in dry-run
+mode):
 
-   ```text
-   [Core One L+] WOULD CHARGE spool 7 (Prusament Galaxy Black): +1000 mm ≈ +2.98 g (extruded)
-   ```
+```text
+[Core One L+] CHARGE spool 7 (Prusament Galaxy Black): +1000 mm ≈ +2.98 g (extruded)
+```
 
 To poll once and exit, for example while testing the config, run the command
 with `once` in place of the default `run`.

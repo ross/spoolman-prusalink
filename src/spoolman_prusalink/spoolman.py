@@ -69,8 +69,9 @@ class Spoolman:
 
     async def use_length(self, spool_id: int, mm: float) -> None:
         """Charge (or, with a negative value, refund) filament length."""
+        # A generous timeout: a charge Spoolman applies after a timeout is sent again.
         resp = await self._client.put(
-            f"/api/v1/spool/{spool_id}/use", json={"use_length": mm}
+            f"/api/v1/spool/{spool_id}/use", json={"use_length": mm}, timeout=30.0
         )
         resp.raise_for_status()
 

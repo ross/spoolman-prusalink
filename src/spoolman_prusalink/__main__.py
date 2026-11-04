@@ -12,14 +12,17 @@ import sys
 from . import config as config_mod
 from .app import Bridge
 
+DEFAULT_CONFIG = "/config/config.toml"
+
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="spoolman-prusalink")
     parser.add_argument(
         "-c",
         "--config",
-        default=os.environ.get("SPOOLMAN_PRUSALINK_CONFIG", "/config/config.toml"),
-        help="TOML config file (default: $SPOOLMAN_PRUSALINK_CONFIG or /config/config.toml)",
+        default=os.environ.get("SPOOLMAN_PRUSALINK_CONFIG"),
+        help="TOML config file (default: $SPOOLMAN_PRUSALINK_CONFIG, else "
+        "/config/config.toml if it exists, else environment variables only)",
     )
     parser.add_argument("--log-level", default=os.environ.get("LOG_LEVEL", "INFO"))
     sub = parser.add_subparsers(dest="command")
@@ -32,8 +35,13 @@ def main(argv: list[str] | None = None) -> int:
         format="%(asctime)s %(levelname)s %(message)s",
         stream=sys.stdout,
     )
+    if logging.getLogger().level > logging.DEBUG:
+        logging.getLogger("httpx").setLevel(logging.WARNING)  # One line per request.
+    path = args.config
+    if path is None and os.path.exists(DEFAULT_CONFIG):
+        path = DEFAULT_CONFIG
     try:
-        cfg = config_mod.load(args.config)
+        cfg = config_mod.load(path)
     except (OSError, config_mod.ConfigError) as e:
         logging.error("config: %s", e)
         return 2

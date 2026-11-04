@@ -13,8 +13,15 @@ services:
     depends_on:
       - spoolman
     environment:
+      PRUSALINK_URL: http://192.168.1.22
       PRUSALINK_API_KEY: ${PRUSALINK_API_KEY:?set PRUSALINK_API_KEY}
-      SPOOLMAN_PRUSALINK_CONFIG: /config/config.toml
+      SPOOLMAN_URL: http://spoolman:8000
+      SPOOLMAN_PRUSALINK_LOCATION: Core One L+
+      SPOOLMAN_PRUSALINK_DRY_RUN: "false"
     volumes:
-      - ./config.toml:/config/config.toml:ro
-      - ./bridge-data:/data
+      - bridge-data:/data
+      # For more settings, mount a config file based on config.example.toml:
+      # - ./config.toml:/config/config.toml:ro
+
+volumes:
+  bridge-data:

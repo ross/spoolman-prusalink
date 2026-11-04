@@ -188,3 +188,17 @@ async def test_length_factor_scales_charges(tmp_path):
     charge = next(r for r in ledger if "use_length" in r)
     assert (charge["extruded_mm"], charge["use_length"]) == (1000, 1050.0)
     await bridge.aclose()
+
+
+def test_config_from_environment_only():
+    cfg = load(None, env={
+        "PRUSALINK_URL": "http://p", "PRUSALINK_API_KEY": "k", "SPOOLMAN_URL": "http://s",
+        "SPOOLMAN_PRUSALINK_LOCATION": "Core One L+", "SPOOLMAN_PRUSALINK_DRY_RUN": "false",
+    })
+    assert cfg.tools == {0: "Core One L+"} and cfg.dry_run is False
+    assert cfg.state_file.as_posix() == "/data/state.json"
+    with pytest.raises(ConfigError, match="SPOOLMAN_PRUSALINK_LOCATION"):
+        load(None, env={"PRUSALINK_URL": "p", "PRUSALINK_API_KEY": "k", "SPOOLMAN_URL": "s"})
+    with pytest.raises(ConfigError, match="true or false"):
+        load(None, env={"PRUSALINK_URL": "p", "PRUSALINK_API_KEY": "k", "SPOOLMAN_URL": "s",
+                        "SPOOLMAN_PRUSALINK_LOCATION": "x", "SPOOLMAN_PRUSALINK_DRY_RUN": "maybe"})

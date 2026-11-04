@@ -53,10 +53,30 @@ class Config:
     printer_notices: bool = False
 
 
-def load(path: str | os.PathLike, env: dict[str, str] | None = None) -> Config:
+def _env_bool(env: dict[str, str], key: str) -> bool | None:
+    value = env.get(key)
+    if value is None or value == "":
+        return None
+    if value.strip().lower() in {"1", "true", "yes", "on"}:
+        return True
+    if value.strip().lower() in {"0", "false", "no", "off"}:
+        return False
+    raise ConfigError(f"{key} must be true or false, got {value!r}")
+
+
+def load(path: str | os.PathLike | None, env: dict[str, str] | None = None) -> Config:
+    """Load the config from a TOML file, or from the environment alone if `path` is None.
+
+    The environment overrides the file for the basic settings: PRUSALINK_URL,
+    PRUSALINK_API_KEY, SPOOLMAN_URL, SPOOLMAN_PRUSALINK_LOCATION (the location of a
+    single-tool printer, used when the file has no [[tools]]) and
+    SPOOLMAN_PRUSALINK_DRY_RUN.
+    """
     env = dict(os.environ) if env is None else env
-    with open(path, "rb") as f:
-        raw = tomllib.load(f)
+    raw: dict = {}
+    if path is not None:
+        with open(path, "rb") as f:
+            raw = tomllib.load(f)
 
     printer = raw.get("printer", {})
     spoolman = raw.get("spoolman", {})
@@ -80,10 +100,14 @@ def load(path: str | os.PathLike, env: dict[str, str] | None = None) -> Config:
         if location in tools.values():
             raise ConfigError(f"location {location!r} is mapped to more than one tool")
         tools[index] = location
+    if not tools and env.get("SPOOLMAN_PRUSALINK_LOCATION"):
+        tools[0] = env["SPOOLMAN_PRUSALINK_LOCATION"]
     if not tools:
-        raise ConfigError("configure at least one [[tools]] entry")
+        raise ConfigError("set SPOOLMAN_PRUSALINK_LOCATION or configure [[tools]] entries")
 
-    dry_run = bool(bridge.get("dry_run", True))
+    dry_run = _env_bool(env, "SPOOLMAN_PRUSALINK_DRY_RUN")
+    if dry_run is None:
+        dry_run = bool(bridge.get("dry_run", True))
 
     length_factor = float(bridge.get("length_factor", 1.0))
     if not 0 < length_factor <= 2:
