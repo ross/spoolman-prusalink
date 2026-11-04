@@ -46,6 +46,9 @@ class Spool:
     diameter: float | None
     density: float | None
     instance_uuid: str | None = None
+    flag: str | None = None
+    extruder_temp: float | None = None
+    bed_temp: float | None = None
 
     def mm_to_grams(self, mm: float) -> float | None:
         """Convert a filament length to weight, as Spoolman does for `use_length`."""

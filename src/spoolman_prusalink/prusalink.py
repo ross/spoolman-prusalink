@@ -60,6 +60,28 @@ class PrusaLink:
         resp.raise_for_status()
         return parse_filament(resp.json())
 
+    async def job_display_name(self) -> str | None:
+        """Return the current job's long file name, or None when no job is running."""
+        resp = await self._client.get("/api/v1/job")
+        if resp.status_code == 204:
+            return None
+        resp.raise_for_status()
+        file = resp.json().get("file") or {}
+        return file.get("display_name") or file.get("name")
+
+    async def upload_and_print(self, storage: str, name: str, gcode: str) -> None:
+        """Upload a G-code file, overwriting any old copy, and start it as a print.
+
+        The printer refuses (409) unless it's idle or finished.
+        """
+        resp = await self._client.put(
+            f"/api/v1/files/{storage}/{name}",
+            content=gcode.encode(),
+            headers={"Print-After-Upload": "?1", "Overwrite": "?1",
+                     "Content-Type": "text/x.gcode"},
+        )
+        resp.raise_for_status()
+
     async def status(self) -> PrinterStatus:
         """Return the printer state and the current job's id from `GET /api/v1/status`."""
         resp = await self._client.get("/api/v1/status")

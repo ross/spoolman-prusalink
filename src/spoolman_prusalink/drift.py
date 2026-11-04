@@ -2,22 +2,21 @@
 
 from __future__ import annotations
 
+from . import printer_sync
 from .color import same_color
 from .models import Material, Spool
-
-# The printer's filament name holds at most 7 characters.
-NAME_LIMIT = 7
 
 
 def printer_name(spool: Spool) -> str | None:
     """The name the bridge would write to the printer for this spool."""
-    if not spool.material:
-        return None
-    return spool.material[:NAME_LIMIT]
+    return printer_sync.printer_name(spool)
 
 
-def differences(tool: int, material: Material, spool: Spool) -> list[str]:
-    """Return human-readable differences, or an empty list if the tool matches."""
+def differences(tool: int, material: Material, spool: Spool, uuids: bool = True) -> list[str]:
+    """Return human-readable differences, or an empty list if the tool matches.
+
+    `uuids` is False on printers that can't hold an instance UUID, such as INDX.
+    """
     diffs = []
     want_name = printer_name(spool)
     if want_name and material.name.casefold() != want_name.casefold():
@@ -26,7 +25,7 @@ def differences(tool: int, material: Material, spool: Spool) -> list[str]:
     if want_color and not same_color(material.color, want_color):
         diffs.append(f"color printer={material.color} spoolman={want_color}")
     # Only tool 0 can hold an ad-hoc instance UUID.
-    if tool == 0 and spool.instance_uuid and (
+    if uuids and tool == 0 and spool.instance_uuid and (
         (material.instance_uuid or "").lower() != spool.instance_uuid.lower()
     ):
         diffs.append(f"uuid printer={material.instance_uuid} spoolman={spool.instance_uuid}")

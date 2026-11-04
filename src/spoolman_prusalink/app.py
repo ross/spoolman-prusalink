@@ -1,27 +1,37 @@
-"""The poll loop. Phase 1: compute and log charges, never write."""
+"""The poll loop: account usage, charge it, keep flags current, and sync the printer."""
 
 from __future__ import annotations
 
 import asyncio
 import contextlib
 import logging
-from dataclasses import dataclass, field
+import uuid
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 
 import httpx
 
-from . import drift
+from . import drift, printer_sync
 from .accounting import WARNINGS, EventKind, ToolState, account
 from .config import Config
 from .models import FilamentReading, Spool
-from .prusalink import BUSY_STATES, PrinterStatus, PrusaLink
+from .prusalink import BUSY_STATES, IDLE_STATES, PrinterStatus, PrusaLink
 from .spoolman import Spoolman
-from .state import append_ledger, load_state, save_state
+from .state import State, append_ledger, load_state, save_state
 
 log = logging.getLogger("spoolman_prusalink")
 
 # Events that repeat every poll while a condition lasts. Log them only when they change.
 _REPEATING = {EventKind.HOLD_EMPTY, EventKind.HOLD_UNASSIGNED, EventKind.AMBIGUOUS}
+
+FLAG_FIELD_NAME = "Printer bridge flag"
+UUID_FIELD_NAME = "Instance UUID"
+# Sync jobs per swap before the bridge gives up and flags the spool.
+MAX_SYNC_ATTEMPTS = 2
+
+
+def _now() -> str:
+    return datetime.now(UTC).isoformat(timespec="seconds")
 
 
 @dataclass
@@ -29,27 +39,43 @@ class Bridge:
     config: Config
     printer: PrusaLink
     spoolman: Spoolman
-    tools: dict[int, ToolState] = field(default_factory=dict)
+    state: State = field(default_factory=State)
     _last_notes: dict[int, tuple[str, ...]] = field(default_factory=dict)
     _last_state: str | None = None
+    _ready_fields: set[str] = field(default_factory=set)
+    _flags: dict[int, str] = field(default_factory=dict)  # Desired flags from the last poll.
+    _pending_writes: list[int] = field(default_factory=list)  # Tools to write when idle.
+    _job_names: dict[int, str | None] = field(default_factory=dict)
 
     @classmethod
     def from_config(cls, config: Config) -> Bridge:
         return cls(
             config=config,
             printer=PrusaLink(config.printer_url, config.printer_api_key),
-            spoolman=Spoolman(config.spoolman_url, uuid_field=config.uuid_field),
-            tools=load_state(config.state_file),
+            spoolman=Spoolman(
+                config.spoolman_url,
+                uuid_field=config.uuid_field,
+                flag_field=None if config.dry_run else config.flag_field,
+            ),
+            state=load_state(config.state_file),
         )
+
+    @property
+    def tools(self) -> dict[int, ToolState]:
+        return self.state.tools
 
     async def aclose(self) -> None:
         await self.printer.aclose()
         await self.spoolman.aclose()
 
     async def poll(self) -> None:
+        # Send charges left over from a failed poll or a restart before reading anything.
+        if not await self.flush():
+            return
         try:
             status = await self.printer.status()
             reading = await self.printer.filament()
+            job_id = await self._user_job_id(status)
         except (httpx.HTTPError, ValueError, KeyError) as e:
             log.warning("printer read failed, skipping poll: %s", e)
             return
@@ -59,15 +85,43 @@ class Bridge:
             log.warning("Spoolman read failed, skipping poll: %s", e)
             return
         self._last_state = status.state
-        self.process(reading, spools, status)
+        self.process(reading, spools, status._replace(job_id=job_id))
+        await self.flush()
+        await self.evict(spools)
+        if status.state in IDLE_STATES:
+            await self.sync_printer(spools)
+        if not self.config.dry_run and self.config.flag_field:
+            await self.sync_flags(spools)
+
+    async def _user_job_id(self, status: PrinterStatus) -> int | None:
+        """Return the job id, or None for the bridge's own sync job.
+
+        A sync job runs as a print, but it mustn't count as a print start, which would
+        close an unconfirmed swap.
+        """
+        if status.job_id is None:
+            return None
+        if status.job_id not in self._job_names:
+            self._job_names = {status.job_id: await self.printer.job_display_name()}
+        name = self._job_names[status.job_id]
+        return None if name == self.config.sync_file else status.job_id
 
     def process(
         self, reading: FilamentReading, spools: list[Spool], status: PrinterStatus
     ) -> list[dict]:
-        """Account one poll. Returns the ledger records it wrote."""
+        """Account one poll and persist the result.
+
+        In dry-run mode, charges go straight to the ledger. Otherwise they go to the
+        outbox, saved in the same write as the new counters, for `flush()` to send.
+        Returns the charge and event records.
+        """
         by_id = {s.id: s for s in spools}
-        now = datetime.now(UTC).isoformat(timespec="seconds")
-        records: list[dict] = []
+        now = _now()
+        events: list[dict] = []
+        charges: list[dict] = []
+        flags: dict[int, list[str]] = {}
+        dry = self.config.dry_run
+        self._pending_writes = []
 
         for tool, location in self.config.tools.items():
             tool_reading = reading.tools.get(tool)
@@ -79,7 +133,8 @@ class Bridge:
 
             def matches(spool_id: int, material=material) -> bool:
                 spool = by_id.get(spool_id)
-                return spool is not None and drift.same_instance(material, spool)
+                return (self.config.printer_uuids and spool is not None
+                        and drift.same_instance(material, spool))
 
             result = account(
                 self.tools.get(tool, ToolState()),
@@ -99,41 +154,262 @@ class Bridge:
                     continue
                 level = logging.WARNING if ev.kind in WARNINGS else logging.INFO
                 log.log(level, "[%s] %s", location, ev.message)
-                records.append({"time": now, "tool": tool, "location": location,
-                                "event": ev.kind.value, "message": ev.message})
+                events.append({"time": now, "tool": tool, "location": location,
+                               "event": ev.kind.value, "message": ev.message})
 
             for c in result.charges:
                 spool = by_id.get(c.spool_id)
                 length = round(c.mm * self.config.length_factor, 1)
                 grams = spool.mm_to_grams(length) if spool else None
                 log.info(
-                    "[%s] WOULD CHARGE spool %d (%s): %+g mm%s (%s)",
-                    location, c.spool_id, spool.name if spool else "unknown", length,
+                    "[%s] %s spool %d (%s): %+g mm%s (%s)",
+                    location, "WOULD CHARGE" if dry else "CHARGE", c.spool_id,
+                    spool.name if spool else "unknown", length,
                     f" ≈ {grams:+.2f} g" if grams is not None else "", c.reason,
                 )
-                records.append({
+                charges.append({
                     "time": now, "tool": tool, "location": location, "spool_id": c.spool_id,
                     "extruded_mm": c.mm, "use_length": length,
                     "grams": None if grams is None else round(grams, 3),
                     "reason": c.reason, "boot_id": reading.boot_id,
-                    "extruded": tool_reading.extruded, "dry_run": True,
+                    "extruded": tool_reading.extruded, "dry_run": dry,
                 })
 
-            st = result.state
-            if st.evict is not None:
-                notes.append(f"[{location}] spool {st.evict} left the tool but is still in "
-                             f"{location!r}; phase 3 moves it out")
+            st = self.tools.get(tool, ToolState())
+            if st.evict is not None and dry:
+                notes.append(f"[{location}] would move spool {st.evict} out of {location!r}")
+            if st.swap is not None:
+                flags.setdefault(st.swap.spool_id, []).append(
+                    f"{location}: filament was unloaded with no Spoolman change. If a "
+                    f"different spool went in, move it into {location} before the next print."
+                )
+            if st.notice is not None:
+                flags.setdefault(st.notice.spool_id, []).append(
+                    f"{location}: {st.notice.message}."
+                )
             active = by_id.get(st.active) if st.active is not None else None
             if not result.skipped and material is not None and active is not None:
-                diffs = drift.differences(tool, material, active)
-                if diffs:
-                    notes.append(f"[{location}] printer differs from spool {active.id}: "
-                                 + "; ".join(diffs))
+                diffs = drift.differences(tool, material, active, self.config.printer_uuids)
+                if not diffs:
+                    if st.needs_sync:
+                        self.tools[tool] = replace(st, needs_sync=False, sync_attempts=0)
+                else:
+                    self._classify_mismatch(tool, location, st, active, diffs, notes, flags)
             self._notes(tool, notes)
 
-        append_ledger(self.config.ledger_file, records)
-        save_state(self.config.state_file, self.tools)
-        return records
+        self._flags = {spool_id: " | ".join(texts) for spool_id, texts in flags.items()}
+        if dry:
+            append_ledger(self.config.ledger_file, events + charges)
+        else:
+            append_ledger(self.config.ledger_file, events)
+            self.state.outbox.extend(charges)
+        save_state(self.config.state_file, self.state)
+        return events + charges
+
+    def _classify_mismatch(self, tool, location, st, active, diffs, notes, flags) -> None:
+        """Decide whether a printer/spool mismatch is a pending write or drift."""
+        detail = "; ".join(diffs)
+        expected = st.needs_sync or self.config.sync_drift
+        settled = st.swap is None and st.assigned == st.active
+        if self.config.printer_sync and expected and st.sync_attempts < MAX_SYNC_ATTEMPTS:
+            if settled:
+                self._pending_writes.append(tool)
+                notes.append(f"[{location}] printer will be set to spool {active.id} when "
+                             f"idle: {detail}")
+            return
+        if self.config.printer_sync and expected:
+            notes.append(f"[{location}] printer still differs from spool {active.id} after "
+                         f"{st.sync_attempts} sync jobs: {detail}")
+            flags.setdefault(active.id, []).append(
+                f"{location}: writing this spool to the printer didn't take: {detail}"
+            )
+            return
+        notes.append(f"[{location}] printer differs from spool {active.id}: {detail}")
+        if self.config.flag_drift:
+            flags.setdefault(active.id, []).append(
+                f"{location}: printer filament differs: {detail}"
+            )
+
+    async def flush(self) -> bool:
+        """Send queued charges in order. Returns False if any are still queued.
+
+        A charge leaves the outbox only once Spoolman accepts it, so a crash or an
+        outage delays charges instead of dropping them. A 4xx response, such as for a
+        deleted spool, drops the charge with an error so it can't block the rest.
+        """
+        outbox = self.state.outbox
+        while outbox:
+            rec = outbox[0]
+            try:
+                await self.spoolman.use_length(rec["spool_id"], rec["use_length"])
+                rec = {**rec, "applied": _now()}
+            except httpx.HTTPStatusError as e:
+                code = e.response.status_code
+                if code >= 500:
+                    log.warning("charge to spool %d failed (%d); %d queued, retrying next poll",
+                                rec["spool_id"], code, len(outbox))
+                    return False
+                log.error("Spoolman rejected a %+g mm charge to spool %d (%d %s); dropping it",
+                          rec["use_length"], rec["spool_id"], code, e.response.text[:200])
+                rec = {**rec, "failed": f"{code}"}
+            except httpx.HTTPError as e:
+                log.warning("charge to spool %d failed (%s); %d queued, retrying next poll",
+                            rec["spool_id"], e, len(outbox))
+                return False
+            outbox.pop(0)
+            save_state(self.config.state_file, self.state)
+            append_ledger(self.config.ledger_file, [rec])
+        return True
+
+    async def evict(self, spools: list[Spool]) -> None:
+        """Move each tool's outgoing spool out of the tool's location."""
+        if self.config.dry_run:
+            return
+        where = {s.id: s.location for s in spools}
+        target = self.config.eviction_location or None
+        for tool, st in self.tools.items():
+            location = self.config.tools.get(tool)
+            if st.evict is None or where.get(st.evict) != location:
+                continue
+            try:
+                await self.spoolman.set_location(st.evict, target)
+            except httpx.HTTPError as e:
+                log.warning("[%s] can't move spool %d out: %s", location, st.evict, e)
+                continue
+            log.info("[%s] moved spool %d to %s", location, st.evict,
+                     repr(target) if target else "no location")
+            self.tools[tool] = replace(st, evict=None)
+            save_state(self.config.state_file, self.state)
+
+    async def sync_printer(self, spools: list[Spool]) -> None:
+        """Write pending spools (and, if enabled, new flags) to the printer in one job."""
+        by_id = {s.id: s for s in spools}
+        writes: list[printer_sync.ToolWrite] = []
+        written: list[int] = []
+        for tool in self._pending_writes:
+            st = self.tools[tool]
+            spool = by_id.get(st.active)
+            if spool is None:
+                continue
+            uuid_value = None
+            if tool == 0 and self.config.printer_uuids and self.config.uuid_field:
+                uuid_value = spool.instance_uuid or await self._mint_uuid(spool)
+            write = printer_sync.ToolWrite(tool, spool, uuid_value)
+            try:
+                printer_sync.filament_lines(write)
+            except printer_sync.CannotSync as e:
+                location = self.config.tools[tool]
+                self._notes(tool, [f"[{location}] can't write spool {spool.id} to the printer: "
+                                   f"{e}"])
+                self._flags[spool.id] = " | ".join(
+                    filter(None, [self._flags.get(spool.id), f"{location}: {e}"])
+                )
+                continue
+            writes.append(write)
+            written.append(tool)
+
+        notices: list[str] = []
+        if self.config.printer_notices:
+            current = set(self._flags.values())
+            notices = [t for t in self._flags.values() if t not in self.state.noticed]
+            self.state.noticed = [t for t in self.state.noticed if t in current]
+
+        if not writes and not notices:
+            return
+        gcode = printer_sync.build_job(
+            self.config.gcode_preamble, writes, notices, multi_tool=len(self.config.tools) > 1
+        )
+        if self.config.dry_run:
+            log.info("WOULD RUN printer job %s:\n%s", self.config.sync_file, gcode.rstrip())
+            return
+        try:
+            await self.printer.upload_and_print(
+                self.config.sync_storage, self.config.sync_file, gcode
+            )
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 409:
+                log.info("printer busy; sync job waits for the next idle poll")
+            else:
+                log.warning("printer sync job failed (%d): %s", e.response.status_code,
+                            e.response.text[:200])
+            return
+        except httpx.HTTPError as e:
+            log.warning("printer sync job failed: %s", e)
+            return
+        log.info("ran printer job %s:\n%s", self.config.sync_file, gcode.rstrip())
+        for tool in written:
+            st = self.tools[tool]
+            self.tools[tool] = replace(st, sync_attempts=st.sync_attempts + 1)
+        self.state.noticed += notices
+        self._pending_writes = []
+        self._last_state = "BUSY"  # The job is starting; poll again soon to verify it.
+        save_state(self.config.state_file, self.state)
+
+    async def _mint_uuid(self, spool: Spool) -> str | None:
+        """Give a spool an instance UUID in Spoolman, so it can be written to the printer."""
+        key = self.config.uuid_field
+        assert key
+        value = str(uuid.uuid4())
+        if self.config.dry_run:
+            log.info("would give spool %d instance UUID %s", spool.id, value)
+            return value
+        if not await self._ensure_field(key, UUID_FIELD_NAME):
+            return None
+        try:
+            await self.spoolman.set_extra_text(spool.id, key, value)
+        except httpx.HTTPError as e:
+            log.warning("can't store an instance UUID on spool %d: %s", spool.id, e)
+            return None
+        log.info("gave spool %d instance UUID %s", spool.id, value)
+        return value
+
+    async def _ensure_field(self, key: str, name: str) -> bool:
+        if key in self._ready_fields:
+            return True
+        try:
+            await self.spoolman.ensure_text_field(key, name)
+        except (httpx.HTTPError, ValueError) as e:
+            log.warning("can't set up the %r spool field: %s", key, e)
+            return False
+        self._ready_fields.add(key)
+        return True
+
+    async def sync_flags(self, spools: list[Spool]) -> None:
+        """Make the flag field match the desired flags, on spools the bridge manages.
+
+        The bridge only clears flags on spools it flagged itself (`State.flagged`), so it
+        never touches a value someone else wrote.
+        """
+        key = self.config.flag_field
+        assert key
+        if not await self._ensure_field(key, FLAG_FIELD_NAME):
+            return
+        current = {s.id: s.flag for s in spools}
+        changed = False
+        for spool_id in sorted(set(self._flags) | set(self.state.flagged)):
+            want = self._flags.get(spool_id)
+            if spool_id not in current:
+                if spool_id in self.state.flagged and want is None:
+                    self.state.flagged.remove(spool_id)  # Spool deleted or archived.
+                    changed = True
+                continue
+            if current[spool_id] != want:
+                try:
+                    await self.spoolman.set_extra_text(spool_id, key, want)
+                except httpx.HTTPError as e:
+                    log.warning("can't update the flag on spool %d: %s", spool_id, e)
+                    continue
+                log.info("%s flag on spool %d%s", "set" if want else "cleared", spool_id,
+                         f": {want}" if want else "")
+            if want is None:
+                if spool_id in self.state.flagged:
+                    self.state.flagged.remove(spool_id)
+                    changed = True
+            elif spool_id not in self.state.flagged:
+                self.state.flagged.append(spool_id)
+                changed = True
+        if changed:
+            save_state(self.config.state_file, self.state)
 
     def _notes(self, tool: int, notes: list[str]) -> None:
         key = tuple(notes)
@@ -149,9 +425,12 @@ class Bridge:
 
     async def run(self, stop: asyncio.Event) -> None:
         log.info(
-            "starting in dry-run mode: printer=%s spoolman=%s tools=%s",
+            "starting%s: printer=%s spoolman=%s tools=%s",
+            " in dry-run mode" if self.config.dry_run else "",
             self.config.printer_url, self.config.spoolman_url, self.config.tools,
         )
+        if self.state.outbox:
+            log.info("%d charge(s) queued from before the restart", len(self.state.outbox))
         while not stop.is_set():
             await self.poll()
             with contextlib.suppress(TimeoutError):

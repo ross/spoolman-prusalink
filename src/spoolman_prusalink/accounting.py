@@ -54,6 +54,7 @@ class EventKind(StrEnum):
     SWAP_ASSUMED = "swap_assumed"
     STAGED_AT_PRINT = "staged_at_print"
     CORRECTION = "correction"
+    STAGING_CANCELLED = "staging_cancelled"
     ASSIGNMENT_CHANGED = "assignment_changed"
     HOLD_EMPTY = "hold_empty"
     HOLD_UNASSIGNED = "hold_unassigned"
@@ -90,6 +91,13 @@ class SwapFlag:
 
 
 @dataclass(frozen=True)
+class Notice:
+    spool_id: int
+    kind: EventKind
+    message: str
+
+
+@dataclass(frozen=True)
 class ToolState:
     boot_id: int | None = None
     charged: int = 0
@@ -99,6 +107,13 @@ class ToolState:
     evict: int | None = None  # Old spool still in the location after a swap.
     swap: SwapFlag | None = None
     job_id: int | None = None  # Last print job seen, to detect a print start.
+    # A one-off notice for the user about a spool, such as a swap assumed at print
+    # start. Cleared at the next print start or unload.
+    notice: Notice | None = None
+    # The printer should be written with the active spool once idle: set when the
+    # active spool changes or the tool unloads (a menu load drops color and UUID).
+    needs_sync: bool = False
+    sync_attempts: int = 0
 
     def to_json(self) -> dict:
         return {
@@ -112,11 +127,18 @@ class ToolState:
             if self.swap is None
             else {"spool_id": self.swap.spool_id, "mm": self.swap.mm},
             "job_id": self.job_id,
+            "notice": None
+            if self.notice is None
+            else {"spool_id": self.notice.spool_id, "kind": self.notice.kind.value,
+                  "message": self.notice.message},
+            "needs_sync": self.needs_sync,
+            "sync_attempts": self.sync_attempts,
         }
 
     @classmethod
     def from_json(cls, data: dict) -> ToolState:
         swap = data.get("swap")
+        notice = data.get("notice")
         return cls(
             boot_id=data.get("boot_id"),
             charged=int(data.get("charged", 0)),
@@ -126,6 +148,11 @@ class ToolState:
             evict=data.get("evict"),
             swap=None if swap is None else SwapFlag(int(swap["spool_id"]), int(swap["mm"])),
             job_id=data.get("job_id"),
+            notice=None if notice is None else Notice(
+                int(notice["spool_id"]), EventKind(notice["kind"]), notice["message"]
+            ),
+            needs_sync=bool(data.get("needs_sync", False)),
+            sync_attempts=int(data.get("sync_attempts", 0)),
         )
 
 
@@ -220,6 +247,8 @@ def account(
     legacy = reading.unload_count is None
     active = s.active
     swap = s.swap
+    notice = s.notice
+    unloaded = False
 
     def retire(old: int | None) -> int | None:
         """Mark the outgoing spool for eviction if it's still in the location."""
@@ -246,6 +275,8 @@ def account(
                 event(EventKind.LOST_UNASSIGNED, f"{before} mm before unload had no spool")
         s = replace(s, charged=at, unload_count=reading.unload_count)
         swap = None  # A new unload supersedes any open swap.
+        notice = None
+        unloaded = True
 
         if assigned != active:
             event(EventKind.SWAP_COMMITTED, f"swap done: spool {active} -> {assigned}")
@@ -293,16 +324,26 @@ def account(
             event(EventKind.SWAP_STAGED, f"spool {assigned} staged; still charging spool "
                   f"{active} until the printer reports an unload")
 
+    elif not legacy and s.assigned != active and assigned == active:
+        event(EventKind.STAGING_CANCELLED, f"spool {s.assigned} is no longer staged; "
+              f"still charging spool {active}")
+
     # 3. A print starting closes the confirmation window.
     started = job_id is not None and job_id != s.job_id
     if started:
+        notice = None
         if swap is not None:
-            event(EventKind.SWAP_ASSUMED, f"print started with no Spoolman change since the "
-                  f"unload; assuming spool {swap.spool_id} was reloaded")
+            msg = (f"print started with no Spoolman change since the unload; assuming "
+                   f"spool {swap.spool_id} was reloaded")
+            event(EventKind.SWAP_ASSUMED, msg)
+            notice = Notice(swap.spool_id, EventKind.SWAP_ASSUMED, msg)
             swap = None
         if not legacy and assigned != active:
-            event(EventKind.STAGED_AT_PRINT, f"print started while spool {assigned} is staged "
-                  f"but not loaded; charging spool {active}")
+            msg = (f"print started while spool {assigned} is staged but not loaded; "
+                   f"charging spool {active}")
+            event(EventKind.STAGED_AT_PRINT, msg)
+            if active is not None:
+                notice = Notice(active, EventKind.STAGED_AT_PRINT, msg)
 
     # 4. Usage since the last charge goes to the active spool.
     delta = reading.extruded - s.charged
@@ -317,12 +358,16 @@ def account(
             if swap is not None and swap.spool_id == active:
                 swap = replace(swap, mm=swap.mm + delta)
 
+    resync = unloaded or active != s.active
     out.state = replace(
         s,
+        needs_sync=s.needs_sync or resync,
+        sync_attempts=0 if resync else s.sync_attempts,
         active=active,
         assigned=assigned,
         evict=evict,
         swap=swap,
         job_id=job_id if job_id is not None else s.job_id,
+        notice=notice,
     )
     return out

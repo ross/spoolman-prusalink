@@ -371,3 +371,14 @@ def test_restart_from_saved_state_neither_double_charges_nor_drops():
     restored = ToolState.from_json(state.to_json())
     charges, _, _ = run([(BOOT, r(260), loc(7))], restored)
     assert charges == [Charge(7, 60, "extruded")]
+
+
+def test_unstaging_before_unload_is_logged_and_keeps_active():
+    charges, kinds, state = run([
+        (BOOT, r(100), loc(19)),
+        (BOOT, r(150), loc(19, 18)),
+        (BOOT, r(200), loc(19)),
+    ])
+    assert kinds.count(EventKind.STAGING_CANCELLED) == 1
+    assert all(c.spool_id == 19 for c in charges)
+    assert (state.active, state.assigned) == (19, 19)

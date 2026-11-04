@@ -71,6 +71,8 @@ def make_bridge(tmp_path, filament, spools):
             return httpx.Response(200, json=filament())
         if request.url.path == "/api/v1/spool":
             return httpx.Response(200, json=spools())
+        if request.url.path == "/api/v1/job":
+            return httpx.Response(200, json={"id": 9, "file": {"display_name": "part.bgcode"}})
         if request.url.path == "/api/v1/status":
             return httpx.Response(200, json={"printer": {"state": "PRINTING"}, "job": {"id": 9}})
         assert request.method == "GET", f"phase 1 must not write: {request.method} {request.url}"
@@ -107,7 +109,7 @@ async def test_poll_logs_would_charge_and_persists(tmp_path, caplog):
     ledger = [json.loads(line) for line in (tmp_path / "ledger.jsonl").read_text().splitlines()]
     charges = [r for r in ledger if "use_length" in r]
     assert [(r["spool_id"], r["use_length"]) for r in charges] == [(7, 1000)]
-    assert load_state(tmp_path / "state.json")[0].charged == 5310
+    assert load_state(tmp_path / "state.json").tools[0].charged == 5310
     assert bridge.interval() == bridge.config.poll_printing
     await bridge.aclose()
 
@@ -163,8 +165,9 @@ def test_config_load(tmp_path):
     with pytest.raises(ConfigError, match="PRUSALINK_API_KEY"):
         load(p, env={})
 
-    p.write_text(p.read_text() + "[bridge]\ndry_run = false\n")
-    with pytest.raises(ConfigError, match="phase 1"):
+    assert cfg.flag_field == "bridge_flag"
+    p.write_text(p.read_text() + "[bridge]\ndry_run = false\nflag_field = \"Bad Key\"\n")
+    with pytest.raises(ConfigError, match="flag_field"):
         load(p, env={"PRUSALINK_API_KEY": "secret"})
 
 

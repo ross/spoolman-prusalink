@@ -20,7 +20,9 @@ def _extra_str(extra: dict | None, key: str | None) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
-def parse_spool(data: dict, uuid_field: str | None = None) -> Spool:
+def parse_spool(
+    data: dict, uuid_field: str | None = None, flag_field: str | None = None
+) -> Spool:
     filament = data.get("filament") or {}
     vendor = (filament.get("vendor") or {}).get("name")
     name = filament.get("name") or filament.get("material") or f"spool {data['id']}"
@@ -35,13 +37,18 @@ def parse_spool(data: dict, uuid_field: str | None = None) -> Spool:
         diameter=filament.get("diameter"),
         density=filament.get("density"),
         instance_uuid=_extra_str(data.get("extra"), uuid_field),
+        flag=_extra_str(data.get("extra"), flag_field),
+        extruder_temp=filament.get("settings_extruder_temp"),
+        bed_temp=filament.get("settings_bed_temp"),
     )
 
 
 class Spoolman:
-    def __init__(self, url: str, *, uuid_field: str | None = None, timeout: float = 10.0,
+    def __init__(self, url: str, *, uuid_field: str | None = None,
+                 flag_field: str | None = None, timeout: float = 10.0,
                  transport: httpx.AsyncBaseTransport | None = None) -> None:
         self._uuid_field = uuid_field
+        self._flag_field = flag_field
         self._client = httpx.AsyncClient(
             base_url=url.rstrip("/"), timeout=timeout, transport=transport
         )
@@ -58,11 +65,40 @@ class Spoolman:
         """
         resp = await self._client.get("/api/v1/spool")
         resp.raise_for_status()
-        return [parse_spool(s, self._uuid_field) for s in resp.json()]
+        return [parse_spool(s, self._uuid_field, self._flag_field) for s in resp.json()]
 
     async def use_length(self, spool_id: int, mm: float) -> None:
-        """Charge (or, with a negative value, refund) filament length. Not used in phase 1."""
+        """Charge (or, with a negative value, refund) filament length."""
         resp = await self._client.put(
             f"/api/v1/spool/{spool_id}/use", json={"use_length": mm}
+        )
+        resp.raise_for_status()
+
+    async def ensure_text_field(self, key: str, name: str) -> None:
+        """Register a spool extra field of type text, unless it already exists."""
+        resp = await self._client.get("/api/v1/field/spool")
+        resp.raise_for_status()
+        for f in resp.json():
+            if f.get("key") == key:
+                if f.get("field_type") != "text":
+                    raise ValueError(f"spool extra field {key!r} exists but isn't a text field")
+                return
+        resp = await self._client.post(
+            f"/api/v1/field/spool/{key}", json={"name": name, "field_type": "text"}
+        )
+        resp.raise_for_status()
+
+    async def set_location(self, spool_id: int, location: str | None) -> None:
+        """Move a spool. None (or "") leaves it with no location."""
+        resp = await self._client.patch(
+            f"/api/v1/spool/{spool_id}", json={"location": location or None}
+        )
+        resp.raise_for_status()
+
+    async def set_extra_text(self, spool_id: int, key: str, value: str | None) -> None:
+        """Set a text extra field, or delete it with None. Other extra fields are kept."""
+        resp = await self._client.patch(
+            f"/api/v1/spool/{spool_id}",
+            json={"extra": {key: None if value is None else json.dumps(value)}},
         )
         resp.raise_for_status()

@@ -33,7 +33,7 @@ def test_no_drift_when_matching():
 def test_name_compared_case_insensitively_and_truncated():
     assert differences(0, Material("pla", "#73737b"), spool()) == []
     s = spool(material="PLA Silk Plus")
-    assert differences(0, Material("PLA Sil", "#73737b"), s) == []
+    assert differences(0, Material("PLASilk", "#73737b"), s) == []
 
 
 def test_name_and_color_drift():
