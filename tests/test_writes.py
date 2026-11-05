@@ -153,7 +153,8 @@ def make(tmp_path, spools, **cfg):
     bridge = Bridge(
         config=config,
         printer=PrusaLink("http://printer", "k", transport=httpx.MockTransport(printer.handle)),
-        spoolman=Spoolman("http://spoolman", flag_field=config.flag_field,
+        spoolman=Spoolman("http://spoolman", uuid_field=config.uuid_field,
+                          flag_field=config.flag_field,
                           transport=httpx.MockTransport(fake.handle)),
     )
     return bridge, fake, printer
@@ -574,4 +575,25 @@ async def test_missing_filament_endpoint_logged_once(tmp_path, caplog):
     await bridge.poll()
     assert "printer now reports filament; resuming" in caplog.text
     assert 0 in bridge.tools
+    await bridge.aclose()
+
+
+async def test_runout_reload_keeps_old_uuid_and_gets_rewritten(tmp_path):
+    bridge, fake, printer = make(tmp_path, [spool(19)], uuid_field="instance_uuid")
+    fake.spools[19]["extra"] = {"instance_uuid": json.dumps("91da34d9-c1c1-470f-bac7-185a2346f86a")}
+    printer.material = {**printer.material, "instance_uuid": "91da34d9-c1c1-470f-bac7-185a2346f86a"}
+    await bridge.poll()  # baseline: the printer matches spool 19
+    assert jobs(printer) == []
+
+    printer.unloads, printer.at_unload = 1, 1000  # runout: M600 unloads, reload keeps metadata
+    printer.extruded = 1100
+    await bridge.poll()  # unconfirmed swap
+    fake.spools[19]["location"] = None
+    fake.spools[20] = spool(20)  # same product and color, no UUID yet
+    await bridge.poll()  # swap confirmed
+    (gcode,) = jobs(printer)
+    minted = json.loads(fake.spools[20]["extra"]["instance_uuid"])
+    assert f'M865.1 I0 C"{minted}"' in gcode
+    await bridge.poll()
+    assert len(jobs(printer)) == 1 and bridge.tools[0].needs_sync is False
     await bridge.aclose()

@@ -52,3 +52,11 @@ def test_mm_to_grams():
     # 1 m of 1.75 mm PLA at 1.24 g/cm³ is about 2.98 g.
     assert round(spool().mm_to_grams(1000), 2) == 2.98
     assert spool(density=None).mm_to_grams(1000) is None
+
+
+def test_stale_printer_uuid_differs_from_spool_without_one():
+    m = Material("PLA", "#73737b", "91da34d9-c1c1-470f-bac7-185a2346f86a")
+    assert differences(0, m, spool()) == [
+        "uuid printer=91da34d9-c1c1-470f-bac7-185a2346f86a spoolman=None"
+    ]
+    assert differences(0, m, spool(), uuids=False) == []

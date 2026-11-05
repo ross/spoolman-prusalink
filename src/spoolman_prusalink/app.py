@@ -186,8 +186,10 @@ class Bridge:
 
     @property
     def _uuids(self) -> bool:
-        """Whether to write and compare instance UUIDs: configured, and the model keeps them."""
-        return self.config.printer_uuids and self._model is not None and self._model.uuids
+        """Whether to write and compare instance UUIDs: configured with a Spoolman field to
+        keep them in, and the model keeps them."""
+        return bool(self.config.printer_uuids and self.config.uuid_field
+                    and self._model is not None and self._model.uuids)
 
     def _preamble(self) -> tuple[str, ...]:
         if self.config.gcode_preamble is not None:
@@ -408,7 +410,7 @@ class Bridge:
             if spool is None:
                 continue
             uuid_value = None
-            if tool == 0 and self._uuids and self.config.uuid_field:
+            if tool == 0 and self._uuids:
                 uuid_value = spool.instance_uuid or await self._mint_uuid(spool)
             write = printer_sync.ToolWrite(tool, spool, uuid_value)
             try:
