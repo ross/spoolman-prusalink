@@ -12,23 +12,53 @@ from dataclasses import dataclass
 
 from .models import Spool
 
-# Default compatibility checks for the Core One L. Without them the printer stops on a
-# "G-code isn't fully compatible" warning. Other models need their own lines.
-COREONEL_PREAMBLE = (
-    'M862.3 P "COREONEL" ; printer model check',
-    "M862.5 P2 ; g-code level check",
-    'M862.6 P"Input shaper" ; FW feature check',
-)
 
-# Printer type codes, as `/api/version` reports them in `printer`, and the model name
-# `M862.3` checks for. From `include/common/printer_model_data.hpp` in the firmware.
+@dataclass(frozen=True)
+class PrinterModel:
+    name: str  # What `M862.3 P"..."` checks for. The firmware compares it exactly.
+    unsupported: str | None = None  # Why the bridge can't run it, or None.
+    uuids: bool = False  # Whether `M865.1` stores an instance UUID (`HAS_ANFC`).
+
+
+_NO_COUNTERS = "its firmware doesn't report usage counters in /api/v1/filament"
+_MULTI_TOOL = "multi-tool printers aren't supported yet"
+
+# Printer type codes, as `/api/version` reports them in `printer`. From
+# `include/common/printer_model_data.hpp` and `ProjectOptions.cmake` in the firmware: the
+# filament tracker is in the MK4 build (MK4, MK4S, MK3.9, MK3.9S), the Core One and the
+# Core One L; ANFC, which keeps UUIDs, only in the last two.
 PRINTER_MODELS = {
-    "1.3.0": "MK3", "1.3.1": "MK3S", "1.3.5": "MK3.5", "1.3.6": "MK3.5S",
-    "1.3.9": "MK3.9", "1.3.10": "MK3.9S", "1.4.0": "MK4", "1.4.1": "MK4S",
-    "2.1.0": "MINI", "3.1.0": "XL", "5.1.0": "XL", "4.1.0": "iX",
-    "7.1.0": "COREONE", "8.1.0": "COREONEL", "7.10.0": "COREONEINDX",
-    "8.10.0": "COREONEL-INDX",
+    "1.3.5": PrinterModel("MK3.5", _NO_COUNTERS),
+    "1.3.6": PrinterModel("MK3.5S", _NO_COUNTERS),
+    "1.3.9": PrinterModel("MK3.9"),
+    "1.3.10": PrinterModel("MK3.9S"),
+    "1.4.0": PrinterModel("MK4"),
+    "1.4.1": PrinterModel("MK4S"),
+    "2.1.0": PrinterModel("MINI", _NO_COUNTERS),
+    "3.1.0": PrinterModel("XL", _MULTI_TOOL),
+    "5.1.0": PrinterModel("XL", _MULTI_TOOL),
+    "4.1.0": PrinterModel("iX", _MULTI_TOOL),
+    "7.1.0": PrinterModel("COREONE", uuids=True),
+    "8.1.0": PrinterModel("COREONEL", uuids=True),
+    "7.10.0": PrinterModel("COREONEINDX", _MULTI_TOOL),
+    "8.10.0": PrinterModel("COREONEL-INDX", _MULTI_TOOL),
 }
+
+
+def default_preamble(model: PrinterModel) -> tuple[str, ...]:
+    """Return the compatibility checks a job for `model` starts with.
+
+    Without them the printer stops on a "G-code isn't fully compatible" warning. The
+    level and the input shaper feature are the same on every supported model.
+    """
+    return (
+        f'M862.3 P "{model.name}" ; printer model check',
+        "M862.5 P2 ; g-code level check",
+        'M862.6 P"Input shaper" ; FW feature check',
+    )
+
+
+COREONEL_PREAMBLE = default_preamble(PRINTER_MODELS["8.1.0"])
 
 _MODEL_CHECK = re.compile(r'^\s*M862\.3\s+P\s*"([^"]+)"', re.IGNORECASE)
 
@@ -42,30 +72,61 @@ def preamble_model(preamble: tuple[str, ...] | list[str]) -> str | None:
     return None
 
 
-def model_mismatch(printer_type: str | None, preamble: tuple[str, ...] | list[str]) -> str | None:
-    """Return why the preamble doesn't suit the printer, or None if it does.
+def model_problem(
+    printer_type: str | None, preamble: tuple[str, ...] | list[str] | None
+) -> str | None:
+    """Return why the bridge can't write to this printer, or None if it can.
 
-    A job whose `M862.3` names another model stops on the printer's compatibility
-    warning and waits for someone to tap through it, so the bridge doesn't send one.
+    `preamble` is the configured override, or None for the model's default. A job
+    whose `M862.3` names another model stops on the printer's compatibility warning
+    until someone taps through it, so the name has to match exactly. The firmware also
+    accepts the model's MMU3 variant name.
     """
     model = PRINTER_MODELS.get(printer_type or "")
     if model is None:
-        return (f"printer type {printer_type!r} isn't one the bridge knows; "
-                "can't check gcode_preamble against it")
+        return f"printer type {printer_type!r} isn't one the bridge knows"
+    if model.unsupported:
+        return f"{model.name} isn't supported: {model.unsupported}"
+    if preamble is None:
+        return None
     wanted = preamble_model(preamble)
     if wanted is None:
-        return f"gcode_preamble has no M862.3 model check; set one for {model}"
-    if wanted.upper() != model.upper():
-        return f"gcode_preamble is for {wanted} but the printer is {model}"
+        return f"gcode_preamble has no M862.3 model check; set one for {model.name}"
+    if wanted not in (model.name, f"{model.name}MMU3"):
+        return f"gcode_preamble is for {wanted} but the printer is {model.name}"
     return None
 
 
-# Firmware preset filament types (`src/common/filament_presets.cpp`). `J` accepts only
-# these; anything else is an error.
-PRESETS = frozenset({
-    "PLA", "PETG", "ASA", "PC", "PVB", "ABS", "HIPS", "PP", "FLEX", "PA", "PPS", "PPA",
-    "PVA", "BVOH",
-})
+@dataclass(frozen=True)
+class Preset:
+    nozzle: int
+    bed: int
+    preheat: int = 170
+    chamber: tuple[int, int, int] | None = None  # (target, min, max), Core One only.
+    filtration: bool = False
+    flexible: bool = False
+
+
+# Firmware preset filaments (`src/common/filament_presets.cpp`), with the preheat values
+# for printers with a load cell, which every supported model has. `M865 X R` resets every
+# parameter to zero or off, and `J` (inherit a preset) is ignored on these models, so the
+# job writes each value. PPS and PPA are left out: they need the HT idler-door setting,
+# which `M865` can't set.
+PRESETS = {
+    "PLA": Preset(215, 60, chamber=(20, 15, 38)),
+    "PETG": Preset(230, 85, chamber=(30, 15, 45)),
+    "ASA": Preset(260, 100, chamber=(70, 40, 75), filtration=True),
+    "PC": Preset(275, 100, preheat=250, chamber=(75, 40, 80), filtration=True),
+    "PVB": Preset(215, 75, chamber=(20, 15, 38)),
+    "ABS": Preset(255, 100, chamber=(70, 40, 75), filtration=True),
+    "HIPS": Preset(220, 100, chamber=(70, 40, 75), filtration=True),
+    "PP": Preset(240, 100, chamber=(60, 30, 70), filtration=True),
+    "FLEX": Preset(240, 50, preheat=210, chamber=(25, 15, 40), filtration=True,
+                   flexible=True),
+    "PA": Preset(285, 100, preheat=260, chamber=(65, 40, 70)),
+    "PVA": Preset(210, 60, preheat=160, chamber=(25, 15, 38)),
+    "BVOH": Preset(210, 60, preheat=160, chamber=(25, 15, 38)),
+}
 PRESET_ALIASES = {"TPU": "FLEX", "TPE": "FLEX"}
 
 NAME_LIMIT = 7  # The firmware's filament name holds at most 7 characters.
@@ -122,27 +183,34 @@ class ToolWrite:
 def filament_lines(write: ToolWrite) -> list[str]:
     """Return the `M865`/`M865.1` lines that load `write.spool` as an ad-hoc filament.
 
-    `R` resets every parameter not given, so the job must supply temperatures, either
-    from a base preset (`J`) or explicitly (`T` nozzle, `B` bed). Spoolman's own
-    temperatures override the preset's.
+    `R` resets every parameter, so the line gives them all: from the material's
+    firmware preset, with Spoolman's extruder and bed temperatures taking priority.
+    A material that isn't a preset needs both temperatures in Spoolman.
     """
     spool, tool = write.spool, write.tool
     name = printer_name(spool)
     if name is None:
         raise CannotSync(f"spool {spool.id} has no material or name to write")
-    preset = preset_for(spool)
-    if preset is None and not (spool.extruder_temp and spool.bed_temp):
+    key = preset_for(spool)
+    preset = PRESETS.get(key) if key else None
+    nozzle = int(spool.extruder_temp) if spool.extruder_temp else None
+    bed = int(spool.bed_temp) if spool.bed_temp else None
+    if preset is None and not (nozzle and bed):
         raise CannotSync(
             f"spool {spool.id}'s material {spool.material!r} isn't a printer preset; set its "
             "extruder and bed temperatures in Spoolman"
         )
-    parts = ["M865 X R", f'N"{name}"']
+    parts = ["M865 X R", f'N"{name}"',
+             f"T{nozzle or preset.nozzle}", f"B{bed or preset.bed}"]
     if preset:
-        parts.append(f'J"{preset}"')
-    if spool.extruder_temp:
-        parts.append(f"T{int(spool.extruder_temp)}")
-    if spool.bed_temp:
-        parts.append(f"B{int(spool.bed_temp)}")
+        parts.append(f"P{min(preset.preheat, nozzle or preset.nozzle)}")
+        if preset.chamber:
+            target, low, high = preset.chamber
+            parts.append(f"C{target} D{low} E{high}")
+        if preset.filtration:
+            parts.append("F1")
+        if preset.flexible:
+            parts.append("G1")
     color = _color(spool)
     if color:
         parts.append(f'O"{color}"')

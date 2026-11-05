@@ -3,10 +3,13 @@ import pytest
 from spoolman_prusalink.models import Spool
 from spoolman_prusalink.printer_sync import (
     COREONEL_PREAMBLE,
+    PRINTER_MODELS,
     CannotSync,
     ToolWrite,
     build_job,
+    default_preamble,
     filament_lines,
+    model_problem,
     printer_name,
 )
 
@@ -28,7 +31,7 @@ def test_name_uses_firmware_charset():
 def test_preset_with_color_and_uuid():
     lines = filament_lines(ToolWrite(0, spool(), "44c406a5-c6f5-4440-bfba-e8060564b717"))
     assert lines == [
-        'M865 X R N"PLA" J"PLA" O"#8c9099" L0',
+        'M865 X R N"PLA" T215 B60 P170 C20 D15 E38 O"#8c9099" L0',
         'M865.1 I0 C"44c406a5-c6f5-4440-bfba-e8060564b717"',
     ]
 
@@ -36,7 +39,7 @@ def test_preset_with_color_and_uuid():
 def test_spoolman_temps_override_preset_and_alias():
     (line,) = filament_lines(ToolWrite(2, spool(material="TPU", extruder_temp=230,
                                                 bed_temp=50, color_hex=None), None))
-    assert line == 'M865 X R N"TPU" J"FLEX" T230 B50 L2'
+    assert line == 'M865 X R N"TPU" T230 B50 P210 C25 D15 E40 F1 G1 L2'
 
 
 def test_uuid_only_on_tool_0():
@@ -60,3 +63,30 @@ def test_notice_only_job():
         "G28 O ; home only if not homed, so the end-of-job bed move is safe",
         "M117 Spoolman: Core One L+: a, b",
     ]
+
+
+def test_non_preset_with_spoolman_temps():
+    (line,) = filament_lines(ToolWrite(0, spool(material="PLA-CF", extruder_temp=225,
+                                                bed_temp=65, color_hex=None), None))
+    assert line == 'M865 X R N"PLA-CF" T225 B65 L0'
+
+
+def test_pps_needs_menu_load():
+    with pytest.raises(CannotSync):
+        filament_lines(ToolWrite(0, spool(material="PPS"), None))
+
+
+def test_model_problems():
+    assert model_problem("8.1.0", None) is None
+    assert model_problem("1.4.1", None) is None
+    assert model_problem("1.4.1", ['M862.3 P "MK4SMMU3"']) is None
+    assert "is for COREONEL but the printer is MK4" in model_problem("1.4.0", COREONEL_PREAMBLE)
+    assert "MINI isn't supported" in model_problem("2.1.0", None)
+    assert "multi-tool" in model_problem("8.10.0", None)
+    assert "isn't one the bridge knows" in model_problem("99.0.0", None)
+    assert "no M862.3" in model_problem("1.4.0", ["M862.5 P2"])
+
+
+def test_default_preamble_names_model():
+    assert default_preamble(PRINTER_MODELS["1.4.0"])[0].startswith('M862.3 P "MK4"')
+    assert COREONEL_PREAMBLE[0] == 'M862.3 P "COREONEL" ; printer model check'

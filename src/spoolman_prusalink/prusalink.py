@@ -43,7 +43,7 @@ def parse_filament(data: dict) -> FilamentReading:
 
 
 class NoFilamentEndpoint(Exception):
-    """The printer's firmware has no `/api/v1/filament`."""
+    """The printer's firmware has no `/api/v1/filament`, or it has no usage counters."""
 
 
 class PrusaLink:
@@ -64,7 +64,11 @@ class PrusaLink:
         if resp.status_code == 404:
             raise NoFilamentEndpoint("printer firmware has no /api/v1/filament")
         resp.raise_for_status()
-        return parse_filament(resp.json())
+        data = resp.json()
+        # MINI and MK3.5 firmware report only the loaded material, with no counters.
+        if "boot_id" not in data or any("extruded" not in t for t in data.get("tools", [])):
+            raise NoFilamentEndpoint("printer's /api/v1/filament has no usage counters")
+        return parse_filament(data)
 
     async def printer_type(self) -> str | None:
         """Return the printer type code from `GET /api/version`, such as `8.1.0`."""

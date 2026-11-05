@@ -4,9 +4,9 @@
 
 [printer]
 url = "http://192.168.1.22"
-# Compatibility checks at the start of every job the bridge runs. These are for the
-# Core One L; other models (including INDX) need their own. The bridge checks the
-# M862.3 model against the printer and doesn't write to the printer if they differ.
+# Compatibility checks at the start of every job the bridge runs. By default they come
+# from the printer's model. If you set them, the M862.3 model must match the printer, or
+# the bridge doesn't write to the printer.
 # gcode_preamble = [
 #   'M862.3 P "COREONEL" ; printer model check',
 #   "M862.5 P2 ; g-code level check",

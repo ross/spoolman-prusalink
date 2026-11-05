@@ -13,11 +13,21 @@ writes the loaded spool's name, color and UUID to the printer.
 
 ## Requirements
 
-- A printer running firmware with `GET /api/v1/filament`, which is on the
+- A Prusa MK4, MK4S, MK3.9, MK3.9S, Core One or Core One L running firmware
+  with `GET /api/v1/filament`, which is on the
   [`prusalink-filament-endpoint` branch](https://github.com/ross/Prusa-Firmware-Buddy/tree/prusalink-filament-endpoint).
-  Stock firmware doesn't have it. With other firmware, the bridge logs an
-  error once and charges nothing, then resumes on its own if the endpoint
-  appears.
+  Stock firmware doesn't have the endpoint. Only the Core One L has been run
+  with the bridge.
+
+  | Model | Charging | Printer writes | Instance UUIDs |
+  | --- | --- | --- | --- |
+  | Core One, Core One L | Yes | Yes | Yes |
+  | MK4, MK4S, MK3.9, MK3.9S | Yes | Yes | No: the firmware drops them |
+  | MINI, MK3.5, MK3.5S | No: the endpoint has no usage counters | No | No |
+  | XL, iX, Core One (L) INDX | Untested | No: multi-tool isn't supported yet | No |
+
+  On firmware without the endpoint or its counters, the bridge logs an error
+  once and charges nothing, then resumes on its own if they appear.
 - The printer's PrusaLink API key.
 - Spoolman, reachable from the bridge over HTTP.
 
@@ -163,8 +173,8 @@ rewrite a flag that hasn't changed.
 PrusaLink has no write endpoint for filament, so the bridge uploads a small
 G-code job, `spoolman-sync.gcode` on the USB drive, and runs it as a print.
 The printer only accepts it while idle or finished, and each run appears in
-the printer's job history. The job starts with the printer's compatibility
-checks (`gcode_preamble`), then `G28 O` to home only if the position isn't
+the printer's job history. The job starts with the compatibility checks for
+the printer's model, then `G28 O` to home only if the position isn't
 known: every job ends by lowering the bed, and with Z unhomed (as after a
 boot) the printer would drive the bed into its stop. It then sets the
 filament with `M865` without moving any,
@@ -187,20 +197,24 @@ leaves the printer alone, unless `sync_drift = true`.
 
 Requirements for a write:
 
-- `gcode_preamble` must be for the printer's model. At startup and after each
-  printer reboot, the bridge reads the model from `GET /api/version` and
-  compares it with the preamble's `M862.3 P"..."` line. If they differ, the
-  model is one the bridge doesn't know, or the preamble has no `M862.3`, the
-  bridge doesn't write to the printer and flags any spool waiting to be
-  written. A job for the wrong model would stop on the printer's
-  compatibility warning until someone tapped through it. Charging isn't
-  affected.
-
+- The bridge must support the printer's model. At startup and after each
+  printer reboot, it reads the model from `GET /api/version`. On a model
+  that's unsupported or unknown, it doesn't write to the printer and flags
+  any spool waiting to be written. Charging isn't affected.
+- The job's compatibility checks come from the model: `M862.3 P"<model>"`,
+  `M862.5 P2` and `M862.6 P"Input shaper"`. If you set `gcode_preamble`, its
+  `M862.3` must name the printer's model exactly (or its MMU3 variant), or
+  the bridge doesn't write. A job for the wrong model would stop on the
+  printer's compatibility warning until someone tapped through it.
 - The spool's material must be a printer preset (PLA, PETG, ASA, PC, PVB,
-  ABS, HIPS, PP, FLEX, PA, PPS, PPA, PVA, BVOH; TPU and TPE map to FLEX), or
-  its filament must have extruder and bed temperatures in Spoolman. The job
-  resets the filament's parameters, so it has to supply temperatures.
-  Otherwise the bridge flags the spool and doesn't write.
+  ABS, HIPS, PP, FLEX, PA, PVA, BVOH; TPU and TPE map to FLEX), or its
+  filament must have extruder and bed temperatures in Spoolman. `M865 X R`
+  resets every filament parameter, so the job writes them all: the preset's
+  nozzle, preheat, bed and chamber temperatures and its filtration and
+  flexible settings, with Spoolman's extruder and bed temperatures taking
+  priority. PPS and PPA need the HT idler-door setting, which `M865` can't
+  set, so load them from the printer's menu. Otherwise the bridge flags the
+  spool and doesn't write.
 - The printer's name is the material, cut to the 7 characters from
   `a-zA-Z0-9_-` the firmware accepts, so `PLA+` is written as `PLA`.
 - With `uuid_field` set and `uuids = true`, a spool with no instance UUID gets

@@ -7,6 +7,7 @@ import httpx
 from spoolman_prusalink.app import Bridge
 from spoolman_prusalink.color import quantize
 from spoolman_prusalink.config import Config
+from spoolman_prusalink.printer_sync import COREONEL_PREAMBLE
 from spoolman_prusalink.prusalink import PrusaLink
 from spoolman_prusalink.spoolman import Spoolman
 from spoolman_prusalink.state import load_state
@@ -88,6 +89,7 @@ class Printer:
         self.printer_type = "8.1.0"  # Core One L
         self.boot_id = 1
         self.filament_endpoint = True
+        self.counters = True  # MINI and MK3.5 firmware report only the material.
 
     def handle(self, request: httpx.Request) -> httpx.Response:
         if self.down:
@@ -99,6 +101,11 @@ class Printer:
                 return httpx.Response(404)
             tool = {"index": 0, "extruded": self.extruded, "unload_count": self.unloads,
                     "extruded_at_unload": self.at_unload}
+            if not self.counters:
+                tool = {"index": 0}
+                if self.material:
+                    tool["material"] = self.material
+                return httpx.Response(200, json={"tools": [tool]})
             if self.material:
                 tool["material"] = self.material
             return httpx.Response(200, json={"boot_id": self.boot_id, "tools": [tool]})
@@ -330,7 +337,7 @@ async def test_spoolman_first_swap_evicts_and_writes_printer(tmp_path):
         "M862.5 P2 ; g-code level check",
         'M862.6 P"Input shaper" ; FW feature check',
     ]
-    assert 'M865 X R N"PLA" J"PLA" O"#ff0000" L0' in gcode
+    assert 'M865 X R N"PLA" T215 B60 P170 C20 D15 E38 O"#ff0000" L0' in gcode
     assert f'M865.1 I0 C"{minted}"' in gcode
     assert gcode.rstrip().endswith("M117 Spoolman: Grey")
     assert printer.uploads[0][0] == "/api/v1/files/usb/spoolman-sync.gcode"
@@ -478,14 +485,39 @@ async def swap_to_spool_20(bridge, fake, printer):
     await bridge.poll()
 
 
-async def test_wrong_model_blocks_writes_and_flags(tmp_path, caplog):
-    bridge, fake, printer = make(tmp_path, [spool(19)], uuid_field="instance_uuid")
-    printer.printer_type = "1.4.0"  # MK4, but the preamble checks for COREONEL
+async def test_preamble_for_wrong_model_blocks_writes_and_flags(tmp_path, caplog):
+    bridge, fake, printer = make(tmp_path, [spool(19)], uuid_field="instance_uuid",
+                                 gcode_preamble=COREONEL_PREAMBLE)
+    printer.printer_type = "1.4.0"  # MK4
     await swap_to_spool_20(bridge, fake, printer)
     assert jobs(printer) == []
     assert "printer is MK4 (1.4.0): gcode_preamble is for COREONEL" in caplog.text
     assert "can't write to the printer: gcode_preamble is for COREONEL" in fake.flag(20)
     assert fake.used[20] == [116.0]  # charging is unaffected
+    await bridge.aclose()
+
+
+async def test_mk4_gets_its_own_preamble_and_no_uuid(tmp_path):
+    bridge, fake, printer = make(tmp_path, [spool(19)], uuid_field="instance_uuid")
+    printer.printer_type = "1.4.0"
+    await swap_to_spool_20(bridge, fake, printer)
+    (gcode,) = jobs(printer)
+    assert gcode.startswith('M862.3 P "MK4" ; printer model check')
+    assert "M865.1" not in gcode  # the MK4 build doesn't keep UUIDs
+    assert "instance_uuid" not in (fake.spools[20].get("extra") or {})
+    await bridge.poll()  # the printer matches without a UUID: no second job
+    assert len(jobs(printer)) == 1
+    await bridge.aclose()
+
+
+async def test_mini_is_unsupported(tmp_path, caplog):
+    bridge, fake, printer = make(tmp_path, [spool(19)])
+    printer.printer_type = "2.1.0"
+    printer.counters = False
+    for _ in range(3):
+        await bridge.poll()
+    assert caplog.text.count("has no usage counters") == 1
+    assert 0 not in bridge.tools
     await bridge.aclose()
 
 

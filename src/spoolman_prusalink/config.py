@@ -8,8 +8,6 @@ import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 
-from .printer_sync import COREONEL_PREAMBLE
-
 
 class ConfigError(ValueError):
     pass
@@ -38,7 +36,8 @@ class Config:
     # Whether a printer/spool mismatch (drift) is written as a flag.
     flag_drift: bool = True
     # Compatibility-check lines at the start of every job file.
-    gcode_preamble: tuple[str, ...] = COREONEL_PREAMBLE
+    # Compatibility checks for the sync job; None uses the printer model's default.
+    gcode_preamble: tuple[str, ...] | None = None
     # Where the sync job is uploaded, and its file name (overwritten each time).
     sync_storage: str = "usb"
     sync_file: str = "spoolman-sync.gcode"
@@ -138,7 +137,9 @@ def load(path: str | os.PathLike | None, env: dict[str, str] | None = None) -> C
         length_factor=length_factor,
         flag_field=flag_field,
         flag_drift=bool(bridge.get("flag_drift", True)),
-        gcode_preamble=tuple(printer.get("gcode_preamble", COREONEL_PREAMBLE)),
+        gcode_preamble=(
+            tuple(printer["gcode_preamble"]) if "gcode_preamble" in printer else None
+        ),
         sync_storage=str(printer.get("sync_storage", "usb")),
         sync_file=sync_file,
         printer_sync=bool(bridge.get("printer_sync", True)),

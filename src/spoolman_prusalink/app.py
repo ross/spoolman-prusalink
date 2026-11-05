@@ -98,6 +98,7 @@ class Bridge:
     # Why printer writes are off for this printer, or None. Checked once per boot.
     _model_error: str | None = None
     _model_boot: int | None = None
+    _model: printer_sync.PrinterModel | None = None
 
     @classmethod
     def from_config(cls, config: Config) -> Bridge:
@@ -164,7 +165,7 @@ class Bridge:
             await self.sync_flags(spools)
 
     async def _check_model(self, boot_id: int) -> None:
-        """Compare the printer's model with `gcode_preamble`; on failure, writes stay off."""
+        """Look up the printer's model; if the bridge can't write to it, writes stay off."""
         try:
             printer_type = await self.printer.printer_type()
         except (httpx.HTTPError, ValueError) as e:
@@ -174,13 +175,25 @@ class Bridge:
             self._model_error = error
             return
         self._model_boot = boot_id
-        self._model_error = printer_sync.model_mismatch(printer_type, self.config.gcode_preamble)
-        model = printer_sync.PRINTER_MODELS.get(printer_type or "", "unknown")
+        self._model = printer_sync.PRINTER_MODELS.get(printer_type or "")
+        self._model_error = printer_sync.model_problem(printer_type, self.config.gcode_preamble)
+        name = self._model.name if self._model else "unknown"
         if self._model_error:
-            log.warning("printer is %s (%s): %s; printer writes are off", model, printer_type,
+            log.warning("printer is %s (%s): %s; printer writes are off", name, printer_type,
                         self._model_error)
         else:
-            log.info("printer is %s (%s)", model, printer_type)
+            log.info("printer is %s (%s)", name, printer_type)
+
+    @property
+    def _uuids(self) -> bool:
+        """Whether to write and compare instance UUIDs: configured, and the model keeps them."""
+        return self.config.printer_uuids and self._model is not None and self._model.uuids
+
+    def _preamble(self) -> tuple[str, ...]:
+        if self.config.gcode_preamble is not None:
+            return self.config.gcode_preamble
+        assert self._model is not None
+        return printer_sync.default_preamble(self._model)
 
     async def _user_job_id(self, status: PrinterStatus) -> int | None:
         """Return the job id, or None for the bridge's own sync job.
@@ -222,7 +235,7 @@ class Bridge:
 
             def matches(spool_id: int, material=material) -> bool:
                 spool = by_id.get(spool_id)
-                return (self.config.printer_uuids and spool is not None
+                return (self._uuids and spool is not None
                         and drift.same_instance(material, spool))
 
             result = account(
@@ -278,7 +291,7 @@ class Bridge:
                 )
             active = by_id.get(st.active) if st.active is not None else None
             if not result.skipped and material is not None and active is not None:
-                diffs = drift.differences(tool, material, active, self.config.printer_uuids)
+                diffs = drift.differences(tool, material, active, self._uuids)
                 if not diffs:
                     if st.needs_sync:
                         self.tools[tool] = replace(st, needs_sync=False, sync_attempts=0)
@@ -395,7 +408,7 @@ class Bridge:
             if spool is None:
                 continue
             uuid_value = None
-            if tool == 0 and self.config.printer_uuids and self.config.uuid_field:
+            if tool == 0 and self._uuids and self.config.uuid_field:
                 uuid_value = spool.instance_uuid or await self._mint_uuid(spool)
             write = printer_sync.ToolWrite(tool, spool, uuid_value)
             try:
@@ -420,7 +433,7 @@ class Bridge:
         if not writes and not notices:
             return
         gcode = printer_sync.build_job(
-            self.config.gcode_preamble, writes, notices, multi_tool=len(self.config.tools) > 1
+            self._preamble(), writes, notices, multi_tool=len(self.config.tools) > 1
         )
         if self.config.dry_run:
             log.info("WOULD RUN printer job %s:\n%s", self.config.sync_file, gcode.rstrip())
