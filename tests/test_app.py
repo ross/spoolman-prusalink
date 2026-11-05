@@ -148,6 +148,39 @@ async def test_printer_error_skips_poll(tmp_path, caplog):
     await bridge.aclose()
 
 
+async def test_printer_outage_logged_on_change(tmp_path, caplog):
+    up = {"v": False}
+    now = {"v": 0.0}
+
+    def handler(request):
+        if not up["v"]:
+            raise httpx.ConnectError("All connection attempts failed")
+        return httpx.Response(401)
+
+    cfg = make_config(tmp_path)
+    t = httpx.MockTransport(handler)
+    bridge = Bridge(cfg, PrusaLink("http://p", "k", transport=t), Spoolman("http://s", transport=t))
+    bridge._printer_outage.clock = lambda: now["v"]
+    caplog.set_level("INFO")
+
+    for _ in range(5):
+        await bridge.poll()
+        now["v"] += 60
+    assert caplog.text.count("printer unreachable") == 1
+    assert "still unreachable" not in caplog.text
+    assert bridge.interval() == cfg.poll_idle
+
+    now["v"] = 3 * 3600 + 30
+    await bridge.poll()
+    assert "printer still unreachable after 3h 00m" in caplog.text
+
+    up["v"] = True
+    await bridge.poll()
+    assert "printer reachable again after 3h 00m" in caplog.text
+    assert not bridge._printer_outage.down
+    await bridge.aclose()
+
+
 def test_config_load(tmp_path):
     p = tmp_path / "c.toml"
     p.write_text(

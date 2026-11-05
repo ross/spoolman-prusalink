@@ -5,7 +5,9 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import time
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 
@@ -26,6 +28,51 @@ _REPEATING = {EventKind.HOLD_EMPTY, EventKind.HOLD_UNASSIGNED, EventKind.AMBIGUO
 
 FLAG_FIELD_NAME = "Printer bridge flag"
 UUID_FIELD_NAME = "Instance UUID"
+# While a service stays unreachable, remind once per this many seconds.
+OUTAGE_REMINDER = 3600
+
+
+def _duration(seconds: float) -> str:
+    minutes = int(seconds // 60)
+    if minutes < 60:
+        return f"{minutes}m"
+    return f"{minutes // 60}h {minutes % 60:02d}m"
+
+
+@dataclass
+class Outage:
+    """Log a service going unreachable and coming back, not every failed poll.
+
+    A printer that's switched off is normal, so a connection failure logs once, then
+    an hourly reminder, then a line when the service answers again.
+    """
+
+    name: str
+    clock: Callable[[], float] = time.monotonic
+    since: float | None = None
+    _reminded: float = 0.0
+
+    @property
+    def down(self) -> bool:
+        return self.since is not None
+
+    def failed(self, error: Exception) -> None:
+        now = self.clock()
+        if self.since is None:
+            self.since = self._reminded = now
+            log.warning("%s unreachable: %s; logging again when it's back", self.name, error)
+        elif now - self._reminded >= OUTAGE_REMINDER:
+            self._reminded = now
+            log.info("%s still unreachable after %s", self.name, _duration(now - self.since))
+        else:
+            log.debug("%s still unreachable: %s", self.name, error)
+
+    def ok(self) -> None:
+        if self.since is not None:
+            log.info("%s reachable again after %s", self.name, _duration(self.clock() - self.since))
+            self.since = None
+
+
 # Sync jobs per swap before the bridge gives up and flags the spool.
 MAX_SYNC_ATTEMPTS = 2
 
@@ -46,6 +93,7 @@ class Bridge:
     _flags: dict[int, str] = field(default_factory=dict)  # Desired flags from the last poll.
     _pending_writes: list[int] = field(default_factory=list)  # Tools to write when idle.
     _job_names: dict[int, str | None] = field(default_factory=dict)
+    _printer_outage: Outage = field(default_factory=lambda: Outage("printer"))
 
     @classmethod
     def from_config(cls, config: Config) -> Bridge:
@@ -76,9 +124,15 @@ class Bridge:
             status = await self.printer.status()
             reading = await self.printer.filament()
             job_id = await self._user_job_id(status)
+        except httpx.TransportError as e:
+            # Connection refused, timeouts and the like: most often the printer is off.
+            self._printer_outage.failed(e)
+            return
         except (httpx.HTTPError, ValueError, KeyError) as e:
+            self._printer_outage.ok()  # It answered, even if badly.
             log.warning("printer read failed, skipping poll: %s", e)
             return
+        self._printer_outage.ok()
         try:
             spools = await self.spoolman.spools()
         except (httpx.HTTPError, ValueError, KeyError) as e:
@@ -425,6 +479,8 @@ class Bridge:
         self._last_notes[tool] = key
 
     def interval(self) -> float:
+        if self._printer_outage.down:
+            return self.config.poll_idle
         if self._last_state is None or self._last_state in BUSY_STATES:
             return self.config.poll_printing
         return self.config.poll_idle
