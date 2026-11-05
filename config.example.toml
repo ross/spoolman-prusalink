@@ -53,6 +53,7 @@ printer_sync = true
 # Also overwrite the printer when it differs with no swap or unload to explain it.
 sync_drift = false
 # Show new flags on the printer screen with M117. Each notice runs as a print job.
+# The message shows for 5 seconds and is easy to miss; the Spoolman flag is the record.
 printer_notices = false
 # Multiplier applied to the printer's extruded length before charging. 1.0 charges
 # what the printer reports, which runs about 5% below slicer estimates.

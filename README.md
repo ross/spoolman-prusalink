@@ -167,13 +167,16 @@ known: every job ends by lowering the bed, and with Z unhomed (as after a
 boot) the printer would drive the bed into its stop. It then sets the
 filament with `M865` without moving any,
 sets the instance UUID with `M865.1` on tool 0, and ends with an `M117`
-message naming the spool.
+message naming the spool. Don't count on seeing that message: the printer
+shows an `M117` for 5 seconds, the finished-job screen covers it, and later
+messages push it out of the eight-entry **Tune** > **Messages** history. The
+spool's flag in Spoolman is the reliable record.
 
 The bridge writes a tool once the printer is idle, after a swap takes effect
 or the tool unloads. A menu load replaces the filament with a preset, which
 drops the color and UUID, so a write is expected then. It waits while a swap
 is staged and while the tool is empty. During an unconfirmed swap it writes
-the spool Spoolman still assigns, so the `M117` shows you what Spoolman
+the spool Spoolman still assigns, so the printer shows what Spoolman
 thinks is loaded; confirming a different spool rewrites the printer. If the printer still
 differs after two jobs, it stops and flags the spool.
 
