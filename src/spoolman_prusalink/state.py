@@ -40,9 +40,12 @@ def load_state(path: Path) -> State:
     )
 
 
-def save_state(path: Path, state: State) -> None:
-    """Write the state atomically, so a crash never leaves a partial file."""
-    path.parent.mkdir(parents=True, exist_ok=True)
+def save_state(path: Path, state: State) -> bool:
+    """Write the state atomically, so a crash never leaves a partial file.
+
+    Skip the write when the file already holds this state, since the bridge saves after
+    every poll and most idle polls change nothing. Return whether it wrote.
+    """
     payload = {
         "version": STATE_VERSION,
         "tools": {str(k): v.to_json() for k, v in sorted(state.tools.items())},
@@ -50,16 +53,24 @@ def save_state(path: Path, state: State) -> None:
         "flagged": state.flagged,
         "noticed": state.noticed,
     }
+    text = json.dumps(payload, indent=2)
+    try:
+        if path.read_text() == text:
+            return False
+    except FileNotFoundError:
+        pass
+    path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.")
     try:
         with os.fdopen(fd, "w") as f:
-            json.dump(payload, f, indent=2)
+            f.write(text)
             f.flush()
             os.fsync(f.fileno())
         os.replace(tmp, path)
     except BaseException:
         Path(tmp).unlink(missing_ok=True)
         raise
+    return True
 
 
 def append_ledger(path: Path, records: list[dict]) -> None:

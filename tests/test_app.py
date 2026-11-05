@@ -4,11 +4,12 @@ from dataclasses import replace
 import httpx
 import pytest
 
+from spoolman_prusalink.accounting import ToolState
 from spoolman_prusalink.app import Bridge
 from spoolman_prusalink.config import Config, ConfigError, load
 from spoolman_prusalink.prusalink import PrusaLink, parse_filament
 from spoolman_prusalink.spoolman import Spoolman, parse_spool
-from spoolman_prusalink.state import load_state
+from spoolman_prusalink.state import State, load_state, save_state
 
 FILAMENT = {
     "boot_id": 3308742886,
@@ -179,6 +180,16 @@ async def test_printer_outage_logged_on_change(tmp_path, caplog):
     assert "printer reachable again after 3h 00m" in caplog.text
     assert not bridge._printer_outage.down
     await bridge.aclose()
+
+
+def test_save_state_skips_unchanged(tmp_path):
+    path = tmp_path / "state.json"
+    state = State(tools={0: ToolState(boot_id=1, charged=100)})
+    assert save_state(path, state)
+    assert not save_state(path, state)
+    state.tools[0] = replace(state.tools[0], charged=150)
+    assert save_state(path, state)
+    assert load_state(path).tools[0].charged == 150
 
 
 def test_config_load(tmp_path):
