@@ -17,7 +17,7 @@ from . import drift, printer_sync
 from .accounting import WARNINGS, EventKind, ToolState, account
 from .config import Config
 from .models import FilamentReading, Spool
-from .prusalink import BUSY_STATES, IDLE_STATES, PrinterStatus, PrusaLink
+from .prusalink import BUSY_STATES, IDLE_STATES, NoFilamentEndpoint, PrinterStatus, PrusaLink
 from .spoolman import Spoolman
 from .state import State, append_ledger, load_state, save_state
 
@@ -94,6 +94,10 @@ class Bridge:
     _pending_writes: list[int] = field(default_factory=list)  # Tools to write when idle.
     _job_names: dict[int, str | None] = field(default_factory=dict)
     _printer_outage: Outage = field(default_factory=lambda: Outage("printer"))
+    _unsupported: bool = False  # The printer lacks the filament endpoint.
+    # Why printer writes are off for this printer, or None. Checked once per boot.
+    _model_error: str | None = None
+    _model_boot: int | None = None
 
     @classmethod
     def from_config(cls, config: Config) -> Bridge:
@@ -128,11 +132,23 @@ class Bridge:
             # Connection refused, timeouts and the like: most often the printer is off.
             self._printer_outage.failed(e)
             return
+        except NoFilamentEndpoint as e:
+            self._printer_outage.ok()
+            if not self._unsupported:
+                self._unsupported = True
+                log.error("%s; this firmware isn't supported, so nothing is charged. "
+                          "Checking again each poll.", e)
+            return
         except (httpx.HTTPError, ValueError, KeyError) as e:
             self._printer_outage.ok()  # It answered, even if badly.
             log.warning("printer read failed, skipping poll: %s", e)
             return
         self._printer_outage.ok()
+        if self._unsupported:
+            self._unsupported = False
+            log.info("printer now reports filament; resuming")
+        if self._model_boot != reading.boot_id:
+            await self._check_model(reading.boot_id)
         try:
             spools = await self.spoolman.spools()
         except (httpx.HTTPError, ValueError, KeyError) as e:
@@ -146,6 +162,25 @@ class Bridge:
             await self.sync_printer(spools)
         if not self.config.dry_run and self.config.flag_field:
             await self.sync_flags(spools)
+
+    async def _check_model(self, boot_id: int) -> None:
+        """Compare the printer's model with `gcode_preamble`; on failure, writes stay off."""
+        try:
+            printer_type = await self.printer.printer_type()
+        except (httpx.HTTPError, ValueError) as e:
+            error = f"can't read the printer model ({e})"
+            if error != self._model_error:
+                log.warning("%s; printer writes are off until it can", error)
+            self._model_error = error
+            return
+        self._model_boot = boot_id
+        self._model_error = printer_sync.model_mismatch(printer_type, self.config.gcode_preamble)
+        model = printer_sync.PRINTER_MODELS.get(printer_type or "", "unknown")
+        if self._model_error:
+            log.warning("printer is %s (%s): %s; printer writes are off", model, printer_type,
+                        self._model_error)
+        else:
+            log.info("printer is %s (%s)", model, printer_type)
 
     async def _user_job_id(self, status: PrinterStatus) -> int | None:
         """Return the job id, or None for the bridge's own sync job.
@@ -269,7 +304,13 @@ class Bridge:
         # Spoolman thinks is loaded, and confirming a different spool rewrites it.
         settled = st.assigned == st.active
         if self.config.printer_sync and expected and st.sync_attempts < MAX_SYNC_ATTEMPTS:
-            if settled:
+            if settled and self._model_error:
+                notes.append(f"[{location}] can't write spool {active.id} to the printer: "
+                             f"{self._model_error}")
+                flags.setdefault(active.id, []).append(
+                    f"{location}: can't write to the printer: {self._model_error}"
+                )
+            elif settled:
                 self._pending_writes.append(tool)
                 notes.append(f"[{location}] printer will be set to spool {active.id} when "
                              f"idle: {detail}")
@@ -343,6 +384,8 @@ class Bridge:
 
     async def sync_printer(self, spools: list[Spool]) -> None:
         """Write pending spools (and, if enabled, new flags) to the printer in one job."""
+        if self._model_error:
+            return
         by_id = {s.id: s for s in spools}
         writes: list[printer_sync.ToolWrite] = []
         written: list[int] = []

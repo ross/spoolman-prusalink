@@ -42,6 +42,10 @@ def parse_filament(data: dict) -> FilamentReading:
     return FilamentReading(boot_id=int(data["boot_id"]), tools=tools)
 
 
+class NoFilamentEndpoint(Exception):
+    """The printer's firmware has no `/api/v1/filament`."""
+
+
 class PrusaLink:
     def __init__(self, url: str, api_key: str, *, timeout: float = 10.0,
                  transport: httpx.AsyncBaseTransport | None = None) -> None:
@@ -57,8 +61,17 @@ class PrusaLink:
 
     async def filament(self) -> FilamentReading:
         resp = await self._client.get("/api/v1/filament")
+        if resp.status_code == 404:
+            raise NoFilamentEndpoint("printer firmware has no /api/v1/filament")
         resp.raise_for_status()
         return parse_filament(resp.json())
+
+    async def printer_type(self) -> str | None:
+        """Return the printer type code from `GET /api/version`, such as `8.1.0`."""
+        resp = await self._client.get("/api/version")
+        resp.raise_for_status()
+        value = resp.json().get("printer")
+        return None if value is None else str(value)
 
     async def job_display_name(self) -> str | None:
         """Return the current job's long file name, or None when no job is running."""

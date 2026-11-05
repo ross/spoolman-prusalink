@@ -72,6 +72,8 @@ def make_bridge(tmp_path, filament, spools):
             return httpx.Response(200, json=filament())
         if request.url.path == "/api/v1/spool":
             return httpx.Response(200, json=spools())
+        if request.url.path == "/api/version":
+            return httpx.Response(200, json={"printer": "8.1.0"})
         if request.url.path == "/api/v1/job":
             return httpx.Response(200, json={"id": 9, "file": {"display_name": "part.bgcode"}})
         if request.url.path == "/api/v1/status":

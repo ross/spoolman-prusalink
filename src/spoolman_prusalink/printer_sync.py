@@ -20,6 +20,46 @@ COREONEL_PREAMBLE = (
     'M862.6 P"Input shaper" ; FW feature check',
 )
 
+# Printer type codes, as `/api/version` reports them in `printer`, and the model name
+# `M862.3` checks for. From `include/common/printer_model_data.hpp` in the firmware.
+PRINTER_MODELS = {
+    "1.3.0": "MK3", "1.3.1": "MK3S", "1.3.5": "MK3.5", "1.3.6": "MK3.5S",
+    "1.3.9": "MK3.9", "1.3.10": "MK3.9S", "1.4.0": "MK4", "1.4.1": "MK4S",
+    "2.1.0": "MINI", "3.1.0": "XL", "5.1.0": "XL", "4.1.0": "iX",
+    "7.1.0": "COREONE", "8.1.0": "COREONEL", "7.10.0": "COREONEINDX",
+    "8.10.0": "COREONEL-INDX",
+}
+
+_MODEL_CHECK = re.compile(r'^\s*M862\.3\s+P\s*"([^"]+)"', re.IGNORECASE)
+
+
+def preamble_model(preamble: tuple[str, ...] | list[str]) -> str | None:
+    """Return the model name the preamble's `M862.3 P"..."` line checks for."""
+    for line in preamble:
+        m = _MODEL_CHECK.match(line)
+        if m:
+            return m.group(1)
+    return None
+
+
+def model_mismatch(printer_type: str | None, preamble: tuple[str, ...] | list[str]) -> str | None:
+    """Return why the preamble doesn't suit the printer, or None if it does.
+
+    A job whose `M862.3` names another model stops on the printer's compatibility
+    warning and waits for someone to tap through it, so the bridge doesn't send one.
+    """
+    model = PRINTER_MODELS.get(printer_type or "")
+    if model is None:
+        return (f"printer type {printer_type!r} isn't one the bridge knows; "
+                "can't check gcode_preamble against it")
+    wanted = preamble_model(preamble)
+    if wanted is None:
+        return f"gcode_preamble has no M862.3 model check; set one for {model}"
+    if wanted.upper() != model.upper():
+        return f"gcode_preamble is for {wanted} but the printer is {model}"
+    return None
+
+
 # Firmware preset filament types (`src/common/filament_presets.cpp`). `J` accepts only
 # these; anything else is an error.
 PRESETS = frozenset({

@@ -85,16 +85,23 @@ class Printer:
         self.down = False
         self.uploads = []  # (path, gcode)
         self.busy = False  # Reject uploads with 409, as while printing.
+        self.printer_type = "8.1.0"  # Core One L
+        self.boot_id = 1
+        self.filament_endpoint = True
 
     def handle(self, request: httpx.Request) -> httpx.Response:
         if self.down:
             raise httpx.ConnectError("printer offline")
+        if request.url.path == "/api/version":
+            return httpx.Response(200, json={"text": "PrusaLink", "printer": self.printer_type})
         if request.url.path == "/api/v1/filament":
+            if not self.filament_endpoint:
+                return httpx.Response(404)
             tool = {"index": 0, "extruded": self.extruded, "unload_count": self.unloads,
                     "extruded_at_unload": self.at_unload}
             if self.material:
                 tool["material"] = self.material
-            return httpx.Response(200, json={"boot_id": 1, "tools": [tool]})
+            return httpx.Response(200, json={"boot_id": self.boot_id, "tools": [tool]})
         if request.url.path == "/api/v1/job":
             if not self.job:
                 return httpx.Response(204)
@@ -457,4 +464,82 @@ async def test_staged_swap_waits_for_unload_before_writing(tmp_path):
     fake.spools[20] = spool_x(20)  # 20 staged
     await bridge.poll()
     assert len(jobs(printer)) == 1
+    await bridge.aclose()
+
+
+async def swap_to_spool_20(bridge, fake, printer):
+    """Baseline on spool 19, then a Spoolman-first swap to spool 20 and a menu load."""
+    await bridge.poll()
+    fake.spools[20] = spool_x(20)
+    await bridge.poll()
+    printer.unloads, printer.at_unload, printer.material = 1, 1000, None
+    await bridge.poll()
+    printer.extruded, printer.material = 1116, {"name": "PLA"}
+    await bridge.poll()
+
+
+async def test_wrong_model_blocks_writes_and_flags(tmp_path, caplog):
+    bridge, fake, printer = make(tmp_path, [spool(19)], uuid_field="instance_uuid")
+    printer.printer_type = "1.4.0"  # MK4, but the preamble checks for COREONEL
+    await swap_to_spool_20(bridge, fake, printer)
+    assert jobs(printer) == []
+    assert "printer is MK4 (1.4.0): gcode_preamble is for COREONEL" in caplog.text
+    assert "can't write to the printer: gcode_preamble is for COREONEL" in fake.flag(20)
+    assert fake.used[20] == [116.0]  # charging is unaffected
+    await bridge.aclose()
+
+
+async def test_unknown_model_blocks_writes(tmp_path, caplog):
+    bridge, fake, printer = make(tmp_path, [spool(19)], uuid_field="instance_uuid")
+    printer.printer_type = "99.1.0"
+    await swap_to_spool_20(bridge, fake, printer)
+    assert jobs(printer) == []
+    assert "printer type '99.1.0' isn't one the bridge knows" in fake.flag(20)
+    await bridge.aclose()
+
+
+async def test_matching_preamble_for_other_model_writes(tmp_path):
+    preamble = ('M862.3 P "MK4S" ; printer model check', "M862.5 P2")
+    bridge, fake, printer = make(tmp_path, [spool(19)], uuid_field="instance_uuid",
+                                 gcode_preamble=preamble)
+    printer.printer_type = "1.4.1"
+    await swap_to_spool_20(bridge, fake, printer)
+    (gcode,) = jobs(printer)
+    assert gcode.startswith('M862.3 P "MK4S"')
+    await bridge.aclose()
+
+
+async def test_model_checked_once_per_boot(tmp_path):
+    bridge, fake, printer = make(tmp_path, [spool(19)])
+    seen = []
+    handle = printer.handle
+
+    def counting(request):
+        seen.append(request.url.path)
+        return handle(request)
+
+    bridge.printer = PrusaLink("http://printer", "k", transport=httpx.MockTransport(counting))
+    for _ in range(3):
+        await bridge.poll()
+    assert seen.count("/api/version") == 1
+    printer.boot_id = 2
+    await bridge.poll()
+    assert seen.count("/api/version") == 2
+    await bridge.aclose()
+
+
+async def test_missing_filament_endpoint_logged_once(tmp_path, caplog):
+    bridge, fake, printer = make(tmp_path, [spool(19)])
+    printer.filament_endpoint = False
+    for _ in range(3):
+        await bridge.poll()
+    assert caplog.text.count("printer firmware has no /api/v1/filament") == 1
+    assert "printer read failed" not in caplog.text
+    assert 0 not in bridge.tools
+
+    printer.filament_endpoint = True
+    caplog.set_level("INFO")
+    await bridge.poll()
+    assert "printer now reports filament; resuming" in caplog.text
+    assert 0 in bridge.tools
     await bridge.aclose()

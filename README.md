@@ -15,7 +15,9 @@ writes the loaded spool's name, color and UUID to the printer.
 
 - A printer running firmware with `GET /api/v1/filament`, which is on the
   [`prusalink-filament-endpoint` branch](https://github.com/ross/Prusa-Firmware-Buddy/tree/prusalink-filament-endpoint).
-  Stock firmware doesn't have it.
+  Stock firmware doesn't have it. With other firmware, the bridge logs an
+  error once and charges nothing, then resumes on its own if the endpoint
+  appears.
 - The printer's PrusaLink API key.
 - Spoolman, reachable from the bridge over HTTP.
 
@@ -184,6 +186,15 @@ A mismatch with no swap or unload behind it is drift. The bridge flags it and
 leaves the printer alone, unless `sync_drift = true`.
 
 Requirements for a write:
+
+- `gcode_preamble` must be for the printer's model. At startup and after each
+  printer reboot, the bridge reads the model from `GET /api/version` and
+  compares it with the preamble's `M862.3 P"..."` line. If they differ, the
+  model is one the bridge doesn't know, or the preamble has no `M862.3`, the
+  bridge doesn't write to the printer and flags any spool waiting to be
+  written. A job for the wrong model would stop on the printer's
+  compatibility warning until someone tapped through it. Charging isn't
+  affected.
 
 - The spool's material must be a printer preset (PLA, PETG, ASA, PC, PVB,
   ABS, HIPS, PP, FLEX, PA, PPS, PPA, PVA, BVOH; TPU and TPE map to FLEX), or
