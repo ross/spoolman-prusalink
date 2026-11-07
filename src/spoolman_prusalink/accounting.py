@@ -2,8 +2,8 @@
 
 `account()` is pure: it takes the stored state for one tool, the latest printer reading,
 the spools Spoolman has in the tool's location, the current print job, and any claim,
-and returns the charges to make, events to report, and the new state. The caller decides
-whether to apply charges (phase 1 only logs them) and persists the new state.
+and returns the charges to make, events to report, and the new state. The caller queues
+the charges for Spoolman, or only logs them in dry run, and persists the new state.
 
 Counter model:
 
