@@ -17,7 +17,9 @@ runs live, the bridge starts from the state its last live run saved and
 charges everything printed since then, including during the dry run, as it
 would after an outage. Turning dry run on and off loses no usage, except
 that, as after an outage, a printer restart in between drops the usage
-before the restart.
+before the restart. Several spool changes during a dry run also count as
+one unload when the bridge goes live (S14 in `docs/scenarios.md`), so usage
+from the spools in between goes to the active spool.
 
 ## Requirements
 
@@ -324,7 +326,10 @@ The `/data` volume holds two files:
   baseline, drops queued charges, and loses track of open swaps. Run only one
   bridge per state file and printer.
 - `ledger.jsonl` stores one JSON object per line for every charge, and every
-  event, such as a reboot or swap. A charge has `dry_run`, and when it was
-  sent, `applied` (the time Spoolman accepted it) or `failed` (the HTTP
-  status that rejected it). Compare it against
-  the slicer's `filament used [mm]` to validate the counts.
+  event, such as a reboot or swap. Every record has `dry_run`. A charge also
+  has, when it was sent, `applied` (the time Spoolman accepted it) or
+  `failed` (the HTTP status that rejected it). Dry run saves no state, so
+  after it the next run records the same events and charges again: a live
+  run as real ones, and a restarted dry run as dry-run ones. To total the
+  charges, leave out records with `"dry_run": true`. Compare the live charges
+  against the slicer's `filament used [mm]` to validate the counts.

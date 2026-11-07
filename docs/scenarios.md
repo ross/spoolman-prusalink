@@ -120,7 +120,7 @@ archived active spool (M3, M3a) is logged once when the bridge finds it.
 | B2 | Restart mid-print. | Catches up in one charge, with no double charge and no loss. | Seen live (job 131) |
 | B3 | Killed between a charge being accepted and the outbox being saved. | That charge is sent again: up to one poll's worth, double-charged. | Implemented; known limit |
 | B4 | `state.json` lost. | Starts again from a baseline (B1). Usage since the last poll is lost, and swap state is forgotten. | Implemented; a lost state file is a deployment problem (see Out of scope) |
-| B6 | Dry run. | Logs what it would charge and write, and records the charges in the ledger. Changes nothing in Spoolman, on the printer or in `state.json`. The next live run charges everything since the last live run, as after an outage (B2). | Tested |
+| B6 | Dry run. | Logs what it would charge and write, and records the charges in the ledger. Changes nothing in Spoolman, on the printer or in `state.json`. The next live run charges everything since the last live run, as after an outage (B2), so several spool changes during the dry run count as one unload (S14). Dry-run ledger records, events included, carry `dry_run`, and the next run records the same events again. | Tested |
 
 ## Claims
 

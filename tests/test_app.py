@@ -167,6 +167,8 @@ async def test_poll_logs_would_charge_and_saves_nothing(tmp_path, caplog):
     ledger = [json.loads(line) for line in (tmp_path / "ledger.jsonl").read_text().splitlines()]
     charges = [r for r in ledger if "use_length" in r]
     assert [(r["spool_id"], r["use_length"]) for r in charges] == [(7, 1000)]
+    assert any("event" in r for r in ledger)
+    assert all(r["dry_run"] is True for r in ledger)  # Events too, not just charges.
     assert bridge.tools[0].charged == 5310
     assert not (tmp_path / "state.json").exists()  # Dry run saves nothing.
     assert bridge.interval() == bridge.config.poll_printing
