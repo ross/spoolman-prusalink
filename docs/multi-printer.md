@@ -42,8 +42,9 @@ printer, one state file, and one deploy.
 
 ### Config
 
-Add a `[[printers]]` array. Each entry has a `name`, `url`, API key, the
-settings that are per printer today (`gcode_preamble`, `sync_storage`,
+Add a `[[printers]]` array. Each entry has a `name`, `url`, an `api_key` or
+an `api_key_env` naming the environment variable that holds it, the settings
+that are per printer today (`gcode_preamble`, `sync_storage`,
 `sync_file`, `uuids`), and its own `tools` entries:
 
 ```toml
@@ -71,8 +72,8 @@ kept, not deleted, because it can hold usage for a deleted spool or spools
 waiting for eviction.
 
 Today's `[printer]` table and top-level `[[tools]]` keep working as a
-one-printer list named `default` (see Q-B), and the environment-only mode
-stays single-printer. `PRUSALINK_URL` and
+one-printer list named `default`, or the `name` set in `[printer]`, and the
+environment-only mode stays single-printer. `PRUSALINK_URL` and
 `PRUSALINK_API_KEY` override only that form: with a `[[printers]]` list,
 they're an error, because there's no one printer for them to apply to.
 
@@ -270,20 +271,3 @@ single-printer sessions.
    outage logs once.
 5. **X6.** Hard to set up on purpose: it needs an unload missed across a
    reboot. Check the logs when it happens.
-
-## Open questions
-
-- **Q-A. API key source.** The plan allows `api_key` in the file and
-  `api_key_env` naming an environment variable, per printer. An alternative
-  is one `PRUSALINK_API_KEYS` variable with name=key pairs. The per-printer
-  form is more explicit and is proposed.
-- **Q-B. Default printer name.** For the one-printer compatibility form, the
-  plan names the printer `default`. The alternative is the printer model,
-  such as `COREONEL`, which reads better in the ledger, but the model isn't
-  known until the first poll, so the state key would be `default` until then
-  anyway. Proposed: `default`, with `name` allowed in `[printer]` for anyone
-  who wants a better one.
-- **Q-C. Orphaned state.** Keeping an unconfigured printer's state forever
-  means a typo leaves a permanent entry. The alternative is to drop it with
-  a warning once nothing in it is pending. Proposed: keep it, and log once at
-  each start.
