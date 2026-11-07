@@ -525,16 +525,20 @@ def account(
             at = min(max(at, s.charged), reading.extruded)
         before = at - s.charged
         n = reading.unload_count - s.unload_count
+        unloads = f"{n if n > 0 else 'some'} unload(s)"
         if active is not None:
-            goes = f"goes to spool {active}"
+            event(
+                EventKind.UNLOAD, f"{unloads}; {before} mm before the unload goes to spool {active}"
+            )
         elif deleted is not None:
-            goes = f"is held because spool {deleted} was deleted"
+            event(
+                EventKind.UNLOAD,
+                f"{unloads}; {before} mm before the unload is held because spool "
+                f"{deleted} was deleted",
+            )
         else:
-            goes = "has no spool"
-        event(
-            EventKind.UNLOAD,
-            f"{n if n > 0 else 'some'} unload(s); {before} mm before the unload {goes}",
-        )
+            # The LOST_UNASSIGNED warning below reports the usage, so don't repeat it here.
+            event(EventKind.UNLOAD, f"{unloads} with no spool active")
         # Usage held over a reboot is usage before the unload too.
         carried = held if deleted is None else 0
         if active is not None and carried:

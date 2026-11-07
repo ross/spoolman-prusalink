@@ -830,9 +830,12 @@ class Bridge:
                 flags.setdefault(active.id, []).append(f"{location}: {problem}")
             elif settled:
                 self._pending_writes.append(tool)
-                notes.append(
-                    f"[{location}] printer will be set to spool {active.id} when idle: {detail}"
-                )
+                # After a sync job, the printer can take a poll to show it. Don't warn
+                # about that wait: a retry logs its job, and giving up logs below.
+                if not st.sync_attempts or edited:
+                    notes.append(
+                        f"[{location}] printer will be set to spool {active.id} when idle: {detail}"
+                    )
             else:
                 notes.append(f"[{location}] printer will be set once spool {st.assigned} is loaded")
             return
