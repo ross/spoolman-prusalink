@@ -8,7 +8,7 @@ import pytest
 from spoolman_prusalink.__main__ import main
 from spoolman_prusalink.accounting import ToolState
 from spoolman_prusalink.app import Bridge
-from spoolman_prusalink.config import Config, ConfigError, load
+from spoolman_prusalink.config import Config, ConfigError, PrinterConfig, load
 from spoolman_prusalink.prusalink import PrusaLink, parse_filament
 from spoolman_prusalink.spoolman import Spoolman, parse_spool
 from spoolman_prusalink.state import State, load_state, save_state
@@ -109,11 +109,12 @@ def test_parse_spool_claim_and_last_used():
 
 
 def make_config(tmp_path, **kw):
+    printer = PrinterConfig(
+        name="default", url="http://printer", api_key="k", tools={0: "Core One L+"}
+    )
     return Config(
-        printer_url="http://printer",
-        printer_api_key="k",
         spoolman_url="http://spoolman",
-        tools={0: "Core One L+"},
+        printers=(printer,),
         state_file=tmp_path / "state.json",
         ledger_file=tmp_path / "ledger.jsonl",
         **kw,
@@ -140,7 +141,7 @@ def make_bridge(tmp_path, filament, spools):
     cfg = make_config(tmp_path)
     return Bridge(
         config=cfg,
-        printer=PrusaLink(cfg.printer_url, "k", transport=transport),
+        printer=PrusaLink(cfg.printer.url, "k", transport=transport),
         spoolman=Spoolman(cfg.spoolman_url, uuid_field="instance_uuid", transport=transport),
     )
 
@@ -261,8 +262,9 @@ def test_config_load(tmp_path):
         '[[tools]]\nindex = 0\nlocation = "Core One L+"\n'
     )
     cfg = load(p, env={"PRUSALINK_API_KEY": "secret"})
-    assert cfg.tools == {0: "Core One L+"}
-    assert cfg.printer_api_key == "secret"
+    assert cfg.printer.tools == {0: "Core One L+"}
+    assert cfg.printer.api_key == "secret"
+    assert cfg.printer.name == "default"
     assert cfg.dry_run
 
     assert cfg.length_factor == 1.0
@@ -410,8 +412,8 @@ def test_config_accepts_booleans_and_preamble_list(tmp_path):
         + "[bridge]\nprinter_sync = false\ndry_run = false\npoll_idle = 0.5\n"
     )
     cfg = load(p, env={"PRUSALINK_API_KEY": "k"})
-    assert cfg.printer_sync is False and cfg.dry_run is False and cfg.printer_uuids is False
-    assert cfg.gcode_preamble == ('M862.3 P "COREONEL"',)
+    assert cfg.printer_sync is False and cfg.dry_run is False and cfg.printer.uuids is False
+    assert cfg.printer.gcode_preamble == ('M862.3 P "COREONEL"',)
     assert cfg.poll_idle == 0.5
 
 
@@ -445,7 +447,7 @@ def test_config_from_environment_only():
             "SPOOLMAN_PRUSALINK_DRY_RUN": "false",
         },
     )
-    assert cfg.tools == {0: "Core One L+"} and cfg.dry_run is False
+    assert cfg.printer.tools == {0: "Core One L+"} and cfg.dry_run is False
     assert cfg.state_file.as_posix() == "/data/state.json"
     with pytest.raises(ConfigError, match="SPOOLMAN_PRUSALINK_LOCATION"):
         load(None, env={"PRUSALINK_URL": "p", "PRUSALINK_API_KEY": "k", "SPOOLMAN_URL": "s"})
@@ -460,3 +462,122 @@ def test_config_from_environment_only():
                 "SPOOLMAN_PRUSALINK_DRY_RUN": "maybe",
             },
         )
+
+
+PRINTERS_BASE = (
+    '[spoolman]\nurl = "http://s"\n'
+    '[[printers]]\nname = "core"\nurl = "http://a"\napi_key_env = "CORE_KEY"\n'
+    '[[printers.tools]]\nindex = 0\nlocation = "Core One L+"\n'
+    '[[printers]]\nname = "mk4s"\nurl = "http://b/"\napi_key = "kb"\nuuids = false\n'
+    '[[printers.tools]]\nindex = 0\nlocation = "MK4S"\n'
+)
+
+
+def test_config_lists_several_printers(tmp_path):
+    p = tmp_path / "c.toml"
+    p.write_text(PRINTERS_BASE)
+    cfg = load(p, env={"CORE_KEY": "ka"})
+    assert [x.name for x in cfg.printers] == ["core", "mk4s"]
+    core, mk4s = cfg.printers
+    assert (core.url, core.api_key, core.tools, core.uuids) == (
+        "http://a",
+        "ka",
+        {0: "Core One L+"},
+        True,
+    )
+    assert (mk4s.url, mk4s.api_key, mk4s.tools, mk4s.uuids) == (
+        "http://b/",
+        "kb",
+        {0: "MK4S"},
+        False,
+    )
+    # The bridge serves one printer until the loop handles several.
+    with pytest.raises(ValueError, match="2 printers"):
+        _ = cfg.printer
+
+
+@pytest.mark.parametrize(
+    "edit, error",
+    [
+        (('name = "core"\n', ""), "printers[0] needs a name"),
+        (('name = "core"\n', 'name = "a b"\n'), "printers[0].name must match"),
+        (('url = "http://a"\n', ""), "printers[core] needs a url"),
+        (
+            ('api_key_env = "CORE_KEY"\n', ""),
+            "set printers[core].api_key or printers[core].api_key_env",
+        ),
+        (
+            ('api_key_env = "CORE_KEY"\n', 'api_key_env = "NO_SUCH_KEY"\n'),
+            "NO_SUCH_KEY, which isn't set",
+        ),
+        (
+            ('api_key_env = "CORE_KEY"\n', 'api_key_env = "CORE_KEY"\napi_key = "x"\n'),
+            "set printers[core].api_key or printers[core].api_key_env, not both",
+        ),
+        (
+            ('[[printers.tools]]\nindex = 0\nlocation = "Core One L+"\n', ""),
+            "printers[core] needs [[printers.tools]]",
+        ),
+        (('name = "mk4s"\n', 'name = "core"\n'), "printer 'core' is configured twice"),
+        (
+            ('url = "http://b/"\n', 'url = "http://a/"\n'),
+            "printers 'core' and 'mk4s' have the same url",
+        ),
+        (
+            ('location = "MK4S"\n', 'location = "Core One L+"\n'),
+            "location 'Core One L+' is mapped to a tool on both 'core' and 'mk4s'",
+        ),
+        (("[spoolman]\n", '[printer]\nurl = "http://p"\n[spoolman]\n'), "not both"),
+        (("[spoolman]\n", '[[tools]]\nindex = 0\nlocation = "X"\n[spoolman]\n'), "not both"),
+        (("uuids = false\n", 'uuids = "no"\n'), "printers[mk4s].uuids must be true or false"),
+    ],
+)
+def test_config_rejects_bad_printer_lists(tmp_path, edit, error):
+    old, new = edit
+    text = PRINTERS_BASE.replace(old, new, 1)
+    assert text != PRINTERS_BASE or new == old
+    p = tmp_path / "c.toml"
+    p.write_text(text)
+    with pytest.raises(ConfigError, match=re.escape(error)):
+        load(p, env={"CORE_KEY": "ka"})
+
+
+@pytest.mark.parametrize(
+    "text, error",
+    [
+        ("printers = []\n", "[[printers]] needs at least one entry"),
+        ("printers = 5\n", "[[printers]] needs at least one entry"),
+        ("printers = [1]\n", "printers[0] must be a table"),
+    ],
+)
+def test_config_rejects_a_printer_list_that_is_not_a_list_of_tables(tmp_path, text, error):
+    p = tmp_path / "c.toml"
+    p.write_text(text + '[spoolman]\nurl = "http://s"\n')
+    with pytest.raises(ConfigError, match=re.escape(error)):
+        load(p, env={})
+
+
+@pytest.mark.parametrize(
+    "var", ["PRUSALINK_URL", "PRUSALINK_API_KEY", "SPOOLMAN_PRUSALINK_LOCATION"]
+)
+def test_config_single_printer_variables_are_an_error_with_a_printer_list(tmp_path, var):
+    p = tmp_path / "c.toml"
+    p.write_text(PRINTERS_BASE)
+    with pytest.raises(ConfigError, match=f"{var} configures a single"):
+        load(p, env={"CORE_KEY": "ka", var: "x"})
+
+
+def test_config_single_printer_takes_a_name_and_api_key_env(tmp_path):
+    p = tmp_path / "c.toml"
+    p.write_text(
+        CONFIG_BASE.replace("[printer]\n", '[printer]\nname = "core"\napi_key_env = "MY_KEY"\n')
+    )
+    cfg = load(p, env={"MY_KEY": "from-env"})
+    assert (cfg.printer.name, cfg.printer.api_key) == ("core", "from-env")
+    # PRUSALINK_API_KEY still wins, as before.
+    assert load(p, env={"MY_KEY": "x", "PRUSALINK_API_KEY": "k"}).printer.api_key == "k"
+    with pytest.raises(ConfigError, match="MY_KEY, which isn't set"):
+        load(p, env={})
+    p.write_text(CONFIG_BASE.replace("[printer]\n", '[printer]\nname = "core one"\n'))
+    with pytest.raises(ConfigError, match="printer.name must match"):
+        load(p, env={"PRUSALINK_API_KEY": "k"})

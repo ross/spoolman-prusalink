@@ -170,7 +170,7 @@ class Bridge:
     def from_config(cls, config: Config) -> Bridge:
         return cls(
             config=config,
-            printer=PrusaLink(config.printer_url, config.printer_api_key),
+            printer=PrusaLink(config.printer.url, config.printer.api_key),
             spoolman=Spoolman(
                 config.spoolman_url,
                 uuid_field=config.uuid_field,
@@ -268,7 +268,7 @@ class Bridge:
             spool_id = st.active
             if spool_id is None or spool_id in listed or spool_id in self._archived:
                 continue
-            location = self.config.tools.get(tool, str(tool))
+            location = self.config.printer.tools.get(tool, str(tool))
             try:
                 found = await self.spoolman.spool(spool_id)
             except (httpx.HTTPError, ValueError, KeyError) as e:
@@ -307,7 +307,7 @@ class Bridge:
             and int(r.get("extruded_mm", 0)) > 0
         )
         self.tools[tool] = hold_deleted(st, spool_id, mm, queued)
-        location = self.config.tools.get(tool, str(tool))
+        location = self.config.printer.tools.get(tool, str(tool))
         self._problems.fail(
             ("deleted", tool),
             spool_id,
@@ -332,7 +332,9 @@ class Bridge:
             return
         self._model_boot = boot_id
         self._model = printer_sync.PRINTER_MODELS.get(printer_type or "")
-        self._model_error = printer_sync.model_problem(printer_type, self.config.gcode_preamble)
+        self._model_error = printer_sync.model_problem(
+            printer_type, self.config.printer.gcode_preamble
+        )
         name = self._model.name if self._model else "unknown"
         if self._model_error:
             log.warning(
@@ -349,15 +351,15 @@ class Bridge:
         """Whether to write and compare instance UUIDs: configured with a Spoolman field to
         keep them in, and the model keeps them."""
         return bool(
-            self.config.printer_uuids
+            self.config.printer.uuids
             and self.config.uuid_field
             and self._model is not None
             and self._model.uuids
         )
 
     def _preamble(self) -> tuple[str, ...]:
-        if self.config.gcode_preamble is not None:
-            return self.config.gcode_preamble
+        if self.config.printer.gcode_preamble is not None:
+            return self.config.printer.gcode_preamble
         assert self._model is not None
         return printer_sync.default_preamble(self._model)
 
@@ -372,7 +374,7 @@ class Bridge:
         if status.job_id not in self._job_names:
             self._job_names = {status.job_id: await self.printer.job_display_name()}
         name = self._job_names[status.job_id]
-        return None if name == self.config.sync_file else status.job_id
+        return None if name == self.config.printer.sync_file else status.job_id
 
     def process(
         self, reading: FilamentReading, spools: list[Spool], status: PrinterStatus
@@ -392,7 +394,7 @@ class Bridge:
         self._pending_writes = []
         claims = self._claims(spools, flags)
 
-        for tool, location in self.config.tools.items():
+        for tool, location in self.config.printer.tools.items():
             tool_reading = reading.tools.get(tool)
             if tool_reading is None:
                 self._notes(tool, [f"[{location}] printer doesn't report tool index {tool}"])
@@ -665,7 +667,7 @@ class Bridge:
         handled = [i for i in self.state.claimed if i in ticked]
         if handled != self.state.claimed:
             self.state.claimed = handled  # Boxes now clear in Spoolman.
-        tools = {location: tool for tool, location in self.config.tools.items()}
+        tools = {location: tool for tool, location in self.config.printer.tools.items()}
         per_tool: dict[int, list[Spool]] = {}
         unplaced: set[int] = set()
         for spool in ticked.values():
@@ -933,7 +935,7 @@ class Bridge:
         where = {s.id: s.location for s in spools}
         target = self.config.eviction_location or None
         for tool, st in list(self.tools.items()):
-            location = self.config.tools.get(tool)
+            location = self.config.printer.tools.get(tool)
             for spool_id in st.evict:
                 if where.get(spool_id) != location:
                     self._problems.clear(("evict", spool_id))
@@ -989,7 +991,7 @@ class Bridge:
             self._problems.clear("sync failed")
             return
         gcode, shown = printer_sync.build_job(
-            self._preamble(), writes, notices, multi_tool=len(self.config.tools) > 1
+            self._preamble(), writes, notices, multi_tool=len(self.config.printer.tools) > 1
         )
         if self.config.dry_run:
             # Nothing is recorded as written, so the same job is due every idle poll.
@@ -997,14 +999,14 @@ class Bridge:
                 "dry-run job",
                 gcode,
                 "WOULD RUN printer job %s:\n%s",
-                self.config.sync_file,
+                self.config.printer.sync_file,
                 gcode.rstrip(),
                 level=logging.INFO,
             )
             return
         try:
             await self.printer.upload_and_print(
-                self.config.sync_storage, self.config.sync_file, gcode
+                self.config.printer.sync_storage, self.config.printer.sync_file, gcode
             )
         except httpx.HTTPStatusError as e:
             if e.response.status_code == 409:
@@ -1028,7 +1030,7 @@ class Bridge:
             return
         self._problems.clear("sync busy")
         self._problems.clear("sync failed", "printer sync job working again")
-        log.info("ran printer job %s:\n%s", self.config.sync_file, gcode.rstrip())
+        log.info("ran printer job %s:\n%s", self.config.printer.sync_file, gcode.rstrip())
         for w in writes:
             st = self.tools[w.tool]
             # Expected until a poll sees the printer match, so an edit write that
@@ -1145,9 +1147,9 @@ class Bridge:
         log.info(
             "starting%s: printer=%s spoolman=%s tools=%s",
             " in dry-run mode" if self.config.dry_run else "",
-            self.config.printer_url,
+            self.config.printer.url,
             self.config.spoolman_url,
-            self.config.tools,
+            self.config.printer.tools,
         )
         if self.state.outbox:
             log.info("%d charge(s) queued from before the restart", len(self.state.outbox))

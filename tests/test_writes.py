@@ -10,7 +10,7 @@ import pytest
 from spoolman_prusalink.accounting import UNKNOWN_WRITE
 from spoolman_prusalink.app import Bridge
 from spoolman_prusalink.color import quantize
-from spoolman_prusalink.config import Config
+from spoolman_prusalink.config import Config, PrinterConfig
 from spoolman_prusalink.printer_sync import COREONEL_PREAMBLE
 from spoolman_prusalink.prusalink import PrusaLink
 from spoolman_prusalink.spoolman import Spoolman
@@ -199,13 +199,21 @@ class Printer:
                 self.material = {**self.material, "instance_uuid": line.split('C"')[1][:36]}
 
 
+PRINTER_KEYS = {"gcode_preamble", "sync_storage", "sync_file", "uuids"}
+
+
 def make(tmp_path, spools, **cfg):
     fake, printer = FakeSpoolman(spools), Printer()
-    config = Config(
-        printer_url="http://printer",
-        printer_api_key="k",
-        spoolman_url="http://spoolman",
+    printer_cfg = PrinterConfig(
+        name="default",
+        url="http://printer",
+        api_key="k",
         tools={0: LOC},
+        **{k: cfg.pop(k) for k in list(cfg) if k in PRINTER_KEYS},
+    )
+    config = Config(
+        spoolman_url="http://spoolman",
+        printers=(printer_cfg,),
         state_file=tmp_path / "state.json",
         ledger_file=tmp_path / "ledger.jsonl",
         dry_run=False,
