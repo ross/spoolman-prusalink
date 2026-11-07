@@ -267,11 +267,15 @@ async def test_unconfirmed_swap_flag_is_set_then_cleared(tmp_path):
     assert "unloaded with no Spoolman change" in fake.flag(19)
     assert load_state(tmp_path / "state.json").flagged == [19]
 
-    printer.job = 7  # A print starts: the swap is assumed, which leaves a notice.
+    printer.job = 7  # A print starts at its first extrusion: the swap is assumed.
+    await bridge.poll()
+    printer.extruded += 50
     await bridge.poll()
     assert "assuming spool 19 was reloaded" in fake.flag(19)
 
     printer.job = 8  # The next print clears the notice.
+    await bridge.poll()
+    printer.extruded += 50
     await bridge.poll()
     assert fake.flag(19) is None
     assert load_state(tmp_path / "state.json").flagged == []
@@ -377,6 +381,8 @@ async def test_own_sync_job_is_not_a_print_start(tmp_path):
     await bridge.poll()
     assert bridge.tools[0].swap is not None
     printer.job, printer.job_name = 51, "part.bgcode"
+    await bridge.poll()
+    printer.extruded += 50
     await bridge.poll()
     assert bridge.tools[0].swap is None
     await bridge.aclose()

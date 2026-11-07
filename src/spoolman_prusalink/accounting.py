@@ -21,7 +21,9 @@ differ while a swap is in progress:
 - Filament first. An unload with no Spoolman change opens an *unconfirmed swap*. Usage
   keeps going to the assigned spool. If Spoolman changes before the next print starts,
   the usage since the unload moves to the new spool. The swap closes, assumed to be the
-  same spool, when a print starts or at the next unload. The printer's reported filament
+  same spool, when a print starts or at the next unload. A print starts at its first
+  extrusion, not when its job appears, so preheat and bed leveling leave time to fix
+  Spoolman, and a job cancelled before extruding changes nothing. The printer's reported filament
   can't close it: a runout reload keeps the old name, color and UUID whatever was loaded.
 - A Spoolman change with no unload, when the printer already reports the new spool's
   instance UUID, is a correction: the new spool becomes active immediately. Name and
@@ -111,7 +113,12 @@ class ToolState:
     assigned: int | None = None  # Spoolman's assignment at the last poll.
     evict: int | None = None  # Old spool still in the location after a swap.
     swap: SwapFlag | None = None
-    job_id: int | None = None  # Last print job seen, to detect a print start.
+    job_id: int | None = None  # Last print job that started, to detect a print start.
+    # A new job that hasn't extruded yet, and the counter when it was first seen. A job
+    # counts as started at its first extrusion, so one cancelled during preheat or bed
+    # leveling changes nothing.
+    pending_job: int | None = None
+    pending_at: int = 0
     # A one-off notice for the user about a spool, such as a swap assumed at print
     # start. Cleared at the next print start or unload.
     notice: Notice | None = None
@@ -136,6 +143,8 @@ class ToolState:
             if self.swap is None
             else {"spool_id": self.swap.spool_id, "mm": self.swap.mm},
             "job_id": self.job_id,
+            "pending_job": self.pending_job,
+            "pending_at": self.pending_at,
             "notice": None
             if self.notice is None
             else {"spool_id": self.notice.spool_id, "kind": self.notice.kind.value,
@@ -158,6 +167,8 @@ class ToolState:
             evict=data.get("evict"),
             swap=None if swap is None else SwapFlag(int(swap["spool_id"]), int(swap["mm"])),
             job_id=data.get("job_id"),
+            pending_job=data.get("pending_job"),
+            pending_at=int(data.get("pending_at", 0)),
             notice=None if notice is None else Notice(
                 int(notice["spool_id"]), EventKind(notice["kind"]), notice["message"]
             ),
@@ -247,7 +258,7 @@ def account(
         )
         # Keep job_id: the firmware stores job IDs in EEPROM and never reuses them, so a
         # print resumed after a power loss keeps its ID and isn't a new print start.
-        s = replace(s, boot_id=boot_id, charged=0, unload_count=0)
+        s = replace(s, boot_id=boot_id, charged=0, unload_count=0, pending_at=0)
 
     if reading.extruded < s.charged:
         # Shouldn't happen within one boot. Resync rather than charge a negative amount.
@@ -341,8 +352,17 @@ def account(
         event(EventKind.STAGING_CANCELLED, f"spool {s.assigned} is no longer staged; "
               f"still charging spool {active}")
 
-    # 3. A print starting closes the confirmation window.
-    started = job_id is not None and job_id != s.job_id
+    # 3. A print starting closes the confirmation window. A print starts at its first
+    # extrusion: a new job is pending until the counter passes where it was first seen.
+    started = False
+    pending_job, pending_at = s.pending_job, s.pending_at
+    if job_id is None or job_id == s.job_id:
+        pending_job = None
+    elif pending_job != job_id:
+        pending_job, pending_at = job_id, reading.extruded
+    elif reading.extruded > pending_at:
+        started = True
+        pending_job = None
     if started:
         notice = None
         if swap is not None:
@@ -380,7 +400,9 @@ def account(
         assigned=assigned,
         evict=evict,
         swap=swap,
-        job_id=job_id if job_id is not None else s.job_id,
+        job_id=job_id if started else s.job_id,
+        pending_job=pending_job,
+        pending_at=pending_at,
         notice=notice,
     )
     return out

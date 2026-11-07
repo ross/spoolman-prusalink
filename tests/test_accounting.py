@@ -203,11 +203,41 @@ def test_print_start_with_staged_swap_warns_and_keeps_old_spool():
     charges, kinds, state = run([
         (BOOT, r(100), loc(7), None),
         (BOOT, r(100), loc(7, 8), None),
-        (BOOT, r(400), loc(7, 8), 42),
+        (BOOT, r(400), loc(7, 8), 42),  # job seen; it starts at its first extrusion
+        (BOOT, r(700), loc(7, 8), 42),
     ])
     assert EventKind.STAGED_AT_PRINT in kinds
-    assert charges == [Charge(7, 300, "extruded")]
+    assert charges == [Charge(7, 300, "extruded"), Charge(7, 300, "extruded")]
     assert state.active == 7
+
+
+def test_job_cancelled_before_extruding_is_not_a_print_start():
+    # Unload, then a print that's cancelled during preheat: the swap stays open, so a
+    # Spoolman change afterwards still confirms it.
+    _, kinds, state = run([
+        (BOOT, r(100), loc(7), None),
+        (BOOT, r(200, unloads=1, at_unload=100), loc(7), None),
+        (BOOT, r(200, unloads=1, at_unload=100), loc(7), 42),
+        (BOOT, r(200, unloads=1, at_unload=100), loc(7), 42),
+        (BOOT, r(200, unloads=1, at_unload=100), loc(7), None),
+        (BOOT, r(200, unloads=1, at_unload=100), loc(9), None),
+    ])
+    assert EventKind.SWAP_ASSUMED not in kinds
+    assert EventKind.SWAP_CONFIRMED in kinds
+    assert (state.active, state.job_id, state.pending_job) == (9, None, None)
+
+
+def test_spoolman_fixed_during_preheat_confirms_swap():
+    _, kinds, state = run([
+        (BOOT, r(100), loc(7), None),
+        (BOOT, r(200, unloads=1, at_unload=100), loc(7), None),
+        (BOOT, r(200, unloads=1, at_unload=100), loc(7), 42),  # preheating
+        (BOOT, r(200, unloads=1, at_unload=100), loc(9), 42),  # user fixes Spoolman
+        (BOOT, r(260, unloads=1, at_unload=100), loc(9), 42),  # purge line
+    ])
+    assert EventKind.SWAP_CONFIRMED in kinds
+    assert EventKind.SWAP_ASSUMED not in kinds
+    assert (state.active, state.job_id) == (9, 42)
 
 
 def test_two_spools_neither_active_is_ambiguous():
