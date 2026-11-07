@@ -5,12 +5,14 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from .accounting import ToolState
 
-STATE_VERSION = 2
+# Version 3 nests tool states under the printer's name and stamps outbox records with it.
+STATE_VERSION = 3
 
 
 @dataclass
@@ -37,11 +39,25 @@ class Runout:
 
 
 @dataclass
-class State:
+class PrinterState:
     tools: dict[int, ToolState] = field(default_factory=dict)
+
+    def to_json(self) -> dict:
+        return {"tools": {str(k): v.to_json() for k, v in sorted(self.tools.items())}}
+
+    @classmethod
+    def from_json(cls, data: dict) -> PrinterState:
+        return cls(tools={int(k): ToolState.from_json(v) for k, v in data.get("tools", {}).items()})
+
+
+@dataclass
+class State:
+    # By printer name. Everything else here is keyed by spool and shared by every printer.
+    printers: dict[str, PrinterState] = field(default_factory=dict)
     # Charges computed but not yet accepted by Spoolman, oldest first. Each is a ledger
-    # record with `spool_id` and `use_length`. Persisting them with the tool state in one
-    # atomic write means a crash can't advance `charged` without the charge surviving.
+    # record with `printer`, `tool`, `spool_id` and `use_length`. Persisting them with the
+    # tool state in one atomic write means a crash can't advance `charged` without the
+    # charge surviving.
     outbox: list[dict] = field(default_factory=list)
     # Spools whose flag field the bridge has set, so it clears only its own flags.
     flagged: list[int] = field(default_factory=list)
@@ -55,21 +71,50 @@ class State:
     # claim is handled once even if clearing the box fails, or in dry-run mode.
     claimed: list[int] = field(default_factory=list)
 
+    def tools(self, printer: str) -> dict[int, ToolState]:
+        """Return the tool states of `printer`, creating its entry."""
+        return self.printers.setdefault(printer, PrinterState()).tools
 
-def load_state(path: Path) -> State:
+
+def load_state(path: Path, printers: Sequence[str]) -> State:
+    """Load the state file. `printers` are the configured printer names.
+
+    A version 2 file is from a bridge with one printer and no printer names. It loads
+    only when one printer is configured, and its tools and outbox become that printer's.
+    """
     if not path.exists():
         return State()
     data = json.loads(path.read_text())
-    if data.get("version") != STATE_VERSION:
-        raise ValueError(f"{path}: unsupported state version {data.get('version')!r}")
+    version = data.get("version")
+    if version == 2:
+        if len(printers) != 1:
+            raise ValueError(
+                f"{path} is from a single-printer bridge (state version {version}); with "
+                f"{len(printers)} printers configured, the bridge can't tell which one it "
+                "belongs to. Start once with that printer alone to migrate it, then add "
+                "the others."
+            )
+        data = _migrate_v2(data, printers[0])
+    elif version != STATE_VERSION:
+        raise ValueError(f"{path}: unsupported state version {version!r}")
     return State(
-        tools={int(k): ToolState.from_json(v) for k, v in data.get("tools", {}).items()},
+        printers={k: PrinterState.from_json(v) for k, v in data.get("printers", {}).items()},
         outbox=list(data.get("outbox", [])),
         flagged=[int(i) for i in data.get("flagged", [])],
         noticed=list(data.get("noticed", [])),
         runouts={int(k): Runout.from_json(v) for k, v in data.get("runouts", {}).items()},
         claimed=[int(i) for i in data.get("claimed", [])],
     )
+
+
+def _migrate_v2(data: dict, printer: str) -> dict:
+    """Nest a version 2 file's tools under `printer` and stamp its outbox records."""
+    return {
+        **data,
+        "version": STATE_VERSION,
+        "printers": {printer: {"tools": data.get("tools", {})}},
+        "outbox": [{**r, "printer": printer} for r in data.get("outbox", [])],
+    }
 
 
 def save_state(path: Path, state: State) -> bool:
@@ -80,7 +125,7 @@ def save_state(path: Path, state: State) -> bool:
     """
     payload = {
         "version": STATE_VERSION,
-        "tools": {str(k): v.to_json() for k, v in sorted(state.tools.items())},
+        "printers": {k: v.to_json() for k, v in sorted(state.printers.items())},
         "outbox": state.outbox,
         "flagged": state.flagged,
         "noticed": state.noticed,

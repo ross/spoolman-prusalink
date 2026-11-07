@@ -11,7 +11,7 @@ from spoolman_prusalink.app import Bridge
 from spoolman_prusalink.config import Config, ConfigError, PrinterConfig, load
 from spoolman_prusalink.prusalink import PrusaLink, parse_filament
 from spoolman_prusalink.spoolman import Spoolman, parse_spool
-from spoolman_prusalink.state import State, load_state, save_state
+from spoolman_prusalink.state import PrinterState, State, load_state, save_state
 
 FILAMENT = {
     "boot_id": 3308742886,
@@ -250,12 +250,13 @@ async def test_printer_outage_logged_on_change(tmp_path, caplog):
 
 def test_save_state_skips_unchanged(tmp_path):
     path = tmp_path / "state.json"
-    state = State(tools={0: ToolState(boot_id=1, charged=100)})
+    state = State(printers={"default": PrinterState({0: ToolState(boot_id=1, charged=100)})})
     assert save_state(path, state)
     assert not save_state(path, state)
-    state.tools[0] = replace(state.tools[0], charged=150)
+    tools = state.tools("default")
+    tools[0] = replace(tools[0], charged=150)
     assert save_state(path, state)
-    assert load_state(path).tools[0].charged == 150
+    assert load_state(path, ["default"]).tools("default")[0].charged == 150
 
 
 def test_config_load(tmp_path):
@@ -585,3 +586,66 @@ def test_config_single_printer_takes_a_name_and_api_key_env(tmp_path):
     p.write_text(CONFIG_BASE.replace("[printer]\n", '[printer]\nname = "core one"\n'))
     with pytest.raises(ConfigError, match="printer.name must match"):
         load(p, env={"PRUSALINK_API_KEY": "k"})
+
+
+V2_STATE = {
+    "version": 2,
+    "tools": {"0": ToolState(boot_id=1, charged=100, active=7, assigned=7).to_json()},
+    "outbox": [{"tool": 0, "spool_id": 7, "use_length": 50.0, "extruded_mm": 50}],
+    "flagged": [7],
+    "noticed": [],
+    "runouts": {},
+    "claimed": [],
+}
+
+
+def test_state_v2_migrates_to_the_only_printer(tmp_path):
+    path = tmp_path / "state.json"
+    path.write_text(json.dumps(V2_STATE))
+    state = load_state(path, ["core"])
+    assert list(state.printers) == ["core"]
+    assert state.tools("core")[0].active == 7
+    # Outbox records are stamped so flush() can find the record's tool.
+    assert [r["printer"] for r in state.outbox] == ["core"]
+    assert state.flagged == [7]
+    assert save_state(path, state)
+    saved = json.loads(path.read_text())
+    assert saved["version"] == 3 and "tools" not in saved
+    assert saved["printers"]["core"]["tools"]["0"]["active"] == 7
+    assert load_state(path, ["core"]) == state
+
+
+def test_state_v2_is_refused_with_several_printers(tmp_path):
+    path = tmp_path / "state.json"
+    path.write_text(json.dumps(V2_STATE))
+    with pytest.raises(ValueError, match="single-printer bridge.*2 printers configured"):
+        load_state(path, ["core", "mk4s"])
+    path.write_text(json.dumps({**V2_STATE, "version": 1}))
+    with pytest.raises(ValueError, match="unsupported state version 1"):
+        load_state(path, ["core"])
+
+
+def test_main_exits_2_on_a_state_file_it_cannot_migrate(tmp_path, monkeypatch, caplog):
+    state = tmp_path / "state.json"
+    state.write_text(json.dumps(V2_STATE))
+    p = tmp_path / "c.toml"
+    p.write_text(PRINTERS_BASE + f'[bridge]\nstate_file = "{state}"\n')
+    monkeypatch.setenv("CORE_KEY", "ka")
+    assert main(["-c", str(p), "once"]) == 2
+    assert "state: " in caplog.text and "single-printer bridge" in caplog.text
+
+
+def test_bridge_keeps_and_warns_about_an_unconfigured_printer(tmp_path, caplog):
+    # X14: a renamed printer leaves its old state behind, which is kept.
+    cfg = make_config(tmp_path)
+    old = PrinterState({0: ToolState(boot_id=1, charged=100, active=7, assigned=7)})
+    t = httpx.MockTransport(lambda request: httpx.Response(404))
+    bridge = Bridge(
+        cfg,
+        Spoolman("http://s", transport=t),
+        {"default": PrusaLink("http://p", "k", transport=t)},
+        State(printers={"old": old}),
+    )
+    assert "printer 'old' that isn't configured; keeping its state" in caplog.text
+    assert bridge.printers[0].tools == {}
+    assert bridge.state.printers["old"] == old

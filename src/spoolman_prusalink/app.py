@@ -166,7 +166,7 @@ class PrinterBridge:
 
     @property
     def tools(self) -> dict[int, ToolState]:
-        return self.bridge.state.tools
+        return self.bridge.state.tools(self.name)
 
     async def read(self) -> tuple[PrinterStatus, FilamentReading] | None:
         """Read the printer's status and counters, or None if this poll can't use it.
@@ -256,7 +256,8 @@ class PrinterBridge:
         queued = sum(
             int(r.get("extruded_mm", 0))
             for r in self.bridge.state.outbox
-            if r.get("tool") == tool
+            if r.get("printer") == self.name
+            and r.get("tool") == tool
             and r.get("spool_id") == spool_id
             and int(r.get("extruded_mm", 0)) > 0
         )
@@ -393,6 +394,7 @@ class PrinterBridge:
                 events.append(
                     {
                         "time": now,
+                        "printer": self.name,
                         "tool": tool,
                         "location": location,
                         "event": ev.kind.value,
@@ -418,6 +420,7 @@ class PrinterBridge:
                 charges.append(
                     {
                         "time": now,
+                        "printer": self.name,
                         "tool": tool,
                         "location": location,
                         "spool_id": c.spool_id,
@@ -807,6 +810,15 @@ class Bridge:
 
     def __post_init__(self) -> None:
         self.printers = [PrinterBridge(p, self.clients[p.name], self) for p in self.config.printers]
+        for name in sorted(self.state.printers.keys() - {p.name for p in self.printers}):
+            # Kept, not dropped: it can hold usage for a deleted spool or spools to evict.
+            log.warning(
+                "the state file has a printer %r that isn't configured; keeping its state",
+                name,
+            )
+
+    def _printer(self, name: object) -> PrinterBridge | None:
+        return next((p for p in self.printers if p.name == name), None)
 
     @classmethod
     def from_config(cls, config: Config) -> Bridge:
@@ -819,7 +831,7 @@ class Bridge:
                 flag_field=None if config.dry_run else config.flag_field,
                 claim_field=config.claim_field,
             ),
-            state=load_state(config.state_file),
+            state=load_state(config.state_file, [p.name for p in config.printers]),
         )
 
     def _save(self) -> None:
@@ -1050,10 +1062,12 @@ class Bridge:
                     )
                     return False
                 mm = int(rec.get("extruded_mm", 0))
+                printer = self._printer(rec.get("printer"))
                 if (
                     code == 404
                     and mm > 0
-                    and self.printers[0]._hold_deleted(rec.get("tool", -1), rec["spool_id"], mm)
+                    and printer is not None
+                    and printer._hold_deleted(rec.get("tool", -1), rec["spool_id"], mm)
                 ):
                     rec = {**rec, "failed": f"{code}", "held": True}
                 else:
