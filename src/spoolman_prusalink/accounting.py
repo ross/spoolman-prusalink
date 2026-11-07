@@ -487,8 +487,14 @@ def account(
             at = min(max(at, s.charged), reading.extruded)
         before = at - s.charged
         n = reading.unload_count - s.unload_count
+        if active is not None:
+            goes = f"goes to spool {active}"
+        elif deleted is not None:
+            goes = f"is held because spool {deleted} was deleted"
+        else:
+            goes = "has no spool"
         event(EventKind.UNLOAD, f"{n if n > 0 else 'some'} unload(s); {before} mm before "
-              f"the unload goes to spool {active}")
+              f"the unload {goes}")
         # Usage held over a reboot is usage before the unload too.
         carried = held if deleted is None else 0
         if active is not None and carried:
@@ -518,8 +524,15 @@ def account(
         if job_id is not None and job_id == s.job_id and active is not None:
             out.runout = active
 
-        if assigned != active:
-            event(EventKind.SWAP_COMMITTED, f"swap done: spool {active} -> {assigned}")
+        if assigned is None and active is not None:
+            # S10: not a swap. Usage is held until a spool is assigned.
+            event(EventKind.ACTIVE_UNASSIGNED, f"spool {active} unloaded with no spool in "
+                  "the location; holding usage until one is assigned")
+            evict = retire(active)
+            active = None
+        elif assigned != active:
+            done = f"spool {active} -> {assigned}" if active is not None else f"spool {assigned}"
+            event(EventKind.SWAP_COMMITTED, f"swap done: {done}")
             evict = retire(active)
             active = assigned
         elif active is not None:
@@ -595,7 +608,8 @@ def account(
                 s = replace(s, charged=reading.extruded)
             if legacy:
                 window.clear()  # The switch is the best guess at when the spool went in.
-            event(EventKind.ASSIGNMENT_CHANGED, f"spool {active} -> {assigned}")
+            event(EventKind.ASSIGNMENT_CHANGED, f"spool {active} -> {assigned}"
+                  if active is not None else f"spool {assigned} is active")
             evict = retire(active)
             active = assigned
         elif assigned is None:

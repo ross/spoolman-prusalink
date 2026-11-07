@@ -253,6 +253,30 @@ def test_both_spools_leaving_the_location_is_reported():
         (EventKind.ACTIVE_UNASSIGNED, "spool 7 is back in the location")]
 
 
+def test_unload_after_the_location_empties_holds_usage():
+    # S10: the spool stays active until the unload, then usage is held as unassigned.
+    _, _, state = run([(BOOT, r(100), loc(7)), (BOOT, r(150), loc())])
+    res = account(state, BOOT, r(200, unloads=1, at_unload=180), loc())
+    assert [(e.kind, e.message) for e in res.events] == [
+        (EventKind.UNLOAD, "1 unload(s); 30 mm before the unload goes to spool 7"),
+        (EventKind.ACTIVE_UNASSIGNED, "spool 7 unloaded with no spool in the location; "
+         "holding usage until one is assigned"),
+        (EventKind.HOLD_UNASSIGNED, "holding usage: no spool assigned"),
+    ]
+    assert res.state.active is None
+    # S6: the next unload with nothing assigned reports the usage before it lost.
+    res = account(res.state, BOOT, r(300, unloads=2, at_unload=250), loc())
+    assert [(e.kind, e.message) for e in res.events] == [
+        (EventKind.UNLOAD, "1 unload(s); 70 mm before the unload has no spool"),
+        (EventKind.LOST_UNASSIGNED, "70 mm before unload had no spool"),
+        (EventKind.HOLD_UNASSIGNED, "holding usage: no spool assigned"),
+    ]
+    res = account(res.state, BOOT, r(320, unloads=2, at_unload=250), loc(8))
+    assert [(e.kind, e.message) for e in res.events] == [
+        (EventKind.ASSIGNMENT_CHANGED, "spool 8 is active")]
+    assert res.charges == [Charge(8, 70, "extruded")]
+
+
 def test_spool_removed_from_location_stays_active_until_unload():
     charges, _, state = run([
         (BOOT, r(100), loc(7)),
