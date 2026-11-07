@@ -213,6 +213,19 @@ async def test_charges_are_applied_and_recorded(tmp_path):
     await bridge.aclose()
 
 
+async def test_usage_while_ambiguous_is_kept_over_a_reboot(tmp_path):
+    bridge, fake, printer = make(tmp_path, [spool(19)])
+    await bridge.poll()  # baseline at 1000
+    fake.spools[20], fake.spools[21] = spool(20), spool(21)
+    printer.extruded = 1500
+    await bridge.poll()  # ambiguous, skipped
+    printer.boot_id, printer.extruded = 2, 10
+    fake.spools.pop(20), fake.spools.pop(21)
+    await bridge.poll()
+    assert fake.used == {19: [500.0, 10.0]}
+    await bridge.aclose()
+
+
 async def test_spoolman_outage_queues_and_retries_in_order(tmp_path):
     bridge, fake, printer = make(tmp_path, [spool(19)])
     await bridge.poll()

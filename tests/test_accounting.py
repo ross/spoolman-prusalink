@@ -249,7 +249,7 @@ def test_spoolman_fixed_during_preheat_confirms_swap():
 def test_two_spools_neither_active_is_ambiguous():
     res = account(ToolState(BOOT, 100, 0, 7, 7), BOOT, r(200), loc(8, 9))
     assert res.skipped and res.charges == []
-    assert res.state == ToolState(BOOT, 100, 0, 7, 7)
+    assert res.state == ToolState(BOOT, 100, 0, 7, 7, extruded=200)  # Held usage.
 
 
 def test_resolve_assignment():
@@ -390,6 +390,87 @@ def test_unload_without_spool_is_reported_lost():
                   loc(5))
     assert EventKind.LOST_UNASSIGNED in [e.kind for e in res.events]
     assert res.charges == [Charge(5, 300, "extruded")]
+
+
+def test_unassigned_usage_held_through_reboot_goes_to_next_spool():
+    charges, kinds, state = run([
+        (BOOT, r(100), loc()),
+        (BOOT, r(5000), loc()),
+        (BOOT, r(9000), loc()),
+        (BOOT + 1, r(10), loc(7)),  # Reboot, then Spoolman fixed.
+    ])
+    assert charges == [Charge(7, 8900, "held before the printer restarted"),
+                       Charge(7, 10, "extruded")]
+    assert EventKind.HELD_CHARGED in kinds
+    assert (state.active, state.held_mm, state.charged) == (7, 0, 10)
+
+
+def test_usage_held_through_reboot_is_kept_until_a_spool_is_active():
+    _, _, state = run([
+        (BOOT, r(100), loc()),
+        (BOOT, r(900), loc()),
+        (BOOT + 1, r(10), loc()),
+        (BOOT + 1, r(50), loc()),
+    ])
+    assert (state.held_mm, state.charged) == (800, 0)
+    restored = ToolState.from_json(json.loads(json.dumps(state.to_json())))
+    charges, _, state = run([(BOOT + 1, r(60), loc(7))], restored)
+    assert charges == [Charge(7, 800, "held before the printer restarted"),
+                       Charge(7, 60, "extruded")]
+    assert state.held_mm == 0
+
+
+def test_empty_tool_usage_held_through_reboot_counts_toward_open_swap():
+    # Unload, reboot during the load, then Spoolman is fixed: the load moves too.
+    charges, _, state = run([
+        (BOOT, r(100), loc(7)),
+        (BOOT, r(700, material=None, unloads=1, at_unload=600), loc(7)),
+        (BOOT, r(760, material=None, unloads=1, at_unload=600), loc(7)),
+        (BOOT + 1, r(20), loc(7)),  # Reboot, the load done.
+    ])
+    assert charges == [Charge(7, 500, "before unload"),
+                       Charge(7, 160, "held before the printer restarted"),
+                       Charge(7, 20, "extruded")]
+    assert state.swap == SwapFlag(7, 180)
+    charges, _, _ = run([(BOOT + 1, r(20), loc(7, 9))], state)
+    assert charges == [Charge(9, 180, "usage since unconfirmed swap"),
+                       Charge(7, -180, "moved to confirmed swap spool")]
+
+
+def test_usage_held_through_reboot_is_lost_at_unload_with_no_spool():
+    _, _, state = run([(BOOT, r(100), loc()), (BOOT, r(900), loc())])
+    res = account(state, BOOT + 1, r(50, unloads=1, at_unload=30), loc())
+    lost = [e.message for e in res.events if e.kind == EventKind.LOST_UNASSIGNED]
+    assert lost == ["830 mm before unload had no spool"]
+    assert res.charges == [] and res.state.held_mm == 0
+
+
+def test_usage_during_ambiguous_location_survives_reboot():
+    _, _, state = run([(BOOT, r(100), loc(7)), (BOOT, r(200), loc(7))])
+    res = account(state, BOOT, r(700), loc(7, 8, 9))
+    assert res.skipped
+    charges, _, _ = run([(BOOT + 1, r(10), loc(7))], res.state)
+    assert charges == [Charge(7, 500, "held before the printer restarted"),
+                       Charge(7, 10, "extruded")]
+
+
+def test_hold_messages_stay_the_same_while_holding():
+    _, _, state = run([(BOOT, r(100), loc())])
+    first = account(state, BOOT, r(200), loc())
+    second = account(first.state, BOOT, r(300), loc())
+    assert first.events == second.events
+    _, _, state = run([(BOOT, r(100), loc(7))])
+    first = account(state, BOOT, r(200, material=None), loc(7))
+    second = account(first.state, BOOT, r(300, material=None), loc(7))
+    assert first.events == second.events
+
+
+def test_state_without_last_reading_holds_nothing_over_reboot():
+    old = ToolState(BOOT, 100, 0, None, None).to_json()
+    del old["extruded"]
+    state = ToolState.from_json(old)
+    charges, _, state = run([(BOOT + 1, r(10), loc(7))], state)
+    assert charges == [Charge(7, 10, "extruded")] and state.held_mm == 0
 
 
 # Firmware without unload fields

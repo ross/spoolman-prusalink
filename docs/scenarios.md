@@ -69,7 +69,7 @@ archived active spool (M3, M3a) is logged once when the bridge finds it.
 
 | # | Scenario | What the bridge does | Status |
 | --- | --- | --- | --- |
-| C1 | Printer reboots or is power-cycled between prints. | New boot ID: counters restart from 0. Metadata stays on the printer. | Seen live |
+| C1 | Printer reboots or is power-cycled between prints. | New boot ID: counters restart from 0. Metadata stays on the printer. Usage held at the reboot, because the tool reported no filament, no spool was assigned or the location was ambiguous, is kept. It goes to the active spool as soon as there is one, and is logged then. An unload with no spool active first reports it lost, as in S6. | Seen live; held usage tested |
 | C2 | Printer switched off for hours. | Logs once when it goes away, hourly while it's away, and once when it's back. Polls every 60 s. | Tested |
 | C3 | Reboot and an unload in the same poll. | Handled in order: reboot, then unload. | Tested |
 | C4 | Counter goes backward within one boot. | Logs a counter anomaly and resyncs without charging. | Tested |

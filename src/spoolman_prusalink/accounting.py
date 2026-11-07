@@ -38,7 +38,10 @@ differ while a swap is in progress:
   after charging usage so far to the outgoing spool.
 
 While the tool reports no material, or no spool is active, uncharged usage is held (by
-not advancing `charged`) and goes to the active spool once both are present.
+not advancing `charged`) and goes to the active spool once both are present. A reboot
+restarts the counter, so the usage held then (`extruded - charged` at the last poll) moves
+to `held_mm`. It's charged to the active spool as soon as there is one, or goes with the
+usage before the next unload: to the active spool, or reported lost if there's none.
 
 A deleted active spool (see `hold_deleted()`) leaves the tool with no active spool and
 `deleted_spool` set. Its usage then advances `charged` and goes to `held_mm` instead, so
@@ -177,6 +180,9 @@ class ToolState:
     # the printer's last reboot, which is when a claimed spool can have gone in: the
     # usage a claim moves. Not mutated in place.
     since_load: dict[int, int] = field(default_factory=dict)
+    # The counter at the last poll, including polls skipped as ambiguous: the usage held
+    # by not advancing `charged` is `extruded - charged`, which a reboot would drop.
+    extruded: int = 0
 
     def to_json(self) -> dict:
         return {
@@ -204,6 +210,7 @@ class ToolState:
             else {"spool_id": self.provisional.spool_id, "mm": self.provisional.mm,
                   "job_id": self.provisional.job_id},
             "since_load": {str(k): v for k, v in sorted(self.since_load.items())},
+            "extruded": self.extruded,
         }
 
     @classmethod
@@ -235,6 +242,8 @@ class ToolState:
             # State from before claims has no record: a claim then moves only usage
             # charged since the upgrade.
             since_load={int(k): int(v) for k, v in (data.get("since_load") or {}).items()},
+            # State from before this was recorded holds nothing over a reboot.
+            extruded=int(data.get("extruded", data.get("charged", 0))),
         )
 
 
@@ -359,6 +368,9 @@ def account(
         event(EventKind.AMBIGUOUS, f"location holds spools {ids}; skipping until it's clear "
               "which one is loaded")
         out.skipped = True
+        if state.boot_id == boot_id:
+            # Nothing is charged, so the usage is held: keep track of it over a reboot.
+            out.state = replace(state, extruded=reading.extruded)
         return out
     evict = state.evict if state.evict in location_ids else None
 
@@ -377,6 +389,7 @@ def account(
             assigned=assigned,
             job_id=job_id,
             needs_sync=out.claimed,
+            extruded=reading.extruded,
         )
         event(EventKind.BASELINE, f"baseline extruded={reading.extruded} spool={active}")
         return out
@@ -384,14 +397,18 @@ def account(
     s = replace(state, evict=evict)
     rebooted = boot_id != s.boot_id
     if rebooted:
+        # Usage held by not advancing `charged` would be lost with the counter.
+        kept = max(s.extruded - s.charged, 0)
         event(
             EventKind.REBOOT,
             f"boot_id {s.boot_id} -> {boot_id}; counters restart at 0 "
-            "(usage since the last poll before the reboot is lost)",
+            "(usage since the last poll before the reboot is lost)"
+            + (f"; {kept} mm held before the restart is kept" if kept else ""),
         )
         # Keep job_id: the firmware stores job IDs in EEPROM and never reuses them, so a
         # print resumed after a power loss keeps its ID and isn't a new print start.
-        s = replace(s, boot_id=boot_id, charged=0, unload_count=0, pending_at=0)
+        s = replace(s, boot_id=boot_id, charged=0, unload_count=0, pending_at=0,
+                    held_mm=s.held_mm + kept)
         # An unload just before a reboot can be missed, so a claim moves only usage
         # since the reboot.
         window.clear()
@@ -418,6 +435,19 @@ def account(
         """Mark the outgoing spool for eviction if it's still in the location."""
         return old if old is not None and old in location_ids and old != assigned else evict
 
+    def charge_held(target: int) -> None:
+        """Charge usage held over a reboot, with no deleted spool, to the active spool."""
+        nonlocal held, swap, provisional
+        charge(target, held, "held before the printer restarted")
+        event(EventKind.HELD_CHARGED, f"spool {target} is active; charged it {held} mm "
+              "held before the printer restarted")
+        # It's usage from before this poll, like usage held by not advancing `charged`.
+        if swap is not None and swap.spool_id == target:
+            swap = replace(swap, mm=swap.mm + held)
+        if provisional is not None and provisional.spool_id == target:
+            provisional = replace(provisional, mm=provisional.mm + held)
+        held = 0
+
     # 1. Unload since the last poll: usage before it goes to the active spool.
     if not legacy and reading.unload_count != s.unload_count:
         at = reading.extruded_at_unload or 0
@@ -432,7 +462,11 @@ def account(
         n = reading.unload_count - s.unload_count
         event(EventKind.UNLOAD, f"{n if n > 0 else 'some'} unload(s); {before} mm before "
               f"the unload goes to spool {active}")
-        if before > 0:
+        # Usage held over a reboot is usage before the unload too.
+        carried = held if deleted is None else 0
+        if active is not None and carried:
+            charge_held(active)
+        if before > 0 or carried:
             if active is not None:
                 charge(active, before, "before unload")
                 if provisional is not None and provisional.spool_id == active:
@@ -440,7 +474,9 @@ def account(
             elif deleted is not None:
                 held += before
             else:
-                event(EventKind.LOST_UNASSIGNED, f"{before} mm before unload had no spool")
+                event(EventKind.LOST_UNASSIGNED,
+                      f"{before + carried} mm before unload had no spool")
+                held = 0
         if provisional is not None:
             event(EventKind.PROVISIONAL_KEPT,
                   f"unload keeps the {provisional.mm} mm charged provisionally to spool "
@@ -589,18 +625,20 @@ def account(
             event(EventKind.HELD_CHARGED, f"spool {active} is active; charged it {held} mm "
                   f"held after spool {deleted} was deleted")
         deleted, held = None, 0
+    elif held and active is not None:
+        charge_held(active)
 
     # 5. Usage since the last charge goes to the active spool.
     delta = reading.extruded - s.charged
     if delta > 0:
         if reading.material is None:
-            event(EventKind.HOLD_EMPTY, f"holding {delta} mm until filament is reported")
+            event(EventKind.HOLD_EMPTY, "holding usage until filament is reported")
         elif active is None and deleted is not None:
             event(EventKind.HOLD_DELETED, f"holding usage since spool {deleted} was deleted")
             held += delta
             s = replace(s, charged=reading.extruded)
         elif active is None:
-            event(EventKind.HOLD_UNASSIGNED, f"holding {delta} mm: no spool assigned")
+            event(EventKind.HOLD_UNASSIGNED, "holding usage: no spool assigned")
         else:
             charge(active, delta, "extruded")
             s = replace(s, charged=reading.extruded)
@@ -646,5 +684,6 @@ def account(
         staged_notice=staged_notice,
         provisional=provisional,
         since_load=window,
+        extruded=reading.extruded,
     )
     return out

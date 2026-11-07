@@ -368,7 +368,8 @@ class Bridge:
                 matches=matches,
                 claim=claim,
             )
-            if not result.skipped:
+            # A skipped tool's state changes only to record the counter.
+            if not result.skipped or tool in self.tools:
                 self.tools[tool] = result.state
             if result.runout is not None:
                 self._check_runout(location, by_id.get(result.runout))
