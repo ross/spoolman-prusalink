@@ -28,6 +28,12 @@ def parse_spool(
     name = filament.get("name") or filament.get("material") or f"spool {data['id']}"
     if vendor:
         name = f"{vendor} {name}"
+    # Spoolman clamps its own remaining_weight at 0, so work it out from used_weight,
+    # which it doesn't. The net weight is the spool's initial weight, else the filament's.
+    net = data.get("initial_weight")
+    if net is None:
+        net = filament.get("weight")
+    used = data.get("used_weight")
     return Spool(
         id=int(data["id"]),
         location=data.get("location") or None,
@@ -40,8 +46,8 @@ def parse_spool(
         flag=_extra_str(data.get("extra"), flag_field),
         extruder_temp=filament.get("settings_extruder_temp"),
         bed_temp=filament.get("settings_bed_temp"),
-        remaining_weight=data.get("remaining_weight"),
-        net_weight=data.get("initial_weight") or filament.get("weight"),
+        remaining_weight=None if net is None or used is None else net - used,
+        net_weight=net,
         archived=bool(data.get("archived", False)),
     )
 
