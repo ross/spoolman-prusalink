@@ -71,9 +71,12 @@ def test_non_preset_with_spoolman_temps():
     assert line == 'M865 X R N"PLA-CF" T225 B65 L0'
 
 
-def test_pps_needs_menu_load():
-    with pytest.raises(CannotSync):
-        filament_lines(ToolWrite(0, spool(material="PPS"), None))
+@pytest.mark.parametrize("material", ["PPS", "PPA", " pps "])
+def test_ht_idler_door_materials_need_menu_load(material):
+    # With temperatures set, these would otherwise pass as a non-preset material.
+    s = spool(material=material, extruder_temp=320, bed_temp=105)
+    with pytest.raises(CannotSync, match="HT idler-door"):
+        filament_lines(ToolWrite(0, s, None))
 
 
 def test_model_problems():

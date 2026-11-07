@@ -503,6 +503,20 @@ async def test_non_preset_without_temps_is_flagged_not_written(tmp_path, caplog)
     await bridge.aclose()
 
 
+async def test_pps_with_temps_is_flagged_not_written_and_logged_once(tmp_path, caplog):
+    bridge, fake, printer = make(tmp_path, [spool(19)])
+    await bridge.poll()
+    fake.spools[20] = spool_x(20, material="PPS", temps=(320, 105))
+    printer.unloads, printer.at_unload, printer.material = 1, 1000, {"name": "PLA"}
+    for _ in range(3):
+        await bridge.poll()
+    assert jobs(printer) == []
+    assert "HT idler-door" in fake.flag(20)
+    assert caplog.text.count("can't write spool 20") == 1
+    assert "printer will be set" not in caplog.text
+    await bridge.aclose()
+
+
 async def test_gives_up_and_flags_after_failed_writes(tmp_path):
     bridge, fake, printer = make(tmp_path, [spool(19)])
     printer.run_job = lambda gcode: None  # The job runs but changes nothing.

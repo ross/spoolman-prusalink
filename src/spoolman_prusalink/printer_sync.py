@@ -129,6 +129,9 @@ PRESETS = {
     "BVOH": Preset(210, 60, preheat=160, chamber=(25, 15, 38)),
 }
 PRESET_ALIASES = {"TPU": "FLEX", "TPE": "FLEX"}
+# In the firmware only the PPS and PPA presets set `requires_ht_idler_door`, and `M865`
+# has no parameter for it, so an ad-hoc filament with these names would load without it.
+HT_IDLER_DOOR = frozenset({"PPS", "PPA"})
 
 NAME_LIMIT = 7  # The firmware's filament name holds at most 7 characters.
 MESSAGE_LIMIT = 40
@@ -186,12 +189,19 @@ def filament_lines(write: ToolWrite) -> list[str]:
 
     `R` resets every parameter, so the line gives them all: from the material's
     firmware preset, with Spoolman's extruder and bed temperatures taking priority.
-    A material that isn't a preset needs both temperatures in Spoolman.
+    A material that isn't a preset needs both temperatures in Spoolman. PPS and PPA
+    can't be written at all.
     """
     spool, tool = write.spool, write.tool
     name = printer_name(spool)
     if name is None:
         raise CannotSync(f"spool {spool.id} has no material or name to write")
+    material = (spool.material or "").strip().upper()
+    if material in HT_IDLER_DOOR:
+        raise CannotSync(
+            f"spool {spool.id}'s material {material} needs the printer's HT idler-door "
+            "setting, which the bridge can't write; load it from the printer's menu"
+        )
     key = preset_for(spool)
     preset = PRESETS.get(key) if key else None
     nozzle = int(spool.extruder_temp) if spool.extruder_temp else None

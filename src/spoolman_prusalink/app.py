@@ -724,6 +724,8 @@ class Bridge:
                     f"{location}: can't write to the printer: {self._model_error}"
                 )
             elif settled and (problem := self._cannot_write(tool, active)):
+                # Noted here, not in sync_printer, so it's logged once rather than
+                # alternating with the "will be set" note on every idle poll.
                 notes.append(f"[{location}] can't write spool {active.id} to the printer: "
                              f"{problem}")
                 flags.setdefault(active.id, []).append(f"{location}: {problem}")
