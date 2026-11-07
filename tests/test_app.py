@@ -266,6 +266,9 @@ def test_config_load(tmp_path):
     assert cfg.dry_run
 
     assert cfg.length_factor == 1.0
+    # P1 and C2: poll every 30 s while printing and every 60 s otherwise.
+    assert cfg.poll_printing == 30
+    assert cfg.poll_idle == 60
 
     with pytest.raises(ConfigError, match="PRUSALINK_API_KEY"):
         load(p, env={})
