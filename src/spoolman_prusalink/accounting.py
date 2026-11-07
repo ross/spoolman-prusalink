@@ -600,9 +600,15 @@ def account(
             active = assigned
         elif assigned is None:
             # Not a swap: nothing is staged, and the active spool is still loaded.
-            if s.assigned is not None:
+            if s.assigned == active:
                 event(EventKind.ACTIVE_UNASSIGNED, f"spool {active} is no longer in the "
                       "location; still charging it until the printer reports an unload")
+            elif s.assigned is not None:
+                # The staged spool left. The active one was already gone, or left with it.
+                event(EventKind.STAGING_CANCELLED, f"spool {s.assigned} is no longer staged; "
+                      f"still charging spool {active}")
+                event(EventKind.ACTIVE_UNASSIGNED, f"spool {active} isn't in the location "
+                      "either; still charging it until the printer reports an unload")
         elif matches(assigned):
             event(EventKind.CORRECTION, f"printer already has spool {assigned}'s filament; "
                   f"switching from spool {active} now")

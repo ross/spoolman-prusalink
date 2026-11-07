@@ -222,6 +222,37 @@ def test_spool_moved_out_with_no_replacement_is_not_staging():
     assert res.charges == [Charge(7, 10, "extruded")]
 
 
+def emptied_after_staging(*steps):
+    """Spool 7 active; the location goes through `steps`, then empties."""
+    _, _, state = run([(BOOT, r(100), loc(7))])
+    for ids in steps:
+        state = account(state, BOOT, r(100), ids).state
+    assert state.assigned == 8
+    return account(state, BOOT, r(150), loc())
+
+
+STAGED_8_LEFT = [
+    (EventKind.STAGING_CANCELLED, "spool 8 is no longer staged; still charging spool 7"),
+    (EventKind.ACTIVE_UNASSIGNED, "spool 7 isn't in the location either; still charging it "
+     "until the printer reports an unload"),
+]
+
+
+def test_staged_spool_leaving_an_emptied_location_is_reported():
+    # Spool 7 is moved out, spool 8 in, then spool 8 out again.
+    res = emptied_after_staging(loc(), loc(8))
+    assert [(e.kind, e.message) for e in res.events] == STAGED_8_LEFT
+    assert res.charges == [Charge(7, 50, "extruded")]
+
+
+def test_both_spools_leaving_the_location_is_reported():
+    res = emptied_after_staging(loc(7, 8))
+    assert [(e.kind, e.message) for e in res.events] == STAGED_8_LEFT
+    res = account(res.state, BOOT, r(160), loc(7))
+    assert [(e.kind, e.message) for e in res.events] == [
+        (EventKind.ACTIVE_UNASSIGNED, "spool 7 is back in the location")]
+
+
 def test_spool_removed_from_location_stays_active_until_unload():
     charges, _, state = run([
         (BOOT, r(100), loc(7)),
