@@ -66,6 +66,35 @@ def _env_bool(env: dict[str, str], key: str) -> bool | None:
     raise ConfigError(f"{key} must be true or false, got {value!r}")
 
 
+def _bool(table: dict, key: str, default: bool, name: str) -> bool:
+    """Return a TOML boolean. A string such as "false" is an error, not true."""
+    value = table.get(key, default)
+    if not isinstance(value, bool):
+        raise ConfigError(f"{name} must be true or false, got {value!r}")
+    return value
+
+
+def _number(table: dict, key: str, default: float, name: str) -> float:
+    value = table.get(key, default)
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        raise ConfigError(f"{name} must be a number, got {value!r}")
+    return float(value)
+
+
+def _interval(table: dict, key: str, default: float, name: str) -> float:
+    value = table.get(key, default)
+    if isinstance(value, bool) or not isinstance(value, int | float) or value <= 0:
+        raise ConfigError(f"{name} must be a number greater than 0, got {value!r}")
+    return float(value)
+
+
+def _table(raw: dict, key: str) -> dict:
+    value = raw.get(key, {})
+    if not isinstance(value, dict):
+        raise ConfigError(f"[{key}] must be a table")
+    return value
+
+
 def load(path: str | os.PathLike | None, env: dict[str, str] | None = None) -> Config:
     """Load the config from a TOML file, or from the environment alone if `path` is None.
 
@@ -78,11 +107,14 @@ def load(path: str | os.PathLike | None, env: dict[str, str] | None = None) -> C
     raw: dict = {}
     if path is not None:
         with open(path, "rb") as f:
-            raw = tomllib.load(f)
+            try:
+                raw = tomllib.load(f)
+            except tomllib.TOMLDecodeError as e:
+                raise ConfigError(f"can't parse {path}: {e}") from e
 
-    printer = raw.get("printer", {})
-    spoolman = raw.get("spoolman", {})
-    bridge = raw.get("bridge", {})
+    printer = _table(raw, "printer")
+    spoolman = _table(raw, "spoolman")
+    bridge = _table(raw, "bridge")
 
     api_key = env.get("PRUSALINK_API_KEY") or printer.get("api_key")
     if not api_key:
@@ -95,8 +127,15 @@ def load(path: str | os.PathLike | None, env: dict[str, str] | None = None) -> C
         raise ConfigError("set spoolman.url or SPOOLMAN_URL")
 
     tools: dict[int, str] = {}
-    for entry in raw.get("tools", []):
-        index, location = int(entry["index"]), str(entry["location"])
+    entries = raw.get("tools", [])
+    if not isinstance(entries, list):
+        raise ConfigError("tools must be [[tools]] entries")
+    for entry in entries:
+        if not isinstance(entry, dict) or "index" not in entry or "location" not in entry:
+            raise ConfigError("each [[tools]] entry needs an index and a location")
+        index, location = entry["index"], str(entry["location"])
+        if isinstance(index, bool) or not isinstance(index, int):
+            raise ConfigError(f"tool index must be an integer, got {index!r}")
         if index in tools:
             raise ConfigError(f"tool {index} is configured twice")
         if location in tools.values():
@@ -109,9 +148,9 @@ def load(path: str | os.PathLike | None, env: dict[str, str] | None = None) -> C
 
     dry_run = _env_bool(env, "SPOOLMAN_PRUSALINK_DRY_RUN")
     if dry_run is None:
-        dry_run = bool(bridge.get("dry_run", True))
+        dry_run = _bool(bridge, "dry_run", True, "bridge.dry_run")
 
-    length_factor = float(bridge.get("length_factor", 1.0))
+    length_factor = _number(bridge, "length_factor", 1.0, "bridge.length_factor")
     if not 0 < length_factor <= 2:
         raise ConfigError(f"length_factor must be in (0, 2], got {length_factor}")
 
@@ -129,6 +168,10 @@ def load(path: str | os.PathLike | None, env: dict[str, str] | None = None) -> C
     keys = [key for _, key in fields if key is not None]
     if len(keys) != len(set(keys)):
         raise ConfigError("uuid_field, flag_field and claim_field must differ")
+    preamble = printer.get("gcode_preamble")
+    if preamble is not None and (
+            not isinstance(preamble, list) or not all(isinstance(x, str) for x in preamble)):
+        raise ConfigError(f"printer.gcode_preamble must be a list of strings, got {preamble!r}")
     return Config(
         printer_url=printer_url,
         printer_api_key=api_key,
@@ -136,22 +179,20 @@ def load(path: str | os.PathLike | None, env: dict[str, str] | None = None) -> C
         tools=tools,
         state_file=Path(bridge.get("state_file", "/data/state.json")),
         ledger_file=Path(bridge.get("ledger_file", "/data/ledger.jsonl")),
-        poll_printing=float(bridge.get("poll_printing", 30)),
-        poll_idle=float(bridge.get("poll_idle", 60)),
+        poll_printing=_interval(bridge, "poll_printing", 30, "bridge.poll_printing"),
+        poll_idle=_interval(bridge, "poll_idle", 60, "bridge.poll_idle"),
         uuid_field=uuid_field,
         eviction_location=str(bridge.get("eviction_location", "")),
         dry_run=dry_run,
         length_factor=length_factor,
         flag_field=flag_field,
         claim_field=claim_field,
-        flag_drift=bool(bridge.get("flag_drift", True)),
-        gcode_preamble=(
-            tuple(printer["gcode_preamble"]) if "gcode_preamble" in printer else None
-        ),
+        flag_drift=_bool(bridge, "flag_drift", True, "bridge.flag_drift"),
+        gcode_preamble=None if preamble is None else tuple(preamble),
         sync_storage=str(printer.get("sync_storage", "usb")),
         sync_file=sync_file,
-        printer_sync=bool(bridge.get("printer_sync", True)),
-        sync_drift=bool(bridge.get("sync_drift", False)),
-        printer_uuids=bool(printer.get("uuids", True)),
-        printer_notices=bool(bridge.get("printer_notices", False)),
+        printer_sync=_bool(bridge, "printer_sync", True, "bridge.printer_sync"),
+        sync_drift=_bool(bridge, "sync_drift", False, "bridge.sync_drift"),
+        printer_uuids=_bool(printer, "uuids", True, "printer.uuids"),
+        printer_notices=_bool(bridge, "printer_notices", False, "bridge.printer_notices"),
     )
