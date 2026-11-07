@@ -57,6 +57,8 @@ def test_parse_spool_remaining_weight_is_not_clamped():
     assert parse_spool(data, None).remaining_weight == -12.0
     data["initial_weight"] = 900.0  # the spool's own weight wins
     assert parse_spool(data, None).net_weight == 900.0
+    data["initial_weight"] = 0.0  # a weight of 0 is still the spool's own, not missing
+    assert parse_spool(data, None).net_weight == 0.0
     del data["used_weight"]
     assert parse_spool(data, None).remaining_weight is None
 
