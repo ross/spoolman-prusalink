@@ -1182,6 +1182,37 @@ async def test_deleted_spool_holds_usage_for_the_next_spool(tmp_path, caplog):
     await bridge.aclose()
 
 
+async def test_dry_run_holds_nothing_for_a_deleted_spool(tmp_path, caplog):
+    bridge, fake, printer = make(tmp_path, [spool(19)])
+    await bridge.poll()
+    printer.extruded = 1500
+    await bridge.poll()
+    assert fake.used == {19: [500.0]}
+
+    # Restarted in dry run, the spool is deleted and printing goes on.
+    bridge.config = replace(bridge.config, dry_run=True)
+    caplog.set_level("INFO")
+    del fake.spools[19]
+    for extruded in (1700, 1800, 1900):
+        printer.extruded = extruded
+        await bridge.poll()
+    assert fake.lookups == [19]
+    assert caplog.text.count("would hold its usage") == 1
+    st = load_state(tmp_path / "state.json").tools[0]
+    assert (st.deleted_spool, st.held_mm) == (None, 0)
+
+    # Live again, with a new spool moved in: the dry-run usage isn't charged to it.
+    bridge.config = replace(bridge.config, dry_run=False)
+    await bridge.poll()
+    fake.spools[20] = spool(20)
+    await bridge.poll()
+    await bridge.poll()
+    assert fake.used == {19: [500.0]}
+    st = load_state(tmp_path / "state.json").tools[0]
+    assert (st.active, st.held_mm) == (20, 0)
+    await bridge.aclose()
+
+
 async def test_404_in_flush_holds_the_charge(tmp_path, caplog):
     bridge, fake, printer = make(tmp_path, [spool(19)])
     caplog.set_level("INFO")

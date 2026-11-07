@@ -136,6 +136,7 @@ class Bridge:
     _ready_fields: set[str] = field(default_factory=set)
     _flags: dict[int, str] = field(default_factory=dict)  # Desired flags from the last poll.
     _pending_writes: list[int] = field(default_factory=list)  # Tools to write when idle.
+    _dry_deleted: set[int] = field(default_factory=set)  # Deleted spools seen in dry run.
     _job_names: dict[int, str | None] = field(default_factory=dict)
     _printer_outage: Outage = field(default_factory=lambda: Outage("printer"))
     _spoolman_outage: Outage = field(default_factory=lambda: Outage("Spoolman"))
@@ -238,6 +239,9 @@ class Bridge:
         The list leaves out archived spools. A deleted one (404) leaves its tool with no
         active spool, holding usage for the next one. An archived one keeps being charged
         until the next unload, and is flagged. Each spool is looked up once, not every poll.
+
+        Dry run holds nothing for a deleted spool: the held usage would be saved and
+        charged for real once dry run is off. It logs what it would do instead.
         """
         listed = {s.id for s in spools}
         keep = {st.active for st in self.tools.values()} | set(self.state.flagged)
@@ -245,7 +249,8 @@ class Bridge:
                           if i not in listed and i in keep}
         for tool, st in list(self.tools.items()):
             spool_id = st.active
-            if spool_id is None or spool_id in listed or spool_id in self._archived:
+            if (spool_id is None or spool_id in listed or spool_id in self._archived
+                    or (self.config.dry_run and spool_id in self._dry_deleted)):
                 continue
             location = self.config.tools.get(tool, str(tool))
             try:
@@ -256,7 +261,12 @@ class Bridge:
                                     "Spoolman's list: %s", location, spool_id, e)
                 continue
             self._problems.clear(("lookup", spool_id))
-            if found is None:
+            if found is None and self.config.dry_run:
+                self._dry_deleted.add(spool_id)
+                log.warning("[%s] spool %d was deleted in Spoolman; would hold its usage for "
+                            "the next spool that becomes active in %s", location, spool_id,
+                            location)
+            elif found is None:
                 self._hold_deleted(tool, spool_id)
             elif found.archived:
                 self._archived[spool_id] = found
