@@ -244,7 +244,12 @@ class Bridge:
         st = self.tools.get(tool)
         if st is None or spool_id not in (st.active, st.deleted_spool):
             return False
-        self.tools[tool] = hold_deleted(st, spool_id, mm)
+        # Charges to this spool still queued, the rejected one included, are each held
+        # as they're rejected, so they're left out of any open swap's usage.
+        queued = sum(int(r.get("extruded_mm", 0)) for r in self.state.outbox
+                     if r.get("tool") == tool and r.get("spool_id") == spool_id
+                     and int(r.get("extruded_mm", 0)) > 0)
+        self.tools[tool] = hold_deleted(st, spool_id, mm, queued)
         location = self.config.tools.get(tool, str(tool))
         self._problems.fail(
             ("deleted", tool), spool_id,

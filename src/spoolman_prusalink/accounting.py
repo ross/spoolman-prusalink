@@ -206,16 +206,25 @@ class Result:
     runout: int | None = None
 
 
-def hold_deleted(state: ToolState, spool_id: int, mm: int = 0) -> ToolState:
+def hold_deleted(state: ToolState, spool_id: int, mm: int = 0, queued: int = 0) -> ToolState:
     """Record that `spool_id` was deleted in Spoolman, holding `mm` of its usage.
 
     If it's the active spool, the tool is left with no active spool, and later usage is
     held for the next spool that becomes active. `mm` is a charge Spoolman rejected,
     added to the held total. Returns the state unchanged if the spool is neither active
     nor already held for.
+
+    An unconfirmed swap on the deleted spool is dropped, and its usage since the unload
+    is held too: that filament came from whatever was loaded, which the next spool
+    stands for, as a confirmed swap would move it. `queued` is the part of it still in
+    the outbox, which is held charge by charge as each is rejected, so it's left out.
     """
+    held = state.held_mm
     if spool_id == state.active:
-        swap = state.swap if state.swap is None or state.swap.spool_id != spool_id else None
+        swap = state.swap
+        if swap is not None and swap.spool_id == spool_id:
+            held += max(swap.mm - queued, 0)
+            swap = None
         notice = (state.notice if state.notice is None or state.notice.spool_id != spool_id
                   else None)
         state = replace(
@@ -229,7 +238,7 @@ def hold_deleted(state: ToolState, spool_id: int, mm: int = 0) -> ToolState:
         )
     elif spool_id != state.deleted_spool:
         return state
-    return replace(state, held_mm=state.held_mm + max(mm, 0))
+    return replace(state, held_mm=held + max(mm, 0))
 
 
 def resolve_assignment(state: ToolState, location_ids: list[int]) -> int | None | list[int]:
@@ -443,9 +452,10 @@ def account(
 
     # A spool is active again after a deletion: it takes the held usage.
     if deleted is not None and active is not None:
-        charge(active, held, f"held after spool {deleted} was deleted")
-        event(EventKind.HELD_CHARGED, f"spool {active} is active; charged it {held} mm "
-              f"held after spool {deleted} was deleted")
+        if held:
+            charge(active, held, f"held after spool {deleted} was deleted")
+            event(EventKind.HELD_CHARGED, f"spool {active} is active; charged it {held} mm "
+                  f"held after spool {deleted} was deleted")
         deleted, held = None, 0
 
     # 4. Usage since the last charge goes to the active spool.

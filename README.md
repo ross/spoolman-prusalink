@@ -146,9 +146,10 @@ With `dry_run = false`, each charge is saved to `state.json` before it's sent
 to Spoolman, in the same write as the counters it came from, and removed once
 Spoolman accepts it. If Spoolman is unreachable or returns a server error,
 charges stay queued and are retried in order on the next poll, including
-after a restart. If Spoolman rejects a charge with any other client error,
-the bridge logs an error, records it in the ledger with `failed`, and drops
-it.
+after a restart. If Spoolman rejects a charge with a client error (4xx), the
+bridge logs an error, records it in the ledger with `failed`, and drops it.
+The exception is a 404 on a charge to the tool's active spool, or to a spool
+already found deleted, described next.
 
 If the active spool is deleted in Spoolman, found either from Spoolman's
 spool list or from a 404 on a charge, the tool is left with no active spool.

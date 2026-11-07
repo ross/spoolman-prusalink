@@ -910,6 +910,9 @@ async def test_negative_remaining_is_logged_once(tmp_path, caplog):
         await bridge.poll()
     assert caplog.text.count("shows -12 g remaining") == 1
     assert fake.flag(19) is None
+    await bridge.aclose()
+
+
 # Deleted and archived active spools (M3, M3a, Q7)
 
 
@@ -1007,4 +1010,51 @@ async def test_archived_spool_is_charged_and_flagged_once(tmp_path, caplog):
     await bridge.poll()
     assert fake.flag(19) is None
     assert fake.lookups == [19]
+    await bridge.aclose()
+
+
+async def delete_during_unconfirmed_swap(tmp_path, queue_swap_charge):
+    """Spool 19 unloads, the new filament is loaded and purged (charged to 19 under the
+    unconfirmed swap), then 19 is deleted and spool 20 moved in."""
+    bridge, fake, printer = make(tmp_path, [spool(19)])
+    await bridge.poll()
+    printer.extruded, printer.unloads, printer.at_unload = 1500, 1, 1500
+    await bridge.poll()  # unconfirmed swap on 19
+    printer.extruded = 1620  # load and purge
+    if queue_swap_charge:
+        fake.fail_use = [503]
+    await bridge.poll()
+    del fake.spools[19]
+    fake.spools[20] = spool(20)
+    printer.extruded = 1700
+    await bridge.poll()
+    await bridge.poll()
+    return bridge, fake
+
+
+async def test_deleting_swap_spool_holds_usage_since_unload(tmp_path):
+    bridge, fake = await delete_during_unconfirmed_swap(tmp_path, queue_swap_charge=False)
+    assert fake.used[19] == [500.0, 120.0]
+    assert sum(fake.used[20]) == 200.0  # 120 since the unload, then 80
+    await bridge.aclose()
+
+
+async def test_deleting_swap_spool_with_queued_charge_holds_it_once(tmp_path):
+    bridge, fake = await delete_during_unconfirmed_swap(tmp_path, queue_swap_charge=True)
+    assert fake.used[19] == [500.0]
+    assert sum(fake.used[20]) == 200.0
+    await bridge.aclose()
+
+
+async def test_nothing_held_logs_no_held_charge(tmp_path, caplog):
+    caplog.set_level("INFO")
+    bridge, fake, printer = make(tmp_path, [spool(19)])
+    await bridge.poll()
+    del fake.spools[19]
+    await bridge.poll()  # deleted while idle: nothing held
+    fake.spools[20] = spool(20)
+    await bridge.poll()
+    assert bridge.tools[0].active == 20
+    assert "charged it 0 mm" not in caplog.text
+    assert not any(r.get("event") == "held_charged" for r in ledger(tmp_path))
     await bridge.aclose()
