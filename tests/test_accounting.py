@@ -805,6 +805,50 @@ def test_staged_spool_flagged_after_reboot_and_cleared_when_unstaged():
     assert state.staged_notice is None
 
 
+def test_staged_notice_for_reboot_while_ambiguous():
+    _, kinds, state = run([
+        (BOOT, r(100), loc(7)),
+        (BOOT, r(100), loc(7, 8)),
+        (222, r(0), loc(7, 8, 9)),  # Reboot while ambiguous.
+        (222, r(0), loc(7, 8)),
+    ])
+    assert EventKind.STAGED_AT_REBOOT in kinds
+    assert state.staged_notice.spool_id == 8 and not state.reboot_pending
+
+
+def test_staged_notice_for_reboot_while_ambiguous_then_another_spool():
+    _, kinds, state = run([
+        (BOOT, r(100), loc(7)),
+        (222, r(0), loc(7, 8, 9)),  # Reboot while ambiguous.
+        (222, r(0), loc(7, 9)),
+    ])
+    assert EventKind.STAGED_AT_REBOOT in kinds
+    assert (state.active, state.staged_notice.spool_id) == (7, 9)
+    assert not state.reboot_pending
+
+
+def test_staged_notice_for_reboot_while_ambiguous_with_neither_active():
+    _, kinds, state = run([
+        (BOOT, r(100), loc(7)),
+        (222, r(0), loc(8, 9)),  # Reboot while ambiguous, spool 7 still loaded.
+        (222, r(0), loc(8)),
+    ])
+    assert EventKind.STAGED_AT_REBOOT in kinds
+    assert (state.active, state.staged_notice.spool_id) == (7, 8)
+    assert not state.reboot_pending
+
+
+def test_reboot_pending_clears_without_a_staged_spool():
+    _, kinds, state = run([
+        (BOOT, r(100), loc(7)),
+        (222, r(0), loc(8, 9)),  # Reboot while ambiguous.
+        (222, r(0), loc(7)),
+        (222, r(0), loc(7, 8)),
+    ])
+    assert EventKind.STAGED_AT_REBOOT not in kinds
+    assert state.staged_notice is None and not state.reboot_pending
+
+
 def test_reboot_without_staging_flags_nothing():
     _, kinds, state = run([(BOOT, r(100), loc(7)), (222, r(0), loc(7))])
     assert EventKind.STAGED_AT_REBOOT not in kinds
@@ -817,6 +861,7 @@ def test_state_round_trip_with_claim_fields():
         staged_notice=Notice(8, EventKind.STAGED_AT_REBOOT, "staged"),
         provisional=Provisional(7, 400, 42),
         since_load={7: 400, 9: -3},
+        reboot_pending=True,
     )
     assert ToolState.from_json(json.loads(json.dumps(s.to_json()))) == s
 
@@ -827,6 +872,7 @@ def test_state_from_before_claims_loads():
            "notice": {"spool_id": 7, "kind": "swap_assumed", "message": "assumed"}}
     s = ToolState.from_json(old)
     assert (s.provisional, s.staged_notice, s.since_load) == (None, None, {})
+    assert s.reboot_pending is False
     assert s.notice == Notice(7, EventKind.SWAP_ASSUMED, "assumed")
 
 

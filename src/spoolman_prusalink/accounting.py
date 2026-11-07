@@ -184,6 +184,9 @@ class ToolState:
     # The counter at the last poll, including polls skipped as ambiguous: the usage held
     # by not advancing `charged` is `extruded - charged`, which a reboot would drop.
     extruded: int = 0
+    # A poll skipped as ambiguous applied a reboot: the next poll that isn't skipped
+    # checks for a staged spool as if it saw the reboot itself.
+    reboot_pending: bool = False
 
     def to_json(self) -> dict:
         return {
@@ -212,6 +215,7 @@ class ToolState:
                   "job_id": self.provisional.job_id},
             "since_load": {str(k): v for k, v in sorted(self.since_load.items())},
             "extruded": self.extruded,
+            "reboot_pending": self.reboot_pending,
         }
 
     @classmethod
@@ -245,6 +249,7 @@ class ToolState:
             since_load={int(k): int(v) for k, v in (data.get("since_load") or {}).items()},
             # State from before this was recorded holds nothing over a reboot.
             extruded=int(data.get("extruded", data.get("charged", 0))),
+            reboot_pending=bool(data.get("reboot_pending", False)),
         )
 
 
@@ -415,7 +420,8 @@ def account(
         if s.boot_id is not None:
             # Nothing is charged, so the usage is held: keep track of it over a reboot,
             # including one while the location stays ambiguous.
-            out.state = replace(s, extruded=reading.extruded, since_load=window)
+            out.state = replace(s, extruded=reading.extruded, since_load=window,
+                                reboot_pending=s.reboot_pending or rebooted)
         return out
     evict = s.evict if s.evict in location_ids else None
     s = replace(s, evict=evict)
@@ -656,8 +662,8 @@ def account(
 
     # 6. Notices that depend on the outcome.
     # After a deletion, the deleted-spool flag already covers the staged spool.
-    if (rebooted and not legacy and assigned is not None and assigned != active
-            and deleted is None):
+    if ((rebooted or s.reboot_pending) and not legacy and assigned is not None
+            and assigned != active and deleted is None):
         # `unload_count` restarts with the printer, so an unload just before the reboot
         # can be missed, leaving the staged spool loaded while the old one is charged.
         msg = (f"printer restarted while spool {assigned} is staged; an unload just before "
@@ -692,5 +698,6 @@ def account(
         provisional=provisional,
         since_load=window,
         extruded=reading.extruded,
+        reboot_pending=False,
     )
     return out
