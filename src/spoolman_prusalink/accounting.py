@@ -166,8 +166,9 @@ class ToolState:
     # can be told apart from a change on the printer. None when the bridge hasn't
     # written this tool. UNKNOWN_WRITE for state saved before this was recorded.
     written: str | None = None
-    # Usage held after the active spool was deleted in Spoolman, in raw extruded mm, and
-    # the deleted spool. Charged to the next spool that becomes active in this tool.
+    # Usage held in raw extruded mm, charged to the next spool that becomes active in this
+    # tool: after the active spool was deleted in Spoolman (`deleted_spool` is that
+    # spool), or carried over a reboot (`deleted_spool` is None).
     held_mm: int = 0
     deleted_spool: int | None = None
     # A notice on the staged spool: a print started, or the printer rebooted, while it

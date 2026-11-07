@@ -131,8 +131,11 @@ Other rules:
 - When `boot_id` changes, the printer has rebooted and its counters restart
   at 0. Usage between the last poll and the reboot is lost, so a shorter poll
   interval loses less.
-- While the tool reports no filament, or no spool is active, usage is held
-  and charged once both are present.
+- While the tool reports no filament, no spool is active, or the location is
+  ambiguous, usage is held and charged once both are present. Usage held when
+  the printer reboots is kept, and charged as soon as a spool is active, even
+  before the tool reports filament. An unload with no spool active first
+  reports it lost.
 - If the location holds two spools and neither is the loaded one, or more
   than two, the bridge skips the tool and logs a warning until it clears.
 - A Spoolman change with no unload switches immediately only if the printer
