@@ -379,6 +379,10 @@ async def test_own_sync_job_is_not_a_print_start(tmp_path):
     await bridge.poll()  # unconfirmed swap
     printer.job, printer.job_name = 50, "spoolman-sync.gcode"
     await bridge.poll()
+    # The counter moves during the sync job, so only the file-name filter keeps it from
+    # counting as a print start.
+    printer.extruded += 50
+    await bridge.poll()
     assert bridge.tools[0].swap is not None
     printer.job, printer.job_name = 51, "part.bgcode"
     await bridge.poll()
