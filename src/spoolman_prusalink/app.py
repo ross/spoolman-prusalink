@@ -157,6 +157,9 @@ class Bridge:
         default_factory=dict)
     # Dry run: the UUID each spool would be given, reused so the job stays the same.
     _dry_uuids: dict[int, str] = field(default_factory=dict)
+    # Dry run, per tool: the held usage and deleted spool as accounting would have left
+    # them. The saved state keeps the values from before dry run.
+    _dry_held: dict[int, tuple[int, int | None]] = field(default_factory=dict)
 
     @classmethod
     def from_config(cls, config: Config) -> Bridge:
@@ -371,8 +374,12 @@ class Bridge:
 
             before = self.tools.get(tool, ToolState())
             claim, others = claims.get(tool, (None, []))
+            seen = before
+            if dry and tool in self._dry_held:
+                held_mm, deleted_spool = self._dry_held[tool]
+                seen = replace(before, held_mm=held_mm, deleted_spool=deleted_spool)
             result = account(
-                before,
+                seen,
                 reading.boot_id,
                 tool_reading,
                 location_ids,
@@ -380,6 +387,14 @@ class Bridge:
                 matches=matches,
                 claim=claim,
             )
+            if dry:
+                # Dry run changes nothing: usage held before it stays held, and none is
+                # added. Accounting goes on from what it would have left, so a held
+                # charge isn't logged again on every poll.
+                new = result.state
+                self._dry_held[tool] = (new.held_mm, new.deleted_spool)
+                result.state = replace(new, held_mm=before.held_mm,
+                                       deleted_spool=before.deleted_spool)
             # A skipped tool's state changes only to record the counter and any reboot.
             if not result.skipped or tool in self.tools:
                 self.tools[tool] = result.state

@@ -1213,6 +1213,63 @@ async def test_dry_run_holds_nothing_for_a_deleted_spool(tmp_path, caplog):
     await bridge.aclose()
 
 
+def restart(bridge, **cfg):
+    """A new bridge on the same printer, Spoolman and state file."""
+    config = replace(bridge.config, **cfg)
+    return Bridge(config=config, printer=bridge.printer, spoolman=bridge.spoolman,
+                  state=load_state(config.state_file))
+
+
+async def held_live_for_deleted_spool(tmp_path):
+    """Spool 19 is deleted during a live run, which holds 400 mm for the next spool."""
+    bridge, fake, printer = make(tmp_path, [spool(19)])
+    await bridge.poll()
+    printer.extruded = 1500
+    await bridge.poll()
+    del fake.spools[19]
+    for extruded in (1700, 1900):
+        printer.extruded = extruded
+        await bridge.poll()
+    st = load_state(tmp_path / "state.json").tools[0]
+    assert (st.deleted_spool, st.held_mm) == (19, 400)
+    return bridge, fake, printer
+
+
+async def test_dry_run_adds_nothing_to_usage_held_live(tmp_path):
+    bridge, fake, printer = await held_live_for_deleted_spool(tmp_path)
+    bridge = restart(bridge, dry_run=True)
+    for extruded in (2000, 2100):  # 200 mm in dry run.
+        printer.extruded = extruded
+        await bridge.poll()
+    st = load_state(tmp_path / "state.json").tools[0]
+    assert (st.deleted_spool, st.held_mm) == (19, 400)
+
+    bridge = restart(bridge, dry_run=False)
+    fake.spools[20] = spool(20)
+    await bridge.poll()
+    await bridge.poll()
+    assert fake.used == {19: [500.0], 20: [400.0]}
+    await bridge.aclose()
+
+
+async def test_dry_run_keeps_usage_held_live(tmp_path, caplog):
+    bridge, fake, printer = await held_live_for_deleted_spool(tmp_path)
+    bridge = restart(bridge, dry_run=True)
+    caplog.set_level("INFO")
+    fake.spools[20] = spool(20)  # Moved in during dry run.
+    for _ in range(3):
+        await bridge.poll()
+    assert caplog.text.count("WOULD CHARGE spool 20") == 1
+    st = load_state(tmp_path / "state.json").tools[0]
+    assert (st.deleted_spool, st.held_mm) == (19, 400)
+
+    bridge = restart(bridge, dry_run=False)
+    await bridge.poll()
+    await bridge.poll()
+    assert fake.used == {19: [500.0], 20: [400.0]}
+    await bridge.aclose()
+
+
 async def test_404_in_flush_holds_the_charge(tmp_path, caplog):
     bridge, fake, printer = make(tmp_path, [spool(19)])
     caplog.set_level("INFO")
