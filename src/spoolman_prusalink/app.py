@@ -449,7 +449,10 @@ class Bridge:
                 self._check_remaining(active)
             if not result.skipped and material is not None and active is not None:
                 diffs = drift.differences(tool, material, active, self._uuids)
-                edited = self._edited(tool, st, material, active)
+                # With the location emptied, the spool is leaving and won't be rewritten,
+                # so only a real printer difference is worth reporting.
+                edited = (self._edited(tool, st, material, active)
+                          if st.assigned is not None else None)
                 if not diffs and not edited:
                     if st.needs_sync or st.sync_attempts:
                         self.tools[tool] = replace(st, needs_sync=False, sync_attempts=0)

@@ -5,7 +5,9 @@ import math
 from dataclasses import replace
 
 import httpx
+import pytest
 
+from spoolman_prusalink.accounting import UNKNOWN_WRITE
 from spoolman_prusalink.app import Bridge
 from spoolman_prusalink.color import quantize
 from spoolman_prusalink.config import Config
@@ -859,6 +861,37 @@ async def written_state(tmp_path, **cfg):
     await bridge.poll()
     assert len(jobs(printer)) == 1
     return bridge, fake, printer
+
+
+@pytest.mark.parametrize("sync_drift", [False, True])
+@pytest.mark.parametrize("reason", ["drift", "edited", "unknown_write", "needs_sync"])
+async def test_emptied_location_reports_only_real_drift(tmp_path, caplog, reason, sync_drift):
+    bridge, fake, printer = await written_state(tmp_path, sync_drift=sync_drift)
+    caplog.set_level("INFO")
+    fake.spools[20]["location"] = None  # Moved out, with nothing in its place.
+    if reason == "drift":
+        printer.material = {"name": "PETG"}
+    elif reason == "edited":
+        fake.spools[20]["filament"]["color_hex"] = "00ff00"
+    elif reason == "unknown_write":
+        bridge.tools[0] = replace(bridge.tools[0], written=UNKNOWN_WRITE)
+    else:
+        bridge.tools[0] = replace(bridge.tools[0], needs_sync=True)
+    for _ in range(3):
+        await bridge.poll()
+    assert len(jobs(printer)) == 1  # only the original write
+    assert "spool None" not in caplog.text
+    flag = fake.flag(20) or ""
+    if reason in ("drift", "edited"):
+        # A Spoolman edit the printer won't get is a real difference: report the
+        # field, not the edit as a pending write.
+        assert caplog.text.count("printer differs from spool 20") == 1
+        assert "printer filament differs" in flag
+        assert "since the last write" not in caplog.text
+    else:
+        assert "printer differs" not in caplog.text
+        assert "printer filament differs" not in flag
+    await bridge.aclose()
 
 
 async def test_spoolman_color_edit_is_written(tmp_path):
