@@ -1,6 +1,8 @@
 import json
 from dataclasses import fields, replace
 
+import pytest
+
 from spoolman_prusalink.accounting import (
     UNKNOWN_WRITE,
     Charge,
@@ -638,6 +640,124 @@ def test_measured_reboot_then_menu_unload_and_load():
     assert state.swap is None
 
 
+def test_several_color_changes_in_one_print_are_each_an_unload():
+    # P5: two M600 color changes under one job ID. The first is confirmed in Spoolman
+    # during the pause; the second isn't, and stays open for the rest of the print.
+    charges, kinds, state = run(
+        [
+            (BOOT, r(100), loc(7), 42),
+            (BOOT, r(500, unloads=1, at_unload=400), loc(7), 42),  # first M600
+            (BOOT, r(550, unloads=1, at_unload=400), loc(8), 42),  # Spoolman updated
+            (BOOT, r(900, unloads=2, at_unload=800), loc(8), 42),  # second M600
+            (BOOT, r(1000, unloads=2, at_unload=800), loc(8), 42),
+        ]
+    )
+    assert charges == [
+        Charge(7, 300, "before unload"),
+        Charge(7, 100, "extruded"),
+        Charge(8, 100, "usage since unconfirmed swap"),
+        Charge(7, -100, "moved to confirmed swap spool"),
+        Charge(8, 50, "extruded"),
+        Charge(8, 250, "before unload"),
+        Charge(8, 100, "extruded"),
+        Charge(8, 100, "extruded"),
+    ]
+    assert kinds.count(EventKind.UNLOAD) == 2
+    assert kinds.count(EventKind.SWAP_UNCONFIRMED) == 2
+    assert kinds.count(EventKind.SWAP_CONFIRMED) == 1
+    # The same job carrying on isn't a print start.
+    assert EventKind.SWAP_ASSUMED not in kinds
+    assert EventKind.STAGED_AT_PRINT not in kinds
+    assert (state.active, state.swap, state.provisional) == (8, SwapFlag(8, 200), None)
+    assert (state.job_id, state.pending_job) == (42, None)
+
+
+def test_runout_confirmed_after_the_print_ends_moves_usage_since_unload():
+    # P3: the swap opened mid-print stays open past the end of the job.
+    _, kinds, state = run(
+        [
+            (BOOT, r(100), loc(7), 42),
+            (BOOT, r(500, unloads=1, at_unload=400), loc(7), 42),  # runout
+            (BOOT, r(800, unloads=1, at_unload=400), loc(7), 42),
+            (BOOT, r(800, unloads=1, at_unload=400), loc(7), None),  # print ends
+        ]
+    )
+    assert EventKind.SWAP_ASSUMED not in kinds
+    assert state.swap == SwapFlag(7, 400)
+    charges, kinds, state = run([(BOOT, r(800, unloads=1, at_unload=400), loc(9), None)], state)
+    assert charges == [
+        Charge(9, 400, "usage since unconfirmed swap"),
+        Charge(7, -400, "moved to confirmed swap spool"),
+    ]
+    assert EventKind.SWAP_CONFIRMED in kinds
+    assert (state.swap, state.active, state.provisional) == (None, 9, None)
+
+
+def test_runout_never_confirmed_is_assumed_at_the_next_print_start():
+    # P4: the swap opened in job 42 closes at job 43's first extrusion.
+    _, kinds, state = run(
+        [
+            (BOOT, r(100), loc(7), 42),
+            (BOOT, r(500, unloads=1, at_unload=400), loc(7), 42),  # runout
+            (BOOT, r(800, unloads=1, at_unload=400), loc(7), 42),
+            (BOOT, r(800, unloads=1, at_unload=400), loc(7), None),
+            (BOOT, r(800, unloads=1, at_unload=400), loc(7), 43),  # preheat
+        ]
+    )
+    assert EventKind.SWAP_ASSUMED not in kinds
+    assert state.swap == SwapFlag(7, 400)
+    _, kinds, state = run([(BOOT, r(900, unloads=1, at_unload=400), loc(7), 43)], state)
+    assert kinds.count(EventKind.SWAP_ASSUMED) == 1
+    assert (state.swap, state.provisional) == (None, Provisional(7, 500, 43))
+    assert state.job_id == 43
+    # A claim still moves it.
+    res = account(state, BOOT, r(950, unloads=1, at_unload=400), loc(7, 9), 43, claim=9)
+    assert res.charges == [
+        Charge(9, 500, "claimed usage since load"),
+        Charge(7, -500, "moved to claimed spool"),
+        Charge(9, 50, "extruded"),
+    ]
+    assert (res.state.active, res.state.provisional) == (9, None)
+
+
+def test_new_job_id_with_no_idle_poll_between_is_a_print_start():
+    # P9: a failed print restarted, the job ID going 42 -> 43 between two polls.
+    _, kinds, state = run(
+        [
+            (BOOT, r(100), loc(7), 42),
+            (BOOT, r(500, unloads=1, at_unload=400), loc(7), 42),  # runout
+            (BOOT, r(500, unloads=1, at_unload=400), loc(7), 43),  # restarted
+        ]
+    )
+    assert EventKind.SWAP_ASSUMED not in kinds
+    assert (state.job_id, state.pending_job) == (42, 43)
+    _, kinds, state = run([(BOOT, r(600, unloads=1, at_unload=400), loc(7), 43)], state)
+    assert kinds == [EventKind.SWAP_ASSUMED]
+    assert (state.job_id, state.pending_job) == (43, None)
+    assert (state.swap, state.provisional) == (None, Provisional(7, 200, 43))
+
+
+def test_spool_staged_mid_print_waits_for_the_unload():
+    # P10: spool 8 scanned in while job 42 is extruding.
+    charges, kinds, state = run(
+        [
+            (BOOT, r(100), loc(7), None),
+            (BOOT, r(100), loc(7), 42),
+            (BOOT, r(200), loc(7), 42),  # print start
+            (BOOT, r(300), loc(7, 8), 42),  # spool 8 scanned in
+            (BOOT, r(500), loc(7, 8), 42),
+        ]
+    )
+    assert kinds.count(EventKind.SWAP_STAGED) == 1
+    assert EventKind.STAGED_AT_PRINT not in kinds  # The print had already started.
+    assert all(c.spool_id == 7 for c in charges)
+    assert (state.active, state.assigned) == (7, 8)
+    charges, kinds, state = run([(BOOT, r(600, unloads=1, at_unload=550), loc(7, 8), 42)], state)
+    assert charges == [Charge(7, 50, "before unload"), Charge(8, 50, "extruded")]
+    assert EventKind.SWAP_COMMITTED in kinds
+    assert (state.active, state.assigned, state.evict) == (8, 8, (7,))
+
+
 # Holding
 
 
@@ -993,6 +1113,34 @@ def test_staged_spool_takes_held_usage_at_print_start():
     assert state.active == 20
 
 
+@pytest.mark.parametrize(
+    ("reports_uuid", "active", "charges", "held"),
+    [
+        (
+            True,
+            20,
+            [Charge(20, 50, "held after spool 19 was deleted"), Charge(20, 100, "extruded")],
+            0,
+        ),
+        (False, None, [], 150),
+    ],
+)
+def test_correction_by_uuid_after_deletion(reports_uuid, active, charges, held):
+    # S12 with the active spool deleted: spool 20 was already staged, so it's made
+    # active only if the printer reports its UUID.
+    res = account(
+        deleted(ids=(20,), held=50),
+        BOOT,
+        r(300),
+        loc(20),
+        matches=lambda spool_id: reports_uuid and spool_id == 20,
+    )
+    assert (EventKind.CORRECTION in [e.kind for e in res.events]) == reports_uuid
+    assert res.charges == charges
+    assert (res.state.active, res.state.held_mm) == (active, held)
+    assert res.state.deleted_spool == (None if reports_uuid else 19)
+
+
 # Provisional charges and claims
 
 
@@ -1324,3 +1472,109 @@ def test_hold_deleted_drops_the_provisional_charge():
     assert state.provisional is not None and state.since_load == {19: 200}
     state = hold_deleted(state, 19, 30)
     assert (state.provisional, state.since_load, state.held_mm) == (None, {}, 30)
+
+
+def test_staged_spool_flagged_at_every_print_start():
+    # S9: the staged spool is flagged again at the next print.
+    _, kinds, state = run(
+        [
+            (BOOT, r(100), loc(7), None),
+            (BOOT, r(100), loc(7, 8), None),
+            (BOOT, r(100), loc(7, 8), 42),
+            (BOOT, r(200), loc(7, 8), 42),  # first print starts
+            (BOOT, r(300), loc(7, 8), None),
+            (BOOT, r(300), loc(7, 8), 43),
+            (BOOT, r(400), loc(7, 8), 43),  # second print starts
+        ]
+    )
+    assert kinds.count(EventKind.STAGED_AT_PRINT) == 2
+    assert (state.active, state.assigned, state.job_id) == (7, 8, 43)
+    assert state.notice.spool_id == 7
+    assert state.staged_notice == Notice(
+        8,
+        EventKind.STAGED_AT_PRINT,
+        "print started while spool 8 is staged but not loaded; charging spool 7",
+    )
+
+
+def test_claim_in_the_same_poll_as_an_unload_moves_only_later_usage():
+    # Usage since an earlier unload, and before this one, stays on spool 7.
+    charges, _, state = claim_run(
+        [
+            (BOOT, r(100), loc(7), None, None),
+            (BOOT, r(300, unloads=1, at_unload=200), loc(7), None, None),
+            (BOOT, r(600, unloads=2, at_unload=500), loc(7, 9), None, 9),
+        ]
+    )
+    assert charges == [
+        Charge(7, 100, "before unload"),
+        Charge(7, 100, "extruded"),
+        Charge(7, 200, "before unload"),
+        Charge(9, 100, "extruded"),
+    ]
+    assert (state.active, state.evict, state.swap) == (9, (7,), None)
+    assert state.since_load == {9: 100}
+    assert state.needs_sync
+
+
+def test_claim_while_a_job_waits_for_its_first_extrusion():
+    _, _, state = run(
+        [
+            (BOOT, r(100), loc(7), None),
+            (BOOT, r(200, unloads=1, at_unload=100), loc(7), None),
+            (BOOT, r(200, unloads=1, at_unload=100), loc(7), 42),  # preheating
+        ]
+    )
+    assert state.pending_job == 42
+    res = account(state, BOOT, r(200, unloads=1, at_unload=100), loc(7, 9), 42, claim=9)
+    assert res.claimed
+    assert res.charges == [
+        Charge(9, 100, "claimed usage since load"),
+        Charge(7, -100, "moved to claimed spool"),
+    ]
+    assert (res.state.active, res.state.swap, res.state.pending_job) == (9, None, 42)
+    # The print start then has no swap left to assume.
+    _, kinds, state = run([(BOOT, r(260, unloads=1, at_unload=100), loc(9), 42)], res.state)
+    assert EventKind.SWAP_ASSUMED not in kinds
+    assert (state.active, state.job_id, state.provisional) == (9, 42, None)
+
+
+def test_first_claim_after_upgrade_moves_only_usage_since_then():
+    old = {
+        "boot_id": BOOT,
+        "charged": 10,
+        "unload_count": 1,
+        "active": 7,
+        "assigned": 7,
+        "evict": None,
+        "swap": None,
+        "job_id": None,
+    }
+    _, _, state = run([(BOOT, r(60, unloads=1, at_unload=5), loc(7))], ToolState.from_json(old))
+    assert state.since_load == {7: 50}
+    res = account(state, BOOT, r(80, unloads=1, at_unload=5), loc(7, 9), claim=9)
+    assert res.charges == [
+        Charge(9, 50, "claimed usage since load"),
+        Charge(7, -50, "moved to claimed spool"),
+        Charge(9, 20, "extruded"),
+    ]
+
+
+def test_legacy_claim_window_restarts_at_assignment_change():
+    _, _, state = run(
+        [
+            (BOOT, legacy(100), loc(7)),
+            (BOOT, legacy(250), loc(7)),
+            (BOOT, legacy(300), loc(8)),  # 7 -> 8: the window restarts
+            (BOOT, legacy(340), loc(8)),
+        ]
+    )
+    assert state.since_load == {8: 40}
+    res = account(state, BOOT, legacy(360), loc(8, 9), claim=9)
+    assert res.claimed
+    assert res.charges == [
+        Charge(9, 40, "claimed usage since load"),
+        Charge(8, -40, "moved to claimed spool"),
+        Charge(9, 20, "extruded"),
+    ]
+    assert (res.state.active, res.state.evict) == (9, (8,))
