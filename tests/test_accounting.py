@@ -1,4 +1,5 @@
 import json
+from dataclasses import replace
 
 from spoolman_prusalink.accounting import (
     Charge,
@@ -455,6 +456,29 @@ def test_hold_deleted_clears_the_active_spool():
         None, None, 19, 50)
     assert hold_deleted(state, 19, 30).held_mm == 80  # Another rejected charge.
     assert hold_deleted(state, 7, 30) == state  # Not this tool's spool.
+    # A spool in the claim window that's neither active nor deleted is left alone too.
+    windowed = replace(state, since_load={7: 40})
+    assert hold_deleted(windowed, 7, 30) == windowed
+
+
+def test_deletion_drops_the_staged_notice():
+    _, kinds, state = run([
+        (BOOT, r(100), loc(19)),
+        (BOOT, r(200), loc(19, 20)),
+        (BOOT + 1, r(10), loc(19, 20)),  # Reboot with spool 20 staged.
+    ])
+    assert EventKind.STAGED_AT_REBOOT in kinds
+    assert state.staged_notice is not None and state.staged_notice.spool_id == 20
+    state = hold_deleted(state, 19)
+    assert state.staged_notice is None
+    _, kinds, state = run([(BOOT + 1, r(20), loc(20))], state)
+    assert EventKind.STAGED_AT_REBOOT not in kinds and state.staged_notice is None
+
+
+def test_reboot_after_deletion_has_no_staged_notice():
+    _, kinds, state = run([(BOOT + 1, r(10), loc(20))], deleted(ids=(20,)))
+    assert EventKind.STAGED_AT_REBOOT not in kinds
+    assert state.staged_notice is None and state.active is None
 
 
 def test_usage_after_deletion_is_held_through_reboot_and_unload():

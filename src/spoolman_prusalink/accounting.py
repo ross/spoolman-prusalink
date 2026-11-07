@@ -168,7 +168,8 @@ class ToolState:
     held_mm: int = 0
     deleted_spool: int | None = None
     # A notice on the staged spool: a print started, or the printer rebooted, while it
-    # was staged. Cleared when it stops being staged, at an unload, or by a claim.
+    # was staged. Cleared when it stops being staged, at an unload, by a claim, or when
+    # the active spool is deleted.
     staged_notice: Notice | None = None
     # Usage charged to the active spool on the assumption that it was reloaded.
     provisional: Provisional | None = None
@@ -291,6 +292,9 @@ def hold_deleted(state: ToolState, spool_id: int, mm: int = 0, queued: int = 0) 
             notice=notice,
             deleted_spool=spool_id,
             provisional=None,  # It was on the active spool.
+            # It says the deleted spool is still charged; the deleted-spool flag covers
+            # the staged spool from here on.
+            staged_notice=None,
         )
     elif spool_id != state.deleted_spool:
         return state
