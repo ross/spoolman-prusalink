@@ -23,11 +23,12 @@ differ while a swap is in progress:
   the usage since the unload moves to the new spool. The swap closes, assumed to be the
   same spool, when a print starts or at the next unload. If the old spool leaves the
   location first, the swap stays open, even through a print start, and later usage is
-  held: the next spool assigned confirms the swap and takes both, and the old spool
-  coming back leaves the swap open as it was. A print starts at its first extrusion, not
-  when its job appears, so preheat and bed leveling leave time to fix Spoolman, and a job
-  cancelled before extruding changes nothing. The printer's reported filament can't close
-  it: a runout reload keeps the old name, color and UUID whatever was loaded.
+  held: the next spool assigned confirms the swap and takes both. The old spool coming
+  back leaves the swap as it would be had it never left: open, or closed as of a print
+  start in between. A print starts at its first extrusion, not when its job appears, so
+  preheat and bed leveling leave time to fix Spoolman, and a job cancelled before
+  extruding changes nothing. The printer's reported filament can't close it: a runout
+  reload keeps the old name, color and UUID whatever was loaded.
 - A print start that closes an unconfirmed swap leaves the usage on the old spool as a
   *provisional* charge. Later usage on that spool adds to it until the next unload, which
   keeps it where it is, or a claim.
@@ -117,6 +118,9 @@ class SwapFlag:
 
     spool_id: int  # The spool that was still assigned after the unload.
     mm: int = 0  # Usage charged to that spool since the unload.
+    # A print that started while the location was empty, which would have closed the
+    # swap: if the old spool comes back, the swap closes as of that print start.
+    started_job: int | None = None
 
 
 @dataclass(frozen=True)
@@ -204,7 +208,8 @@ class ToolState:
             "evict": list(self.evict),
             "swap": None
             if self.swap is None
-            else {"spool_id": self.swap.spool_id, "mm": self.swap.mm},
+            else {"spool_id": self.swap.spool_id, "mm": self.swap.mm,
+                  "started_job": self.swap.started_job},
             "job_id": self.job_id,
             "pending_job": self.pending_job,
             "pending_at": self.pending_at,
@@ -235,7 +240,9 @@ class ToolState:
             active=data.get("active"),
             assigned=data.get("assigned"),
             evict=_evict_from_json(data.get("evict")),
-            swap=None if swap is None else SwapFlag(int(swap["spool_id"]), int(swap["mm"])),
+            swap=None if swap is None else SwapFlag(
+                int(swap["spool_id"]), int(swap["mm"]), swap.get("started_job"),
+            ),
             job_id=data.get("job_id"),
             pending_job=data.get("pending_job"),
             pending_at=int(data.get("pending_at", 0)),
@@ -591,9 +598,17 @@ def account(
                   f"the {swap.mm} mm since the unload")
             active = None
         elif swap is not None and assigned == swap.spool_id:
-            # The old spool is back: the swap stays open, as if it had never left.
+            # The old spool is back: as if it had never left, the swap stays open, or closes
+            # as of a print start while it was out.
             event(EventKind.ACTIVE_UNASSIGNED, f"spool {assigned} is back in the location")
             active = assigned
+            if swap.started_job is not None:
+                event(EventKind.SWAP_ASSUMED,
+                      f"print {swap.started_job} started with no Spoolman change since the "
+                      f"unload; assuming spool {swap.spool_id} was reloaded and charging it "
+                      "provisionally")
+                provisional = Provisional(swap.spool_id, swap.mm, swap.started_job)
+                swap = None
         elif swap is not None:
             moved = swap.mm
             if moved > 0:
@@ -670,8 +685,10 @@ def account(
                   f"assigned; making it active in place of deleted spool {deleted}")
             active = assigned
         # With the location emptied, no spool is charged to assume: the swap stays open
-        # for the next spool assigned.
-        if swap is not None and active is not None:
+        # for the next spool assigned. The old spool coming back closes it as of now.
+        if swap is not None and active is None and swap.started_job is None:
+            swap = replace(swap, started_job=job_id)
+        elif swap is not None and active is not None:
             event(EventKind.SWAP_ASSUMED,
                   f"print started with no Spoolman change since the unload; assuming "
                   f"spool {swap.spool_id} was reloaded and charging it provisionally")

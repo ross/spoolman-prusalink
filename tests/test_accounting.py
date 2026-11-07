@@ -472,6 +472,27 @@ def test_old_spool_moved_back_keeps_swap_open():
                        Charge(7, -400, "moved to confirmed swap spool")]
 
 
+def test_old_spool_back_after_print_start_closes_swap_as_of_that_start():
+    # Moved back mid-print: the swap closes as it would have had spool 7 never left.
+    _, _, state = run([(*step, None) for step in TWO_STEP])
+    charges, kinds, state = run([
+        (BOOT, r(950, unloads=1, at_unload=600), loc(), 42),
+        (BOOT, r(1000, unloads=1, at_unload=600), loc(), 42),  # print start
+        (BOOT, r(1000, unloads=1, at_unload=600), loc(7), 42),  # spool 7 back
+        (BOOT, r(5000, unloads=1, at_unload=600), loc(7), 42),
+        (BOOT, r(5000, unloads=1, at_unload=600), loc(7), None),
+    ], state)
+    assert charges == [Charge(7, 100, "extruded"), Charge(7, 4000, "extruded")]
+    assumed = [e for e in kinds if e == EventKind.SWAP_ASSUMED]
+    assert len(assumed) == 1
+    assert (state.swap, state.provisional, state.active) == (None, Provisional(7, 4400, 42), 7)
+    # Spoolman first: spool 9 is staged, and nothing moves.
+    charges, kinds, state = run([(BOOT, r(5000, unloads=1, at_unload=600), loc(7, 9))], state)
+    assert charges == []
+    assert EventKind.SWAP_STAGED in kinds
+    assert (state.active, state.assigned) == (7, 9)
+
+
 def test_print_start_with_location_emptied_keeps_swap_open():
     _, _, state = run([(*step, None) for step in TWO_STEP])
     charges, kinds, state = run([
@@ -710,7 +731,7 @@ def test_legacy_assignment_change_switches_after_charging_outgoing():
 def test_state_round_trip():
     s = ToolState(
         boot_id=BOOT, charged=123, unload_count=2, active=7, assigned=8, evict=(5, 6),
-        swap=SwapFlag(7, 40), job_id=42, pending_job=43, pending_at=120,
+        swap=SwapFlag(7, 40, 41), job_id=42, pending_job=43, pending_at=120,
         notice=Notice(7, EventKind.STAGED_AT_PRINT, "staged"),
         needs_sync=True, sync_attempts=2, written="M865 P0 F\"PLA\"",
         held_mm=30, deleted_spool=19,
