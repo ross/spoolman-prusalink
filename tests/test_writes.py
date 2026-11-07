@@ -296,7 +296,7 @@ async def test_queued_charge_survives_restart(tmp_path):
         "http://spoolman", flag_field="bridge_flag", transport=httpx.MockTransport(fake.handle)
     )
     restarted.state = load_state(tmp_path / "state.json")
-    restarted.printer = PrusaLink(
+    restarted.printers[0].client = PrusaLink(
         "http://printer", "k", transport=httpx.MockTransport(printer.handle)
     )
     printer.down = True
