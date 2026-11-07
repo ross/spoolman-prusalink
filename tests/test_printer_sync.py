@@ -42,6 +42,22 @@ def test_spoolman_temps_override_preset_and_alias():
     assert line == 'M865 X R N"TPU" T230 B50 P210 C25 D15 E40 F1 G1 L2'
 
 
+def test_uuid_is_written_in_canonical_form():
+    lines = filament_lines(ToolWrite(0, spool(), "44C406A5-C6F5-4440-BFBA-E8060564B717"))
+    assert lines[1] == 'M865.1 I0 C"44c406a5-c6f5-4440-bfba-e8060564b717"'
+
+
+@pytest.mark.parametrize("value", [
+    '44c406a5-c6f5-4440-bfba-e8060564b717"\nG1 Z-10\n;',
+    "{44c406a5-c6f5-4440-bfba-e8060564b717}",
+    "44c406a5c6f54440bfbae8060564b717",
+    "44c406a5-c6f5-4440-bfba-e8060564b71",
+])
+def test_uuid_that_isnt_canonical_is_refused(value):
+    with pytest.raises(CannotSync, match="isn't a UUID"):
+        filament_lines(ToolWrite(0, spool(), value))
+
+
 def test_uuid_only_on_tool_0():
     assert len(filament_lines(ToolWrite(1, spool(), "u"))) == 1
 

@@ -542,6 +542,20 @@ async def test_pps_loaded_from_the_menu_clears_the_flag(tmp_path, caplog):
     await bridge.aclose()
 
 
+async def test_bad_uuid_in_spoolman_is_flagged_not_written(tmp_path, caplog):
+    bridge, fake, printer = make(tmp_path, [spool(19)], uuid_field="instance_uuid")
+    await bridge.poll()
+    bad = json.dumps('44c406a5-c6f5-4440-bfba-e8060564b717"\nG1 Z-10\n;')
+    fake.spools[20] = spool_x(20, extra={"instance_uuid": bad})
+    printer.unloads, printer.at_unload, printer.material = 1, 1000, {"name": "PLA"}
+    for _ in range(3):
+        await bridge.poll()
+    assert jobs(printer) == []
+    assert "isn't a UUID" in fake.flag(20)
+    assert caplog.text.count("can't write spool 20") == 1
+    await bridge.aclose()
+
+
 async def test_gives_up_and_flags_after_failed_writes(tmp_path):
     bridge, fake, printer = make(tmp_path, [spool(19)])
     printer.run_job = lambda gcode: None  # The job runs but changes nothing.

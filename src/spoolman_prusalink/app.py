@@ -698,11 +698,10 @@ class Bridge:
         return "\n".join(printer_sync.filament_lines(
             printer_sync.ToolWrite(tool, spool, uuid_value)))
 
-    @staticmethod
-    def _cannot_write(tool: int, spool: Spool) -> str | None:
+    def _cannot_write(self, tool: int, spool: Spool) -> str | None:
         """Return why `spool` can't be written to the printer, or None if it can."""
         try:
-            printer_sync.filament_lines(printer_sync.ToolWrite(tool, spool, None))
+            self._write_lines(tool, spool, spool.instance_uuid)
         except printer_sync.CannotSync as e:
             return str(e)
         return None

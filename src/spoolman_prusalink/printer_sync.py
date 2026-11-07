@@ -8,6 +8,7 @@ filament. See `src/marlin_stubs/M865.cpp` in the firmware.
 from __future__ import annotations
 
 import re
+import uuid
 from dataclasses import dataclass
 
 from .color import same_color
@@ -238,8 +239,24 @@ def filament_lines(write: ToolWrite) -> list[str]:
     parts.append(f"L{tool}")
     lines = [" ".join(parts)]
     if tool == 0 and write.uuid:
-        lines.append(f'M865.1 I0 C"{write.uuid}"')
+        lines.append(f'M865.1 I0 C"{_uuid(spool, write.uuid)}"')
     return lines
+
+
+def _uuid(spool: Spool, value: str) -> str:
+    """Return `value` as a lowercase UUID, or raise CannotSync if it isn't one.
+
+    Only the plain hyphenated form passes. Drift compares Spoolman's value with the
+    printer's ignoring only case, so a value in another form would never match.
+    """
+    try:
+        canonical = str(uuid.UUID(value))
+    except ValueError:
+        canonical = None
+    if canonical != value.lower():
+        raise CannotSync(f"spool {spool.id}'s instance UUID {value!r} isn't a UUID; fix or "
+                         "clear it in Spoolman")
+    return canonical
 
 
 def printer_matches_write(material: Material, written: str, uuids: bool) -> bool:
