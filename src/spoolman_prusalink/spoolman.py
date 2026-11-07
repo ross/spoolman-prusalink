@@ -71,6 +71,7 @@ def parse_spool(
         bed_temp=filament.get("settings_bed_temp"),
         remaining_weight=None if net is None or used is None else net - used,
         net_weight=net,
+        used_weight=used,
         archived=bool(data.get("archived", False)),
         claim=_extra_true(data.get("extra"), claim_field),
         last_used=_timestamp(data.get("last_used")),
@@ -113,13 +114,21 @@ class Spoolman:
         return parse_spool(resp.json(), self._uuid_field, self._flag_field,
                            self._claim_field)
 
-    async def use_length(self, spool_id: int, mm: float) -> None:
-        """Charge (or, with a negative value, refund) filament length."""
+    async def use_length(self, spool_id: int, mm: float) -> float | None:
+        """Charge (or, with a negative value, refund) filament length.
+
+        Returns the spool's used weight after the charge, if Spoolman reports one.
+        """
         # A generous timeout: a charge Spoolman applies after a timeout is sent again.
         resp = await self._client.put(
             f"/api/v1/spool/{spool_id}/use", json={"use_length": mm}, timeout=30.0
         )
         resp.raise_for_status()
+        try:
+            used = resp.json().get("used_weight")
+        except (ValueError, AttributeError):
+            return None
+        return float(used) if isinstance(used, int | float) else None
 
     async def ensure_field(self, key: str, name: str, field_type: str = "text") -> None:
         """Register a spool extra field of `field_type`, unless it already exists."""

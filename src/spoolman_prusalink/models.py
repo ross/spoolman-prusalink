@@ -52,6 +52,7 @@ class Spool:
     bed_temp: float | None = None
     remaining_weight: float | None = None  # Grams, per Spoolman; None without a weight.
     net_weight: float | None = None  # Grams of filament when full: the spool's or filament's.
+    used_weight: float | None = None  # Grams used, per Spoolman.
     archived: bool = False
     claim: bool = False  # The claim box is ticked.
     last_used: datetime | None = None

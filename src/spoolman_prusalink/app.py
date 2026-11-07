@@ -27,7 +27,7 @@ from .config import Config
 from .models import FilamentReading, Spool
 from .prusalink import BUSY_STATES, IDLE_STATES, NoFilamentEndpoint, PrinterStatus, PrusaLink
 from .spoolman import Spoolman
-from .state import State, append_ledger, load_state, save_state
+from .state import Runout, State, append_ledger, load_state, save_state
 
 log = logging.getLogger("spoolman_prusalink")
 
@@ -114,6 +114,8 @@ class Once:
 # A mid-print unload with more than this fraction of the net weight left in Spoolman
 # gets a flag.
 RUNOUT_LEFT = 0.05
+# Grams. Spoolman's weights are floats, so a smaller difference isn't an edit.
+WEIGHT_EPSILON = 0.01
 
 # Sync jobs per swap before the bridge gives up and flags the spool.
 MAX_SYNC_ATTEMPTS = 2
@@ -455,8 +457,9 @@ class Bridge:
                                             edited=edited is not None)
             self._notes(tool, notes)
 
-        for spool_id, text in self.state.runouts.items():
-            flags.setdefault(spool_id, []).append(text)
+        self._check_runout_edits(by_id)
+        for spool_id, runout in self.state.runouts.items():
+            flags.setdefault(spool_id, []).append(runout.text)
         self._flags = {spool_id: " | ".join(texts) for spool_id, texts in flags.items()}
         if dry:
             append_ledger(self.config.ledger_file, events + charges)
@@ -469,8 +472,9 @@ class Bridge:
     def _check_runout(self, location: str, spool: Spool | None) -> None:
         """Flag a spool that unloaded mid-print with more than RUNOUT_LEFT remaining.
 
-        That usually means an earlier swap charged the wrong spool. A planned color change
-        unloads mid-print too, so the flag allows for that.
+        That usually means an earlier swap charged the wrong spool. A jam or tangle that
+        trips the filament sensor, and a planned color change, unload mid-print too, so the
+        flag allows for them.
         """
         if spool is None or not spool.net_weight or spool.remaining_weight is None:
             return
@@ -478,10 +482,32 @@ class Bridge:
             return
         text = (f"{location}: unloaded mid-print with {spool.remaining_weight:.0f} g left in "
                 "Spoolman. If it ran out, its usage is probably on another spool: check "
-                "recent swaps. Ignore this after a planned color change.")
+                "recent swaps, then correct this spool's weight, which clears this. The "
+                "filament may also have jammed or tangled. Ignore this after a planned "
+                "color change.")
         log.warning("[%s] spool %d unloaded mid-print with %.0f g left in Spoolman",
                     location, spool.id, spool.remaining_weight)
-        self.state.runouts[spool.id] = text
+        self.state.runouts[spool.id] = Runout(text, spool.net_weight, spool.used_weight)
+
+    def _check_runout_edits(self, by_id: dict[int, Spool]) -> None:
+        """Clear runout flags on spools whose weight the user edited in Spoolman.
+
+        A corrected weight answers the flag. A charge whose response was lost also looks
+        like an edit, which clears the flag early; that's rare and costs only the flag.
+        """
+        for spool_id, runout in list(self.state.runouts.items()):
+            spool = by_id.get(spool_id)
+            if spool is None:
+                continue
+            if runout.net is None or runout.used is None:
+                runout.net, runout.used = spool.net_weight, spool.used_weight
+                continue
+            if (spool.net_weight is not None and spool.used_weight is not None
+                    and (abs(spool.net_weight - runout.net) > WEIGHT_EPSILON
+                         or abs(spool.used_weight - runout.used) > WEIGHT_EPSILON)):
+                log.info("spool %d's weight was edited in Spoolman; clearing its runout flag",
+                         spool_id)
+                del self.state.runouts[spool_id]
 
     def _check_remaining(self, spool: Spool) -> None:
         """Log once when a loaded spool's remaining weight in Spoolman goes below 0."""
@@ -669,8 +695,12 @@ class Bridge:
         while outbox:
             rec = outbox[0]
             try:
-                await self.spoolman.use_length(rec["spool_id"], rec["use_length"])
+                used = await self.spoolman.use_length(rec["spool_id"], rec["use_length"])
                 rec = {**rec, "applied": _now()}
+                runout = self.state.runouts.get(rec["spool_id"])
+                if runout is not None:
+                    # Follow our own charges, so only a user's edit reads as a change.
+                    runout.used = used
             except httpx.HTTPStatusError as e:
                 code = e.response.status_code
                 if code >= 500:

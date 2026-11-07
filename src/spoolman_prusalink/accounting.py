@@ -258,7 +258,7 @@ class Result:
     skipped: bool = False  # True when the assignment was ambiguous and nothing changed.
     claimed: bool = False  # True when the claim passed in was handled.
     # The spool that was in the tool when it unloaded during a started print: a runout,
-    # or a planned color change, which looks the same.
+    # a jam or tangle, or a planned color change, which all look the same.
     runout: int | None = None
 
 

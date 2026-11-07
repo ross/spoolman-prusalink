@@ -11,9 +11,10 @@ from spoolman_prusalink.config import Config
 from spoolman_prusalink.printer_sync import COREONEL_PREAMBLE
 from spoolman_prusalink.prusalink import PrusaLink
 from spoolman_prusalink.spoolman import Spoolman
-from spoolman_prusalink.state import load_state
+from spoolman_prusalink.state import Runout, load_state
 
 LOC = "Core One L+"
+GRAMS_PER_MM = 0.003  # Roughly 1.75 mm PLA.
 
 
 class FakeSpoolman:
@@ -64,7 +65,10 @@ class FakeSpoolman:
             mm = json.loads(request.content)["use_length"]
             self.used.setdefault(spool_id, []).append(mm)
             self.writes.append(("use", spool_id, mm))
-            return httpx.Response(200, json=self.spools[spool_id])
+            data = self.spools[spool_id]
+            if data.get("used_weight") is not None:
+                data["used_weight"] += mm * GRAMS_PER_MM
+            return httpx.Response(200, json=data)
         if path.startswith("/api/v1/spool/") and method == "PATCH":
             if self.fail_patch:
                 return httpx.Response(self.fail_patch, text="oops")
@@ -883,10 +887,50 @@ async def runout_mid_print(tmp_path, remaining):
 
 async def test_runout_with_plenty_left_is_flagged(tmp_path):
     bridge, fake, printer = await runout_mid_print(tmp_path, remaining=400.0)
-    assert "unloaded mid-print with 400 g left" in fake.flag(19)
+    assert "unloaded mid-print with 398 g left" in fake.flag(19)  # 400 g less 1500 mm
     await bridge.poll()  # the same spool stays active: the flag stays
     assert "unloaded mid-print" in fake.flag(19)
     assert 19 in load_state(tmp_path / "state.json").runouts
+    await bridge.aclose()
+
+
+async def test_runout_flag_survives_the_bridges_own_charges(tmp_path):
+    bridge, fake, printer = await runout_mid_print(tmp_path, remaining=400.0)
+    for _ in range(3):  # Same spool reloaded; printing goes on.
+        printer.extruded += 500
+        await bridge.poll()
+    assert fake.used[19][-1] > 0
+    assert "unloaded mid-print" in fake.flag(19)
+    await bridge.aclose()
+
+
+async def test_runout_flag_clears_when_weight_is_edited(tmp_path, caplog):
+    bridge, fake, printer = await runout_mid_print(tmp_path, remaining=400.0)
+    caplog.set_level("INFO")
+    fake.spools[19]["used_weight"] = 990.0  # The user corrects it: 10 g left.
+    await bridge.poll()
+    assert fake.flag(19) is None or "mid-print" not in fake.flag(19)
+    assert 19 not in load_state(tmp_path / "state.json").runouts
+    assert caplog.text.count("weight was edited in Spoolman") == 1
+    await bridge.aclose()
+
+
+async def test_runout_flag_clears_when_initial_weight_is_edited(tmp_path):
+    bridge, fake, printer = await runout_mid_print(tmp_path, remaining=400.0)
+    fake.spools[19]["initial_weight"] = 700.0
+    await bridge.poll()
+    assert 19 not in load_state(tmp_path / "state.json").runouts
+    await bridge.aclose()
+
+
+async def test_runout_flag_from_older_state_learns_the_weights(tmp_path):
+    bridge, fake, printer = await runout_mid_print(tmp_path, remaining=400.0)
+    bridge.state.runouts[19] = Runout(bridge.state.runouts[19].text)  # As loaded from v1.
+    await bridge.poll()
+    assert 19 in bridge.state.runouts  # Learns the weights, doesn't read it as an edit.
+    fake.spools[19]["used_weight"] = 990.0
+    await bridge.poll()
+    assert 19 not in bridge.state.runouts
     await bridge.aclose()
 
 

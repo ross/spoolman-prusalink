@@ -178,8 +178,9 @@ If the active spool is deleted in Spoolman, found either from Spoolman's
 spool list or from a 404 on a charge, the tool is left with no active spool.
 The rejected charge, any usage since an unconfirmed swap's unload, and later
 usage are held, and charged to the next spool that becomes active in the
-tool, with the reason "held after spool N was deleted". An archived active spool keeps being charged until the next
-unload.
+tool, with the reason "held after spool N was deleted". Charges accepted
+before the deletion, including a provisional one, stay where they are. An
+archived active spool keeps being charged until the next unload.
 
 A charge that Spoolman applied but whose response was lost is sent again, so
 it can be counted twice. Every other failure delays charges rather than
@@ -197,10 +198,10 @@ the bridge creates on first use:
   it stops being staged. A reboot while a spool is staged also flags it.
 - A claimed spool that isn't in a tool's location.
 - An unload during a print while Spoolman shows more than 5% of the spool's
-  net weight left, until the spool next becomes active in a tool. Reloading
-  the same spool keeps the flag. That usually means an
-  earlier swap charged the wrong spool, though a planned color change looks
-  the same. A loaded spool going below 0 g remaining is only logged, once:
+  net weight left. That usually means an earlier swap charged the wrong
+  spool, though a jam or tangle, or a planned color change, looks the same.
+  Correcting the spool's weight in Spoolman clears the flag, as does another
+  spool becoming active and then this one. Reloading the same spool keeps it. A loaded spool going below 0 g remaining is only logged, once:
   spool weights are inexact.
 - Usage held because the active spool was deleted, on the spool staged in
   the location, until it becomes active at the next unload or print start.

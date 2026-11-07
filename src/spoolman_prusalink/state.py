@@ -14,6 +14,29 @@ STATE_VERSION = 2
 
 
 @dataclass
+class Runout:
+    """A runout flag, and the spool's weights in Spoolman as the bridge last knew them.
+
+    `net` and `used` start as the weights when the flag was set, and `used` follows the
+    bridge's own charges. Any other change to either is the user editing the weight,
+    which answers the flag. None means not known yet, as for state from older versions.
+    """
+
+    text: str
+    net: float | None = None
+    used: float | None = None
+
+    def to_json(self) -> dict:
+        return {"text": self.text, "net": self.net, "used": self.used}
+
+    @classmethod
+    def from_json(cls, data: dict | str) -> Runout:
+        if isinstance(data, str):  # Before the weights were kept.
+            return cls(data)
+        return cls(str(data["text"]), data.get("net"), data.get("used"))
+
+
+@dataclass
 class State:
     tools: dict[int, ToolState] = field(default_factory=dict)
     # Charges computed but not yet accepted by Spoolman, oldest first. Each is a ledger
@@ -25,8 +48,9 @@ class State:
     # Flag texts already shown on the printer with M117, so each is shown once.
     noticed: list[str] = field(default_factory=list)
     # Flags for spools that ran out mid-print while Spoolman showed plenty left, by
-    # spool ID. Each clears when its spool next becomes active.
-    runouts: dict[int, str] = field(default_factory=dict)
+    # spool ID. Each clears when another spool becomes active and then this one does, or
+    # when the user edits the spool's weight in Spoolman.
+    runouts: dict[int, Runout] = field(default_factory=dict)
     # Spools whose claim the bridge has handled while the box still shows ticked, so a
     # claim is handled once even if clearing the box fails, or in dry-run mode.
     claimed: list[int] = field(default_factory=list)
@@ -43,7 +67,7 @@ def load_state(path: Path) -> State:
         outbox=list(data.get("outbox", [])),
         flagged=[int(i) for i in data.get("flagged", [])],
         noticed=list(data.get("noticed", [])),
-        runouts={int(k): str(v) for k, v in data.get("runouts", {}).items()},
+        runouts={int(k): Runout.from_json(v) for k, v in data.get("runouts", {}).items()},
         claimed=[int(i) for i in data.get("claimed", [])],
     )
 
@@ -60,7 +84,7 @@ def save_state(path: Path, state: State) -> bool:
         "outbox": state.outbox,
         "flagged": state.flagged,
         "noticed": state.noticed,
-        "runouts": {str(k): v for k, v in sorted(state.runouts.items())},
+        "runouts": {str(k): v.to_json() for k, v in sorted(state.runouts.items())},
         "claimed": state.claimed,
     }
     text = json.dumps(payload, indent=2)
