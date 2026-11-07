@@ -18,8 +18,9 @@ charges everything printed since then, including during the dry run, as it
 would after an outage. Turning dry run on and off loses no usage, except
 that, as after an outage, a printer restart in between drops the usage
 before the restart. Several spool changes during a dry run also count as
-one unload when the bridge goes live (S14 in `docs/scenarios.md`), so usage
-from the spools in between goes to the active spool.
+one unload when the bridge goes live (S14 in `docs/scenarios.md`): usage up
+to the last unload goes to the spool that was active at the last live run,
+and only later usage goes to the spool loaded now.
 
 ## Requirements
 
@@ -328,8 +329,10 @@ The `/data` volume holds two files:
 - `ledger.jsonl` stores one JSON object per line for every charge, and every
   event, such as a reboot or swap. Every record has `dry_run`. A charge also
   has, when it was sent, `applied` (the time Spoolman accepted it) or
-  `failed` (the HTTP status that rejected it). Dry run saves no state, so
-  after it the next run records the same events and charges again: a live
-  run as real ones, and a restarted dry run as dry-run ones. To total the
-  charges, leave out records with `"dry_run": true`. Compare the live charges
-  against the slicer's `filament used [mm]` to validate the counts.
+  `failed` (the HTTP status that rejected it; a charge held for a deleted
+  spool also has `held` and is charged again later as part of a new charge).
+  Dry run saves no state, so the run after it charges the same usage again
+  from the last live state, with its own events and charges, which can
+  differ from the dry run's. To total what Spoolman received, add up
+  `use_length` over records with `applied`. Compare that against the
+  slicer's `filament used [mm]` to validate the counts.
