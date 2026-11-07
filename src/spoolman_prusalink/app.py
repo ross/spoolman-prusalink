@@ -730,8 +730,15 @@ class Bridge:
         outage delays charges instead of dropping them. A 404 for the tool's active (or
         already deleted) spool means it was deleted: the charge is held for the tool's
         next spool. Any other 4xx drops the charge with an error so it can't block the rest.
+
+        Dry run sends nothing: charges queued by a live run stay queued until it's off.
         """
         outbox = self.state.outbox
+        if self.config.dry_run and outbox:
+            self._problems.fail("dry-run outbox", len(outbox),
+                                "%d queued charge(s) held until dry run is off", len(outbox))
+            return True
+        self._problems.clear("dry-run outbox")
         sent = 0
         while outbox:
             rec = outbox[0]

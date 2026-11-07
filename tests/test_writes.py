@@ -771,6 +771,29 @@ async def test_spoolman_read_problems_logged_once(tmp_path, caplog):
     await bridge.aclose()
 
 
+async def test_dry_run_holds_queued_charges(tmp_path, caplog):
+    bridge, fake, printer = make(tmp_path, [spool(19)])
+    await bridge.poll()
+    printer.extruded = 1500
+    fake.fail_use = [503]
+    await bridge.poll()
+    assert len(bridge.state.outbox) == 1
+
+    # Restarted in dry run: the queued charge is neither sent nor dropped.
+    bridge.config = replace(bridge.config, dry_run=True)
+    caplog.set_level("INFO")
+    for _ in range(3):
+        await bridge.poll()
+    assert fake.used == {}
+    assert len(load_state(tmp_path / "state.json").outbox) == 1
+    assert caplog.text.count("1 queued charge(s) held until dry run is off") == 1
+
+    bridge.config = replace(bridge.config, dry_run=False)
+    await bridge.poll()
+    assert fake.used == {19: [500.0]} and bridge.state.outbox == []
+    await bridge.aclose()
+
+
 async def test_charge_failures_logged_once(tmp_path, caplog):
     bridge, fake, printer = make(tmp_path, [spool(19)])
     caplog.set_level("INFO")
