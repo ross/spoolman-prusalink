@@ -70,6 +70,22 @@ def test_parse_spool_decodes_uuid_extra():
     assert parse_spool(spool_json(3, ""), "instance_uuid").location is None
 
 
+def test_parse_spool_claim_and_last_used():
+    data = spool_json(3, "Core One L+")
+    assert parse_spool(data, claim_field="bridge_claim").claim is False
+    assert parse_spool(data).last_used is None
+    data["extra"]["bridge_claim"] = "true"
+    data["last_used"] = "2026-11-07T01:47:16Z"
+    s = parse_spool(data, claim_field="bridge_claim")
+    assert s.claim is True
+    assert s.last_used.isoformat() == "2026-11-07T01:47:16+00:00"
+    assert parse_spool(data).claim is False  # Claims off.
+    data["extra"]["bridge_claim"] = "false"
+    data["last_used"] = "2026-11-07T01:47:16"  # No zone: read as UTC.
+    s = parse_spool(data, claim_field="bridge_claim")
+    assert s.claim is False and s.last_used.utcoffset().total_seconds() == 0
+
+
 def make_config(tmp_path, **kw):
     return Config(
         printer_url="http://printer", printer_api_key="k", spoolman_url="http://spoolman",
@@ -225,6 +241,14 @@ def test_config_load(tmp_path):
         load(p, env={})
 
     assert cfg.flag_field == "bridge_flag"
+    assert cfg.claim_field == "bridge_claim"
+    base = p.read_text()
+    p.write_text(base + "[bridge]\nclaim_field = \"bridge_flag\"\n")
+    with pytest.raises(ConfigError, match="must differ"):
+        load(p, env={"PRUSALINK_API_KEY": "secret"})
+    p.write_text(base + "[bridge]\nclaim_field = \"\"\n")
+    assert load(p, env={"PRUSALINK_API_KEY": "secret"}).claim_field is None
+    p.write_text(base)
     p.write_text(p.read_text() + "[bridge]\ndry_run = false\nflag_field = \"Bad Key\"\n")
     with pytest.raises(ConfigError, match="flag_field"):
         load(p, env={"PRUSALINK_API_KEY": "secret"})

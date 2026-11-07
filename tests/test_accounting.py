@@ -1,6 +1,10 @@
+import json
+
 from spoolman_prusalink.accounting import (
     Charge,
     EventKind,
+    Notice,
+    Provisional,
     SwapFlag,
     ToolState,
     account,
@@ -491,3 +495,226 @@ def test_staged_spool_takes_held_usage_at_print_start():
     assert charges == [Charge(20, 120, "held after spool 19 was deleted"),
                        Charge(20, 20, "extruded")]
     assert state.active == 20
+# Provisional charges and claims
+
+
+def claim_run(steps, state=None):
+    """Like run(), with (boot, reading, location_ids, job_id, claim) steps."""
+    state = state or ToolState()
+    charges, kinds = [], []
+    for boot, reading, ids, job, claim in steps:
+        res = account(state, boot, reading, ids, job, claim=claim)
+        charges += res.charges
+        kinds += [e.kind for e in res.events]
+        state = res.state
+    return charges, kinds, state
+
+
+def test_print_start_records_provisional_charge_that_grows_until_unload():
+    charges, kinds, state = run([
+        (BOOT, r(100), loc(7), None),
+        (BOOT, r(216, unloads=1, at_unload=100), loc(7), None),  # 116 mm load purge
+        (BOOT, r(216, unloads=1, at_unload=100), loc(7), 42),
+        (BOOT, r(300, unloads=1, at_unload=100), loc(7), 42),  # first extrusion
+    ])
+    assert EventKind.SWAP_ASSUMED in kinds
+    assert state.swap is None and state.notice is None
+    assert state.provisional == Provisional(7, 200, 42)
+
+    _, _, state = run([
+        (BOOT, r(500, unloads=1, at_unload=100), loc(7), 42),
+        (BOOT, r(500, unloads=1, at_unload=100), loc(7), None),
+        (BOOT, r(600, unloads=1, at_unload=100), loc(7), 43),  # next print, no unload
+        (BOOT, r(700, unloads=1, at_unload=100), loc(7), 43),
+    ], state)
+    assert state.provisional == Provisional(7, 600, 42)
+
+    charges, kinds, state = run([(BOOT, r(750, unloads=2, at_unload=720), loc(7), None)],
+                                state)
+    assert EventKind.PROVISIONAL_KEPT in kinds
+    assert state.provisional is None
+    assert all(c.mm > 0 and c.spool_id == 7 for c in charges)
+
+
+def test_claim_on_staged_spool_moves_usage_since_unload():
+    # S5: a different spool is loaded with no Spoolman change, and a print runs.
+    _, _, state = run([
+        (BOOT, r(100), loc(7), None),
+        (BOOT, r(500, unloads=1, at_unload=400), loc(7), None),  # 300 before unload
+        (BOOT, r(500, unloads=1, at_unload=400), loc(7), 42),
+        (BOOT, r(900, unloads=1, at_unload=400), loc(7), 42),
+    ])
+    assert state.provisional == Provisional(7, 500, 42)
+    assert state.since_load == {7: 500}
+
+    # The user moves spool 9 into the location (staged) and claims it.
+    _, kinds, state = run([(BOOT, r(950, unloads=1, at_unload=400), loc(7, 9), 42)], state)
+    assert EventKind.SWAP_STAGED in kinds
+    res = account(state, BOOT, r(1000, unloads=1, at_unload=400), loc(7, 9), 42, claim=9)
+    assert res.claimed
+    assert res.charges == [
+        Charge(9, 550, "claimed usage since load"),
+        Charge(7, -550, "moved to claimed spool"),
+        Charge(9, 50, "extruded"),
+    ]
+    assert EventKind.CLAIMED in [e.kind for e in res.events]
+    s = res.state
+    assert (s.active, s.assigned, s.evict) == (9, 9, 7)
+    assert (s.provisional, s.swap, s.staged_notice) == (None, None, None)
+    assert s.needs_sync and s.sync_attempts == 0
+    assert s.since_load == {7: 0, 9: 600}
+
+
+def test_claim_moves_only_usage_since_reboot():
+    # A spool staged across a reboot: the unload may have been lost with the reboot.
+    charges, kinds, state = claim_run([
+        (BOOT, r(100), loc(7), None, None),
+        (BOOT, r(300), loc(7, 9), None, None),  # 200 to 7, then 9 staged
+        (222, r(40), loc(7, 9), None, None),  # reboot
+        (222, r(90), loc(7, 9), None, 9),
+    ])
+    assert EventKind.STAGED_AT_REBOOT in kinds
+    assert charges[-3:] == [
+        Charge(9, 40, "claimed usage since load"),
+        Charge(7, -40, "moved to claimed spool"),
+        Charge(9, 50, "extruded"),
+    ]
+    assert (state.active, state.evict, state.staged_notice) == (9, 7, None)
+
+
+def test_claim_moves_usage_from_every_spool_since_load():
+    _, _, state = run([
+        (BOOT, r(100), loc(7)),
+        (BOOT, r(150, unloads=1, at_unload=100), loc(7)),  # 50 to 7 after the unload
+        (BOOT, r(150, unloads=1, at_unload=100), loc(7, 8)),  # confirms: 50 moves to 8
+        (BOOT, r(180, unloads=1, at_unload=100), loc(8)),
+    ])
+    assert state.since_load == {7: 0, 8: 80}
+    res = account(state, BOOT, r(180, unloads=1, at_unload=100), loc(8, 9), None, claim=9)
+    assert res.charges == [
+        Charge(9, 80, "claimed usage since load"),
+        Charge(8, -80, "moved to claimed spool"),
+    ]
+
+
+def test_later_claim_moves_usage_on():
+    _, _, state = claim_run([
+        (BOOT, r(100), loc(7), None, None),
+        (BOOT, r(200), loc(7, 8), None, 8),
+        (BOOT, r(260), loc(8, 9), None, 9),
+    ])
+    assert state.active == 9
+    assert state.since_load == {8: 0, 9: 160}
+
+
+def test_claim_on_active_spool_confirms_and_closes_provisional():
+    _, _, state = run([
+        (BOOT, r(100), loc(7), None),
+        (BOOT, r(200, unloads=1, at_unload=100), loc(7), None),
+        (BOOT, r(200, unloads=1, at_unload=100), loc(7), 42),
+        (BOOT, r(300, unloads=1, at_unload=100), loc(7), 42),
+    ])
+    assert state.provisional is not None
+    res = account(state, BOOT, r(320, unloads=1, at_unload=100), loc(7), 42, claim=7)
+    assert res.claimed
+    assert res.charges == [Charge(7, 20, "extruded")]
+    assert [e.kind for e in res.events] == [EventKind.CLAIM_CONFIRMED]
+    assert res.state.provisional is None and res.state.active == 7
+
+
+def test_claim_after_unload_moves_nothing_but_switches():
+    _, _, state = run([
+        (BOOT, r(100), loc(7)),
+        (BOOT, r(200, material=None, unloads=1, at_unload=200), loc(7)),
+    ])
+    assert state.swap == SwapFlag(7, 0)
+    res = account(state, BOOT, r(200, material=None, unloads=1, at_unload=200), loc(7, 9),
+                  claim=9)
+    assert res.charges == []
+    assert (res.state.active, res.state.evict, res.state.swap) == (9, 7, None)
+    assert res.state.needs_sync
+
+
+def test_claim_waits_while_location_is_ambiguous():
+    res = account(ToolState(BOOT, 100, 0, 7, 7), BOOT, r(200), loc(8, 9), claim=9)
+    assert res.skipped and not res.claimed
+
+
+def test_staged_spool_flagged_at_print_start_and_cleared_when_loaded():
+    _, kinds, state = run([
+        (BOOT, r(100), loc(7), None),
+        (BOOT, r(100), loc(7, 8), None),
+        (BOOT, r(100), loc(7, 8), 42),
+        (BOOT, r(200), loc(7, 8), 42),
+    ])
+    assert EventKind.STAGED_AT_PRINT in kinds
+    assert state.notice.spool_id == 7
+    assert state.staged_notice.spool_id == 8
+    assert state.staged_notice.kind == EventKind.STAGED_AT_PRINT
+    _, _, state = run([(BOOT, r(250, unloads=1, at_unload=220), loc(7, 8), None)], state)
+    assert state.active == 8 and state.staged_notice is None
+
+
+def test_staged_spool_flagged_after_reboot_and_cleared_when_unstaged():
+    _, kinds, state = run([
+        (BOOT, r(100), loc(7)),
+        (BOOT, r(100), loc(7, 8)),
+        (222, r(0), loc(7, 8)),
+    ])
+    assert EventKind.STAGED_AT_REBOOT in kinds
+    assert state.staged_notice.spool_id == 8
+    _, _, state = run([(222, r(0), loc(7))], state)
+    assert state.staged_notice is None
+
+
+def test_reboot_without_staging_flags_nothing():
+    _, kinds, state = run([(BOOT, r(100), loc(7)), (222, r(0), loc(7))])
+    assert EventKind.STAGED_AT_REBOOT not in kinds
+    assert state.staged_notice is None
+
+
+def test_state_round_trip_with_claim_fields():
+    s = ToolState(
+        BOOT, 123, 2, 7, 8, 5, None, 42,
+        staged_notice=Notice(8, EventKind.STAGED_AT_REBOOT, "staged"),
+        provisional=Provisional(7, 400, 42),
+        since_load={7: 400, 9: -3},
+    )
+    assert ToolState.from_json(json.loads(json.dumps(s.to_json()))) == s
+
+
+def test_state_from_before_claims_loads():
+    old = {"boot_id": BOOT, "charged": 10, "unload_count": 1, "active": 7, "assigned": 7,
+           "evict": None, "swap": None, "job_id": None,
+           "notice": {"spool_id": 7, "kind": "swap_assumed", "message": "assumed"}}
+    s = ToolState.from_json(old)
+    assert (s.provisional, s.staged_notice, s.since_load) == (None, None, {})
+    assert s.notice == Notice(7, EventKind.SWAP_ASSUMED, "assumed")
+
+
+def test_claim_takes_usage_held_for_a_deleted_spool():
+    state = deleted(ids=(20,))
+    assert state.since_load == {}  # The deleted spool's charges aren't moved.
+    _, _, state = run([(BOOT, r(300), loc(20))], state)  # 20 staged: usage held
+    assert (state.active, state.held_mm) == (None, 100)
+    res = account(state, BOOT, r(350), loc(20), claim=20)
+    assert res.claimed
+    assert res.charges == [Charge(20, 100, "held after spool 19 was deleted"),
+                           Charge(20, 50, "extruded")]
+    kinds = [e.kind for e in res.events]
+    assert EventKind.CLAIMED in kinds and EventKind.HELD_CHARGED in kinds
+    s = res.state
+    assert (s.active, s.held_mm, s.deleted_spool, s.needs_sync) == (20, 0, None, True)
+    assert s.since_load == {20: 150}
+
+
+def test_hold_deleted_drops_the_provisional_charge():
+    _, _, state = run([
+        (BOOT, r(100), loc(19), None),
+        (BOOT, r(200, unloads=1, at_unload=100), loc(19), None),
+        (BOOT, r(200, unloads=1, at_unload=100), loc(19), 42),
+        (BOOT, r(300, unloads=1, at_unload=100), loc(19), 42),
+    ])
+    assert state.provisional is not None and state.since_load == {19: 200}
+    state = hold_deleted(state, 19, 30)
+    assert (state.provisional, state.since_load, state.held_mm) == (None, {}, 30)

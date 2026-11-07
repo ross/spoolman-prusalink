@@ -110,7 +110,9 @@ If you swap the filament first, the bridge flags an unconfirmed swap and keeps
 charging the assigned spool. Move the new spool into the location before the
 next print starts, and the usage since the unload moves to it. If a print
 starts first, the bridge assumes you reloaded the same spool, for example
-after clearing a jam, and records that assumption in the ledger.
+after clearing a jam. It charges that spool provisionally and flags it with
+the amount. The next unload keeps the usage there. If a different spool was
+loaded, claim it (see [Claims](#claims)).
 
 Other rules:
 
@@ -140,6 +142,27 @@ the printer's rounding to 5 bits per channel. The UUID is read from the spool
 extra field named by `uuid_field`, `instance_uuid` by default, which must be a
 text field.
 
+### Claims
+
+A claim tells the bridge which spool is in a tool when it can't know. To
+claim a spool, move it into the tool's location, then tick **Claim held
+usage** on it in Spoolman. Everything charged to that tool since the later of
+its last unload and the printer's last reboot moves to the claimed spool. The
+claimed spool becomes active, the old spool is moved out of the location, the
+box is cleared, and the spool is written to the printer when it's idle.
+Claiming the spool that's already active confirms it, and nothing moves.
+
+- A ticked spool that isn't in a tool's location is flagged and left alone
+  until it is.
+- If several spools are claimed for one tool between two polls, the one with
+  the most recent `last_used` wins, and the other boxes are cleared.
+  Spoolman doesn't record when a box was ticked.
+- If the location holds two spools and neither is active, the claim waits
+  until the location is resolved.
+- The bridge flags a staged spool when a print starts, or when the printer
+  reboots, while it's staged: the unload can be lost across a reboot. Claim
+  the staged spool if it's the one loaded.
+
 ## Charging and flags
 
 With `dry_run = false`, each charge is saved to `state.json` before it's sent
@@ -167,8 +190,12 @@ the bridge creates on first use:
 
 - An unconfirmed swap, on the spool still assigned, until Spoolman changes,
   a print starts, or the next unload.
-- A swap assumed at print start, or a print started with a swap staged, until
-  the next print start or unload.
+- A provisional charge, on the spool assumed reloaded at print start, until
+  the next unload or a claim. The amount shown updates between prints.
+- A print started with a swap staged, on both spools. The active spool's flag
+  lasts until the next print start or unload. The staged spool's lasts until
+  it stops being staged. A reboot while a spool is staged also flags it.
+- A claimed spool that isn't in a tool's location.
 - An unload during a print while Spoolman shows more than 5% of the spool's
   net weight left, until the spool next becomes active in a tool. Reloading
   the same spool keeps the flag. That usually means an
@@ -184,6 +211,12 @@ the bridge creates on first use:
 
 The bridge only changes the field on spools it flagged itself, and doesn't
 rewrite a flag that hasn't changed.
+
+Claims use the `claim_field` extra field (`bridge_claim` by default), a
+boolean field the bridge creates on first use and shows as **Claim held
+usage**. The bridge clears the box after it handles a claim. Set
+`claim_field = ""` to turn claims off. In dry-run mode the bridge handles each
+claim once but doesn't clear the box.
 
 ## Writing to the printer
 

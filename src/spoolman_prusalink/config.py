@@ -33,6 +33,9 @@ class Config:
     length_factor: float = 1.0
     # Spool extra field (type text) the bridge writes flags to; None disables flags.
     flag_field: str | None = "bridge_flag"
+    # Spool extra field (type boolean) the user ticks to claim a spool is in a tool;
+    # None disables claims.
+    claim_field: str | None = "bridge_claim"
     # Whether a printer/spool mismatch (drift) is written as a flag.
     flag_drift: bool = True
     # Compatibility-check lines at the start of every job file.
@@ -114,14 +117,18 @@ def load(path: str | os.PathLike | None, env: dict[str, str] | None = None) -> C
 
     uuid_field = bridge.get("uuid_field", "instance_uuid") or None
     flag_field = bridge.get("flag_field", "bridge_flag") or None
-    for name, key in (("uuid_field", uuid_field), ("flag_field", flag_field)):
+    claim_field = bridge.get("claim_field", "bridge_claim") or None
+    fields = (("uuid_field", uuid_field), ("flag_field", flag_field),
+              ("claim_field", claim_field))
+    for name, key in fields:
         if key is not None and not re.fullmatch(r"[a-z0-9_]{1,64}", key):
             raise ConfigError(f"{name} must match [a-z0-9_]{{1,64}}, got {key!r}")
     sync_file = str(printer.get("sync_file", "spoolman-sync.gcode"))
     if not re.fullmatch(r"[A-Za-z0-9_.-]+\.gcode", sync_file):
         raise ConfigError(f"printer.sync_file must be a plain .gcode file name, got {sync_file!r}")
-    if uuid_field is not None and uuid_field == flag_field:
-        raise ConfigError("uuid_field and flag_field must differ")
+    keys = [key for _, key in fields if key is not None]
+    if len(keys) != len(set(keys)):
+        raise ConfigError("uuid_field, flag_field and claim_field must differ")
     return Config(
         printer_url=printer_url,
         printer_api_key=api_key,
@@ -136,6 +143,7 @@ def load(path: str | os.PathLike | None, env: dict[str, str] | None = None) -> C
         dry_run=dry_run,
         length_factor=length_factor,
         flag_field=flag_field,
+        claim_field=claim_field,
         flag_drift=bool(bridge.get("flag_drift", True)),
         gcode_preamble=(
             tuple(printer["gcode_preamble"]) if "gcode_preamble" in printer else None

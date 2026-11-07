@@ -63,6 +63,11 @@ length_factor = 1.0
 # swap, for you to see in Spoolman. The bridge creates the field if it's missing and only
 # changes it on spools it flagged itself. "" disables flags.
 flag_field = "bridge_flag"
+# Spool extra field (type boolean, shown as "Claim held usage") that you tick to tell
+# the bridge a spool is in a tool: move the spool into the tool's location, then tick
+# it. Usage since the tool's last unload or the printer's last reboot moves to it. The
+# bridge creates the field if it's missing and clears the box. "" disables claims.
+claim_field = "bridge_claim"
 # Also flag a spool when the printer's filament name, color or UUID doesn't match it.
 flag_drift = true
 # true logs and records what the bridge would do without writing anything. Set it to

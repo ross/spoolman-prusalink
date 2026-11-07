@@ -27,6 +27,9 @@ class State:
     # Flags for spools that ran out mid-print while Spoolman showed plenty left, by
     # spool ID. Each clears when its spool next becomes active.
     runouts: dict[int, str] = field(default_factory=dict)
+    # Spools whose claim the bridge has handled while the box still shows ticked, so a
+    # claim is handled once even if clearing the box fails, or in dry-run mode.
+    claimed: list[int] = field(default_factory=list)
 
 
 def load_state(path: Path) -> State:
@@ -41,6 +44,7 @@ def load_state(path: Path) -> State:
         flagged=[int(i) for i in data.get("flagged", [])],
         noticed=list(data.get("noticed", [])),
         runouts={int(k): str(v) for k, v in data.get("runouts", {}).items()},
+        claimed=[int(i) for i in data.get("claimed", [])],
     )
 
 
@@ -57,6 +61,7 @@ def save_state(path: Path, state: State) -> bool:
         "flagged": state.flagged,
         "noticed": state.noticed,
         "runouts": {str(k): v for k, v in sorted(state.runouts.items())},
+        "claimed": state.claimed,
     }
     text = json.dumps(payload, indent=2)
     try:
