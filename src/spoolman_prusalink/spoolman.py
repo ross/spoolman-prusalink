@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 
 import httpx
 
@@ -20,14 +21,42 @@ def _extra_str(extra: dict | None, key: str | None) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
+def _extra_true(extra: dict | None, key: str | None) -> bool:
+    """Whether a boolean extra field is ticked. Spoolman stores it as JSON `true`."""
+    if not key or not extra or key not in extra:
+        return False
+    try:
+        return json.loads(extra[key]) is True
+    except (TypeError, ValueError):
+        return False
+
+
+def _timestamp(value: object) -> datetime | None:
+    """Parse a Spoolman timestamp such as `2026-11-07T01:47:16Z`, read as UTC."""
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+
+
 def parse_spool(
-    data: dict, uuid_field: str | None = None, flag_field: str | None = None
+    data: dict, uuid_field: str | None = None, flag_field: str | None = None,
+    claim_field: str | None = None,
 ) -> Spool:
     filament = data.get("filament") or {}
     vendor = (filament.get("vendor") or {}).get("name")
     name = filament.get("name") or filament.get("material") or f"spool {data['id']}"
     if vendor:
         name = f"{vendor} {name}"
+    # Spoolman clamps its own remaining_weight at 0, so work it out from used_weight,
+    # which it doesn't. The net weight is the spool's initial weight, else the filament's.
+    net = data.get("initial_weight")
+    if net is None:
+        net = filament.get("weight")
+    used = data.get("used_weight")
     return Spool(
         id=int(data["id"]),
         location=data.get("location") or None,
@@ -40,15 +69,23 @@ def parse_spool(
         flag=_extra_str(data.get("extra"), flag_field),
         extruder_temp=filament.get("settings_extruder_temp"),
         bed_temp=filament.get("settings_bed_temp"),
+        remaining_weight=None if net is None or used is None else net - used,
+        net_weight=net,
+        used_weight=used,
+        archived=bool(data.get("archived", False)),
+        claim=_extra_true(data.get("extra"), claim_field),
+        last_used=_timestamp(data.get("last_used")),
     )
 
 
 class Spoolman:
     def __init__(self, url: str, *, uuid_field: str | None = None,
-                 flag_field: str | None = None, timeout: float = 10.0,
+                 flag_field: str | None = None, claim_field: str | None = None,
+                 timeout: float = 10.0,
                  transport: httpx.AsyncBaseTransport | None = None) -> None:
         self._uuid_field = uuid_field
         self._flag_field = flag_field
+        self._claim_field = claim_field
         self._client = httpx.AsyncClient(
             base_url=url.rstrip("/"), timeout=timeout, transport=transport
         )
@@ -65,27 +102,47 @@ class Spoolman:
         """
         resp = await self._client.get("/api/v1/spool")
         resp.raise_for_status()
-        return [parse_spool(s, self._uuid_field, self._flag_field) for s in resp.json()]
+        return [parse_spool(s, self._uuid_field, self._flag_field, self._claim_field)
+                for s in resp.json()]
 
-    async def use_length(self, spool_id: int, mm: float) -> None:
-        """Charge (or, with a negative value, refund) filament length."""
+    async def spool(self, spool_id: int) -> Spool | None:
+        """Return one spool, archived or not, or None if it doesn't exist (404)."""
+        resp = await self._client.get(f"/api/v1/spool/{spool_id}")
+        if resp.status_code == 404:
+            return None
+        resp.raise_for_status()
+        return parse_spool(resp.json(), self._uuid_field, self._flag_field,
+                           self._claim_field)
+
+    async def use_length(self, spool_id: int, mm: float) -> float | None:
+        """Charge (or, with a negative value, refund) filament length.
+
+        Returns the spool's used weight after the charge, if Spoolman reports one.
+        """
         # A generous timeout: a charge Spoolman applies after a timeout is sent again.
         resp = await self._client.put(
             f"/api/v1/spool/{spool_id}/use", json={"use_length": mm}, timeout=30.0
         )
         resp.raise_for_status()
+        try:
+            used = resp.json().get("used_weight")
+        except (ValueError, AttributeError):
+            return None
+        return float(used) if isinstance(used, int | float) else None
 
-    async def ensure_text_field(self, key: str, name: str) -> None:
-        """Register a spool extra field of type text, unless it already exists."""
+    async def ensure_field(self, key: str, name: str, field_type: str = "text") -> None:
+        """Register a spool extra field of `field_type`, unless it already exists."""
         resp = await self._client.get("/api/v1/field/spool")
         resp.raise_for_status()
         for f in resp.json():
             if f.get("key") == key:
-                if f.get("field_type") != "text":
-                    raise ValueError(f"spool extra field {key!r} exists but isn't a text field")
+                if f.get("field_type") != field_type:
+                    raise ValueError(
+                        f"spool extra field {key!r} exists but isn't a {field_type} field"
+                    )
                 return
         resp = await self._client.post(
-            f"/api/v1/field/spool/{key}", json={"name": name, "field_type": "text"}
+            f"/api/v1/field/spool/{key}", json={"name": name, "field_type": field_type}
         )
         resp.raise_for_status()
 
@@ -98,6 +155,10 @@ class Spoolman:
 
     async def set_extra_text(self, spool_id: int, key: str, value: str | None) -> None:
         """Set a text extra field, or delete it with None. Other extra fields are kept."""
+        await self.set_extra(spool_id, key, value)
+
+    async def set_extra(self, spool_id: int, key: str, value: object) -> None:
+        """Set an extra field to a JSON value, or delete it with None."""
         resp = await self._client.patch(
             f"/api/v1/spool/{spool_id}",
             json={"extra": {key: None if value is None else json.dumps(value)}},

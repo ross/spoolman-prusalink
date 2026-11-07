@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime
 
 
 @dataclass(frozen=True)
@@ -49,6 +50,12 @@ class Spool:
     flag: str | None = None
     extruder_temp: float | None = None
     bed_temp: float | None = None
+    remaining_weight: float | None = None  # Grams, per Spoolman; None without a weight.
+    net_weight: float | None = None  # Grams of filament when full: the spool's or filament's.
+    used_weight: float | None = None  # Grams used, per Spoolman.
+    archived: bool = False
+    claim: bool = False  # The claim box is ticked.
+    last_used: datetime | None = None
 
     def mm_to_grams(self, mm: float) -> float | None:
         """Convert a filament length to weight, as Spoolman does for `use_length`."""
