@@ -154,6 +154,8 @@ class Bridge:
     # updated only between prints, so the flag isn't rewritten on every poll.
     _provisional_shown: dict[int, tuple[tuple[int, int | None], int]] = field(
         default_factory=dict)
+    # Dry run: the UUID each spool would be given, reused so the job stays the same.
+    _dry_uuids: dict[int, str] = field(default_factory=dict)
 
     @classmethod
     def from_config(cls, config: Config) -> Bridge:
@@ -814,6 +816,7 @@ class Bridge:
             self.state.noticed = [t for t in self.state.noticed if t in current]
 
         if not writes and not notices:
+            self._problems.clear("dry-run job")
             self._problems.clear("sync busy")
             self._problems.clear("sync failed")
             return
@@ -821,7 +824,9 @@ class Bridge:
             self._preamble(), writes, notices, multi_tool=len(self.config.tools) > 1
         )
         if self.config.dry_run:
-            log.info("WOULD RUN printer job %s:\n%s", self.config.sync_file, gcode.rstrip())
+            # Nothing is recorded as written, so the same job is due every idle poll.
+            self._problems.fail("dry-run job", gcode, "WOULD RUN printer job %s:\n%s",
+                                self.config.sync_file, gcode.rstrip(), level=logging.INFO)
             return
         try:
             await self.printer.upload_and_print(
@@ -859,10 +864,13 @@ class Bridge:
         """Give a spool an instance UUID in Spoolman, so it can be written to the printer."""
         key = self.config.uuid_field
         assert key
-        value = str(uuid.uuid4())
         if self.config.dry_run:
-            log.info("would give spool %d instance UUID %s", spool.id, value)
-            return value
+            if spool.id not in self._dry_uuids:
+                self._dry_uuids[spool.id] = str(uuid.uuid4())
+                log.info("would give spool %d instance UUID %s", spool.id,
+                         self._dry_uuids[spool.id])
+            return self._dry_uuids[spool.id]
+        value = str(uuid.uuid4())
         if not await self._ensure_field(key, UUID_FIELD_NAME):
             return None
         try:

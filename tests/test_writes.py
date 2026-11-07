@@ -556,6 +556,30 @@ async def test_dry_run_never_uploads(tmp_path, caplog):
     await bridge.aclose()
 
 
+async def test_dry_run_logs_a_pending_job_once(tmp_path, caplog):
+    bridge, fake, printer = make(tmp_path, [spool(19)], uuid_field="instance_uuid")
+    bridge.config = replace(bridge.config, dry_run=True)
+    caplog.set_level("INFO")
+    await bridge.poll()
+    fake.spools[20] = spool_x(20)  # S1: staged, then unload and load.
+    await bridge.poll()
+    printer.unloads, printer.at_unload, printer.material = 1, 1000, {"name": "PLA"}
+    fake.spools[19]["location"] = None  # Dry run doesn't evict it.
+    for _ in range(4):
+        await bridge.poll()
+    assert jobs(printer) == []
+    assert caplog.text.count("WOULD RUN printer job") == 1
+    assert caplog.text.count("would give spool 20 instance UUID") == 1
+
+    # A different job is logged again.
+    fake.spools[20] = spool_x(20, color="00ff00")
+    await bridge.poll()
+    await bridge.poll()
+    assert caplog.text.count("WOULD RUN printer job") == 2
+    assert caplog.text.count("would give spool 20 instance UUID") == 1
+    await bridge.aclose()
+
+
 async def test_unconfirmed_swap_still_writes_assigned_spool(tmp_path):
     # A jam: unload, reload the same spool from the menu (color dropped), no new print.
     bridge, fake, printer = make(tmp_path, [spool(19)])
