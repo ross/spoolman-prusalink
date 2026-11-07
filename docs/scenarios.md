@@ -43,7 +43,7 @@ archived active spool (M3, M3a) is logged once when the bridge finds it.
 | S8 | Spool staged, then moved back out before any unload. | Staging is cancelled and logged. The active spool keeps being charged. | Tested |
 | S9 | Spool staged, and the user never unloads. | It stays staged indefinitely. Each print start logs that the staged spool isn't loaded and flags both the active and the staged spool. A reboot while it's staged flags the staged spool too. Claiming the staged spool makes it active (see Q2). | Decided and implemented; tested |
 | S10 | Spool moved out of the location with no replacement. | It stays active until the next unload, then usage is held as unassigned. During an unconfirmed swap, usage is held at once and the swap stays open (S3). | Seen live (spool 20); the unconfirmed-swap case tested |
-| S11 | Two spools in the location, neither active. | Skips the tool and warns until one is removed. | Tested |
+| S11 | Two spools in the location, neither active. | Skips the tool and warns until one is removed. | Seen live (spools 2 and 7) |
 | S12 | Spoolman changed to a spool whose UUID the printer already reports, with no unload. | Treated as a correction: switches immediately. | Tested |
 | S13 | Spoolman changed with no unload, and the printer doesn't report the new spool's UUID. | Staged until the next unload. If the user meant "I got it wrong; this spool is loaded", they claim it (see Q3). | Decided and implemented; tested |
 | S14 | Several unloads and loads between two polls. | Counts them as one unload. Usage up to the last unload goes to the active spool. | Seen live (14 → 7 → 20, with the bridge stopped during the swaps) |
