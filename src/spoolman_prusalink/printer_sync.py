@@ -154,6 +154,16 @@ def printer_name(spool: Spool) -> str | None:
     return None
 
 
+def loaded_from_menu(shown: str, spool: Spool) -> bool:
+    """Whether the printer shows `spool`'s HT idler-door material, loaded from its menu.
+
+    The bridge can't write these materials, and a menu load sets the preset's name but
+    not the spool's color or instance UUID, so the name is all that can match.
+    """
+    material = (spool.material or "").strip().upper()
+    return material in HT_IDLER_DOOR and shown.strip().upper() == material
+
+
 def preset_for(spool: Spool) -> str | None:
     """The firmware preset to inherit temperatures from, if the material is one."""
     if not spool.material:

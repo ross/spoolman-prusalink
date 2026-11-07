@@ -517,6 +517,31 @@ async def test_pps_with_temps_is_flagged_not_written_and_logged_once(tmp_path, c
     await bridge.aclose()
 
 
+async def test_pps_loaded_from_the_menu_clears_the_flag(tmp_path, caplog):
+    bridge, fake, printer = make(tmp_path, [spool(19)], uuid_field="instance_uuid")
+    await bridge.poll()
+    uuid = json.dumps("91da34d9-c1c1-470f-bac7-185a2346f86a")
+    fake.spools[20] = spool_x(20, material="PPS", temps=(320, 105),
+                              extra={"instance_uuid": uuid})
+    printer.unloads, printer.at_unload, printer.material = 1, 1000, {"name": "PLA"}
+    await bridge.poll()
+    await bridge.poll()
+    assert "HT idler-door" in fake.flag(20)
+
+    # The user loads it from the printer's menu, as the flag says: the printer shows
+    # the preset's name, but not the spool's color or UUID.
+    caplog.set_level("INFO")
+    printer.material = {"name": "PPS", "color": "#000000"}
+    for _ in range(3):
+        await bridge.poll()
+    assert fake.flag(20) is None
+    assert jobs(printer) == []
+    st = bridge.tools[0]
+    assert (st.needs_sync, st.sync_attempts) == (False, 0)
+    assert "differs" not in caplog.text
+    await bridge.aclose()
+
+
 async def test_gives_up_and_flags_after_failed_writes(tmp_path):
     bridge, fake, printer = make(tmp_path, [spool(19)])
     printer.run_job = lambda gcode: None  # The job runs but changes nothing.

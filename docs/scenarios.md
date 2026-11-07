@@ -90,7 +90,7 @@ archived active spool (M3, M3a) is logged once when the bridge finds it.
 | W5 | The printer still differs after two sync jobs. | Stops and flags the spool ("didn't take"). | Tested |
 | W6 | The bridge's own sync job. | Not counted as a print start: recognized by its file name. | Tested |
 | W7 | Spool's material isn't a preset and Spoolman has no temperatures. | Flags the spool and doesn't write. | Tested |
-| W8 | PPS or PPA. | Flags the spool and doesn't write: `M865` can't set the HT idler-door requirement. | Tested |
+| W8 | PPS or PPA. | Flags the spool and doesn't write: `M865` can't set the HT idler-door requirement. Once the printer shows the material, loaded from its menu, the flag clears; the color and UUID the menu load leaves out aren't drift. | Tested |
 | W9 | Printer differs with no swap or unload behind it (drift). | Flags it and leaves the printer alone, unless `sync_drift = true`. | Tested |
 | W10 | Unsupported, unknown or mismatched model. | Logs once, flags waiting spools, and doesn't write. Charging continues. | Tested |
 | W11 | Unconfirmed swap open. | Writes the assigned spool, so the printer shows what Spoolman thinks is loaded. | Tested |
