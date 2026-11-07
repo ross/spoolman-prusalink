@@ -15,30 +15,45 @@ from spoolman_prusalink.state import State, load_state, save_state
 
 FILAMENT = {
     "boot_id": 3308742886,
-    "tools": [{
-        "index": 0,
-        "extruded": 4310,
-        "material": {"name": "PLA", "color": "#73737b",
-                     "instance_uuid": "44c406a5-c6f5-4440-bfba-e8060564b717"},
-    }],
+    "tools": [
+        {
+            "index": 0,
+            "extruded": 4310,
+            "material": {
+                "name": "PLA",
+                "color": "#73737b",
+                "instance_uuid": "44c406a5-c6f5-4440-bfba-e8060564b717",
+            },
+        }
+    ],
 }
 
 
 def spool_json(id, location, material="PLA", color="73767d", uuid=None):
     extra = {} if uuid is None else {"instance_uuid": json.dumps(uuid)}
     return {
-        "id": id, "location": location, "extra": extra,
-        "filament": {"id": 1, "name": "Galaxy Black", "material": material,
-                     "color_hex": color, "diameter": 1.75, "density": 1.24,
-                     "vendor": {"name": "Prusament"}},
+        "id": id,
+        "location": location,
+        "extra": extra,
+        "filament": {
+            "id": 1,
+            "name": "Galaxy Black",
+            "material": material,
+            "color_hex": color,
+            "diameter": 1.75,
+            "density": 1.24,
+            "vendor": {"name": "Prusament"},
+        },
     }
 
 
 def test_parse_filament_with_and_without_material():
-    r = parse_filament({
-        "boot_id": 5,
-        "tools": [FILAMENT["tools"][0], {"index": 1, "extruded": 0}],
-    })
+    r = parse_filament(
+        {
+            "boot_id": 5,
+            "tools": [FILAMENT["tools"][0], {"index": 1, "extruded": 0}],
+        }
+    )
     assert r.boot_id == 5
     assert r.tools[0].material.instance_uuid.startswith("44c4")
     assert r.tools[0].unload_count is None
@@ -46,8 +61,13 @@ def test_parse_filament_with_and_without_material():
 
 
 def test_parse_filament_unload_fields():
-    tool = {"index": 0, "extruded": 900, "unload_count": 2, "extruded_at_unload": 600,
-            "material": {"name": "PLA"}}
+    tool = {
+        "index": 0,
+        "extruded": 900,
+        "unload_count": 2,
+        "extruded_at_unload": 600,
+        "material": {"name": "PLA"},
+    }
     r = parse_filament({"boot_id": 5, "tools": [tool]}).tools[0]
     assert (r.extruded, r.unload_count, r.extruded_at_unload) == (900, 2, 600)
 
@@ -90,9 +110,13 @@ def test_parse_spool_claim_and_last_used():
 
 def make_config(tmp_path, **kw):
     return Config(
-        printer_url="http://printer", printer_api_key="k", spoolman_url="http://spoolman",
-        tools={0: "Core One L+"}, state_file=tmp_path / "state.json",
-        ledger_file=tmp_path / "ledger.jsonl", **kw,
+        printer_url="http://printer",
+        printer_api_key="k",
+        spoolman_url="http://spoolman",
+        tools={0: "Core One L+"},
+        state_file=tmp_path / "state.json",
+        ledger_file=tmp_path / "ledger.jsonl",
+        **kw,
     )
 
 
@@ -151,7 +175,8 @@ async def test_poll_logs_would_charge_and_saves_nothing(tmp_path, caplog):
 
 async def test_two_spools_in_location_skips_tool(tmp_path, caplog):
     bridge = make_bridge(
-        tmp_path, lambda: FILAMENT,
+        tmp_path,
+        lambda: FILAMENT,
         lambda: [spool_json(7, "Core One L+"), spool_json(9, "Core One L+")],
     )
     await bridge.poll()
@@ -246,13 +271,13 @@ def test_config_load(tmp_path):
     assert cfg.flag_field == "bridge_flag"
     assert cfg.claim_field == "bridge_claim"
     base = p.read_text()
-    p.write_text(base + "[bridge]\nclaim_field = \"bridge_flag\"\n")
+    p.write_text(base + '[bridge]\nclaim_field = "bridge_flag"\n')
     with pytest.raises(ConfigError, match="must differ"):
         load(p, env={"PRUSALINK_API_KEY": "secret"})
-    p.write_text(base + "[bridge]\nclaim_field = \"\"\n")
+    p.write_text(base + '[bridge]\nclaim_field = ""\n')
     assert load(p, env={"PRUSALINK_API_KEY": "secret"}).claim_field is None
     p.write_text(base)
-    p.write_text(p.read_text() + "[bridge]\ndry_run = false\nflag_field = \"Bad Key\"\n")
+    p.write_text(p.read_text() + '[bridge]\ndry_run = false\nflag_field = "Bad Key"\n')
     with pytest.raises(ConfigError, match="flag_field"):
         load(p, env={"PRUSALINK_API_KEY": "secret"})
 
@@ -263,52 +288,72 @@ CONFIG_BASE = (
 )
 
 
-@pytest.mark.parametrize("text, error", [
-    ('[bridge]\nprinter_sync = "false"\n', "bridge.printer_sync must be true or false"),
-    ('[bridge]\nflag_drift = "no"\n', "bridge.flag_drift must be true or false"),
-    ('[bridge]\nsync_drift = 1\n', "bridge.sync_drift must be true or false"),
-    ('[bridge]\nprinter_notices = "yes"\n', "bridge.printer_notices must be true or false"),
-    ('[bridge]\ndry_run = "false"\n', "bridge.dry_run must be true or false"),
-    ('[printer]\nuuids = "false"\n', "printer.uuids must be true or false"),
-    ('[printer]\ngcode_preamble = "M862.3"\n', "gcode_preamble must be a list of strings"),
-    ('[printer]\ngcode_preamble = ["M862.3", 1]\n', "gcode_preamble must be a list of strings"),
-    ('[bridge]\npoll_idle = 0\n', "bridge.poll_idle must be a number greater than 0"),
-    ('[bridge]\npoll_printing = -5\n', "bridge.poll_printing must be a number greater than 0"),
-    ('[bridge]\npoll_idle = "soon"\n', "bridge.poll_idle must be a number greater than 0"),
-    ('[bridge]\nlength_factor = "x"\n', "bridge.length_factor must be a number"),
-    ('[bridge]\npoll_idle = nan\n', "bridge.poll_idle must be a number greater than 0"),
-    ('[bridge]\npoll_printing = inf\n', "bridge.poll_printing must be a number greater than 0"),
-    ('[bridge]\npoll_printing = -nan\n', "bridge.poll_printing must be a number greater than 0"),
-    ('[bridge]\nlength_factor = nan\n', "bridge.length_factor must be a number"),
-    ('[bridge]\nlength_factor = inf\n', "bridge.length_factor must be a number"),
-    ('[bridge]\nuuid_field = 5\n', "bridge.uuid_field must be a string"),
-    ('[bridge]\nflag_field = true\n', "bridge.flag_field must be a string"),
-    ('[bridge]\nclaim_field = ["a"]\n', "bridge.claim_field must be a string"),
-    ('[bridge]\nstate_file = 5\n', "bridge.state_file must be a string"),
-    ('[bridge]\nledger_file = 5\n', "bridge.ledger_file must be a string"),
-    ('[bridge]\neviction_location = 5\n', "bridge.eviction_location must be a string"),
-    ('[printer]\nsync_storage = 5\n', "printer.sync_storage must be a string"),
-    ('[printer]\nsync_file = 5\n', "printer.sync_file must be a string"),
-    ('[printer]\napi_key = 5\n', "printer.api_key must be a string"),
-])
+@pytest.mark.parametrize(
+    "text, error",
+    [
+        ('[bridge]\nprinter_sync = "false"\n', "bridge.printer_sync must be true or false"),
+        ('[bridge]\nflag_drift = "no"\n', "bridge.flag_drift must be true or false"),
+        ("[bridge]\nsync_drift = 1\n", "bridge.sync_drift must be true or false"),
+        ('[bridge]\nprinter_notices = "yes"\n', "bridge.printer_notices must be true or false"),
+        ('[bridge]\ndry_run = "false"\n', "bridge.dry_run must be true or false"),
+        ('[printer]\nuuids = "false"\n', "printer.uuids must be true or false"),
+        ('[printer]\ngcode_preamble = "M862.3"\n', "gcode_preamble must be a list of strings"),
+        ('[printer]\ngcode_preamble = ["M862.3", 1]\n', "gcode_preamble must be a list of strings"),
+        ("[bridge]\npoll_idle = 0\n", "bridge.poll_idle must be a number greater than 0"),
+        ("[bridge]\npoll_printing = -5\n", "bridge.poll_printing must be a number greater than 0"),
+        ('[bridge]\npoll_idle = "soon"\n', "bridge.poll_idle must be a number greater than 0"),
+        ('[bridge]\nlength_factor = "x"\n', "bridge.length_factor must be a number"),
+        ("[bridge]\npoll_idle = nan\n", "bridge.poll_idle must be a number greater than 0"),
+        ("[bridge]\npoll_printing = inf\n", "bridge.poll_printing must be a number greater than 0"),
+        (
+            "[bridge]\npoll_printing = -nan\n",
+            "bridge.poll_printing must be a number greater than 0",
+        ),
+        ("[bridge]\nlength_factor = nan\n", "bridge.length_factor must be a number"),
+        ("[bridge]\nlength_factor = inf\n", "bridge.length_factor must be a number"),
+        ("[bridge]\nuuid_field = 5\n", "bridge.uuid_field must be a string"),
+        ("[bridge]\nflag_field = true\n", "bridge.flag_field must be a string"),
+        ('[bridge]\nclaim_field = ["a"]\n', "bridge.claim_field must be a string"),
+        ("[bridge]\nstate_file = 5\n", "bridge.state_file must be a string"),
+        ("[bridge]\nledger_file = 5\n", "bridge.ledger_file must be a string"),
+        ("[bridge]\neviction_location = 5\n", "bridge.eviction_location must be a string"),
+        ("[printer]\nsync_storage = 5\n", "printer.sync_storage must be a string"),
+        ("[printer]\nsync_file = 5\n", "printer.sync_file must be a string"),
+        ("[printer]\napi_key = 5\n", "printer.api_key must be a string"),
+    ],
+)
 def test_config_rejects_bad_values(tmp_path, text, error):
     p = tmp_path / "c.toml"
     # TOML can't define [printer] twice, so its keys go into the base's table.
-    p.write_text(CONFIG_BASE.replace("[printer]\n", text, 1) if text.startswith("[printer]")
-                 else CONFIG_BASE + text)
+    p.write_text(
+        CONFIG_BASE.replace("[printer]\n", text, 1)
+        if text.startswith("[printer]")
+        else CONFIG_BASE + text
+    )
     with pytest.raises(ConfigError, match=re.escape(error)):
         load(p, env={"PRUSALINK_API_KEY": "k"})
 
 
-@pytest.mark.parametrize("text, error", [
-    ("[printer\n", "can't parse"),
-    ('[printer]\nurl = "http://p"\n[spoolman]\nurl = "http://s"\n[[tools]]\nlocation = "A"\n',
-     "each [[tools]] entry needs an index and a location"),
-    ('[printer]\nurl = "http://p"\n[spoolman]\nurl = "http://s"\n[[tools]]\nindex = 0\n',
-     "each [[tools]] entry needs an index and a location"),
-    ('[printer]\nurl = "http://p"\n[spoolman]\nurl = "http://s"\n'
-     '[[tools]]\nindex = "zero"\nlocation = "A"\n', "tool index must be an integer"),
-])
+@pytest.mark.parametrize(
+    "text, error",
+    [
+        ("[printer\n", "can't parse"),
+        (
+            '[printer]\nurl = "http://p"\n[spoolman]\nurl = "http://s"\n'
+            '[[tools]]\nlocation = "A"\n',
+            "each [[tools]] entry needs an index and a location",
+        ),
+        (
+            '[printer]\nurl = "http://p"\n[spoolman]\nurl = "http://s"\n[[tools]]\nindex = 0\n',
+            "each [[tools]] entry needs an index and a location",
+        ),
+        (
+            '[printer]\nurl = "http://p"\n[spoolman]\nurl = "http://s"\n'
+            '[[tools]]\nindex = "zero"\nlocation = "A"\n',
+            "tool index must be an integer",
+        ),
+    ],
+)
 def test_config_malformed_file_is_a_config_error(tmp_path, text, error):
     p = tmp_path / "c.toml"
     p.write_text(text)
@@ -316,12 +361,18 @@ def test_config_malformed_file_is_a_config_error(tmp_path, text, error):
         load(p, env={"PRUSALINK_API_KEY": "k"})
 
 
-@pytest.mark.parametrize("text, error", [
-    ('[printer]\nurl = 5\n[spoolman]\nurl = "http://s"\n', "printer.url must be a string"),
-    ('[printer]\nurl = "http://p"\n[spoolman]\nurl = 5\n', "spoolman.url must be a string"),
-    ('[printer]\nurl = "http://p"\n[spoolman]\nurl = "http://s"\n'
-     '[[tools]]\nindex = 0\nlocation = 5\n', "tool location must be a string"),
-])
+@pytest.mark.parametrize(
+    "text, error",
+    [
+        ('[printer]\nurl = 5\n[spoolman]\nurl = "http://s"\n', "printer.url must be a string"),
+        ('[printer]\nurl = "http://p"\n[spoolman]\nurl = 5\n', "spoolman.url must be a string"),
+        (
+            '[printer]\nurl = "http://p"\n[spoolman]\nurl = "http://s"\n'
+            "[[tools]]\nindex = 0\nlocation = 5\n",
+            "tool location must be a string",
+        ),
+    ],
+)
 def test_config_rejects_non_string_urls_and_locations(tmp_path, text, error):
     p = tmp_path / "c.toml"
     p.write_text(text)
@@ -346,9 +397,13 @@ def test_main_exits_2_on_a_malformed_config(tmp_path, monkeypatch, caplog):
 
 def test_config_accepts_booleans_and_preamble_list(tmp_path):
     p = tmp_path / "c.toml"
-    p.write_text(CONFIG_BASE.replace(
-        '[printer]\n', '[printer]\nuuids = false\ngcode_preamble = ["M862.3 P \\"COREONEL\\""]\n')
-        + "[bridge]\nprinter_sync = false\ndry_run = false\npoll_idle = 0.5\n")
+    p.write_text(
+        CONFIG_BASE.replace(
+            "[printer]\n",
+            '[printer]\nuuids = false\ngcode_preamble = ["M862.3 P \\"COREONEL\\""]\n',
+        )
+        + "[bridge]\nprinter_sync = false\ndry_run = false\npoll_idle = 0.5\n"
+    )
     cfg = load(p, env={"PRUSALINK_API_KEY": "k"})
     assert cfg.printer_sync is False and cfg.dry_run is False and cfg.printer_uuids is False
     assert cfg.gcode_preamble == ('M862.3 P "COREONEL"',)
@@ -375,14 +430,28 @@ async def test_length_factor_scales_charges(tmp_path):
 
 
 def test_config_from_environment_only():
-    cfg = load(None, env={
-        "PRUSALINK_URL": "http://p", "PRUSALINK_API_KEY": "k", "SPOOLMAN_URL": "http://s",
-        "SPOOLMAN_PRUSALINK_LOCATION": "Core One L+", "SPOOLMAN_PRUSALINK_DRY_RUN": "false",
-    })
+    cfg = load(
+        None,
+        env={
+            "PRUSALINK_URL": "http://p",
+            "PRUSALINK_API_KEY": "k",
+            "SPOOLMAN_URL": "http://s",
+            "SPOOLMAN_PRUSALINK_LOCATION": "Core One L+",
+            "SPOOLMAN_PRUSALINK_DRY_RUN": "false",
+        },
+    )
     assert cfg.tools == {0: "Core One L+"} and cfg.dry_run is False
     assert cfg.state_file.as_posix() == "/data/state.json"
     with pytest.raises(ConfigError, match="SPOOLMAN_PRUSALINK_LOCATION"):
         load(None, env={"PRUSALINK_URL": "p", "PRUSALINK_API_KEY": "k", "SPOOLMAN_URL": "s"})
     with pytest.raises(ConfigError, match="true or false"):
-        load(None, env={"PRUSALINK_URL": "p", "PRUSALINK_API_KEY": "k", "SPOOLMAN_URL": "s",
-                        "SPOOLMAN_PRUSALINK_LOCATION": "x", "SPOOLMAN_PRUSALINK_DRY_RUN": "maybe"})
+        load(
+            None,
+            env={
+                "PRUSALINK_URL": "p",
+                "PRUSALINK_API_KEY": "k",
+                "SPOOLMAN_URL": "s",
+                "SPOOLMAN_PRUSALINK_LOCATION": "x",
+                "SPOOLMAN_PRUSALINK_DRY_RUN": "maybe",
+            },
+        )

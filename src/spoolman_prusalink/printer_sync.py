@@ -124,8 +124,7 @@ PRESETS = {
     "ABS": Preset(255, 100, chamber=(70, 40, 75), filtration=True),
     "HIPS": Preset(220, 100, chamber=(70, 40, 75), filtration=True),
     "PP": Preset(240, 100, chamber=(60, 30, 70), filtration=True),
-    "FLEX": Preset(240, 50, preheat=210, chamber=(25, 15, 40), filtration=True,
-                   flexible=True),
+    "FLEX": Preset(240, 50, preheat=210, chamber=(25, 15, 40), filtration=True, flexible=True),
     "PA": Preset(285, 100, preheat=260, chamber=(65, 40, 70)),
     "PVA": Preset(210, 60, preheat=160, chamber=(25, 15, 38)),
     "BVOH": Preset(210, 60, preheat=160, chamber=(25, 15, 38)),
@@ -223,8 +222,7 @@ def filament_lines(write: ToolWrite) -> list[str]:
             f"spool {spool.id}'s material {spool.material!r} isn't a printer preset; set its "
             "extruder and bed temperatures in Spoolman"
         )
-    parts = ["M865 X R", f'N"{name}"',
-             f"T{nozzle or preset.nozzle}", f"B{bed or preset.bed}"]
+    parts = ["M865 X R", f'N"{name}"', f"T{nozzle or preset.nozzle}", f"B{bed or preset.bed}"]
     if preset:
         parts.append(f"P{min(preset.preheat, nozzle or preset.nozzle)}")
         if preset.chamber:
@@ -255,8 +253,9 @@ def _uuid(spool: Spool, value: str) -> str:
     except ValueError:
         canonical = None
     if canonical != value.lower():
-        raise CannotSync(f"spool {spool.id}'s instance UUID {value!r} isn't a UUID; fix or "
-                         "clear it in Spoolman")
+        raise CannotSync(
+            f"spool {spool.id}'s instance UUID {value!r} isn't a UUID; fix or clear it in Spoolman"
+        )
     return canonical
 
 

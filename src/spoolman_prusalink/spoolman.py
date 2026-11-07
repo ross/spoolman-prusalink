@@ -43,7 +43,9 @@ def _timestamp(value: object) -> datetime | None:
 
 
 def parse_spool(
-    data: dict, uuid_field: str | None = None, flag_field: str | None = None,
+    data: dict,
+    uuid_field: str | None = None,
+    flag_field: str | None = None,
     claim_field: str | None = None,
 ) -> Spool:
     filament = data.get("filament") or {}
@@ -79,10 +81,16 @@ def parse_spool(
 
 
 class Spoolman:
-    def __init__(self, url: str, *, uuid_field: str | None = None,
-                 flag_field: str | None = None, claim_field: str | None = None,
-                 timeout: float = 10.0,
-                 transport: httpx.AsyncBaseTransport | None = None) -> None:
+    def __init__(
+        self,
+        url: str,
+        *,
+        uuid_field: str | None = None,
+        flag_field: str | None = None,
+        claim_field: str | None = None,
+        timeout: float = 10.0,
+        transport: httpx.AsyncBaseTransport | None = None,
+    ) -> None:
         self._uuid_field = uuid_field
         self._flag_field = flag_field
         self._claim_field = claim_field
@@ -102,8 +110,10 @@ class Spoolman:
         """
         resp = await self._client.get("/api/v1/spool")
         resp.raise_for_status()
-        return [parse_spool(s, self._uuid_field, self._flag_field, self._claim_field)
-                for s in resp.json()]
+        return [
+            parse_spool(s, self._uuid_field, self._flag_field, self._claim_field)
+            for s in resp.json()
+        ]
 
     async def spool(self, spool_id: int) -> Spool | None:
         """Return one spool, archived or not, or None if it doesn't exist (404)."""
@@ -111,8 +121,7 @@ class Spoolman:
         if resp.status_code == 404:
             return None
         resp.raise_for_status()
-        return parse_spool(resp.json(), self._uuid_field, self._flag_field,
-                           self._claim_field)
+        return parse_spool(resp.json(), self._uuid_field, self._flag_field, self._claim_field)
 
     async def use_length(self, spool_id: int, mm: float) -> float | None:
         """Charge (or, with a negative value, refund) filament length.

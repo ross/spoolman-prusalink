@@ -94,8 +94,12 @@ def _number(table: dict, key: str, default: float, name: str) -> float:
 
 def _interval(table: dict, key: str, default: float, name: str) -> float:
     value = table.get(key, default)
-    if (isinstance(value, bool) or not isinstance(value, int | float)
-            or not math.isfinite(value) or value <= 0):
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int | float)
+        or not math.isfinite(value)
+        or value <= 0
+    ):
         raise ConfigError(f"{name} must be a number greater than 0, got {value!r}")
     return float(value)
 
@@ -175,8 +179,7 @@ def load(path: str | os.PathLike | None, env: dict[str, str] | None = None) -> C
     uuid_field = _str(bridge, "uuid_field", "instance_uuid", "bridge.uuid_field") or None
     flag_field = _str(bridge, "flag_field", "bridge_flag", "bridge.flag_field") or None
     claim_field = _str(bridge, "claim_field", "bridge_claim", "bridge.claim_field") or None
-    fields = (("uuid_field", uuid_field), ("flag_field", flag_field),
-              ("claim_field", claim_field))
+    fields = (("uuid_field", uuid_field), ("flag_field", flag_field), ("claim_field", claim_field))
     for name, key in fields:
         if key is not None and not re.fullmatch(r"[a-z0-9_]{1,64}", key):
             raise ConfigError(f"{name} must match [a-z0-9_]{{1,64}}, got {key!r}")
@@ -188,7 +191,8 @@ def load(path: str | os.PathLike | None, env: dict[str, str] | None = None) -> C
         raise ConfigError("uuid_field, flag_field and claim_field must differ")
     preamble = printer.get("gcode_preamble")
     if preamble is not None and (
-            not isinstance(preamble, list) or not all(isinstance(x, str) for x in preamble)):
+        not isinstance(preamble, list) or not all(isinstance(x, str) for x in preamble)
+    ):
         raise ConfigError(f"printer.gcode_preamble must be a list of strings, got {preamble!r}")
     return Config(
         printer_url=printer_url,

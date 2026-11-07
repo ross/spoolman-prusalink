@@ -47,8 +47,14 @@ class NoFilamentEndpoint(Exception):
 
 
 class PrusaLink:
-    def __init__(self, url: str, api_key: str, *, timeout: float = 10.0,
-                 transport: httpx.AsyncBaseTransport | None = None) -> None:
+    def __init__(
+        self,
+        url: str,
+        api_key: str,
+        *,
+        timeout: float = 10.0,
+        transport: httpx.AsyncBaseTransport | None = None,
+    ) -> None:
         self._client = httpx.AsyncClient(
             base_url=url.rstrip("/"),
             headers={"X-Api-Key": api_key},
@@ -94,8 +100,7 @@ class PrusaLink:
         resp = await self._client.put(
             f"/api/v1/files/{storage}/{name}",
             content=gcode.encode(),
-            headers={"Print-After-Upload": "?1", "Overwrite": "?1",
-                     "Content-Type": "text/x.gcode"},
+            headers={"Print-After-Upload": "?1", "Overwrite": "?1", "Content-Type": "text/x.gcode"},
         )
         resp.raise_for_status()
 

@@ -92,11 +92,17 @@ class EventKind(StrEnum):
 
 
 # Events that need the user's attention.
-WARNINGS = frozenset({
-    EventKind.AMBIGUOUS, EventKind.SWAP_UNCONFIRMED, EventKind.SWAP_ASSUMED,
-    EventKind.STAGED_AT_PRINT, EventKind.STAGED_AT_REBOOT, EventKind.LOST_UNASSIGNED,
-    EventKind.COUNTER_ANOMALY,
-})
+WARNINGS = frozenset(
+    {
+        EventKind.AMBIGUOUS,
+        EventKind.SWAP_UNCONFIRMED,
+        EventKind.SWAP_ASSUMED,
+        EventKind.STAGED_AT_PRINT,
+        EventKind.STAGED_AT_REBOOT,
+        EventKind.LOST_UNASSIGNED,
+        EventKind.COUNTER_ANOMALY,
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -208,8 +214,11 @@ class ToolState:
             "evict": list(self.evict),
             "swap": None
             if self.swap is None
-            else {"spool_id": self.swap.spool_id, "mm": self.swap.mm,
-                  "started_job": self.swap.started_job},
+            else {
+                "spool_id": self.swap.spool_id,
+                "mm": self.swap.mm,
+                "started_job": self.swap.started_job,
+            },
             "job_id": self.job_id,
             "pending_job": self.pending_job,
             "pending_at": self.pending_at,
@@ -222,8 +231,11 @@ class ToolState:
             "staged_notice": _notice_json(self.staged_notice),
             "provisional": None
             if self.provisional is None
-            else {"spool_id": self.provisional.spool_id, "mm": self.provisional.mm,
-                  "job_id": self.provisional.job_id},
+            else {
+                "spool_id": self.provisional.spool_id,
+                "mm": self.provisional.mm,
+                "job_id": self.provisional.job_id,
+            },
             "since_load": {str(k): v for k, v in sorted(self.since_load.items())},
             "extruded": self.extruded,
             "reboot_pending": self.reboot_pending,
@@ -240,8 +252,12 @@ class ToolState:
             active=data.get("active"),
             assigned=data.get("assigned"),
             evict=_evict_from_json(data.get("evict")),
-            swap=None if swap is None else SwapFlag(
-                int(swap["spool_id"]), int(swap["mm"]), swap.get("started_job"),
+            swap=None
+            if swap is None
+            else SwapFlag(
+                int(swap["spool_id"]),
+                int(swap["mm"]),
+                swap.get("started_job"),
             ),
             job_id=data.get("job_id"),
             pending_job=data.get("pending_job"),
@@ -253,8 +269,11 @@ class ToolState:
             held_mm=int(data.get("held_mm", 0)),
             deleted_spool=data.get("deleted_spool"),
             staged_notice=_notice_from_json(data.get("staged_notice")),
-            provisional=None if provisional is None else Provisional(
-                int(provisional["spool_id"]), int(provisional["mm"]),
+            provisional=None
+            if provisional is None
+            else Provisional(
+                int(provisional["spool_id"]),
+                int(provisional["mm"]),
                 provisional.get("job_id"),
             ),
             # State from before claims has no record: a claim then moves only usage
@@ -320,8 +339,7 @@ def hold_deleted(state: ToolState, spool_id: int, mm: int = 0, queued: int = 0) 
         if swap is not None and swap.spool_id == spool_id:
             held += max(swap.mm - queued, 0)
             swap = None
-        notice = (state.notice if state.notice is None or state.notice.spool_id != spool_id
-                  else None)
+        notice = state.notice if state.notice is None or state.notice.spool_id != spool_id else None
         state = replace(
             state,
             active=None,
@@ -340,8 +358,9 @@ def hold_deleted(state: ToolState, spool_id: int, mm: int = 0, queued: int = 0) 
     if spool_id in state.since_load:
         # A claim takes the held usage instead: a rejected charge is both in the window
         # and in `held_mm`, and there's nothing left to refund.
-        state = replace(state, since_load={k: v for k, v in state.since_load.items()
-                                           if k != spool_id})
+        state = replace(
+            state, since_load={k: v for k, v in state.since_load.items() if k != spool_id}
+        )
     return replace(state, held_mm=held + max(mm, 0))
 
 
@@ -428,22 +447,29 @@ def account(
         )
         # Keep job_id: the firmware stores job IDs in EEPROM and never reuses them, so a
         # print resumed after a power loss keeps its ID and isn't a new print start.
-        s = replace(s, boot_id=boot_id, charged=0, unload_count=0, pending_at=0,
-                    held_mm=s.held_mm + kept)
+        s = replace(
+            s, boot_id=boot_id, charged=0, unload_count=0, pending_at=0, held_mm=s.held_mm + kept
+        )
         # An unload just before a reboot can be missed, so a claim moves only usage
         # since the reboot.
         window.clear()
 
     if ambiguous:
         ids = ", ".join(str(i) for i in assigned)
-        event(EventKind.AMBIGUOUS, f"location holds spools {ids}; skipping until it's clear "
-              "which one is loaded")
+        event(
+            EventKind.AMBIGUOUS,
+            f"location holds spools {ids}; skipping until it's clear which one is loaded",
+        )
         out.skipped = True
         if s.boot_id is not None:
             # Nothing is charged, so the usage is held: keep track of it over a reboot,
             # including one while the location stays ambiguous.
-            out.state = replace(s, extruded=reading.extruded, since_load=window,
-                                reboot_pending=s.reboot_pending or rebooted)
+            out.state = replace(
+                s,
+                extruded=reading.extruded,
+                since_load=window,
+                reboot_pending=s.reboot_pending or rebooted,
+            )
         return out
     evict = tuple(i for i in s.evict if i in location_ids)
     s = replace(s, evict=evict)
@@ -476,8 +502,10 @@ def account(
         """Charge usage held over a reboot, with no deleted spool, to the active spool."""
         nonlocal held, swap, provisional
         charge(target, held, "held before the printer restarted")
-        event(EventKind.HELD_CHARGED, f"spool {target} is active; charged it {held} mm "
-              "held before the printer restarted")
+        event(
+            EventKind.HELD_CHARGED,
+            f"spool {target} is active; charged it {held} mm held before the printer restarted",
+        )
         # It's usage from before this poll, like usage held by not advancing `charged`.
         if swap is not None and swap.spool_id == target:
             swap = replace(swap, mm=swap.mm + held)
@@ -503,8 +531,10 @@ def account(
             goes = f"is held because spool {deleted} was deleted"
         else:
             goes = "has no spool"
-        event(EventKind.UNLOAD, f"{n if n > 0 else 'some'} unload(s); {before} mm before "
-              f"the unload {goes}")
+        event(
+            EventKind.UNLOAD,
+            f"{n if n > 0 else 'some'} unload(s); {before} mm before the unload {goes}",
+        )
         # Usage held over a reboot is usage before the unload too.
         carried = held if deleted is None else 0
         if active is not None and carried:
@@ -517,13 +547,16 @@ def account(
             elif deleted is not None:
                 held += before
             else:
-                event(EventKind.LOST_UNASSIGNED,
-                      f"{before + carried} mm before unload had no spool")
+                event(
+                    EventKind.LOST_UNASSIGNED, f"{before + carried} mm before unload had no spool"
+                )
                 held = 0
         if provisional is not None:
-            event(EventKind.PROVISIONAL_KEPT,
-                  f"unload keeps the {provisional.mm} mm charged provisionally to spool "
-                  f"{provisional.spool_id}")
+            event(
+                EventKind.PROVISIONAL_KEPT,
+                f"unload keeps the {provisional.mm} mm charged provisionally to spool "
+                f"{provisional.spool_id}",
+            )
             provisional = None
         s = replace(s, charged=at, unload_count=reading.unload_count)
         window.clear()
@@ -536,8 +569,11 @@ def account(
 
         if assigned is None and active is not None:
             # S10: not a swap. Usage is held until a spool is assigned.
-            event(EventKind.ACTIVE_UNASSIGNED, f"spool {active} unloaded with no spool in "
-                  "the location; holding usage until one is assigned")
+            event(
+                EventKind.ACTIVE_UNASSIGNED,
+                f"spool {active} unloaded with no spool in "
+                "the location; holding usage until one is assigned",
+            )
             evict = retire(active)
             active = None
         elif assigned != active:
@@ -559,10 +595,15 @@ def account(
     if claim is not None:
         out.claimed = True
         if claim == active:
-            closed = (f"; the {provisional.mm} mm provisional charge stays"
-                      if provisional is not None else "")
-            event(EventKind.CLAIM_CONFIRMED,
-                  f"spool {claim} claimed: confirmed as loaded, nothing moves{closed}")
+            closed = (
+                f"; the {provisional.mm} mm provisional charge stays"
+                if provisional is not None
+                else ""
+            )
+            event(
+                EventKind.CLAIM_CONFIRMED,
+                f"spool {claim} claimed: confirmed as loaded, nothing moves{closed}",
+            )
         else:
             # Charge before refunding: Spoolman clamps used_weight at 0, so a refund
             # applied first could be truncated if the charge then fails.
@@ -573,9 +614,11 @@ def account(
                 charge(i, -mm, "moved to claimed spool")
             since = "reboot" if rebooted or not s.unload_count else "unload"
             sources = ", ".join(f"{mm} mm from spool {i}" for i, mm in moved.items())
-            event(EventKind.CLAIMED,
-                  f"spool {claim} claimed in place of spool {active}: moved "
-                  f"{sources or 'nothing'} (usage since the last {since})")
+            event(
+                EventKind.CLAIMED,
+                f"spool {claim} claimed in place of spool {active}: moved "
+                f"{sources or 'nothing'} (usage since the last {since})",
+            )
             evict = tuple(i for i in evict if i != claim)
             if active is not None and active in location_ids and active not in evict:
                 evict = (*evict, active)
@@ -593,9 +636,12 @@ def account(
         if swap is not None and assigned is None:
             # The old spool left first, before the new one arrived. Keep the swap open and
             # hold usage until a spool is assigned: a new spool confirms the swap below.
-            event(EventKind.ACTIVE_UNASSIGNED, f"spool {active} is no longer in the "
-                  "location; holding usage until a spool is assigned, which also takes "
-                  f"the {swap.mm} mm since the unload")
+            event(
+                EventKind.ACTIVE_UNASSIGNED,
+                f"spool {active} is no longer in the "
+                "location; holding usage until a spool is assigned, which also takes "
+                f"the {swap.mm} mm since the unload",
+            )
             active = None
         elif swap is not None and assigned == swap.spool_id:
             # The old spool is back: as if it had never left, the swap stays open, or closes
@@ -603,10 +649,12 @@ def account(
             event(EventKind.ACTIVE_UNASSIGNED, f"spool {assigned} is back in the location")
             active = assigned
             if swap.started_job is not None:
-                event(EventKind.SWAP_ASSUMED,
-                      f"print {swap.started_job} started with no Spoolman change since the "
-                      f"unload; assuming spool {swap.spool_id} was reloaded and charging it "
-                      "provisionally")
+                event(
+                    EventKind.SWAP_ASSUMED,
+                    f"print {swap.started_job} started with no Spoolman change since the "
+                    f"unload; assuming spool {swap.spool_id} was reloaded and charging it "
+                    "provisionally",
+                )
                 provisional = Provisional(swap.spool_id, swap.mm, swap.started_job)
                 swap = None
         elif swap is not None:
@@ -616,8 +664,10 @@ def account(
                 # applied first could be truncated if the charge then fails.
                 charge(assigned, moved, "usage since unconfirmed swap")
                 charge(swap.spool_id, -moved, "moved to confirmed swap spool")
-            event(EventKind.SWAP_CONFIRMED,
-                  f"swap confirmed: {moved} mm moved from spool {swap.spool_id} to {assigned}")
+            event(
+                EventKind.SWAP_CONFIRMED,
+                f"swap confirmed: {moved} mm moved from spool {swap.spool_id} to {assigned}",
+            )
             swap = None
             evict = retire(active)
             active = assigned
@@ -625,8 +675,10 @@ def account(
             # Already in the location when the active spool was deleted: it may not be
             # loaded yet, so keep holding unless the printer reports its UUID.
             if matches(assigned):
-                event(EventKind.CORRECTION, f"printer already has spool {assigned}'s "
-                      "filament; making it active")
+                event(
+                    EventKind.CORRECTION,
+                    f"printer already has spool {assigned}'s filament; making it active",
+                )
                 active = assigned
         elif legacy or active is None:
             # No unload signal to wait for, or nothing was active: switch now, charging
@@ -637,35 +689,55 @@ def account(
                 s = replace(s, charged=reading.extruded)
             if legacy:
                 window.clear()  # The switch is the best guess at when the spool went in.
-            event(EventKind.ASSIGNMENT_CHANGED, f"spool {active} -> {assigned}"
-                  if active is not None else f"spool {assigned} is active")
+            event(
+                EventKind.ASSIGNMENT_CHANGED,
+                f"spool {active} -> {assigned}"
+                if active is not None
+                else f"spool {assigned} is active",
+            )
             evict = retire(active)
             active = assigned
         elif assigned is None:
             # Not a swap: nothing is staged, and the active spool is still loaded.
             if s.assigned == active:
-                event(EventKind.ACTIVE_UNASSIGNED, f"spool {active} is no longer in the "
-                      "location; still charging it until the printer reports an unload")
+                event(
+                    EventKind.ACTIVE_UNASSIGNED,
+                    f"spool {active} is no longer in the "
+                    "location; still charging it until the printer reports an unload",
+                )
             elif s.assigned is not None:
                 # The staged spool left. The active one was already gone, or left with it.
-                event(EventKind.STAGING_CANCELLED, f"spool {s.assigned} is no longer staged; "
-                      f"still charging spool {active}")
-                event(EventKind.ACTIVE_UNASSIGNED, f"spool {active} isn't in the location "
-                      "either; still charging it until the printer reports an unload")
+                event(
+                    EventKind.STAGING_CANCELLED,
+                    f"spool {s.assigned} is no longer staged; still charging spool {active}",
+                )
+                event(
+                    EventKind.ACTIVE_UNASSIGNED,
+                    f"spool {active} isn't in the location "
+                    "either; still charging it until the printer reports an unload",
+                )
         elif matches(assigned):
-            event(EventKind.CORRECTION, f"printer already has spool {assigned}'s filament; "
-                  f"switching from spool {active} now")
+            event(
+                EventKind.CORRECTION,
+                f"printer already has spool {assigned}'s filament; "
+                f"switching from spool {active} now",
+            )
             evict = retire(active)
             active = assigned
         elif assigned != s.assigned:
-            event(EventKind.SWAP_STAGED, f"spool {assigned} staged; still charging spool "
-                  f"{active} until the printer reports an unload")
+            event(
+                EventKind.SWAP_STAGED,
+                f"spool {assigned} staged; still charging spool "
+                f"{active} until the printer reports an unload",
+            )
 
     elif not legacy and active is not None and s.assigned is None and assigned == active:
         event(EventKind.ACTIVE_UNASSIGNED, f"spool {active} is back in the location")
     elif not legacy and active is not None and s.assigned != active and assigned == active:
-        event(EventKind.STAGING_CANCELLED, f"spool {s.assigned} is no longer staged; "
-              f"still charging spool {active}")
+        event(
+            EventKind.STAGING_CANCELLED,
+            f"spool {s.assigned} is no longer staged; still charging spool {active}",
+        )
 
     # 4. A print starting closes the confirmation window. A print starts at its first
     # extrusion: a new job is pending until the counter passes where it was first seen.
@@ -681,22 +753,29 @@ def account(
     if started:
         notice = None
         if deleted is not None and active is None and assigned is not None:
-            event(EventKind.ASSIGNMENT_CHANGED, f"print started with spool {assigned} "
-                  f"assigned; making it active in place of deleted spool {deleted}")
+            event(
+                EventKind.ASSIGNMENT_CHANGED,
+                f"print started with spool {assigned} "
+                f"assigned; making it active in place of deleted spool {deleted}",
+            )
             active = assigned
         # With the location emptied, no spool is charged to assume: the swap stays open
         # for the next spool assigned. The old spool coming back closes it as of now.
         if swap is not None and active is None and swap.started_job is None:
             swap = replace(swap, started_job=job_id)
         elif swap is not None and active is not None:
-            event(EventKind.SWAP_ASSUMED,
-                  f"print started with no Spoolman change since the unload; assuming "
-                  f"spool {swap.spool_id} was reloaded and charging it provisionally")
+            event(
+                EventKind.SWAP_ASSUMED,
+                f"print started with no Spoolman change since the unload; assuming "
+                f"spool {swap.spool_id} was reloaded and charging it provisionally",
+            )
             provisional = Provisional(swap.spool_id, swap.mm, job_id)
             swap = None
         if not legacy and assigned is not None and assigned != active:
-            msg = (f"print started while spool {assigned} is staged but not loaded; "
-                   f"charging spool {active}")
+            msg = (
+                f"print started while spool {assigned} is staged but not loaded; "
+                f"charging spool {active}"
+            )
             event(EventKind.STAGED_AT_PRINT, msg)
             if active is not None:
                 notice = Notice(active, EventKind.STAGED_AT_PRINT, msg)
@@ -708,8 +787,11 @@ def account(
     if deleted is not None and active is not None:
         if held:
             charge(active, held, f"held after spool {deleted} was deleted")
-            event(EventKind.HELD_CHARGED, f"spool {active} is active; charged it {held} mm "
-                  f"held after spool {deleted} was deleted")
+            event(
+                EventKind.HELD_CHARGED,
+                f"spool {active} is active; charged it {held} mm "
+                f"held after spool {deleted} was deleted",
+            )
         deleted, held = None, 0
     elif held and active is not None:
         charge_held(active)
@@ -735,21 +817,30 @@ def account(
 
     # 6. Notices that depend on the outcome.
     # After a deletion, the deleted-spool flag already covers the staged spool.
-    if ((rebooted or s.reboot_pending) and not legacy and assigned is not None
-            and assigned != active and deleted is None):
+    if (
+        (rebooted or s.reboot_pending)
+        and not legacy
+        and assigned is not None
+        and assigned != active
+        and deleted is None
+    ):
         # `unload_count` restarts with the printer, so an unload just before the reboot
         # can be missed, leaving the staged spool loaded while the old one is charged.
-        msg = (f"printer restarted while spool {assigned} is staged; an unload just before "
-               f"the restart can be missed, so check which spool is loaded. Still "
-               f"charging spool {active}")
+        msg = (
+            f"printer restarted while spool {assigned} is staged; an unload just before "
+            f"the restart can be missed, so check which spool is loaded. Still "
+            f"charging spool {active}"
+        )
         event(EventKind.STAGED_AT_REBOOT, msg)
         staged_notice = Notice(assigned, EventKind.STAGED_AT_REBOOT, msg)
     if staged_notice is not None and (staged_notice.spool_id != assigned or assigned == active):
         staged_notice = None
     if provisional is not None and provisional.spool_id != active:
-        event(EventKind.PROVISIONAL_KEPT,
-              f"spool {provisional.spool_id} is no longer active; its {provisional.mm} mm "
-              "provisional charge stays")
+        event(
+            EventKind.PROVISIONAL_KEPT,
+            f"spool {provisional.spool_id} is no longer active; its {provisional.mm} mm "
+            "provisional charge stays",
+        )
         provisional = None
 
     resync = unloaded or active != s.active or out.claimed
