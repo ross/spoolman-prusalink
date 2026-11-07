@@ -33,6 +33,13 @@ differ while a swap is in progress:
 
 While the tool reports no material, or no spool is active, uncharged usage is held (by
 not advancing `charged`) and goes to the active spool once both are present.
+
+A deleted active spool (see `hold_deleted()`) leaves the tool with no active spool and
+`deleted_spool` set. Its usage then advances `charged` and goes to `held_mm` instead, so
+it survives a reboot and an unload. `held_mm` is charged to the next spool that becomes
+active: by an assignment change, a swap commit, or a print start with a spool assigned.
+A spool already staged when the deletion is found isn't made active on its own, since the
+deleted spool's filament can still be in the tool.
 """
 
 from __future__ import annotations
@@ -60,6 +67,8 @@ class EventKind(StrEnum):
     ASSIGNMENT_CHANGED = "assignment_changed"
     HOLD_EMPTY = "hold_empty"
     HOLD_UNASSIGNED = "hold_unassigned"
+    HOLD_DELETED = "hold_deleted"
+    HELD_CHARGED = "held_charged"
     LOST_UNASSIGNED = "lost_unassigned"
     COUNTER_ANOMALY = "counter_anomaly"
 
@@ -130,6 +139,10 @@ class ToolState:
     # can be told apart from a change on the printer. None when the bridge hasn't
     # written this tool. UNKNOWN_WRITE for state saved before this was recorded.
     written: str | None = None
+    # Usage held after the active spool was deleted in Spoolman, in raw extruded mm, and
+    # the deleted spool. Charged to the next spool that becomes active in this tool.
+    held_mm: int = 0
+    deleted_spool: int | None = None
 
     def to_json(self) -> dict:
         return {
@@ -152,6 +165,8 @@ class ToolState:
             "needs_sync": self.needs_sync,
             "sync_attempts": self.sync_attempts,
             "written": self.written,
+            "held_mm": self.held_mm,
+            "deleted_spool": self.deleted_spool,
         }
 
     @classmethod
@@ -175,6 +190,8 @@ class ToolState:
             needs_sync=bool(data.get("needs_sync", False)),
             sync_attempts=int(data.get("sync_attempts", 0)),
             written=data.get("written", UNKNOWN_WRITE),
+            held_mm=int(data.get("held_mm", 0)),
+            deleted_spool=data.get("deleted_spool"),
         )
 
 
@@ -187,6 +204,32 @@ class Result:
     # The spool that was in the tool when it unloaded during a started print: a runout,
     # or a planned color change, which looks the same.
     runout: int | None = None
+
+
+def hold_deleted(state: ToolState, spool_id: int, mm: int = 0) -> ToolState:
+    """Record that `spool_id` was deleted in Spoolman, holding `mm` of its usage.
+
+    If it's the active spool, the tool is left with no active spool, and later usage is
+    held for the next spool that becomes active. `mm` is a charge Spoolman rejected,
+    added to the held total. Returns the state unchanged if the spool is neither active
+    nor already held for.
+    """
+    if spool_id == state.active:
+        swap = state.swap if state.swap is None or state.swap.spool_id != spool_id else None
+        notice = (state.notice if state.notice is None or state.notice.spool_id != spool_id
+                  else None)
+        state = replace(
+            state,
+            active=None,
+            assigned=None if state.assigned == spool_id else state.assigned,
+            evict=None if state.evict == spool_id else state.evict,
+            swap=swap,
+            notice=notice,
+            deleted_spool=spool_id,
+        )
+    elif spool_id != state.deleted_spool:
+        return state
+    return replace(state, held_mm=state.held_mm + max(mm, 0))
 
 
 def resolve_assignment(state: ToolState, location_ids: list[int]) -> int | None | list[int]:
@@ -276,6 +319,8 @@ def account(
     swap = s.swap
     notice = s.notice
     unloaded = False
+    deleted = s.deleted_spool
+    held = s.held_mm
 
     def retire(old: int | None) -> int | None:
         """Mark the outgoing spool for eviction if it's still in the location."""
@@ -298,6 +343,8 @@ def account(
         if before > 0:
             if active is not None:
                 charge(active, before, "before unload")
+            elif deleted is not None:
+                held += before
             else:
                 event(EventKind.LOST_UNASSIGNED, f"{before} mm before unload had no spool")
         s = replace(s, charged=at, unload_count=reading.unload_count)
@@ -334,6 +381,13 @@ def account(
             swap = None
             evict = retire(active)
             active = assigned
+        elif deleted is not None and active is None and assigned == s.assigned:
+            # Already in the location when the active spool was deleted: it may not be
+            # loaded yet, so keep holding unless the printer reports its UUID.
+            if matches(assigned):
+                event(EventKind.CORRECTION, f"printer already has spool {assigned}'s "
+                      "filament; making it active")
+                active = assigned
         elif legacy or active is None:
             # No unload signal to wait for, or nothing was active: switch now, charging
             # usage so far to the outgoing spool.
@@ -370,6 +424,10 @@ def account(
         pending_job = None
     if started:
         notice = None
+        if deleted is not None and active is None and assigned is not None:
+            event(EventKind.ASSIGNMENT_CHANGED, f"print started with spool {assigned} "
+                  f"assigned; making it active in place of deleted spool {deleted}")
+            active = assigned
         if swap is not None:
             msg = (f"print started with no Spoolman change since the unload; assuming "
                    f"spool {swap.spool_id} was reloaded")
@@ -383,11 +441,22 @@ def account(
             if active is not None:
                 notice = Notice(active, EventKind.STAGED_AT_PRINT, msg)
 
+    # A spool is active again after a deletion: it takes the held usage.
+    if deleted is not None and active is not None:
+        charge(active, held, f"held after spool {deleted} was deleted")
+        event(EventKind.HELD_CHARGED, f"spool {active} is active; charged it {held} mm "
+              f"held after spool {deleted} was deleted")
+        deleted, held = None, 0
+
     # 4. Usage since the last charge goes to the active spool.
     delta = reading.extruded - s.charged
     if delta > 0:
         if reading.material is None:
             event(EventKind.HOLD_EMPTY, f"holding {delta} mm until filament is reported")
+        elif active is None and deleted is not None:
+            event(EventKind.HOLD_DELETED, f"holding usage since spool {deleted} was deleted")
+            held += delta
+            s = replace(s, charged=reading.extruded)
         elif active is None:
             event(EventKind.HOLD_UNASSIGNED, f"holding {delta} mm: no spool assigned")
         else:
@@ -409,5 +478,7 @@ def account(
         pending_job=pending_job,
         pending_at=pending_at,
         notice=notice,
+        held_mm=held,
+        deleted_spool=deleted,
     )
     return out

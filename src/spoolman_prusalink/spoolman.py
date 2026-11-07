@@ -42,6 +42,7 @@ def parse_spool(
         bed_temp=filament.get("settings_bed_temp"),
         remaining_weight=data.get("remaining_weight"),
         net_weight=data.get("initial_weight") or filament.get("weight"),
+        archived=bool(data.get("archived", False)),
     )
 
 
@@ -68,6 +69,14 @@ class Spoolman:
         resp = await self._client.get("/api/v1/spool")
         resp.raise_for_status()
         return [parse_spool(s, self._uuid_field, self._flag_field) for s in resp.json()]
+
+    async def spool(self, spool_id: int) -> Spool | None:
+        """Return one spool, archived or not, or None if it doesn't exist (404)."""
+        resp = await self._client.get(f"/api/v1/spool/{spool_id}")
+        if resp.status_code == 404:
+            return None
+        resp.raise_for_status()
+        return parse_spool(resp.json(), self._uuid_field, self._flag_field)
 
     async def use_length(self, spool_id: int, mm: float) -> None:
         """Charge (or, with a negative value, refund) filament length."""

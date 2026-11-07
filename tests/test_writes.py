@@ -28,6 +28,7 @@ class FakeSpoolman:
         self.fail_read = None  # Status code for spool reads.
         self.fail_patch = None  # Status code for spool PATCHes.
         self.fail_field = None  # Status code for field reads.
+        self.lookups = []  # Spool ids read one at a time.
 
     def handle(self, request: httpx.Request) -> httpx.Response:
         path, method = request.url.path, request.method
@@ -36,7 +37,14 @@ class FakeSpoolman:
         if path == "/api/v1/spool" and method == "GET":
             if self.fail_read:
                 return httpx.Response(self.fail_read, text="oops")
-            return httpx.Response(200, json=list(self.spools.values()))
+            return httpx.Response(
+                200, json=[s for s in self.spools.values() if not s.get("archived")])
+        if path.startswith("/api/v1/spool/") and method == "GET":
+            spool_id = int(path.rsplit("/", 1)[1])
+            self.lookups.append(spool_id)
+            if spool_id not in self.spools:
+                return httpx.Response(404, json={"message": "not found"})
+            return httpx.Response(200, json=self.spools[spool_id])
         if path == "/api/v1/field/spool" and method == "GET":
             if self.fail_field:
                 return httpx.Response(self.fail_field, text="oops")
@@ -899,4 +907,101 @@ async def test_negative_remaining_is_logged_once(tmp_path, caplog):
         await bridge.poll()
     assert caplog.text.count("shows -12 g remaining") == 1
     assert fake.flag(19) is None
+# Deleted and archived active spools (M3, M3a, Q7)
+
+
+async def test_deleted_spool_holds_usage_for_the_next_spool(tmp_path, caplog):
+    bridge, fake, printer = make(tmp_path, [spool(19)])
+    caplog.set_level("INFO")
+    await bridge.poll()
+    printer.extruded = 1500
+    await bridge.poll()
+    del fake.spools[19]
+    for extruded in (1700, 1800, 1900):  # Printing on with the spool deleted.
+        printer.extruded = extruded
+        await bridge.poll()
+    assert fake.used == {19: [500.0]}
+    assert fake.lookups == [19]
+    st = load_state(tmp_path / "state.json").tools[0]
+    assert (st.active, st.deleted_spool, st.held_mm) == (None, 19, 400)
+    assert caplog.text.count("spool 19 was deleted in Spoolman") == 1
+    assert caplog.text.count("holding usage since spool 19 was deleted") == 1
+    assert "rejected" not in caplog.text
+
+    fake.spools[20] = spool(20)  # The user re-creates the spool and moves it in.
+    await bridge.poll()
+    await bridge.poll()
+    assert fake.used == {19: [500.0], 20: [400.0]}
+    assert [r["reason"] for r in ledger(tmp_path) if r.get("spool_id") == 20] == [
+        "held after spool 19 was deleted"]
+    assert caplog.text.count("held after spool 19 was deleted") == 2  # Event and charge.
+    st = load_state(tmp_path / "state.json").tools[0]
+    assert (st.active, st.deleted_spool, st.held_mm) == (20, None, 0)
+    await bridge.aclose()
+
+
+async def test_404_in_flush_holds_the_charge(tmp_path, caplog):
+    bridge, fake, printer = make(tmp_path, [spool(19)])
+    caplog.set_level("INFO")
+    await bridge.poll()
+    printer.extruded = 1500
+    fake.fail_use = [503]
+    await bridge.poll()  # The charge stays queued.
+    del fake.spools[19]
+    printer.extruded = 1600
+    await bridge.poll()  # The queued charge gets a 404.
+    await bridge.poll()
+    assert fake.used == {} and fake.lookups == []
+    st = load_state(tmp_path / "state.json").tools[0]
+    assert (st.active, st.deleted_spool, st.held_mm) == (None, 19, 600)
+    held = [r for r in ledger(tmp_path) if r.get("held")]
+    assert [(r["spool_id"], r["failed"]) for r in held] == [(19, "404")]
+    assert caplog.text.count("spool 19 was deleted in Spoolman") == 1
+    assert "dropping it" not in caplog.text
+
+    fake.spools[21] = spool(21)
+    await bridge.poll()
+    assert fake.used == {21: [600.0]}
+    await bridge.aclose()
+
+
+async def test_staged_spool_is_flagged_while_usage_is_held(tmp_path):
+    bridge, fake, printer = make(tmp_path, [spool(19)])
+    await bridge.poll()
+    fake.spools[20] = spool(20)  # Staged.
+    await bridge.poll()
+    del fake.spools[19]
+    printer.extruded = 1300
+    await bridge.poll()
+    await bridge.poll()
+    assert "usage is being held because spool 19 was deleted" in fake.flag(20)
+    assert fake.writes.count(("patch", 20)) == 1
+    assert fake.used == {}
+
+    printer.unloads, printer.at_unload = 1, 1300  # Swap commit.
+    await bridge.poll()
+    assert fake.used == {20: [300.0]}
+    assert fake.flag(20) is None
+    await bridge.aclose()
+
+
+async def test_archived_spool_is_charged_and_flagged_once(tmp_path, caplog):
+    bridge, fake, printer = make(tmp_path, [spool(19)])
+    caplog.set_level("INFO")
+    await bridge.poll()
+    fake.spools[19]["archived"] = True
+    for extruded in (1100, 1200, 1300):
+        printer.extruded = extruded
+        await bridge.poll()
+    assert fake.used == {19: [100.0, 100.0, 100.0]}
+    assert fake.lookups == [19]
+    assert fake.flag(19) == f"{LOC}: spool is archived but still loaded"
+    assert fake.writes.count(("patch", 19)) == 1
+    assert caplog.text.count("spool 19 is archived but still loaded") == 1
+
+    printer.unloads, printer.at_unload = 1, 1300  # Unloaded: the flag clears.
+    await bridge.poll()
+    await bridge.poll()
+    assert fake.flag(19) is None
+    assert fake.lookups == [19]
     await bridge.aclose()

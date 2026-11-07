@@ -4,6 +4,7 @@ from spoolman_prusalink.accounting import (
     SwapFlag,
     ToolState,
     account,
+    hold_deleted,
     resolve_assignment,
 )
 from spoolman_prusalink.models import Material, ToolReading
@@ -408,6 +409,15 @@ def test_state_round_trip():
     assert ToolState.from_json(s.to_json()) == s
 
 
+def test_held_usage_round_trips_and_old_state_has_none():
+    s = ToolState(BOOT, 123, 2, None, None, held_mm=300, deleted_spool=19)
+    assert ToolState.from_json(s.to_json()) == s
+    old = s.to_json()
+    del old["held_mm"], old["deleted_spool"]
+    restored = ToolState.from_json(old)
+    assert (restored.held_mm, restored.deleted_spool) == (0, None)
+
+
 def test_restart_from_saved_state_neither_double_charges_nor_drops():
     _, _, state = run([(BOOT, r(100), loc(7)), (BOOT, r(200), loc(7))])
     restored = ToolState.from_json(state.to_json())
@@ -424,3 +434,60 @@ def test_unstaging_before_unload_is_logged_and_keeps_active():
     assert kinds.count(EventKind.STAGING_CANCELLED) == 1
     assert all(c.spool_id == 19 for c in charges)
     assert (state.active, state.assigned) == (19, 19)
+
+
+# Deleted active spool (M3, Q7)
+
+
+def deleted(extruded=200, ids=(), held=0):
+    """State after spool 19 was active at `extruded`, then deleted with `held` mm rejected."""
+    _, _, state = run([(BOOT, r(100), loc(19)), (BOOT, r(extruded), loc(19, *ids))])
+    return hold_deleted(state, 19, held)
+
+
+def test_hold_deleted_clears_the_active_spool():
+    state = deleted(held=50)
+    assert (state.active, state.assigned, state.deleted_spool, state.held_mm) == (
+        None, None, 19, 50)
+    assert hold_deleted(state, 19, 30).held_mm == 80  # Another rejected charge.
+    assert hold_deleted(state, 7, 30) == state  # Not this tool's spool.
+
+
+def test_usage_after_deletion_is_held_through_reboot_and_unload():
+    charges, kinds, state = run([
+        (BOOT, r(300), loc()),
+        (BOOT + 1, r(40), loc()),  # Reboot: held usage survives.
+        (BOOT + 1, r(90, unloads=1, at_unload=60), loc()),  # Unload with nothing assigned.
+    ], deleted(held=50))
+    assert charges == []
+    assert EventKind.LOST_UNASSIGNED not in kinds
+    assert EventKind.HOLD_DELETED in kinds
+    assert (state.held_mm, state.deleted_spool, state.charged) == (50 + 100 + 40 + 50, 19, 90)
+
+
+def test_held_usage_goes_to_the_next_assigned_spool():
+    charges, kinds, state = run([(BOOT, r(300), loc()), (BOOT, r(350), loc(20))],
+                                deleted(held=50))
+    assert charges == [Charge(20, 150, "held after spool 19 was deleted"),
+                       Charge(20, 50, "extruded")]
+    assert EventKind.HELD_CHARGED in kinds
+    assert (state.active, state.held_mm, state.deleted_spool) == (20, 0, None)
+
+
+def test_staged_spool_waits_for_unload_then_takes_held_usage():
+    charges, _, state = run([(BOOT, r(300), loc(20))], deleted(ids=(20,)))
+    assert charges == [] and state.active is None and state.held_mm == 100
+    charges, _, state = run([(BOOT, r(400, unloads=1, at_unload=350), loc(20))], state)
+    assert charges == [Charge(20, 150, "held after spool 19 was deleted"),
+                       Charge(20, 50, "extruded")]
+    assert (state.active, state.held_mm) == (20, 0)
+
+
+def test_staged_spool_takes_held_usage_at_print_start():
+    _, _, state = run([(BOOT, r(300), loc(20))], deleted(ids=(20,)))
+    # The job appears at 320 (pending, so those 20 mm are held too) and starts at its
+    # first extrusion.
+    charges, _, state = run([(BOOT, r(320), loc(20), 77), (BOOT, r(340), loc(20), 77)], state)
+    assert charges == [Charge(20, 120, "held after spool 19 was deleted"),
+                       Charge(20, 20, "extruded")]
+    assert state.active == 20

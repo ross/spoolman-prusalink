@@ -146,9 +146,16 @@ With `dry_run = false`, each charge is saved to `state.json` before it's sent
 to Spoolman, in the same write as the counters it came from, and removed once
 Spoolman accepts it. If Spoolman is unreachable or returns a server error,
 charges stay queued and are retried in order on the next poll, including
-after a restart. If Spoolman rejects a charge with a client error, for
-example because the spool was deleted, the bridge logs an error, records it
-in the ledger with `failed`, and drops it.
+after a restart. If Spoolman rejects a charge with any other client error,
+the bridge logs an error, records it in the ledger with `failed`, and drops
+it.
+
+If the active spool is deleted in Spoolman, found either from Spoolman's
+spool list or from a 404 on a charge, the tool is left with no active spool.
+The rejected charge and later usage are held, and charged to the next spool
+that becomes active in the tool, with the reason "held after spool N was
+deleted". An archived active spool keeps being charged until the next
+unload.
 
 A charge that Spoolman applied but whose response was lost is sent again, so
 it can be counted twice. Every other failure delays charges rather than
@@ -166,6 +173,9 @@ the bridge creates on first use:
   earlier swap charged the wrong spool, though a planned color change looks
   the same. A loaded spool going below 0 g remaining is only logged, once:
   spool weights are inexact.
+- Usage held because the active spool was deleted, on the spool staged in
+  the location, until it becomes active at the next unload or print start.
+- An archived spool that's still loaded, until the next unload.
 - With `flag_drift = true`, a mismatch between the printer's filament and the
   loaded spool. A menu load always causes one, because it drops the color and
   UUID.

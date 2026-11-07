@@ -14,7 +14,7 @@ from datetime import UTC, datetime
 import httpx
 
 from . import drift, printer_sync
-from .accounting import UNKNOWN_WRITE, WARNINGS, EventKind, ToolState, account
+from .accounting import UNKNOWN_WRITE, WARNINGS, EventKind, ToolState, account, hold_deleted
 from .config import Config
 from .models import FilamentReading, Spool
 from .prusalink import BUSY_STATES, IDLE_STATES, NoFilamentEndpoint, PrinterStatus, PrusaLink
@@ -24,7 +24,8 @@ from .state import State, append_ledger, load_state, save_state
 log = logging.getLogger("spoolman_prusalink")
 
 # Events that repeat every poll while a condition lasts. Log them only when they change.
-_REPEATING = {EventKind.HOLD_EMPTY, EventKind.HOLD_UNASSIGNED, EventKind.AMBIGUOUS}
+_REPEATING = {EventKind.HOLD_EMPTY, EventKind.HOLD_UNASSIGNED, EventKind.HOLD_DELETED,
+              EventKind.AMBIGUOUS}
 
 FLAG_FIELD_NAME = "Printer bridge flag"
 UUID_FIELD_NAME = "Instance UUID"
@@ -131,6 +132,9 @@ class Bridge:
     _model_error: str | None = None
     _model_boot: int | None = None
     _model: printer_sync.PrinterModel | None = None
+    # Active spools missing from Spoolman's list that turned out to be archived, looked
+    # up once each. Kept while active or flagged, so their flag can be set and cleared.
+    _archived: dict[int, Spool] = field(default_factory=dict)
 
     @classmethod
     def from_config(cls, config: Config) -> Bridge:
@@ -195,6 +199,7 @@ class Bridge:
         self._spoolman_outage.ok()
         self._problems.clear("Spoolman read", "Spoolman reads working again")
         self._last_state = status.state
+        await self.check_missing(spools)
         self.process(reading, spools, status._replace(job_id=job_id))
         await self.flush()
         await self.evict(spools)
@@ -202,6 +207,51 @@ class Bridge:
             await self.sync_printer(spools)
         if not self.config.dry_run and self.config.flag_field:
             await self.sync_flags(spools)
+
+    async def check_missing(self, spools: list[Spool]) -> None:
+        """Find out why an active spool is missing from Spoolman's list.
+
+        The list leaves out archived spools. A deleted one (404) leaves its tool with no
+        active spool, holding usage for the next one. An archived one keeps being charged
+        until the next unload, and is flagged. Each spool is looked up once, not every poll.
+        """
+        listed = {s.id for s in spools}
+        keep = {st.active for st in self.tools.values()} | set(self.state.flagged)
+        self._archived = {i: s for i, s in self._archived.items()
+                          if i not in listed and i in keep}
+        for tool, st in list(self.tools.items()):
+            spool_id = st.active
+            if spool_id is None or spool_id in listed or spool_id in self._archived:
+                continue
+            location = self.config.tools.get(tool, str(tool))
+            try:
+                found = await self.spoolman.spool(spool_id)
+            except (httpx.HTTPError, ValueError, KeyError) as e:
+                self._problems.fail(("lookup", spool_id), e,
+                                    "[%s] can't look up spool %d, which is missing from "
+                                    "Spoolman's list: %s", location, spool_id, e)
+                continue
+            self._problems.clear(("lookup", spool_id))
+            if found is None:
+                self._hold_deleted(tool, spool_id)
+            elif found.archived:
+                self._archived[spool_id] = found
+                log.warning("[%s] spool %d is archived but still loaded; charging it until "
+                            "the next unload", location, spool_id)
+
+    def _hold_deleted(self, tool: int, spool_id: int, mm: int = 0) -> bool:
+        """Hold a deleted spool's usage for the tool's next spool. Returns whether it did."""
+        st = self.tools.get(tool)
+        if st is None or spool_id not in (st.active, st.deleted_spool):
+            return False
+        self.tools[tool] = hold_deleted(st, spool_id, mm)
+        location = self.config.tools.get(tool, str(tool))
+        self._problems.fail(
+            ("deleted", tool), spool_id,
+            "[%s] spool %d was deleted in Spoolman; holding its usage for the next spool "
+            "that becomes active in %s", location, spool_id, location)
+        # Not saved here: flush() saves with the record popped, and process() saves after.
+        return True
 
     async def _check_model(self, boot_id: int) -> None:
         """Look up the printer's model; if the bridge can't write to it, writes stay off."""
@@ -322,6 +372,17 @@ class Bridge:
                 })
 
             st = self.tools.get(tool, ToolState())
+            if st.deleted_spool is None:
+                self._problems.clear(("deleted", tool))
+            elif st.assigned is not None:
+                flags.setdefault(st.assigned, []).append(
+                    f"{location}: usage is being held because spool {st.deleted_spool} was "
+                    f"deleted. It goes to this spool at the next unload or print start."
+                )
+            if st.active in self._archived:
+                flags.setdefault(st.active, []).append(
+                    f"{location}: spool is archived but still loaded"
+                )
             if st.evict is not None and dry:
                 notes.append(f"[{location}] would move spool {st.evict} out of {location!r}")
             if st.swap is not None:
@@ -457,8 +518,9 @@ class Bridge:
         """Send queued charges in order. Returns False if any are still queued.
 
         A charge leaves the outbox only once Spoolman accepts it, so a crash or an
-        outage delays charges instead of dropping them. A 4xx response, such as for a
-        deleted spool, drops the charge with an error so it can't block the rest.
+        outage delays charges instead of dropping them. A 404 for the tool's active (or
+        already deleted) spool means it was deleted: the charge is held for the tool's
+        next spool. Any other 4xx drops the charge with an error so it can't block the rest.
         """
         outbox = self.state.outbox
         sent = 0
@@ -474,9 +536,15 @@ class Bridge:
                         "charge", code, "charge to spool %d failed (%d); %d queued, retrying",
                         rec["spool_id"], code, len(outbox))
                     return False
-                log.error("Spoolman rejected a %+g mm charge to spool %d (%d %s); dropping it",
-                          rec["use_length"], rec["spool_id"], code, e.response.text[:200])
-                rec = {**rec, "failed": f"{code}"}
+                mm = int(rec.get("extruded_mm", 0))
+                if code == 404 and mm > 0 and self._hold_deleted(
+                        rec.get("tool", -1), rec["spool_id"], mm):
+                    rec = {**rec, "failed": f"{code}", "held": True}
+                else:
+                    log.error("Spoolman rejected a %+g mm charge to spool %d (%d %s); "
+                              "dropping it", rec["use_length"], rec["spool_id"], code,
+                              e.response.text[:200])
+                    rec = {**rec, "failed": f"{code}"}
             except httpx.HTTPError as e:
                 self._problems.fail(
                     "charge", e, "charge to spool %d failed (%s); %d queued, retrying",
@@ -629,7 +697,7 @@ class Bridge:
         assert key
         if not await self._ensure_field(key, FLAG_FIELD_NAME):
             return
-        current = {s.id: s.flag for s in spools}
+        current = {s.id: s.flag for s in [*spools, *self._archived.values()]}
         changed = False
         for spool_id in sorted(set(self._flags) | set(self.state.flagged)):
             want = self._flags.get(spool_id)
@@ -646,6 +714,8 @@ class Bridge:
                                         "can't update the flag on spool %d: %s", spool_id, e)
                     continue
                 self._problems.clear(("flag", spool_id))
+                if spool_id in self._archived:
+                    self._archived[spool_id] = replace(self._archived[spool_id], flag=want)
                 log.info("%s flag on spool %d%s", "set" if want else "cleared", spool_id,
                          f": {want}" if want else "")
             if want is None:
