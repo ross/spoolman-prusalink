@@ -495,6 +495,8 @@ def test_staged_spool_takes_held_usage_at_print_start():
     assert charges == [Charge(20, 120, "held after spool 19 was deleted"),
                        Charge(20, 20, "extruded")]
     assert state.active == 20
+
+
 # Provisional charges and claims
 
 

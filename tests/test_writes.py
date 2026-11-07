@@ -1027,6 +1027,9 @@ async def test_archived_spool_is_charged_and_flagged_once(tmp_path, caplog):
     await bridge.poll()
     assert fake.flag(19) is None
     assert fake.lookups == [19]
+    await bridge.aclose()
+
+
 # Claims
 
 

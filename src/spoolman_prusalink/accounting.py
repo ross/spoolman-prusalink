@@ -292,13 +292,13 @@ def hold_deleted(state: ToolState, spool_id: int, mm: int = 0, queued: int = 0) 
             deleted_spool=spool_id,
             provisional=None,  # It was on the active spool.
         )
+    elif spool_id != state.deleted_spool:
+        return state
     if spool_id in state.since_load:
         # A claim takes the held usage instead: a rejected charge is both in the window
         # and in `held_mm`, and there's nothing left to refund.
         state = replace(state, since_load={k: v for k, v in state.since_load.items()
                                            if k != spool_id})
-    elif spool_id != state.deleted_spool:
-        return state
     return replace(state, held_mm=held + max(mm, 0))
 
 
@@ -606,7 +606,9 @@ def account(
                 provisional = replace(provisional, mm=provisional.mm + delta)
 
     # 6. Notices that depend on the outcome.
-    if rebooted and not legacy and assigned is not None and assigned != active:
+    # After a deletion, the deleted-spool flag already covers the staged spool.
+    if (rebooted and not legacy and assigned is not None and assigned != active
+            and deleted is None):
         # `unload_count` restarts with the printer, so an unload just before the reboot
         # can be missed, leaving the staged spool loaded while the old one is charged.
         msg = (f"printer restarted while spool {assigned} is staged; an unload just before "

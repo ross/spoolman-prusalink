@@ -176,8 +176,8 @@ already found deleted, described next.
 
 If the active spool is deleted in Spoolman, found either from Spoolman's
 spool list or from a 404 on a charge, the tool is left with no active spool.
-The rejected charge and later usage are held, and charged to the next spool
-that becomes active in the tool, with the reason "held after spool N was
+The rejected charge, any usage since an unconfirmed swap's unload, and later
+usage are held, and charged to the next spool that becomes active in the tool, with the reason "held after spool N was
 deleted". An archived active spool keeps being charged until the next
 unload.
 
