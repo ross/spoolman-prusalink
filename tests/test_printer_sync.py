@@ -52,17 +52,21 @@ def test_non_preset_needs_temps():
 
 
 def test_job_message_is_ascii_and_multi_tool_uses_screen_numbers():
-    job = build_job(COREONEL_PREAMBLE, [ToolWrite(1, spool(), None)], [], multi_tool=True)
+    job, shown = build_job(COREONEL_PREAMBLE, [ToolWrite(1, spool(), None)], ["n"],
+                           multi_tool=True)
     assert job.splitlines()[-1] == "M117 Spoolman: T2 Polymaker PolySonic PLA Gre"
     assert ";" not in job.splitlines()[-1]
+    assert shown == []  # The write's message replaces the notice.
 
 
 def test_notice_only_job():
-    job = build_job(COREONEL_PREAMBLE, [], ["Core One L+: a; b"], multi_tool=False)
+    job, shown = build_job(COREONEL_PREAMBLE, [], ["Core One L+: a; b", "other"],
+                           multi_tool=False)
     assert job.splitlines()[3:] == [
         "G28 O ; home only if not homed, so the end-of-job bed move is safe",
         "M117 Spoolman: Core One L+: a, b",
     ]
+    assert shown == ["Core One L+: a; b"]
 
 
 def test_non_preset_with_spoolman_temps():

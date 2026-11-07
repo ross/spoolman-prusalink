@@ -272,9 +272,13 @@ def build_job(
     writes: list[ToolWrite],
     notices: list[str],
     multi_tool: bool,
-) -> str:
-    """Return the job file: compatibility checks, homing if needed, filament writes, then
-    one `M117`."""
+) -> tuple[str, list[str]]:
+    """Return the job file and the notices its message shows.
+
+    The job has compatibility checks, homing if needed, filament writes, then one
+    `M117`. The screen holds one message, so it names the written spools if there are
+    any, else the first notice. Notices it doesn't show wait for a later job.
+    """
     lines = [*preamble, HOME_IF_NEEDED]
     labels = []
     for w in writes:
@@ -282,10 +286,12 @@ def build_job(
         label = _message(w.spool.name)
         labels.append(f"T{w.tool + 1} {label}" if multi_tool else label)
     message = ""
+    shown: list[str] = []
     if labels:
         message = "Spoolman: " + ", ".join(labels)
     elif notices:
         message = "Spoolman: " + notices[0]
+        shown = notices[:1]
     if message:
         lines.append(f"M117 {_message(message)}")
-    return "\n".join(lines) + "\n"
+    return "\n".join(lines) + "\n", shown

@@ -857,7 +857,7 @@ class Bridge:
             self._problems.clear("sync busy")
             self._problems.clear("sync failed")
             return
-        gcode = printer_sync.build_job(
+        gcode, shown = printer_sync.build_job(
             self._preamble(), writes, notices, multi_tool=len(self.config.tools) > 1
         )
         if self.config.dry_run:
@@ -892,7 +892,7 @@ class Bridge:
                 st, sync_attempts=st.sync_attempts + 1,
                 written="\n".join(printer_sync.filament_lines(w)),
             )
-        self.state.noticed += notices
+        self.state.noticed += shown
         self._pending_writes = []
         self._last_state = "BUSY"  # The job is starting; poll again soon to verify it.
         save_state(self.config.state_file, self.state)

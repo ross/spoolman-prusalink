@@ -584,6 +584,35 @@ async def test_printer_notices_show_each_flag_once(tmp_path):
     await bridge.aclose()
 
 
+async def test_printer_notice_waits_for_a_job_without_a_write(tmp_path):
+    # A jam: the W11 write and the swap flag are due in the same poll.
+    bridge, fake, printer = make(tmp_path, [spool(19)], printer_notices=True)
+    await bridge.poll()
+    printer.unloads, printer.at_unload, printer.material = 1, 1000, {"name": "PLA"}
+    await bridge.poll()
+    (write,) = jobs(printer)
+    assert write.rstrip().endswith("M117 Spoolman: Grey")
+    await bridge.poll()
+    notice = jobs(printer)[1]
+    assert "M117 Spoolman: Core One L+: filament was unl" in notice
+    await bridge.poll()
+    assert len(jobs(printer)) == 2
+    await bridge.aclose()
+
+
+async def test_printer_notices_show_two_new_flags_in_turn(tmp_path):
+    bridge, fake, printer = make(tmp_path, [spool(19), spool(21, location=None)],
+                                 printer_notices=True)
+    await bridge.poll()
+    bridge.state.runouts[19] = Runout("first flag")
+    bridge.state.runouts[21] = Runout("second flag")
+    for _ in range(4):
+        await bridge.poll()
+    shown = [g.splitlines()[-1] for g in jobs(printer)]
+    assert shown == ["M117 Spoolman: first flag", "M117 Spoolman: second flag"]
+    await bridge.aclose()
+
+
 async def test_dry_run_never_uploads(tmp_path, caplog):
     bridge, fake, printer = make(tmp_path, [spool(19)], sync_drift=True)
     bridge.config = __import__("dataclasses").replace(bridge.config, dry_run=True)
