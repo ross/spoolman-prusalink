@@ -2,13 +2,15 @@
 
 This is the list of events and transitions the bridge has to handle, what it
 does for each, and how sure we are of it. It covers one single-tool printer.
-Multi-tool (INDX, XL) is out of scope until phase 4.
+Multi-tool (INDX, XL) is out of scope.
 
 Status values:
 
 - **Seen live**: the behavior has been observed on the Core One L+.
 - **Tested**: a unit test covers it, but it hasn't been seen live.
 - **Implemented**: code handles it, with no test.
+- **Decided**: the behavior is settled. Unless the row also says
+  "implemented", the code doesn't do it yet.
 - **Gap**: the bridge does something wrong or unhelpful.
 - **Question**: the behavior needs a decision.
 
@@ -75,7 +77,7 @@ archived active spool (M3, M3a) is logged once when the bridge finds it.
 | C6 | Manual extrusion or retraction from the printer menu. | Extrusion is charged to the active spool. The counter only counts filament fed. | Implemented |
 | C7 | Tool reports no filament (after an unload, or a sensor problem). | Holds usage until a filament is reported. | Tested |
 | C8 | Firmware update. | A reboot (C1). The model is checked again. | Implemented |
-| C9 | Printer answers with an error (wrong API key, 500). | Warns every poll and charges nothing. | Implemented |
+| C9 | Printer answers with an error (wrong API key, 500). | Logs the error once, until it changes or clears. Charges nothing. | Implemented |
 
 ## Writing to the printer
 
@@ -219,4 +221,4 @@ configured. Each of these needs fixing in the deployment, not the code.
   - A spool whose remaining weight goes below 0 gets one log line and nothing else. Spool weights are inexact, so many spools end slightly negative. Spoolman itself shows 0 rather than a negative weight, so the bridge works it out from the used weight.
   - An unload during a print, after its first extrusion, while Spoolman shows more than a threshold remaining, flags the spool. That usually means an earlier swap charged the wrong spool. The flag says how much Spoolman thinks is left and suggests checking recent swaps. A jam or tangle that trips the filament sensor, and a planned `M600` color change, look the same to the bridge, so the wording allows for both. The threshold is 5% of the spool's net weight remaining, so it scales with 2 kg and 3 kg spools. A spool with no net weight in Spoolman is never flagged.
   - The flag clears when the user edits the spool's weight in Spoolman, since a corrected weight answers it. It also clears when another spool becomes active in the tool and then this one does. Reloading the same spool keeps it. The bridge keeps the spool's net and used weights with the flag. It moves the used weight on by each of its own charges when the charge's response matches, so any other change to either weight is an edit, even one made while a charge was queued. A charge whose response is lost is sent again and applied twice, so its response doesn't match: that also reads as an edit and clears the flag early, which costs only the flag.
-- **Q9 (B5). Decided: out of scope.** The bridge doesn't try to detect or prevent bad deployments. See [Out of scope](#out-of-scope).
+- **Q9 (B4). Decided: out of scope.** The bridge doesn't try to detect or prevent bad deployments. See [Out of scope](#out-of-scope).

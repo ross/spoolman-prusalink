@@ -68,8 +68,10 @@ that user. Run only one bridge per printer: two would charge the same usage
 twice.
 
 For multi-tool printers and the other settings, mount a config file based on
-`config.example.toml` at `/config/config.toml`. The environment variables
-above override the file. `compose.example.yaml` runs the bridge next to
+`config.example.toml` at `/config/config.toml`. `PRUSALINK_URL`,
+`PRUSALINK_API_KEY`, `SPOOLMAN_URL` and `SPOOLMAN_PRUSALINK_DRY_RUN` override
+the file. `SPOOLMAN_PRUSALINK_LOCATION` applies only when the file has no
+`[[tools]]` entries, because the file's tools take precedence. `compose.example.yaml` runs the bridge next to
 Spoolman.
 
 To verify, look for a `baseline` line for each tool in the log. After the
@@ -88,6 +90,7 @@ with `once` in place of the default `run`.
 ```sh
 python3 -m venv .venv
 .venv/bin/pip install -e '.[dev]'
+cp config.example.toml config.toml
 PRUSALINK_API_KEY=API_KEY .venv/bin/spoolman-prusalink -c config.toml once
 .venv/bin/pytest
 ```
@@ -103,8 +106,10 @@ into the tool's location while the old filament is still loaded. The bridge
 stages the new spool and keeps charging the old one. When the printer reports
 an unload, usage up to the unload goes to the old spool, and everything after
 it, including the load and purge, goes to the new one. The old spool can stay
-in the location until then. The bridge ignores it after the unload and logs
-that it should be moved out.
+in the location until then. After the unload, the bridge ignores it. With
+`dry_run = false`, it also moves the old spool to `eviction_location`, which
+is no location by default. In dry-run mode, it only logs that it would move
+the spool. Set `eviction_location` in the config file.
 
 If you swap the filament first, the bridge flags an unconfirmed swap and keeps
 charging the assigned spool. Move the new spool into the location before the
