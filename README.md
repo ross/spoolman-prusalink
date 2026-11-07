@@ -71,8 +71,8 @@ For multi-tool printers and the other settings, mount a config file based on
 `config.example.toml` at `/config/config.toml`. `PRUSALINK_URL`,
 `PRUSALINK_API_KEY`, `SPOOLMAN_URL` and `SPOOLMAN_PRUSALINK_DRY_RUN` override
 the file. `SPOOLMAN_PRUSALINK_LOCATION` applies only when the file has no
-`[[tools]]` entries, because the file's tools take precedence. `compose.example.yaml` runs the bridge next to
-Spoolman.
+`[[tools]]` entries, because the file's tools take precedence.
+`compose.example.yaml` runs the bridge next to Spoolman.
 
 To verify, look for a `baseline` line for each tool in the log. After the
 printer extrudes, look for lines like this one (`WOULD CHARGE` in dry-run
@@ -86,6 +86,11 @@ To poll once and exit, for example while testing the config, run the command
 with `once` in place of the default `run`.
 
 ### Run from source
+
+The example config is set up for the container. After copying it, edit
+`config.toml`: point `[printer] url` and `[spoolman] url` at your printer and
+Spoolman, and set `state_file` and `ledger_file` to a directory you can write
+to, such as `./data`.
 
 ```sh
 python3 -m venv .venv
