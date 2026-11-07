@@ -489,6 +489,24 @@ class Bridge:
                     location, spool.id, spool.remaining_weight)
         self.state.runouts[spool.id] = Runout(text, spool.net_weight, spool.used_weight)
 
+    def _follow_runout_charge(self, rec: dict, used: float | None) -> None:
+        """Move a runout flag's used weight on by a charge Spoolman accepted.
+
+        Only when the response is the stored weight plus this charge: anything else
+        includes a change made in Spoolman since the last read, and leaving the stored
+        weight alone lets the next read see it as an edit.
+        """
+        runout = self.state.runouts.get(rec["spool_id"])
+        if runout is None or used is None:
+            return
+        grams = rec.get("grams")
+        if runout.used is None or grams is None:
+            runout.used = used
+            return
+        # Spoolman clamps a refund at 0.
+        if abs(used - max(runout.used + grams, 0.0)) <= WEIGHT_EPSILON:
+            runout.used = used
+
     def _check_runout_edits(self, by_id: dict[int, Spool]) -> None:
         """Clear runout flags on spools whose weight the user edited in Spoolman.
 
@@ -697,10 +715,7 @@ class Bridge:
             try:
                 used = await self.spoolman.use_length(rec["spool_id"], rec["use_length"])
                 rec = {**rec, "applied": _now()}
-                runout = self.state.runouts.get(rec["spool_id"])
-                if runout is not None:
-                    # Follow our own charges, so only a user's edit reads as a change.
-                    runout.used = used
+                self._follow_runout_charge(rec, used)
             except httpx.HTTPStatusError as e:
                 code = e.response.status_code
                 if code >= 500:
