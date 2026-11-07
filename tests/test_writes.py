@@ -1060,6 +1060,41 @@ async def test_spoolman_temperature_edit_is_written(tmp_path):
     await bridge.aclose()
 
 
+async def test_spoolman_edit_that_doesnt_apply_is_retried_then_flagged(tmp_path):
+    bridge, fake, printer = await written_state(tmp_path, flag_drift=True)
+    printer.run_job = lambda gcode: None  # Cancelled on the screen: nothing changes.
+    fake.spools[20]["filament"]["color_hex"] = "00ff00"
+    for _ in range(4):
+        await bridge.poll()
+    assert len(jobs(printer)) == 3  # The swap write, then the edit twice (W5).
+    assert "didn't take" in fake.flag(20)
+    assert "printer filament differs" not in fake.flag(20)
+    await bridge.aclose()
+
+
+async def test_spoolman_edit_is_not_drift_while_its_job_runs(tmp_path):
+    bridge, fake, printer = await written_state(tmp_path, flag_drift=True)
+    queued = []
+
+    def start_job(gcode):  # The job starts but hasn't reached M865 yet.
+        printer.job, printer.job_name = 60, "spoolman-sync.gcode"
+        queued.append(gcode)
+
+    printer.run_job = start_job
+    fake.spools[20]["filament"]["color_hex"] = "00ff00"
+    await bridge.poll()
+    assert len(jobs(printer)) == 2
+    await bridge.poll()
+    assert fake.flag(20) is None
+    printer.job = None
+    Printer.run_job(printer, queued[0])
+    await bridge.poll()
+    await bridge.poll()
+    assert len(jobs(printer)) == 2 and fake.flag(20) is None
+    assert bridge.tools[0].needs_sync is False and bridge.tools[0].sync_attempts == 0
+    await bridge.aclose()
+
+
 async def test_printer_change_after_write_is_drift(tmp_path):
     bridge, fake, printer = await written_state(tmp_path, flag_drift=True)
     printer.material = {"name": "PETG"}  # changed on the printer, not in Spoolman

@@ -887,8 +887,10 @@ class Bridge:
         log.info("ran printer job %s:\n%s", self.config.sync_file, gcode.rstrip())
         for w in writes:
             st = self.tools[w.tool]
+            # Expected until a poll sees the printer match, so an edit write that
+            # hasn't run yet isn't drift and one that didn't take is retried (W5).
             self.tools[w.tool] = replace(
-                st, sync_attempts=st.sync_attempts + 1,
+                st, needs_sync=True, sync_attempts=st.sync_attempts + 1,
                 written="\n".join(printer_sync.filament_lines(w)),
             )
         self.state.noticed += shown
