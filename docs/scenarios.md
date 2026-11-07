@@ -120,7 +120,7 @@ archived active spool (M3, M3a) is logged once when the bridge finds it.
 | B2 | Restart mid-print. | Catches up in one charge, with no double charge and no loss. | Seen live (job 131) |
 | B3 | Killed between a charge being accepted and the outbox being saved. | That charge is sent again: up to one poll's worth, double-charged. | Implemented; known limit |
 | B4 | `state.json` lost. | Starts again from a baseline (B1). Usage since the last poll is lost, and swap state is forgotten. | Implemented; a lost state file is a deployment problem (see Out of scope) |
-| B6 | Dry run. | Logs what it would charge and write. Changes nothing. | Tested |
+| B6 | Dry run. | Logs what it would charge and write, and records the charges in the ledger. Changes nothing in Spoolman, on the printer or in `state.json`. The next live run charges everything since the last live run, as after an outage (B2). | Tested |
 
 ## Claims
 
@@ -172,8 +172,9 @@ bridge can't know. It answers Q1, Q2 and Q3. Decided and implemented.
 - **A claim in the same poll as an unload** is handled after the unload, so
   only usage after the unload moves.
 - **Handled once.** The bridge records each handled claim in `state.json`
-  until Spoolman shows the box clear, so a failed clear or dry-run mode
-  doesn't handle it again on the next poll.
+  until Spoolman shows the box clear, so a failed clear doesn't handle it
+  again on the next poll. Dry run records it only in memory, so the next live
+  run handles it again.
 
 Possible improvement: Spoolman's websocket pushes an event for every spool
 change as it happens. Listening on it would give the order of claims, and

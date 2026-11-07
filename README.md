@@ -5,11 +5,19 @@ spools [Spoolman](https://github.com/Donkie/Spoolman) assigns to its tools.
 It reads the per-tool `extruded` counter from PrusaLink's
 `GET /api/v1/filament` endpoint and maps each tool to a Spoolman location.
 
-The bridge starts in dry-run mode, which logs and records what it would do
-but writes nothing. With `dry_run = false`, it charges usage to Spoolman,
-writes flags such as an unconfirmed swap to a text extra field on the spool,
-moves the old spool out of the tool's location when a swap takes effect, and
-writes the loaded spool's name, color and UUID to the printer.
+The bridge starts in dry-run mode, which logs what it would do and records
+what it would charge in the ledger, but changes nothing in Spoolman, on the
+printer or in `state.json`. With `dry_run = false`, it charges usage to
+Spoolman, writes flags such as an unconfirmed swap to a text extra field on
+the spool, moves the old spool out of the tool's location when a swap takes
+effect, and writes the loaded spool's name, color and UUID to the printer.
+
+Dry run is like a stopped bridge that shows what it would do. When it next
+runs live, the bridge starts from the state its last live run saved and
+charges everything printed since then, including during the dry run, as it
+would after an outage. Turning dry run on and off loses no usage, except
+that, as after an outage, a printer restart in between drops the usage
+before the restart.
 
 ## Requirements
 
@@ -57,7 +65,7 @@ Spoolman's location filter, because that filter matches partial text.
 | `PRUSALINK_API_KEY` | The printer's PrusaLink API key. |
 | `SPOOLMAN_URL` | Spoolman's base URL. |
 | `SPOOLMAN_PRUSALINK_LOCATION` | The Spoolman location that stands for the printer's single tool. |
-| `SPOOLMAN_PRUSALINK_DRY_RUN` | `true` (the default) logs what the bridge would do and writes nothing. |
+| `SPOOLMAN_PRUSALINK_DRY_RUN` | `true` (the default) logs what the bridge would do and changes nothing. |
 | `SPOOLMAN_PRUSALINK_CONFIG` | Optional path to a TOML config file. `/config/config.toml` is read if it exists. |
 | `LOG_LEVEL` | `INFO` by default. `DEBUG` also logs every HTTP request. |
 
@@ -237,7 +245,7 @@ Claims use the `claim_field` extra field (`bridge_claim` by default), a
 boolean field the bridge creates on first use and shows as **Claim held
 usage**. The bridge clears the box after it handles a claim. Set
 `claim_field = ""` to turn claims off. In dry-run mode the bridge handles each
-claim once but doesn't clear the box.
+claim once but doesn't clear the box, so the next live run handles it again.
 
 ## Writing to the printer
 

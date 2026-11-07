@@ -136,7 +136,6 @@ class Bridge:
     _ready_fields: set[str] = field(default_factory=set)
     _flags: dict[int, str] = field(default_factory=dict)  # Desired flags from the last poll.
     _pending_writes: list[int] = field(default_factory=list)  # Tools to write when idle.
-    _dry_deleted: set[int] = field(default_factory=set)  # Deleted spools seen in dry run.
     _job_names: dict[int, str | None] = field(default_factory=dict)
     _printer_outage: Outage = field(default_factory=lambda: Outage("printer"))
     _spoolman_outage: Outage = field(default_factory=lambda: Outage("Spoolman"))
@@ -157,9 +156,6 @@ class Bridge:
         default_factory=dict)
     # Dry run: the UUID each spool would be given, reused so the job stays the same.
     _dry_uuids: dict[int, str] = field(default_factory=dict)
-    # Dry run, per tool: the held usage and deleted spool as accounting would have left
-    # them. The saved state keeps the values from before dry run.
-    _dry_held: dict[int, tuple[int, int | None]] = field(default_factory=dict)
 
     @classmethod
     def from_config(cls, config: Config) -> Bridge:
@@ -178,6 +174,16 @@ class Bridge:
     @property
     def tools(self) -> dict[int, ToolState]:
         return self.state.tools
+
+    def _save(self) -> None:
+        """Save the state, except in dry run.
+
+        Dry run keeps its accounting in memory only, as if the bridge were stopped: the
+        next live run starts from the last live state and charges everything since, as
+        after an outage.
+        """
+        if not self.config.dry_run:
+            save_state(self.config.state_file, self.state)
 
     async def aclose(self) -> None:
         await self.printer.aclose()
@@ -242,9 +248,6 @@ class Bridge:
         The list leaves out archived spools. A deleted one (404) leaves its tool with no
         active spool, holding usage for the next one. An archived one keeps being charged
         until the next unload, and is flagged. Each spool is looked up once, not every poll.
-
-        Dry run holds nothing for a deleted spool: the held usage would be saved and
-        charged for real once dry run is off. It logs what it would do instead.
         """
         listed = {s.id for s in spools}
         keep = {st.active for st in self.tools.values()} | set(self.state.flagged)
@@ -252,8 +255,7 @@ class Bridge:
                           if i not in listed and i in keep}
         for tool, st in list(self.tools.items()):
             spool_id = st.active
-            if (spool_id is None or spool_id in listed or spool_id in self._archived
-                    or (self.config.dry_run and spool_id in self._dry_deleted)):
+            if spool_id is None or spool_id in listed or spool_id in self._archived:
                 continue
             location = self.config.tools.get(tool, str(tool))
             try:
@@ -264,12 +266,7 @@ class Bridge:
                                     "Spoolman's list: %s", location, spool_id, e)
                 continue
             self._problems.clear(("lookup", spool_id))
-            if found is None and self.config.dry_run:
-                self._dry_deleted.add(spool_id)
-                log.warning("[%s] spool %d was deleted in Spoolman; would hold its usage for "
-                            "the next spool that becomes active in %s", location, spool_id,
-                            location)
-            elif found is None:
+            if found is None:
                 self._hold_deleted(tool, spool_id)
             elif found.archived:
                 self._archived[spool_id] = found
@@ -346,9 +343,9 @@ class Bridge:
     ) -> list[dict]:
         """Account one poll and persist the result.
 
-        In dry-run mode, charges go straight to the ledger. Otherwise they go to the
-        outbox, saved in the same write as the new counters, for `flush()` to send.
-        Returns the charge and event records.
+        In dry-run mode, charges go straight to the ledger and the state isn't saved.
+        Otherwise they go to the outbox, saved in the same write as the new counters, for
+        `flush()` to send. Returns the charge and event records.
         """
         by_id = {s.id: s for s in spools}
         now = _now()
@@ -374,12 +371,8 @@ class Bridge:
 
             before = self.tools.get(tool, ToolState())
             claim, others = claims.get(tool, (None, []))
-            seen = before
-            if dry and tool in self._dry_held:
-                held_mm, deleted_spool = self._dry_held[tool]
-                seen = replace(before, held_mm=held_mm, deleted_spool=deleted_spool)
             result = account(
-                seen,
+                before,
                 reading.boot_id,
                 tool_reading,
                 location_ids,
@@ -387,14 +380,6 @@ class Bridge:
                 matches=matches,
                 claim=claim,
             )
-            if dry:
-                # Dry run changes nothing: usage held before it stays held, and none is
-                # added. Accounting goes on from what it would have left, so a held
-                # charge isn't logged again on every poll.
-                new = result.state
-                self._dry_held[tool] = (new.held_mm, new.deleted_spool)
-                result.state = replace(new, held_mm=before.held_mm,
-                                       deleted_spool=before.deleted_spool)
             # A skipped tool's state changes only to record the counter and any reboot.
             if not result.skipped or tool in self.tools:
                 self.tools[tool] = result.state
@@ -506,7 +491,7 @@ class Bridge:
         else:
             append_ledger(self.config.ledger_file, events)
             self.state.outbox.extend(charges)
-        save_state(self.config.state_file, self.state)
+        self._save()
         return events + charges
 
     def _check_runout(self, location: str, spool: Spool | None) -> None:
@@ -674,7 +659,7 @@ class Bridge:
             self.state.claimed.remove(spool_id)
             changed = True
         if changed:
-            save_state(self.config.state_file, self.state)
+            self._save()
 
     def _edited(self, tool: int, st: ToolState, material, spool: Spool) -> str | None:
         """Return why the printer should get Spoolman's edit of `spool`, or None.
@@ -805,7 +790,7 @@ class Bridge:
                 return False
             outbox.pop(0)
             sent += 1
-            save_state(self.config.state_file, self.state)
+            self._save()
             append_ledger(self.config.ledger_file, [rec])
         self._problems.clear("charge", "sent %d queued charge(s)", sent)
         return True
@@ -834,7 +819,7 @@ class Bridge:
                          repr(target) if target else "no location")
                 st = replace(st, evict=tuple(i for i in st.evict if i != spool_id))
                 self.tools[tool] = st
-                save_state(self.config.state_file, self.state)
+                self._save()
 
     async def sync_printer(self, spools: list[Spool]) -> None:
         """Write pending spools (and, if enabled, new flags) to the printer in one job."""
@@ -903,7 +888,7 @@ class Bridge:
         self.state.noticed += shown
         self._pending_writes = []
         self._last_state = "BUSY"  # The job is starting; poll again soon to verify it.
-        save_state(self.config.state_file, self.state)
+        self._save()
 
     async def _mint_uuid(self, spool: Spool) -> str | None:
         """Give a spool an instance UUID in Spoolman, so it can be written to the printer."""
@@ -979,7 +964,7 @@ class Bridge:
                 self.state.flagged.append(spool_id)
                 changed = True
         if changed:
-            save_state(self.config.state_file, self.state)
+            self._save()
 
     def _notes(self, tool: int, notes: list[str]) -> None:
         key = tuple(notes)
