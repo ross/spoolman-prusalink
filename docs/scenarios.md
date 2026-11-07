@@ -96,7 +96,7 @@ archived active spool (M3, M3a) is logged once when the bridge finds it.
 | W11 | Unconfirmed swap open. | Writes the assigned spool, so the printer shows what Spoolman thinks is loaded. | Tested |
 | W12 | Spool staged. | Waits for the unload before writing. | Tested |
 | W13 | Unhomed printer after a boot. | `G28 O` homes it before the job ends, so the end-of-job bed move is safe. | Implemented; not yet confirmed on the printer |
-| W14 | Spoolman changes the spool's color, name, material, temperatures or UUID with no swap (an edit). | If the printer still matches the bridge's last write, writes the edit when idle (see Q6). Otherwise it's drift (W9). A name-only edit isn't written when the filament has a material: the printer's filament name is then the material, and the name appears only in the sync job's screen message. With no material, the name is the printer's filament name, so a name edit is written. | Tested |
+| W14 | Spoolman changes the spool's color, name, material, temperatures or UUID with no swap (an edit). | If the printer still matches the bridge's last write, writes the edit when idle (see Q6). Otherwise it's drift (W9). A name-only edit isn't written when the filament has a material: the printer's filament name is then the material, and the name appears only in the sync job's screen message. With no material, the printer's filament name is the first 7 letters, digits, `_` or `-` of the vendor and name, so a name edit is written only if it changes them. | Tested |
 
 ## Spoolman
 
