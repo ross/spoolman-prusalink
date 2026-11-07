@@ -77,6 +77,7 @@ class EventKind(StrEnum):
     CLAIM_CONFIRMED = "claim_confirmed"
     CORRECTION = "correction"
     STAGING_CANCELLED = "staging_cancelled"
+    ACTIVE_UNASSIGNED = "active_unassigned"
     ASSIGNMENT_CHANGED = "assignment_changed"
     HOLD_EMPTY = "hold_empty"
     HOLD_UNASSIGNED = "hold_unassigned"
@@ -597,7 +598,12 @@ def account(
             event(EventKind.ASSIGNMENT_CHANGED, f"spool {active} -> {assigned}")
             evict = retire(active)
             active = assigned
-        elif assigned is not None and matches(assigned):
+        elif assigned is None:
+            # Not a swap: nothing is staged, and the active spool is still loaded.
+            if s.assigned is not None:
+                event(EventKind.ACTIVE_UNASSIGNED, f"spool {active} is no longer in the "
+                      "location; still charging it until the printer reports an unload")
+        elif matches(assigned):
             event(EventKind.CORRECTION, f"printer already has spool {assigned}'s filament; "
                   f"switching from spool {active} now")
             evict = retire(active)
@@ -606,7 +612,9 @@ def account(
             event(EventKind.SWAP_STAGED, f"spool {assigned} staged; still charging spool "
                   f"{active} until the printer reports an unload")
 
-    elif not legacy and s.assigned != active and assigned == active:
+    elif not legacy and active is not None and s.assigned is None and assigned == active:
+        event(EventKind.ACTIVE_UNASSIGNED, f"spool {active} is back in the location")
+    elif not legacy and active is not None and s.assigned != active and assigned == active:
         event(EventKind.STAGING_CANCELLED, f"spool {s.assigned} is no longer staged; "
               f"still charging spool {active}")
 
@@ -633,7 +641,7 @@ def account(
                   f"spool {swap.spool_id} was reloaded and charging it provisionally")
             provisional = Provisional(swap.spool_id, swap.mm, job_id)
             swap = None
-        if not legacy and assigned != active:
+        if not legacy and assigned is not None and assigned != active:
             msg = (f"print started while spool {assigned} is staged but not loaded; "
                    f"charging spool {active}")
             event(EventKind.STAGED_AT_PRINT, msg)

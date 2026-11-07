@@ -198,8 +198,27 @@ def test_old_spool_moved_out_first_then_new_staged():
         Charge(7, 30, "before unload"),
         Charge(8, 30, "extruded"),
     ]
-    assert kinds.count(EventKind.SWAP_STAGED) == 2
+    assert kinds.count(EventKind.SWAP_STAGED) == 1
+    assert kinds.count(EventKind.ACTIVE_UNASSIGNED) == 1
     assert (state.active, state.evict) == (8, ())
+
+
+def test_spool_moved_out_with_no_replacement_is_not_staging():
+    _, _, state = run([(BOOT, r(100), loc(7))])
+    res = account(state, BOOT, r(150), loc())
+    assert [(e.kind, e.message) for e in res.events] == [
+        (EventKind.ACTIVE_UNASSIGNED, "spool 7 is no longer in the location; still charging "
+         "it until the printer reports an unload")]
+    res = account(res.state, BOOT, r(200), loc())
+    assert res.events == []
+    # A print starts: no spool is staged, so there's nothing to warn about.
+    res = account(res.state, BOOT, r(200), loc(), 42)
+    res = account(res.state, BOOT, r(250), loc(), 42)
+    assert res.events == [] and res.state.notice is None
+    res = account(res.state, BOOT, r(260), loc(7), 42)
+    assert [(e.kind, e.message) for e in res.events] == [
+        (EventKind.ACTIVE_UNASSIGNED, "spool 7 is back in the location")]
+    assert res.charges == [Charge(7, 10, "extruded")]
 
 
 def test_spool_removed_from_location_stays_active_until_unload():
