@@ -1095,6 +1095,25 @@ async def test_spoolman_edit_is_not_drift_while_its_job_runs(tmp_path):
     await bridge.aclose()
 
 
+@pytest.mark.parametrize("flag_drift", [True, False])
+@pytest.mark.parametrize("bad", [
+    "{44c406a5-c6f5-4440-bfba-e8060564b717}",
+    '44c406a5-c6f5-4440-bfba-e8060564b717"\nG1 Z-10\n;',
+])
+async def test_spoolman_edit_to_a_bad_uuid_is_flagged_not_written(tmp_path, caplog,
+                                                                  flag_drift, bad):
+    bridge, fake, printer = await written_state(tmp_path, flag_drift=flag_drift)
+    caplog.set_level("INFO")
+    fake.spools[20]["extra"]["instance_uuid"] = json.dumps(bad)
+    for _ in range(3):
+        await bridge.poll()
+    assert len(jobs(printer)) == 1
+    assert "isn't a UUID" in fake.flag(20)
+    assert "printer filament differs" not in fake.flag(20)
+    assert caplog.text.count("can't write spool 20") == 1
+    await bridge.aclose()
+
+
 async def test_printer_change_after_write_is_drift(tmp_path):
     bridge, fake, printer = await written_state(tmp_path, flag_drift=True)
     printer.material = {"name": "PETG"}  # changed on the printer, not in Spoolman

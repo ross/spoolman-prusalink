@@ -686,7 +686,9 @@ class Bridge:
         try:
             want = self._write_lines(tool, spool, spool.instance_uuid)
         except printer_sync.CannotSync:
-            return None
+            # The edit can't be written, but it's still an edit, not drift:
+            # _classify_mismatch flags why.
+            want = None
         if want == st.written:
             return None
         if not printer_sync.printer_matches_write(material, st.written, self._uuids):
