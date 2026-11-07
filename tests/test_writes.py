@@ -829,3 +829,70 @@ async def test_fresh_install_does_not_rewrite(tmp_path):
         await bridge.poll()
     assert jobs(printer) == []
     await bridge.aclose()
+
+
+
+def weighted(spool_json, remaining, net=1000.0):
+    spool_json["remaining_weight"] = remaining
+    spool_json["filament"]["weight"] = net
+    return spool_json
+
+
+async def runout_mid_print(tmp_path, remaining):
+    bridge, fake, printer = make(tmp_path, [weighted(spool(19), remaining)])
+    printer.job = 131
+    await bridge.poll()  # baseline mid-print
+    printer.extruded = 1500
+    await bridge.poll()
+    printer.unloads, printer.at_unload, printer.extruded = 1, 1500, 1500  # runout
+    await bridge.poll()
+    return bridge, fake, printer
+
+
+async def test_runout_with_plenty_left_is_flagged(tmp_path):
+    bridge, fake, printer = await runout_mid_print(tmp_path, remaining=400.0)
+    assert "unloaded mid-print with 400 g left" in fake.flag(19)
+    await bridge.poll()  # the same spool stays active: the flag stays
+    assert "unloaded mid-print" in fake.flag(19)
+    assert 19 in load_state(tmp_path / "state.json").runouts
+    await bridge.aclose()
+
+
+async def test_runout_near_empty_is_not_flagged(tmp_path):
+    bridge, fake, printer = await runout_mid_print(tmp_path, remaining=30.0)
+    assert fake.flag(19) is None or "mid-print" not in fake.flag(19)
+    await bridge.aclose()
+
+
+async def test_runout_flag_clears_when_spool_is_next_active(tmp_path):
+    bridge, fake, printer = await runout_mid_print(tmp_path, remaining=400.0)
+    fake.spools[19]["location"] = None
+    fake.spools[20] = spool(20)  # confirms the swap: spool 20 goes in
+    await bridge.poll()
+    assert "mid-print" in (fake.flag(19) or "")
+    fake.spools[20]["location"] = None
+    fake.spools[19]["location"] = LOC  # spool 19 back in the tool later
+    printer.unloads, printer.at_unload = 2, printer.extruded
+    await bridge.poll()
+    assert fake.flag(19) is None or "mid-print" not in fake.flag(19)
+    await bridge.aclose()
+
+
+async def test_unload_outside_a_print_is_not_a_runout(tmp_path):
+    bridge, fake, printer = make(tmp_path, [weighted(spool(19), 400.0)])
+    await bridge.poll()
+    printer.unloads, printer.at_unload = 1, 1000
+    await bridge.poll()
+    assert "mid-print" not in (fake.flag(19) or "")
+    await bridge.aclose()
+
+
+async def test_negative_remaining_is_logged_once(tmp_path, caplog):
+    caplog.set_level("INFO")
+    bridge, fake, printer = make(tmp_path, [weighted(spool(19), -12.0)])
+    for _ in range(3):
+        printer.extruded += 100
+        await bridge.poll()
+    assert caplog.text.count("shows -12 g remaining") == 1
+    assert fake.flag(19) is None
+    await bridge.aclose()

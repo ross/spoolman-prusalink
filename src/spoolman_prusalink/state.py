@@ -24,6 +24,9 @@ class State:
     flagged: list[int] = field(default_factory=list)
     # Flag texts already shown on the printer with M117, so each is shown once.
     noticed: list[str] = field(default_factory=list)
+    # Flags for spools that ran out mid-print while Spoolman showed plenty left, by
+    # spool ID. Each clears when its spool next becomes active.
+    runouts: dict[int, str] = field(default_factory=dict)
 
 
 def load_state(path: Path) -> State:
@@ -37,6 +40,7 @@ def load_state(path: Path) -> State:
         outbox=list(data.get("outbox", [])),
         flagged=[int(i) for i in data.get("flagged", [])],
         noticed=list(data.get("noticed", [])),
+        runouts={int(k): str(v) for k, v in data.get("runouts", {}).items()},
     )
 
 
@@ -52,6 +56,7 @@ def save_state(path: Path, state: State) -> bool:
         "outbox": state.outbox,
         "flagged": state.flagged,
         "noticed": state.noticed,
+        "runouts": {str(k): v for k, v in sorted(state.runouts.items())},
     }
     text = json.dumps(payload, indent=2)
     try:

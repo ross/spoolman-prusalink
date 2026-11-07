@@ -99,6 +99,10 @@ class Once:
         return True
 
 
+# A mid-print unload with more than this fraction of the net weight left in Spoolman
+# gets a flag.
+RUNOUT_LEFT = 0.05
+
 # Sync jobs per swap before the bridge gives up and flags the spool.
 MAX_SYNC_ATTEMPTS = 2
 
@@ -275,8 +279,9 @@ class Bridge:
                 return (self._uuids and spool is not None
                         and drift.same_instance(material, spool))
 
+            before = self.tools.get(tool, ToolState())
             result = account(
-                self.tools.get(tool, ToolState()),
+                before,
                 reading.boot_id,
                 tool_reading,
                 location_ids,
@@ -285,6 +290,8 @@ class Bridge:
             )
             if not result.skipped:
                 self.tools[tool] = result.state
+            if result.runout is not None:
+                self._check_runout(location, by_id.get(result.runout))
 
             notes = []
             for ev in result.events:
@@ -327,6 +334,10 @@ class Bridge:
                     f"{location}: {st.notice.message}."
                 )
             active = by_id.get(st.active) if st.active is not None else None
+            if active is not None:
+                if active.id != before.active:
+                    self.state.runouts.pop(active.id, None)
+                self._check_remaining(active)
             if not result.skipped and material is not None and active is not None:
                 diffs = drift.differences(tool, material, active, self._uuids)
                 edited = self._edited(tool, st, material, active)
@@ -339,6 +350,8 @@ class Bridge:
                                             edited=edited is not None)
             self._notes(tool, notes)
 
+        for spool_id, text in self.state.runouts.items():
+            flags.setdefault(spool_id, []).append(text)
         self._flags = {spool_id: " | ".join(texts) for spool_id, texts in flags.items()}
         if dry:
             append_ledger(self.config.ledger_file, events + charges)
@@ -347,6 +360,34 @@ class Bridge:
             self.state.outbox.extend(charges)
         save_state(self.config.state_file, self.state)
         return events + charges
+
+    def _check_runout(self, location: str, spool: Spool | None) -> None:
+        """Flag a spool that unloaded mid-print with more than RUNOUT_LEFT remaining.
+
+        That usually means an earlier swap charged the wrong spool. A planned color change
+        unloads mid-print too, so the flag allows for that.
+        """
+        if spool is None or not spool.net_weight or spool.remaining_weight is None:
+            return
+        if spool.remaining_weight <= RUNOUT_LEFT * spool.net_weight:
+            return
+        text = (f"{location}: unloaded mid-print with {spool.remaining_weight:.0f} g left in "
+                "Spoolman. If it ran out, its usage is probably on another spool: check "
+                "recent swaps. Ignore this after a planned color change.")
+        log.warning("[%s] spool %d unloaded mid-print with %.0f g left in Spoolman",
+                    location, spool.id, spool.remaining_weight)
+        self.state.runouts[spool.id] = text
+
+    def _check_remaining(self, spool: Spool) -> None:
+        """Log once when a loaded spool's remaining weight in Spoolman goes below 0."""
+        key = ("negative", spool.id)
+        if spool.remaining_weight is not None and spool.remaining_weight < 0:
+            self._problems.fail(key, "negative",
+                                "spool %d shows %.0f g remaining in Spoolman but is still "
+                                "loaded; its weight is probably off", spool.id,
+                                spool.remaining_weight, level=logging.INFO)
+        else:
+            self._problems.clear(key)
 
     def _edited(self, tool: int, st: ToolState, material, spool: Spool) -> str | None:
         """Return why the printer should get Spoolman's edit of `spool`, or None.

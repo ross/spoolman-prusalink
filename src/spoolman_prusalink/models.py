@@ -49,6 +49,8 @@ class Spool:
     flag: str | None = None
     extruder_temp: float | None = None
     bed_temp: float | None = None
+    remaining_weight: float | None = None  # Grams, per Spoolman; None without a weight.
+    net_weight: float | None = None  # Grams of filament when full: the spool's or filament's.
 
     def mm_to_grams(self, mm: float) -> float | None:
         """Convert a filament length to weight, as Spoolman does for `use_length`."""

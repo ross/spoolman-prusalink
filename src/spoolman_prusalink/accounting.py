@@ -184,6 +184,9 @@ class Result:
     charges: list[Charge] = field(default_factory=list)
     events: list[Event] = field(default_factory=list)
     skipped: bool = False  # True when the assignment was ambiguous and nothing changed.
+    # The spool that was in the tool when it unloaded during a started print: a runout,
+    # or a planned color change, which looks the same.
+    runout: int | None = None
 
 
 def resolve_assignment(state: ToolState, location_ids: list[int]) -> int | None | list[int]:
@@ -301,6 +304,8 @@ def account(
         swap = None  # A new unload supersedes any open swap.
         notice = None
         unloaded = True
+        if job_id is not None and job_id == s.job_id and active is not None:
+            out.runout = active
 
         if assigned != active:
             event(EventKind.SWAP_COMMITTED, f"swap done: spool {active} -> {assigned}")

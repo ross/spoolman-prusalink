@@ -161,6 +161,11 @@ the bridge creates on first use:
   a print starts, or the next unload.
 - A swap assumed at print start, or a print started with a swap staged, until
   the next print start or unload.
+- An unload during a print while Spoolman shows more than 5% of the spool's
+  net weight left, until the spool is next loaded. That usually means an
+  earlier swap charged the wrong spool, though a planned color change looks
+  the same. A loaded spool going below 0 g remaining is only logged, once:
+  spool weights are inexact.
 - With `flag_drift = true`, a mismatch between the printer's filament and the
   loaded spool. A menu load always causes one, because it drops the color and
   UUID.

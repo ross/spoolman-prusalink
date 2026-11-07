@@ -40,6 +40,8 @@ def parse_spool(
         flag=_extra_str(data.get("extra"), flag_field),
         extruder_temp=filament.get("settings_extruder_temp"),
         bed_temp=filament.get("settings_bed_temp"),
+        remaining_weight=data.get("remaining_weight"),
+        net_weight=data.get("initial_weight") or filament.get("weight"),
     )
 
 
