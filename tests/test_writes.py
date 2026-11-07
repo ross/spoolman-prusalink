@@ -1,6 +1,7 @@
 """Phase 2: charges and flags written to a fake Spoolman."""
 
 import json
+import math
 from dataclasses import replace
 
 import httpx
@@ -14,7 +15,6 @@ from spoolman_prusalink.spoolman import Spoolman
 from spoolman_prusalink.state import Runout, load_state
 
 LOC = "Core One L+"
-GRAMS_PER_MM = 0.003  # Roughly 1.75 mm PLA.
 
 
 class FakeSpoolman:
@@ -25,6 +25,7 @@ class FakeSpoolman:
         self.fields = []
         self.used = {}  # spool id -> list of use_length calls applied
         self.fail_use = []  # status codes to return for upcoming use calls
+        self.lose_use = 0  # Upcoming use calls to apply, then time out.
         self.writes = []
         self.down = False  # Refuse connections.
         self.fail_read = None  # Status code for spool reads.
@@ -66,8 +67,13 @@ class FakeSpoolman:
             self.used.setdefault(spool_id, []).append(mm)
             self.writes.append(("use", spool_id, mm))
             data = self.spools[spool_id]
-            if data.get("used_weight") is not None:
-                data["used_weight"] += mm * GRAMS_PER_MM
+            if data.get("used_weight") is not None:  # As Spoolman works it out.
+                f = data["filament"]
+                grams = math.pi * (f["diameter"] / 20) ** 2 * (mm / 10) * f["density"]
+                data["used_weight"] = max(data["used_weight"] + grams, 0.0)
+            if self.lose_use:
+                self.lose_use -= 1
+                raise httpx.ReadTimeout("response lost", request=request)
             return httpx.Response(200, json=data)
         if path.startswith("/api/v1/spool/") and method == "PATCH":
             if self.fail_patch:
@@ -887,7 +893,7 @@ async def runout_mid_print(tmp_path, remaining):
 
 async def test_runout_with_plenty_left_is_flagged(tmp_path):
     bridge, fake, printer = await runout_mid_print(tmp_path, remaining=400.0)
-    assert "unloaded mid-print with 398 g left" in fake.flag(19)  # 400 g less 1500 mm
+    assert "unloaded mid-print with 399 g left" in fake.flag(19)  # 400 g less 500 mm
     await bridge.poll()  # the same spool stays active: the flag stays
     assert "unloaded mid-print" in fake.flag(19)
     assert 19 in load_state(tmp_path / "state.json").runouts
@@ -912,6 +918,30 @@ async def test_runout_flag_clears_when_weight_is_edited(tmp_path, caplog):
     assert fake.flag(19) is None or "mid-print" not in fake.flag(19)
     assert 19 not in load_state(tmp_path / "state.json").runouts
     assert caplog.text.count("weight was edited in Spoolman") == 1
+    await bridge.aclose()
+
+
+async def test_runout_flag_clears_when_weight_is_edited_with_a_charge_queued(tmp_path):
+    bridge, fake, printer = await runout_mid_print(tmp_path, remaining=400.0)
+    printer.extruded += 500
+    fake.fail_use = [503]  # The charge stays queued past the next read.
+    await bridge.poll()
+    assert bridge.state.outbox
+    fake.spools[19]["used_weight"] = 990.0  # The user corrects it meanwhile.
+    await bridge.poll()  # Sends the charge, whose response includes the edit.
+    assert 19 not in bridge.state.runouts
+    await bridge.aclose()
+
+
+async def test_runout_flag_clears_when_a_charge_response_is_lost(tmp_path):
+    # The resent charge is applied twice, so its response doesn't match: read as an edit.
+    bridge, fake, printer = await runout_mid_print(tmp_path, remaining=400.0)
+    printer.extruded += 500
+    fake.lose_use = 1
+    await bridge.poll()
+    await bridge.poll()
+    assert fake.used[19][-1] == fake.used[19][-2]  # Sent twice.
+    assert 19 not in bridge.state.runouts
     await bridge.aclose()
 
 
