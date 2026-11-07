@@ -245,7 +245,9 @@ def account(
             f"boot_id {s.boot_id} -> {boot_id}; counters restart at 0 "
             "(usage since the last poll before the reboot is lost)",
         )
-        s = replace(s, boot_id=boot_id, charged=0, unload_count=0, job_id=None)
+        # Keep job_id: the firmware stores job IDs in EEPROM and never reuses them, so a
+        # print resumed after a power loss keeps its ID and isn't a new print start.
+        s = replace(s, boot_id=boot_id, charged=0, unload_count=0)
 
     if reading.extruded < s.charged:
         # Shouldn't happen within one boot. Resync rather than charge a negative amount.

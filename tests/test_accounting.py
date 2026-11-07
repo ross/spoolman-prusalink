@@ -73,6 +73,18 @@ def test_reboot_restarts_from_zero_not_unknown():
     assert (state.boot_id, state.charged) == (222, 30)
 
 
+def test_resumed_job_after_reboot_is_not_a_print_start():
+    # Power loss mid-print with an unconfirmed swap open, then a power-panic resume
+    # that keeps the job ID.
+    _, kinds, state = run([
+        (BOOT, r(1000), loc(7), 131),
+        (BOOT, r(1100, unloads=1, at_unload=1050), loc(7), 131),
+        (222, r(40), loc(7), 131),
+    ])
+    assert EventKind.SWAP_ASSUMED not in kinds
+    assert state.swap is not None and state.job_id == 131
+
+
 def test_reboot_resets_unload_count():
     _, _, state = run([
         (BOOT, r(100, unloads=3, at_unload=50), loc(7)),
