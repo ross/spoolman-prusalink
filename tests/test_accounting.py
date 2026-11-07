@@ -591,6 +591,11 @@ def test_hold_deleted_clears_the_active_spool():
     assert hold_deleted(windowed, 7, 30) == windowed
 
 
+def test_hold_deleted_drops_only_the_deleted_spool_from_evict():
+    state = ToolState(BOOT, 100, 0, 19, 19, evict=(5, 19, 8))
+    assert hold_deleted(state, 19).evict == (5, 8)
+
+
 def test_deletion_drops_the_staged_notice():
     _, kinds, state = run([
         (BOOT, r(100), loc(19)),
@@ -789,6 +794,15 @@ def test_claim_after_unload_moves_nothing_but_switches():
     assert res.charges == []
     assert (res.state.active, res.state.evict, res.state.swap) == (9, (7,), None)
     assert res.state.needs_sync
+
+
+def test_claim_keeps_earlier_evictions():
+    # Spool 5 is still awaiting eviction (dry run, or Spoolman refused the move), and
+    # spool 9 was evicted too before it went back in and was claimed.
+    state = ToolState(BOOT, 100, 0, 7, 7, evict=(5, 9))
+    res = account(state, BOOT, r(150), loc(5, 7, 9), claim=9)
+    assert res.claimed
+    assert (res.state.active, res.state.assigned, res.state.evict) == (9, 9, (5, 7))
 
 
 def test_claim_waits_while_location_is_ambiguous():
