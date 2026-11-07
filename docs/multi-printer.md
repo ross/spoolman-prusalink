@@ -15,8 +15,11 @@ every printer.
 Not in scope:
 
 - Several Spoolman instances. One bridge serves one Spoolman.
-- Multi-tool printers (INDX, XL). The per-tool accounting already allows
-  several tools per printer, and the firmware check still refuses them.
+- Multi-tool printers (INDX, XL). Their support stays as it is: the config,
+  accounting, and state already handle several tools per printer, and the
+  model check still refuses to write to them. A multi-tool printer is one
+  `[[printers]]` entry with several tools. Adding the per-tool write job is
+  separate work.
 - Replacing `state.json` and `ledger.jsonl` with SQLite. That's a separate
   change, after this one. This plan only shapes the state and the records so
   SQLite can take them over without reshaping.
