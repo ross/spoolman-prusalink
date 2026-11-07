@@ -1,7 +1,8 @@
 import json
-from dataclasses import replace
+from dataclasses import fields, replace
 
 from spoolman_prusalink.accounting import (
+    UNKNOWN_WRITE,
     Charge,
     EventKind,
     Notice,
@@ -559,8 +560,28 @@ def test_legacy_assignment_change_switches_after_charging_outgoing():
 
 
 def test_state_round_trip():
-    s = ToolState(BOOT, 123, 2, 7, 8, (5,), SwapFlag(7, 40), 42)
-    assert ToolState.from_json(s.to_json()) == s
+    s = ToolState(
+        boot_id=BOOT, charged=123, unload_count=2, active=7, assigned=8, evict=(5, 6),
+        swap=SwapFlag(7, 40), job_id=42, pending_job=43, pending_at=120,
+        notice=Notice(7, EventKind.STAGED_AT_PRINT, "staged"),
+        needs_sync=True, sync_attempts=2, written="M865 P0 F\"PLA\"",
+        held_mm=30, deleted_spool=19,
+        staged_notice=Notice(8, EventKind.STAGED_AT_REBOOT, "rebooted"),
+        provisional=Provisional(7, 400, 42), since_load={7: 400, 9: -3}, extruded=150,
+        reboot_pending=True,
+    )
+    # Every field is set, so a field left out of to_json or from_json fails here.
+    defaults = ToolState()
+    assert all(getattr(s, f.name) != getattr(defaults, f.name) for f in fields(ToolState))
+    assert ToolState.from_json(json.loads(json.dumps(s.to_json()))) == s
+    unwritten = replace(s, written=None)
+    assert ToolState.from_json(json.loads(json.dumps(unwritten.to_json()))) == unwritten
+
+
+def test_state_from_before_writes_were_recorded_has_an_unknown_write():
+    old = ToolState(BOOT, 10, 1, 7, 7).to_json()
+    del old["written"]
+    assert ToolState.from_json(old).written == UNKNOWN_WRITE
 
 
 def test_held_usage_round_trips_and_old_state_has_none():
