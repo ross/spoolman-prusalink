@@ -97,6 +97,11 @@ class Notice:
     message: str
 
 
+# `ToolState.written` for state saved before the bridge recorded its writes. Those writes
+# used `J` to supply temperatures, which the firmware ignores, so they're rewritten once.
+UNKNOWN_WRITE = ""
+
+
 @dataclass(frozen=True)
 class ToolState:
     boot_id: int | None = None
@@ -114,6 +119,10 @@ class ToolState:
     # active spool changes or the tool unloads (a menu load drops color and UUID).
     needs_sync: bool = False
     sync_attempts: int = 0
+    # The `M865` lines last written to the printer for this tool, so an edit in Spoolman
+    # can be told apart from a change on the printer. None when the bridge hasn't
+    # written this tool. UNKNOWN_WRITE for state saved before this was recorded.
+    written: str | None = None
 
     def to_json(self) -> dict:
         return {
@@ -133,6 +142,7 @@ class ToolState:
                   "message": self.notice.message},
             "needs_sync": self.needs_sync,
             "sync_attempts": self.sync_attempts,
+            "written": self.written,
         }
 
     @classmethod
@@ -153,6 +163,7 @@ class ToolState:
             ),
             needs_sync=bool(data.get("needs_sync", False)),
             sync_attempts=int(data.get("sync_attempts", 0)),
+            written=data.get("written", UNKNOWN_WRITE),
         )
 
 

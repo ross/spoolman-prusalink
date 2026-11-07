@@ -192,8 +192,20 @@ the spool Spoolman still assigns, so the printer shows what Spoolman
 thinks is loaded; confirming a different spool rewrites the printer. If the printer still
 differs after two jobs, it stops and flags the spool.
 
-A mismatch with no swap or unload behind it is drift. The bridge flags it and
-leaves the printer alone, unless `sync_drift = true`.
+The bridge remembers the `M865` line it last wrote for each tool. If the
+printer still shows that write but the spool has changed in Spoolman (color,
+name, material, temperatures or UUID), the bridge writes the change when
+idle. Temperature edits are caught this way even though the printer doesn't
+report temperatures back.
+
+Any other mismatch, with no swap, unload or Spoolman edit behind it, is drift:
+something changed on the printer. The bridge flags it and leaves the printer
+alone, unless `sync_drift = true`.
+
+After upgrading from a version that didn't record its writes, the bridge
+rewrites each tool once when idle. Those versions relied on `J` for
+temperatures, which the firmware ignores, so they left the nozzle and bed
+temperatures at 0.
 
 Requirements for a write:
 

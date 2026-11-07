@@ -10,7 +10,8 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-from .models import Spool
+from .color import same_color
+from .models import Material, Spool
 
 
 @dataclass(frozen=True)
@@ -219,6 +220,25 @@ def filament_lines(write: ToolWrite) -> list[str]:
     if tool == 0 and write.uuid:
         lines.append(f'M865.1 I0 C"{write.uuid}"')
     return lines
+
+
+def printer_matches_write(material: Material, written: str, uuids: bool) -> bool:
+    """Whether the printer still reports what `written` (from `filament_lines`) set.
+
+    The printer reports only name, color and UUID, so those are what's compared.
+    """
+    name = re.search(r'\bN"([^"]*)"', written)
+    color = re.search(r'\bO"(#[0-9a-f]{6})"', written)
+    uuid = re.search(r'^M865\.1 I0 C"([^"]+)"', written, re.MULTILINE)
+    if name is None or material.name.casefold() != name.group(1).casefold():
+        return False
+    if not same_color(material.color, color.group(1) if color else None):
+        return False
+    if uuids:
+        want = uuid.group(1).lower() if uuid else ""
+        if (material.instance_uuid or "").lower() != want:
+            return False
+    return True
 
 
 # Every print job ends with the firmware lowering the bed. With Z unhomed, as after a

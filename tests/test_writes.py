@@ -754,3 +754,72 @@ async def test_sync_job_failure_logged_once(tmp_path, caplog):
     assert len(jobs(printer)) == 1
     assert caplog.text.count("printer sync job working again") == 1
     await bridge.aclose()
+
+
+async def written_state(tmp_path, **cfg):
+    """A bridge that has swapped to spool 20 and written it to the printer."""
+    bridge, fake, printer = make(tmp_path, [spool(19)], uuid_field="instance_uuid", **cfg)
+    await swap_to_spool_20(bridge, fake, printer)
+    assert len(jobs(printer)) == 1
+    await bridge.poll()
+    assert len(jobs(printer)) == 1
+    return bridge, fake, printer
+
+
+async def test_spoolman_color_edit_is_written(tmp_path):
+    bridge, fake, printer = await written_state(tmp_path)
+    fake.spools[20]["filament"]["color_hex"] = "00ff00"
+    await bridge.poll()
+    assert len(jobs(printer)) == 2
+    assert 'O"#00ff00"' in jobs(printer)[-1]
+    await bridge.poll()
+    assert len(jobs(printer)) == 2
+    await bridge.aclose()
+
+
+async def test_spoolman_temperature_edit_is_written(tmp_path):
+    bridge, fake, printer = await written_state(tmp_path)
+    fake.spools[20]["filament"]["settings_extruder_temp"] = 205
+    await bridge.poll()
+    assert len(jobs(printer)) == 2
+    assert " T205 " in jobs(printer)[-1]
+    await bridge.poll()
+    assert len(jobs(printer)) == 2
+    await bridge.aclose()
+
+
+async def test_printer_change_after_write_is_drift(tmp_path):
+    bridge, fake, printer = await written_state(tmp_path, flag_drift=True)
+    printer.material = {"name": "PETG"}  # changed on the printer, not in Spoolman
+    await bridge.poll()
+    assert len(jobs(printer)) == 1
+    assert "printer filament differs" in fake.flag(20)
+    await bridge.aclose()
+
+
+async def test_state_from_before_write_tracking_is_rewritten_once(tmp_path):
+    uuid19 = "91da34d9-c1c1-470f-bac7-185a2346f86a"
+    bridge, fake, printer = make(tmp_path, [spool(20)], uuid_field="instance_uuid")
+    printer.material = {**printer.material, "instance_uuid": uuid19}  # left by a runout
+    await bridge.poll()  # baseline
+    # Simulate state saved by an older bridge: no "written" key.
+    state = json.loads((tmp_path / "state.json").read_text())
+    del state["tools"]["0"]["written"]
+    (tmp_path / "state.json").write_text(json.dumps(state))
+    bridge.state = load_state(tmp_path / "state.json")
+
+    await bridge.poll()
+    (gcode,) = jobs(printer)
+    minted = json.loads(fake.spools[20]["extra"]["instance_uuid"])
+    assert " T215 B60 " in gcode and f'C"{minted}"' in gcode
+    await bridge.poll()
+    assert len(jobs(printer)) == 1
+    await bridge.aclose()
+
+
+async def test_fresh_install_does_not_rewrite(tmp_path):
+    bridge, fake, printer = make(tmp_path, [spool(19)], uuid_field="instance_uuid")
+    for _ in range(2):
+        await bridge.poll()
+    assert jobs(printer) == []
+    await bridge.aclose()

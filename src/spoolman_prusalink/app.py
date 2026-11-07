@@ -14,7 +14,7 @@ from datetime import UTC, datetime
 import httpx
 
 from . import drift, printer_sync
-from .accounting import WARNINGS, EventKind, ToolState, account
+from .accounting import UNKNOWN_WRITE, WARNINGS, EventKind, ToolState, account
 from .config import Config
 from .models import FilamentReading, Spool
 from .prusalink import BUSY_STATES, IDLE_STATES, NoFilamentEndpoint, PrinterStatus, PrusaLink
@@ -329,11 +329,14 @@ class Bridge:
             active = by_id.get(st.active) if st.active is not None else None
             if not result.skipped and material is not None and active is not None:
                 diffs = drift.differences(tool, material, active, self._uuids)
-                if not diffs:
-                    if st.needs_sync:
+                edited = self._edited(tool, st, material, active)
+                if not diffs and not edited:
+                    if st.needs_sync or st.sync_attempts:
                         self.tools[tool] = replace(st, needs_sync=False, sync_attempts=0)
                 else:
-                    self._classify_mismatch(tool, location, st, active, diffs, notes, flags)
+                    self._classify_mismatch(tool, location, st, active,
+                                            diffs + ([edited] if edited else []), notes, flags,
+                                            edited=edited is not None)
             self._notes(tool, notes)
 
         self._flags = {spool_id: " | ".join(texts) for spool_id, texts in flags.items()}
@@ -345,10 +348,38 @@ class Bridge:
         save_state(self.config.state_file, self.state)
         return events + charges
 
-    def _classify_mismatch(self, tool, location, st, active, diffs, notes, flags) -> None:
+    def _edited(self, tool: int, st: ToolState, material, spool: Spool) -> str | None:
+        """Return why the printer should get Spoolman's edit of `spool`, or None.
+
+        That's when the printer still shows the bridge's last write, but the write the
+        bridge would make now differs: someone changed the spool in Spoolman, not the
+        printer. Comparing whole `M865` lines catches temperature edits, which the
+        printer doesn't report back.
+        """
+        if st.written is None:
+            return None
+        if st.written == UNKNOWN_WRITE:
+            return "rewriting once with full filament parameters"
+        try:
+            want = self._write_lines(tool, spool, spool.instance_uuid)
+        except printer_sync.CannotSync:
+            return None
+        if want == st.written:
+            return None
+        if not printer_sync.printer_matches_write(material, st.written, self._uuids):
+            return None
+        return "spool changed in Spoolman since the last write"
+
+    def _write_lines(self, tool: int, spool: Spool, uuid_value: str | None) -> str:
+        uuid_value = uuid_value if tool == 0 and self._uuids else None
+        return "\n".join(printer_sync.filament_lines(
+            printer_sync.ToolWrite(tool, spool, uuid_value)))
+
+    def _classify_mismatch(self, tool, location, st, active, diffs, notes, flags,
+                           edited: bool = False) -> None:
         """Decide whether a printer/spool mismatch is a pending write or drift."""
         detail = "; ".join(diffs)
-        expected = st.needs_sync or self.config.sync_drift
+        expected = st.needs_sync or self.config.sync_drift or edited
         # Wait while a swap is staged: the active spool is about to change. During an
         # unconfirmed swap, write the assigned spool: the M117 then shows the user what
         # Spoolman thinks is loaded, and confirming a different spool rewrites it.
@@ -447,18 +478,13 @@ class Bridge:
             return
         by_id = {s.id: s for s in spools}
         writes: list[printer_sync.ToolWrite] = []
-        written: list[int] = []
         for tool in self._pending_writes:
             st = self.tools[tool]
             spool = by_id.get(st.active)
             if spool is None:
                 continue
-            uuid_value = None
-            if tool == 0 and self._uuids:
-                uuid_value = spool.instance_uuid or await self._mint_uuid(spool)
-            write = printer_sync.ToolWrite(tool, spool, uuid_value)
             try:
-                printer_sync.filament_lines(write)
+                printer_sync.filament_lines(printer_sync.ToolWrite(tool, spool, None))
             except printer_sync.CannotSync as e:
                 location = self.config.tools[tool]
                 self._notes(tool, [f"[{location}] can't write spool {spool.id} to the printer: "
@@ -467,8 +493,10 @@ class Bridge:
                     filter(None, [self._flags.get(spool.id), f"{location}: {e}"])
                 )
                 continue
-            writes.append(write)
-            written.append(tool)
+            uuid_value = None
+            if tool == 0 and self._uuids:
+                uuid_value = spool.instance_uuid or await self._mint_uuid(spool)
+            writes.append(printer_sync.ToolWrite(tool, spool, uuid_value))
 
         notices: list[str] = []
         if self.config.printer_notices:
@@ -507,9 +535,12 @@ class Bridge:
         self._problems.clear("sync busy")
         self._problems.clear("sync failed", "printer sync job working again")
         log.info("ran printer job %s:\n%s", self.config.sync_file, gcode.rstrip())
-        for tool in written:
-            st = self.tools[tool]
-            self.tools[tool] = replace(st, sync_attempts=st.sync_attempts + 1)
+        for w in writes:
+            st = self.tools[w.tool]
+            self.tools[w.tool] = replace(
+                st, sync_attempts=st.sync_attempts + 1,
+                written="\n".join(printer_sync.filament_lines(w)),
+            )
         self.state.noticed += notices
         self._pending_writes = []
         self._last_state = "BUSY"  # The job is starting; poll again soon to verify it.
