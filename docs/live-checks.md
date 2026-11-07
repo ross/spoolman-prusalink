@@ -79,10 +79,12 @@ No print runs. About 30 minutes and a few grams of purge.
 4. **W14.** Edit the loaded spool's color, then its temperatures, in Spoolman.
    Each one starts a sync job. Check the printer's filament menu for the new
    temperatures, because the printer doesn't report them back.
-5. **S11.** Put two spools in the location. The bridge logs a warning and
-   holds usage. Remove one, and the usage goes to the other.
-6. **S10, S6.** Move the active spool out with no replacement, then unload.
-   Usage is held as unassigned, and the unload reports it lost.
+5. **S10, S6.** Move the active spool out with no replacement. It's still
+   charged. Unload: usage before the unload goes to that spool, and usage
+   after it is held as unassigned. Unload again: the held usage is reported
+   lost.
+6. **S11.** With no spool active after step 5, put two spools in the
+   location. The bridge skips the tool and warns until you remove one.
 7. **S8.** Stage a spool, then move it back out before unloading. The staging
    is cancelled and logged.
 
@@ -133,8 +135,9 @@ These use the throwaway spool record.
    next unload.
 3. **M3.** Delete the active spool. Usage is held, and the next spool moved in
    takes it.
-4. **M4.** Rename the location in Spoolman, then rename it back. Usage is held
-   while the name doesn't match.
+4. **M4.** Rename the location in Spoolman, then unload and load. The spool
+   is charged until the unload, and usage after it is held. Rename the
+   location back, and the held usage goes to the spool in it.
 5. **M6.** Set a flag on a spool by hand. The bridge leaves it alone.
 
 ## When they happen

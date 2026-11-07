@@ -1498,23 +1498,25 @@ def test_staged_spool_flagged_at_every_print_start():
 
 
 def test_claim_in_the_same_poll_as_an_unload_moves_only_later_usage():
-    # Usage since an earlier unload, and before this one, stays on spool 7.
-    charges, _, state = claim_run(
+    # Spool 9 is staged, and spool 7 is claimed in the poll that sees the unload.
+    # Handled after the unload, the claim undoes the swap to spool 9, so the usage
+    # after the unload goes to spool 7. Handled first, it would only confirm spool 7,
+    # and the unload would then make spool 9 active.
+    charges, kinds, state = claim_run(
         [
             (BOOT, r(100), loc(7), None, None),
-            (BOOT, r(300, unloads=1, at_unload=200), loc(7), None, None),
-            (BOOT, r(600, unloads=2, at_unload=500), loc(7, 9), None, 9),
+            (BOOT, r(200), loc(7, 9), None, None),
+            (BOOT, r(500, unloads=1, at_unload=400), loc(7, 9), None, 7),
         ]
     )
     assert charges == [
-        Charge(7, 100, "before unload"),
         Charge(7, 100, "extruded"),
         Charge(7, 200, "before unload"),
-        Charge(9, 100, "extruded"),
+        Charge(7, 100, "extruded"),
     ]
-    assert (state.active, state.evict, state.swap) == (9, (7,), None)
-    assert state.since_load == {9: 100}
-    assert state.needs_sync
+    assert kinds[-2:] == [EventKind.SWAP_COMMITTED, EventKind.CLAIMED]
+    assert (state.active, state.evict) == (7, (9,))
+    assert state.since_load == {7: 100}
 
 
 def test_claim_while_a_job_waits_for_its_first_extrusion():

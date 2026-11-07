@@ -130,6 +130,7 @@ class Printer:
         self.down = False
         self.uploads = []  # (path, gcode)
         self.busy = False  # Reject uploads with 409, as while printing.
+        self.refused = 0  # Uploads rejected with 409.
         self.printer_type = "8.1.0"  # Core One L
         self.boot_id = 1
         self.filament_endpoint = True
@@ -169,6 +170,7 @@ class Printer:
             )
         if request.method == "PUT" and request.url.path.startswith("/api/v1/files/"):
             if self.busy or self.job:
+                self.refused += 1
                 return httpx.Response(409)
             if self.upload_error:
                 return httpx.Response(self.upload_error, text="oops")
@@ -1943,6 +1945,7 @@ async def test_write_due_mid_print_waits_for_the_print_to_end(tmp_path):
         printer.extruded += 100
         await bridge.poll()
     assert jobs(printer) == []
+    assert printer.refused == 0  # The bridge waits; it doesn't try and get 409.
     printer.job = None
     await bridge.poll()
     (gcode,) = jobs(printer)
@@ -1967,6 +1970,7 @@ async def test_print_started_right_after_a_load_delays_the_write(tmp_path):
         printer.extruded = extruded
         await bridge.poll()
     assert jobs(printer) == []  # The print runs with the menu's metadata.
+    assert printer.refused == 0
     assert sum(fake.used[20]) == 500
     printer.job = None
     await bridge.poll()
@@ -2131,6 +2135,20 @@ async def test_spoolman_name_edit_is_not_written(tmp_path):
     fake.spools[20]["filament"]["name"] = "Red"
     await bridge.poll()
     assert len(jobs(printer)) == 1
+    await bridge.aclose()
+
+
+async def test_spoolman_name_edit_is_written_when_the_filament_has_no_material(tmp_path):
+    # W14: with no material, the printer's filament name is the Spoolman name.
+    bridge, fake, printer = await written_state(tmp_path)
+    filament = fake.spools[20]["filament"]
+    filament.update(material=None, settings_extruder_temp=215, settings_bed_temp=60)
+    await bridge.poll()
+    assert len(jobs(printer)) == 2
+    filament["name"] = "Red"
+    await bridge.poll()
+    assert len(jobs(printer)) == 3
+    assert 'N"Red"' in jobs(printer)[-1]
     await bridge.aclose()
 
 
