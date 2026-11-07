@@ -88,10 +88,12 @@ No print runs. About 30 minutes and a few grams of purge.
 4. **W14.** Edit the loaded spool's color, then its temperatures, in Spoolman.
    Each one starts a sync job. Check the printer's filament menu for the new
    temperatures, because the printer doesn't report them back.
-5. **S10, S6.** Move the active spool out with no replacement. It's still
-   charged. Unload: usage before the unload goes to that spool, and usage
-   after it is held as unassigned. Unload again: the held usage is reported
-   lost.
+5. **S10, S6.** With spool A loaded and active, move A out of the location in
+   Spoolman and put nothing in. A is still charged. At the printer, unload A
+   and load spool B without changing Spoolman. Usage up to the unload goes to
+   A, A stops being active, and B's purge is held as unassigned. Then unload B
+   and load spool C. With nothing assigned, B's held purge is reported lost,
+   and C's purge is held. B and C can be the same physical spool.
 6. **S11.** With no spool active after step 5, put two spools in the
    location. The bridge skips the tool and warns until you remove one.
 7. **S8.** Stage a spool, then move it back out before unloading. The staging
