@@ -439,6 +439,20 @@ async def test_own_sync_job_is_not_a_print_start(tmp_path):
     await bridge.aclose()
 
 
+async def test_emptied_location_has_no_spool_none_note(tmp_path, caplog):
+    bridge, fake, printer = make(tmp_path, [spool(19)], sync_drift=True)
+    await bridge.poll()
+    caplog.set_level("INFO")
+    fake.spools[19]["location"] = None  # Moved out, with nothing in its place.
+    printer.material = {"name": "PETG"}
+    for _ in range(3):
+        await bridge.poll()
+    assert jobs(printer) == []
+    assert "spool None" not in caplog.text
+    assert caplog.text.count("spool 19 is no longer in the location") == 1
+    await bridge.aclose()
+
+
 async def test_busy_printer_defers_write(tmp_path):
     bridge, fake, printer = make(tmp_path, [spool(19)])
     await bridge.poll()

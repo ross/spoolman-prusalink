@@ -685,9 +685,10 @@ class Bridge:
                 self._pending_writes.append(tool)
                 notes.append(f"[{location}] printer will be set to spool {active.id} when "
                              f"idle: {detail}")
-            else:
+            elif st.assigned is not None:
                 notes.append(f"[{location}] printer will be set once spool {st.assigned} "
                              f"is loaded")
+            # With nothing assigned, the active_unassigned event already said so.
             return
         if self.config.printer_sync and expected:
             notes.append(f"[{location}] printer still differs from spool {active.id} after "
