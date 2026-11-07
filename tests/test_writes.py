@@ -24,12 +24,22 @@ class FakeSpoolman:
         self.used = {}  # spool id -> list of use_length calls applied
         self.fail_use = []  # status codes to return for upcoming use calls
         self.writes = []
+        self.down = False  # Refuse connections.
+        self.fail_read = None  # Status code for spool reads.
+        self.fail_patch = None  # Status code for spool PATCHes.
+        self.fail_field = None  # Status code for field reads.
 
     def handle(self, request: httpx.Request) -> httpx.Response:
         path, method = request.url.path, request.method
+        if self.down:
+            raise httpx.ConnectError("spoolman offline")
         if path == "/api/v1/spool" and method == "GET":
+            if self.fail_read:
+                return httpx.Response(self.fail_read, text="oops")
             return httpx.Response(200, json=list(self.spools.values()))
         if path == "/api/v1/field/spool" and method == "GET":
+            if self.fail_field:
+                return httpx.Response(self.fail_field, text="oops")
             return httpx.Response(200, json=self.fields)
         if path.startswith("/api/v1/field/spool/") and method == "POST":
             body = json.loads(request.content)
@@ -47,6 +57,8 @@ class FakeSpoolman:
             self.writes.append(("use", spool_id, mm))
             return httpx.Response(200, json=self.spools[spool_id])
         if path.startswith("/api/v1/spool/") and method == "PATCH":
+            if self.fail_patch:
+                return httpx.Response(self.fail_patch, text="oops")
             spool_id = int(path.rsplit("/", 1)[1])
             body = json.loads(request.content)
             if "location" in body:
@@ -89,11 +101,15 @@ class Printer:
         self.printer_type = "8.1.0"  # Core One L
         self.boot_id = 1
         self.filament_endpoint = True
+        self.error = None  # Status code for every request, such as 401.
+        self.upload_error = None  # Status code for sync job uploads.
         self.counters = True  # MINI and MK3.5 firmware report only the material.
 
     def handle(self, request: httpx.Request) -> httpx.Response:
         if self.down:
             raise httpx.ConnectError("printer offline")
+        if self.error:
+            return httpx.Response(self.error, text="oops")
         if request.url.path == "/api/version":
             return httpx.Response(200, json={"text": "PrusaLink", "printer": self.printer_type})
         if request.url.path == "/api/v1/filament":
@@ -117,6 +133,8 @@ class Printer:
         if request.method == "PUT" and request.url.path.startswith("/api/v1/files/"):
             if self.busy or self.job:
                 return httpx.Response(409)
+            if self.upload_error:
+                return httpx.Response(self.upload_error, text="oops")
             assert request.headers["Print-After-Upload"] == "?1"
             gcode = request.content.decode()
             self.uploads.append((request.url.path, gcode))
@@ -596,4 +614,143 @@ async def test_runout_reload_keeps_old_uuid_and_gets_rewritten(tmp_path):
     assert f'M865.1 I0 C"{minted}"' in gcode
     await bridge.poll()
     assert len(jobs(printer)) == 1 and bridge.tools[0].needs_sync is False
+    await bridge.aclose()
+
+
+async def test_printer_read_error_logged_once(tmp_path, caplog):
+    bridge, fake, printer = make(tmp_path, [spool(19)])
+    caplog.set_level("INFO")
+    printer.error = 401
+    for _ in range(4):
+        await bridge.poll()
+    assert caplog.text.count("printer read failed") == 1
+    printer.error = 500  # A different error is new.
+    for _ in range(2):
+        await bridge.poll()
+    assert caplog.text.count("printer read failed") == 2
+    printer.error = None
+    for _ in range(2):
+        await bridge.poll()
+    assert caplog.text.count("printer reads working again") == 1
+    await bridge.aclose()
+
+
+async def test_spoolman_read_problems_logged_once(tmp_path, caplog):
+    bridge, fake, printer = make(tmp_path, [spool(19)])
+    caplog.set_level("INFO")
+    fake.down = True
+    for _ in range(4):
+        await bridge.poll()
+    assert caplog.text.count("Spoolman unreachable") == 1
+    assert "read failed" not in caplog.text
+    fake.down = False
+    fake.fail_read = 500
+    for _ in range(3):
+        await bridge.poll()
+    assert caplog.text.count("Spoolman reachable again") == 1
+    assert caplog.text.count("Spoolman read failed") == 1
+    fake.fail_read = None
+    for _ in range(2):
+        await bridge.poll()
+    assert caplog.text.count("Spoolman reads working again") == 1
+    await bridge.aclose()
+
+
+async def test_charge_failures_logged_once(tmp_path, caplog):
+    bridge, fake, printer = make(tmp_path, [spool(19)])
+    caplog.set_level("INFO")
+    await bridge.poll()
+    printer.extruded = 1500
+    fake.fail_use = [503, 503, 503]
+    for _ in range(3):
+        await bridge.poll()
+    assert caplog.text.count("charge to spool 19 failed") == 1
+    await bridge.poll()
+    assert fake.used == {19: [500.0]}
+    assert caplog.text.count("sent 1 queued charge(s)") == 1
+    printer.extruded = 1600
+    await bridge.poll()
+    assert caplog.text.count("sent ") == 1
+    await bridge.aclose()
+
+
+async def test_evict_failure_logged_once(tmp_path, caplog):
+    bridge, fake, printer = make(tmp_path, [spool(19)])
+    caplog.set_level("INFO")
+    await bridge.poll()
+    fake.spools[20] = spool_x(20)
+    await bridge.poll()
+    printer.unloads, printer.at_unload, printer.material = 1, 1000, None
+    fake.fail_patch = 500
+    for _ in range(4):
+        await bridge.poll()
+    assert fake.spools[19]["location"] == LOC
+    assert caplog.text.count("can't move spool 19 out") == 1
+    assert caplog.text.count("can't update the flag on spool 19") <= 1
+    fake.fail_patch = None
+    await bridge.poll()
+    assert fake.spools[19]["location"] is None
+    await bridge.aclose()
+
+
+async def test_flag_failure_logged_once(tmp_path, caplog):
+    bridge, fake, printer = make(tmp_path, [spool(19)])
+    caplog.set_level("INFO")
+    await bridge.poll()
+    printer.unloads, printer.at_unload = 1, 1000
+    fake.fail_patch = 500
+    for _ in range(4):
+        await bridge.poll()
+    assert caplog.text.count("can't update the flag on spool 19") == 1
+    fake.fail_patch = None
+    await bridge.poll()
+    assert "unloaded with no Spoolman change" in fake.flag(19)
+    assert caplog.text.count("can't update the flag on spool 19") == 1
+    await bridge.aclose()
+
+
+async def test_field_setup_failure_logged_once(tmp_path, caplog):
+    bridge, fake, printer = make(tmp_path, [spool(19)])
+    caplog.set_level("INFO")
+    fake.fail_field = 500
+    for _ in range(4):
+        await bridge.poll()
+    assert caplog.text.count("spool field") == 1
+    fake.fail_field = None
+    await bridge.poll()
+    assert caplog.text.count("spool field is set up") == 1
+    assert caplog.text.count("spool field") == 2
+    await bridge.aclose()
+
+
+async def test_busy_printer_logged_once(tmp_path, caplog):
+    bridge, fake, printer = make(tmp_path, [spool(19)])
+    caplog.set_level("INFO")
+    await bridge.poll()
+    printer.unloads, printer.at_unload, printer.material = 1, 1000, {"name": "PLA"}
+    fake.spools[20] = spool_x(20)
+    printer.busy = True
+    for _ in range(4):
+        await bridge.poll()
+    assert caplog.text.count("printer busy") == 1
+    printer.busy = False
+    await bridge.poll()
+    assert len(jobs(printer)) == 1
+    await bridge.aclose()
+
+
+async def test_sync_job_failure_logged_once(tmp_path, caplog):
+    bridge, fake, printer = make(tmp_path, [spool(19)])
+    caplog.set_level("INFO")
+    await bridge.poll()
+    printer.unloads, printer.at_unload, printer.material = 1, 1000, {"name": "PLA"}
+    fake.spools[20] = spool_x(20)
+    printer.upload_error = 500
+    for _ in range(4):
+        await bridge.poll()
+    assert caplog.text.count("printer sync job failed") == 1
+    printer.upload_error = None
+    await bridge.poll()
+    assert len(jobs(printer)) == 1
+    assert caplog.text.count("printer sync job working again") == 1
     await bridge.aclose()
