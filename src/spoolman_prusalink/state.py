@@ -27,15 +27,16 @@ class Runout:
     text: str
     net: float | None = None
     used: float | None = None
+    printer: str | None = None  # Whose tool it ran out in; None in state from before names.
 
     def to_json(self) -> dict:
-        return {"text": self.text, "net": self.net, "used": self.used}
+        return {"text": self.text, "net": self.net, "used": self.used, "printer": self.printer}
 
     @classmethod
     def from_json(cls, data: dict | str) -> Runout:
         if isinstance(data, str):  # Before the weights were kept.
             return cls(data)
-        return cls(str(data["text"]), data.get("net"), data.get("used"))
+        return cls(str(data["text"]), data.get("net"), data.get("used"), data.get("printer"))
 
 
 @dataclass

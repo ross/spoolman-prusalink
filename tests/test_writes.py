@@ -681,8 +681,8 @@ async def test_printer_notices_show_two_new_flags_in_turn(tmp_path):
         tmp_path, [spool(19), spool(21, location=None)], printer_notices=True
     )
     await bridge.poll()
-    bridge.state.runouts[19] = Runout("first flag")
-    bridge.state.runouts[21] = Runout("second flag")
+    bridge.state.runouts[19] = Runout("first flag")  # Spool 19 is in the tool's location.
+    bridge.state.runouts[21] = Runout("second flag", printer="default")  # Spool 21 isn't.
     for _ in range(4):
         await bridge.poll()
     shown = [g.splitlines()[-1] for g in jobs(printer)]
@@ -2236,8 +2236,11 @@ async def test_records_name_the_printer(tmp_path):
     await bridge.aclose()
 
 
-def two_printers(tmp_path, spools):
-    """A bridge with printers "a" and "b", each with one tool, against one fake Spoolman."""
+def two_printers(tmp_path, spools, **cfg):
+    """A bridge with printers "a" and "b", each with one tool, against one fake Spoolman.
+
+    Returns the bridge, the fake Spoolman and the two fake printers by name.
+    """
     fake = FakeSpoolman(spools)
     printers = {"a": Printer(), "b": Printer()}
     config = Config(
@@ -2249,21 +2252,28 @@ def two_printers(tmp_path, spools):
         state_file=tmp_path / "state.json",
         ledger_file=tmp_path / "ledger.jsonl",
         dry_run=False,
+        **cfg,
     )
     bridge = Bridge(
         config=config,
-        spoolman=Spoolman("http://spoolman", transport=httpx.MockTransport(fake.handle)),
+        spoolman=Spoolman(
+            "http://spoolman",
+            uuid_field=config.uuid_field,
+            flag_field=config.flag_field,
+            claim_field=config.claim_field,
+            transport=httpx.MockTransport(fake.handle),
+        ),
         clients={
             name: PrusaLink(f"http://{name}", "k", transport=httpx.MockTransport(p.handle))
             for name, p in printers.items()
         },
     )
-    return bridge, fake
+    return bridge, fake, printers
 
 
 async def test_404_in_flush_holds_the_charge_for_the_records_printer(tmp_path, caplog):
     # X11: a rejected charge is held for the tool named by the record's printer.
-    bridge, fake = two_printers(tmp_path, [spool(21, "Tool a")])
+    bridge, fake, _ = two_printers(tmp_path, [spool(21, "Tool a")])
     a, b = (bridge.state.tools(name) for name in ("a", "b"))
     a[0] = ToolState(boot_id=1, charged=100, active=21, assigned=21)
     b[0] = ToolState(boot_id=1, charged=700, active=19, assigned=19)

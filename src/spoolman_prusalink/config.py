@@ -67,13 +67,6 @@ class Config:
     # Show new flags on the printer screen with M117 through a job, when idle.
     printer_notices: bool = False
 
-    @property
-    def printer(self) -> PrinterConfig:
-        """The only printer. The bridge serves one printer until the loop handles several."""
-        if len(self.printers) != 1:
-            raise ValueError(f"{len(self.printers)} printers are configured, not one")
-        return self.printers[0]
-
 
 def _env_bool(env: dict[str, str], key: str) -> bool | None:
     value = env.get(key)
