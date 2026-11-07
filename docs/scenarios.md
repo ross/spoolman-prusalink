@@ -46,7 +46,7 @@ archived active spool (M3, M3a) is logged once when the bridge finds it.
 | S11 | Two spools in the location, neither active. | Skips the tool and warns until one is removed. | Tested |
 | S12 | Spoolman changed to a spool whose UUID the printer already reports, with no unload. | Treated as a correction: switches immediately. | Tested |
 | S13 | Spoolman changed with no unload, and the printer doesn't report the new spool's UUID. | Staged until the next unload. If the user meant "I got it wrong; this spool is loaded", they claim it (see Q3). | Decided and implemented; tested |
-| S14 | Several unloads and loads between two polls. | Counts them as one unload. Usage up to the last unload goes to the active spool. | Tested |
+| S14 | Several unloads and loads between two polls. | Counts them as one unload. Usage up to the last unload goes to the active spool. | Seen live (14 → 7 → 20, with the bridge stopped during the swaps) |
 
 ## During a print
 
