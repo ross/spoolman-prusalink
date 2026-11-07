@@ -421,14 +421,107 @@ def test_next_unload_supersedes_open_swap():
     assert state.swap == SwapFlag(7, 100)
 
 
-def test_swap_flag_cleared_when_spool_removed():
-    charges, _, state = run([
+def test_swap_kept_open_when_spool_removed():
+    # The old spool leaves the location first: the swap stays open and usage is held.
+    charges, kinds, state = run([
         (BOOT, r(100), loc(7)),
         (BOOT, r(900, unloads=1, at_unload=600), loc(7)),
         (BOOT, r(950, unloads=1, at_unload=600), loc()),
     ])
-    assert state.swap is None and state.active is None
-    assert all(c.mm > 0 for c in charges)
+    assert charges == [Charge(7, 500, "before unload"), Charge(7, 300, "extruded")]
+    assert EventKind.SWAP_CONFIRMED not in kinds
+    assert kinds[-2:] == [EventKind.ACTIVE_UNASSIGNED, EventKind.HOLD_UNASSIGNED]
+    assert (state.swap, state.active, state.charged) == (SwapFlag(7, 300), None, 900)
+
+
+# The old spool moved out of the location, then the new one moved in (S3 in S7's order).
+TWO_STEP = [
+    (BOOT, r(100), loc(7)),
+    (BOOT, r(900, unloads=1, at_unload=600), loc(7)),
+    (BOOT, r(950, unloads=1, at_unload=600), loc()),
+]
+
+
+def test_two_step_swap_moves_usage_since_unload_to_new_spool():
+    charges, _, state = run(TWO_STEP)
+    res = account(state, BOOT, r(1000, unloads=1, at_unload=600), loc(9))
+    assert res.charges == [
+        Charge(9, 300, "usage since unconfirmed swap"),
+        Charge(7, -300, "moved to confirmed swap spool"),
+        Charge(9, 100, "extruded"),
+    ]
+    totals = {}
+    for c in charges + res.charges:
+        totals[c.spool_id] = totals.get(c.spool_id, 0) + c.mm
+    assert totals == {7: 500, 9: 400}
+    confirmed = [e.message for e in res.events if e.kind == EventKind.SWAP_CONFIRMED]
+    assert confirmed == ["swap confirmed: 300 mm moved from spool 7 to 9"]
+    assert (res.state.swap, res.state.active, res.state.evict) == (None, 9, ())
+    assert res.state.since_load == {7: 0, 9: 400}
+
+
+def test_old_spool_moved_back_keeps_swap_open():
+    _, _, state = run(TWO_STEP)
+    charges, kinds, state = run([(BOOT, r(1000, unloads=1, at_unload=600), loc(7))], state)
+    assert charges == [Charge(7, 100, "extruded")]
+    assert kinds == [EventKind.ACTIVE_UNASSIGNED]
+    assert (state.swap, state.active) == (SwapFlag(7, 400), 7)
+    # A different spool later still takes everything since the unload.
+    charges, _, _ = run([(BOOT, r(1000, unloads=1, at_unload=600), loc(7, 9))], state)
+    assert charges == [Charge(9, 400, "usage since unconfirmed swap"),
+                       Charge(7, -400, "moved to confirmed swap spool")]
+
+
+def test_print_start_with_location_emptied_keeps_swap_open():
+    _, _, state = run([(*step, None) for step in TWO_STEP])
+    charges, kinds, state = run([
+        (BOOT, r(950, unloads=1, at_unload=600), loc(), 42),
+        (BOOT, r(3000, unloads=1, at_unload=600), loc(), 42),
+        (BOOT, r(3000, unloads=1, at_unload=600), loc(9), None),
+    ], state)
+    assert EventKind.SWAP_ASSUMED not in kinds
+    assert EventKind.PROVISIONAL_KEPT not in kinds
+    assert charges == [Charge(9, 300, "usage since unconfirmed swap"),
+                       Charge(7, -300, "moved to confirmed swap spool"),
+                       Charge(9, 2100, "extruded")]
+    assert (state.swap, state.provisional, state.active) == (None, None, 9)
+
+
+def test_reboot_with_location_emptied_keeps_swap_and_held_usage():
+    _, _, state = run(TWO_STEP)
+    charges, kinds, state = run([
+        (BOOT + 1, r(20), loc()),
+        (BOOT + 1, r(30), loc(9)),
+    ], state)
+    assert charges == [Charge(9, 300, "usage since unconfirmed swap"),
+                       Charge(7, -300, "moved to confirmed swap spool"),
+                       Charge(9, 50, "held before the printer restarted"),
+                       Charge(9, 30, "extruded")]
+    assert EventKind.STAGED_AT_REBOOT not in kinds
+    assert (state.swap, state.active, state.held_mm) == (None, 9, 0)
+
+
+def test_unload_with_location_emptied_closes_swap_on_old_spool():
+    # As S6: usage held with nothing assigned is lost at the unload. The next unload
+    # closes the swap, so the usage since the first one stays on the old spool.
+    _, _, state = run(TWO_STEP)
+    res = account(state, BOOT, r(1200, unloads=2, at_unload=1100), loc())
+    lost = [e.message for e in res.events if e.kind == EventKind.LOST_UNASSIGNED]
+    assert lost == ["200 mm before unload had no spool"]
+    assert res.charges == []
+    assert (res.state.swap, res.state.active, res.state.charged) == (None, None, 1100)
+    charges, _, _ = run([(BOOT, r(1250, unloads=2, at_unload=1100), loc(9))], res.state)
+    assert charges == [Charge(9, 150, "extruded")]
+
+
+def test_claim_with_location_emptied_moves_usage_since_unload():
+    _, _, state = run(TWO_STEP)
+    res = account(state, BOOT, r(1000, unloads=1, at_unload=600), loc(9), claim=9)
+    assert res.claimed
+    assert res.charges == [Charge(9, 300, "claimed usage since load"),
+                           Charge(7, -300, "moved to claimed spool"),
+                           Charge(9, 100, "extruded")]
+    assert (res.state.swap, res.state.active) == (None, 9)
 
 
 def test_measured_reboot_then_menu_unload_and_load():

@@ -292,6 +292,24 @@ async def test_confirmed_swap_charges_new_before_refunding_old(tmp_path):
     await bridge.aclose()
 
 
+async def test_two_step_swap_flags_the_old_spool_then_moves_its_usage(tmp_path):
+    bridge, fake, printer = make(tmp_path, [spool(19)])
+    await bridge.poll()
+    printer.unloads, printer.at_unload, printer.extruded = 1, 1000, 1116
+    await bridge.poll()  # unconfirmed swap: 116 to spool 19
+    fake.spools[19] = spool(19, location=None)  # spool 19 moved out first
+    printer.extruded += 50
+    await bridge.poll()
+    assert "moved out" in fake.flag(19)
+    fake.spools[20] = spool(20)  # then spool 20 moved in
+    await bridge.poll()
+    uses = [w for w in fake.writes if w[0] == "use"]
+    assert uses == [("use", 19, 116.0), ("use", 20, 116.0), ("use", 19, -116.0),
+                    ("use", 20, 50.0)]
+    assert not fake.flag(19)
+    await bridge.aclose()
+
+
 async def test_unconfirmed_swap_flag_is_set_then_cleared(tmp_path):
     bridge, fake, printer = make(tmp_path, [spool(19)])
     await bridge.poll()

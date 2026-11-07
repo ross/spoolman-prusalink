@@ -124,6 +124,10 @@ after clearing a jam. It charges that spool provisionally and flags it with
 the amount. The next unload keeps the usage there. If a different spool was
 loaded, claim it (see [Claims](#claims)).
 
+You can also move the old spool out of the location before moving the new
+one in. While the location is empty, the bridge holds usage, even during a
+print, and the next spool you move in takes everything since the unload.
+
 Other rules:
 
 - The first poll of each tool records the current counter as a baseline.
@@ -204,7 +208,9 @@ Flags go to the `flag_field` extra field (`bridge_flag` by default), which
 the bridge creates on first use:
 
 - An unconfirmed swap, on the spool still assigned, until Spoolman changes,
-  a print starts, or the next unload.
+  a print starts, or the next unload. If that spool is moved out of the
+  location, the flag says so and lasts until a spool is moved in or the next
+  unload.
 - A provisional charge, on the spool assumed reloaded at print start, until
   the next unload or a claim. The amount shown updates between prints.
 - A print started with a swap staged, on both spools. The active spool's flag

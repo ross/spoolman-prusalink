@@ -21,10 +21,13 @@ differ while a swap is in progress:
 - Filament first. An unload with no Spoolman change opens an *unconfirmed swap*. Usage
   keeps going to the assigned spool. If Spoolman changes before the next print starts,
   the usage since the unload moves to the new spool. The swap closes, assumed to be the
-  same spool, when a print starts or at the next unload. A print starts at its first
-  extrusion, not when its job appears, so preheat and bed leveling leave time to fix
-  Spoolman, and a job cancelled before extruding changes nothing. The printer's reported filament
-  can't close it: a runout reload keeps the old name, color and UUID whatever was loaded.
+  same spool, when a print starts or at the next unload. If the old spool leaves the
+  location first, the swap stays open, even through a print start, and later usage is
+  held: the next spool assigned confirms the swap and takes both, and the old spool
+  coming back leaves the swap open as it was. A print starts at its first extrusion, not
+  when its job appears, so preheat and bed leveling leave time to fix Spoolman, and a job
+  cancelled before extruding changes nothing. The printer's reported filament can't close
+  it: a runout reload keeps the old name, color and UUID whatever was loaded.
 - A print start that closes an unconfirmed swap leaves the usage on the old spool as a
   *provisional* charge. Later usage on that spool adds to it until the next unload, which
   keeps it where it is, or a claim.
@@ -580,8 +583,19 @@ def account(
     elif unloaded:
         pass
     elif assigned != active:
-        if swap is not None:
-            moved = swap.mm if assigned is not None else 0
+        if swap is not None and assigned is None:
+            # The old spool left first, before the new one arrived. Keep the swap open and
+            # hold usage until a spool is assigned: a new spool confirms the swap below.
+            event(EventKind.ACTIVE_UNASSIGNED, f"spool {active} is no longer in the "
+                  "location; holding usage until a spool is assigned, which also takes "
+                  f"the {swap.mm} mm since the unload")
+            active = None
+        elif swap is not None and assigned == swap.spool_id:
+            # The old spool is back: the swap stays open, as if it had never left.
+            event(EventKind.ACTIVE_UNASSIGNED, f"spool {assigned} is back in the location")
+            active = assigned
+        elif swap is not None:
+            moved = swap.mm
             if moved > 0:
                 # Charge before refunding: Spoolman clamps used_weight at 0, so a refund
                 # applied first could be truncated if the charge then fails.
@@ -655,7 +669,9 @@ def account(
             event(EventKind.ASSIGNMENT_CHANGED, f"print started with spool {assigned} "
                   f"assigned; making it active in place of deleted spool {deleted}")
             active = assigned
-        if swap is not None:
+        # With the location emptied, no spool is charged to assume: the swap stays open
+        # for the next spool assigned.
+        if swap is not None and active is not None:
             event(EventKind.SWAP_ASSUMED,
                   f"print started with no Spoolman change since the unload; assuming "
                   f"spool {swap.spool_id} was reloaded and charging it provisionally")

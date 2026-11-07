@@ -447,7 +447,12 @@ class Bridge:
             if dry:
                 notes += [f"[{location}] would move spool {i} out of {location!r}"
                           for i in st.evict]
-            if st.swap is not None:
+            if st.swap is not None and st.active is None:
+                flags.setdefault(st.swap.spool_id, []).append(
+                    f"{location}: filament was unloaded, then this spool was moved out. "
+                    f"Usage since the unload goes to the next spool moved into {location}."
+                )
+            elif st.swap is not None:
                 flags.setdefault(st.swap.spool_id, []).append(
                     f"{location}: filament was unloaded with no Spoolman change. If a "
                     f"different spool went in, move it into {location} before the next print."
