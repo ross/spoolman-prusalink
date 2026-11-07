@@ -902,6 +902,17 @@ async def test_spoolman_read_problems_logged_once(tmp_path, caplog):
     await bridge.aclose()
 
 
+async def test_live_ledger_records_are_marked_not_dry_run(tmp_path):
+    bridge, fake, printer = make(tmp_path, [spool(19)])
+    await bridge.poll()
+    printer.extruded = 1500
+    await bridge.poll()
+    ledger = [json.loads(line) for line in (tmp_path / "ledger.jsonl").read_text().splitlines()]
+    assert any("event" in r for r in ledger) and any("use_length" in r for r in ledger)
+    assert all(r["dry_run"] is False for r in ledger)
+    await bridge.aclose()
+
+
 async def test_dry_run_holds_queued_charges(tmp_path, caplog):
     bridge, fake, printer = make(tmp_path, [spool(19)])
     await bridge.poll()

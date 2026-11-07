@@ -437,6 +437,7 @@ class Bridge:
                         "location": location,
                         "event": ev.kind.value,
                         "message": ev.message,
+                        "dry_run": dry,
                     }
                 )
 
