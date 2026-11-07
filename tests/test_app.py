@@ -141,8 +141,8 @@ def make_bridge(tmp_path, filament, spools):
     cfg = make_config(tmp_path)
     return Bridge(
         config=cfg,
-        printer=PrusaLink(cfg.printer.url, "k", transport=transport),
         spoolman=Spoolman(cfg.spoolman_url, uuid_field="instance_uuid", transport=transport),
+        clients={"default": PrusaLink(cfg.printer.url, "k", transport=transport)},
     )
 
 
@@ -170,7 +170,7 @@ async def test_poll_logs_would_charge_and_saves_nothing(tmp_path, caplog):
     assert [(r["spool_id"], r["use_length"]) for r in charges] == [(7, 1000)]
     assert any("event" in r for r in ledger)
     assert all(r["dry_run"] is True for r in ledger)  # Events too, not just charges.
-    assert bridge.tools[0].charged == 5310
+    assert bridge.printers[0].tools[0].charged == 5310
     assert not (tmp_path / "state.json").exists()  # Dry run saves nothing.
     assert bridge.interval() == bridge.config.poll_printing
     await bridge.aclose()
@@ -184,7 +184,7 @@ async def test_two_spools_in_location_skips_tool(tmp_path, caplog):
     )
     await bridge.poll()
     assert "location holds spools 7, 9" in caplog.text
-    assert 0 not in bridge.tools
+    assert 0 not in bridge.printers[0].tools
     await bridge.aclose()
 
 
@@ -204,7 +204,9 @@ async def test_printer_error_skips_poll(tmp_path, caplog):
 
     cfg = make_config(tmp_path)
     t = httpx.MockTransport(handler)
-    bridge = Bridge(cfg, PrusaLink("http://p", "k", transport=t), Spoolman("http://s", transport=t))
+    bridge = Bridge(
+        cfg, Spoolman("http://s", transport=t), {"default": PrusaLink("http://p", "k", transport=t)}
+    )
     await bridge.poll()
     assert "printer read failed" in caplog.text
     assert not (tmp_path / "state.json").exists()
@@ -222,8 +224,10 @@ async def test_printer_outage_logged_on_change(tmp_path, caplog):
 
     cfg = make_config(tmp_path)
     t = httpx.MockTransport(handler)
-    bridge = Bridge(cfg, PrusaLink("http://p", "k", transport=t), Spoolman("http://s", transport=t))
-    bridge._printer_outage.clock = lambda: now["v"]
+    bridge = Bridge(
+        cfg, Spoolman("http://s", transport=t), {"default": PrusaLink("http://p", "k", transport=t)}
+    )
+    bridge.printers[0]._printer_outage.clock = lambda: now["v"]
     caplog.set_level("INFO")
 
     for _ in range(5):
@@ -240,7 +244,7 @@ async def test_printer_outage_logged_on_change(tmp_path, caplog):
     up["v"] = True
     await bridge.poll()
     assert "printer reachable again after 3h 00m" in caplog.text
-    assert not bridge._printer_outage.down
+    assert not bridge.printers[0]._printer_outage.down
     await bridge.aclose()
 
 
