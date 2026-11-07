@@ -147,7 +147,9 @@ class ToolState:
     unload_count: int = 0
     active: int | None = None  # Spool physically in the tool, which gets charged.
     assigned: int | None = None  # Spoolman's assignment at the last poll.
-    evict: int | None = None  # Old spool still in the location after a swap.
+    # Old spools still in the location after a swap, oldest first. More than one when an
+    # eviction hasn't happened yet (dry run, or Spoolman refused it) by the next swap.
+    evict: tuple[int, ...] = ()
     swap: SwapFlag | None = None
     job_id: int | None = None  # Last print job that started, to detect a print start.
     # A new job that hasn't extruded yet, and the counter when it was first seen. A job
@@ -195,7 +197,7 @@ class ToolState:
             "unload_count": self.unload_count,
             "active": self.active,
             "assigned": self.assigned,
-            "evict": self.evict,
+            "evict": list(self.evict),
             "swap": None
             if self.swap is None
             else {"spool_id": self.swap.spool_id, "mm": self.swap.mm},
@@ -228,7 +230,7 @@ class ToolState:
             unload_count=int(data.get("unload_count", 0)),
             active=data.get("active"),
             assigned=data.get("assigned"),
-            evict=data.get("evict"),
+            evict=_evict_from_json(data.get("evict")),
             swap=None if swap is None else SwapFlag(int(swap["spool_id"]), int(swap["mm"])),
             job_id=data.get("job_id"),
             pending_job=data.get("pending_job"),
@@ -251,6 +253,15 @@ class ToolState:
             extruded=int(data.get("extruded", data.get("charged", 0))),
             reboot_pending=bool(data.get("reboot_pending", False)),
         )
+
+
+def _evict_from_json(data: list[int] | int | None) -> tuple[int, ...]:
+    # State from before several evictions were kept stores one spool or None.
+    if data is None:
+        return ()
+    if isinstance(data, int):
+        return (data,)
+    return tuple(int(i) for i in data)
 
 
 def _notice_json(notice: Notice | None) -> dict | None:
@@ -304,7 +315,7 @@ def hold_deleted(state: ToolState, spool_id: int, mm: int = 0, queued: int = 0) 
             state,
             active=None,
             assigned=None if state.assigned == spool_id else state.assigned,
-            evict=None if state.evict == spool_id else state.evict,
+            evict=tuple(i for i in state.evict if i != spool_id),
             swap=swap,
             notice=notice,
             deleted_spool=spool_id,
@@ -326,10 +337,10 @@ def hold_deleted(state: ToolState, spool_id: int, mm: int = 0, queued: int = 0) 
 def resolve_assignment(state: ToolState, location_ids: list[int]) -> int | None | list[int]:
     """Return the assigned spool, None for an empty location, or the ids if ambiguous.
 
-    The spool awaiting eviction is ignored. With two spools, one of which is active,
+    Spools awaiting eviction are ignored. With two spools, one of which is active,
     the other is the staged one.
     """
-    ids = [i for i in location_ids if i != state.evict]
+    ids = [i for i in location_ids if i not in state.evict]
     if not ids:
         return None
     if len(ids) == 1:
@@ -423,7 +434,7 @@ def account(
             out.state = replace(s, extruded=reading.extruded, since_load=window,
                                 reboot_pending=s.reboot_pending or rebooted)
         return out
-    evict = s.evict if s.evict in location_ids else None
+    evict = tuple(i for i in s.evict if i in location_ids)
     s = replace(s, evict=evict)
 
     if reading.extruded < s.charged:
@@ -444,9 +455,11 @@ def account(
     deleted = s.deleted_spool
     held = s.held_mm
 
-    def retire(old: int | None) -> int | None:
+    def retire(old: int | None) -> tuple[int, ...]:
         """Mark the outgoing spool for eviction if it's still in the location."""
-        return old if old is not None and old in location_ids and old != assigned else evict
+        if old is None or old not in location_ids or old == assigned or old in evict:
+            return evict
+        return (*evict, old)
 
     def charge_held(target: int) -> None:
         """Charge usage held over a reboot, with no deleted spool, to the active spool."""
@@ -539,10 +552,9 @@ def account(
             event(EventKind.CLAIMED,
                   f"spool {claim} claimed in place of spool {active}: moved "
                   f"{sources or 'nothing'} (usage since the last {since})")
-            if evict == claim:
-                evict = None
-            if active is not None and active in location_ids:
-                evict = active
+            evict = tuple(i for i in evict if i != claim)
+            if active is not None and active in location_ids and active not in evict:
+                evict = (*evict, active)
             active = claim
             resolved = resolve_assignment(replace(s, active=claim, evict=evict), location_ids)
             assigned = claim if isinstance(resolved, list) else resolved

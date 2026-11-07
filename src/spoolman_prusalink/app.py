@@ -417,8 +417,9 @@ class Bridge:
                 flags.setdefault(st.active, []).append(
                     f"{location}: spool is archived but still loaded"
                 )
-            if st.evict is not None and dry:
-                notes.append(f"[{location}] would move spool {st.evict} out of {location!r}")
+            if dry:
+                notes += [f"[{location}] would move spool {i} out of {location!r}"
+                          for i in st.evict]
             if st.swap is not None:
                 flags.setdefault(st.swap.spool_id, []).append(
                     f"{location}: filament was unloaded with no Spoolman change. If a "
@@ -746,28 +747,30 @@ class Bridge:
         return True
 
     async def evict(self, spools: list[Spool]) -> None:
-        """Move each tool's outgoing spool out of the tool's location."""
+        """Move each tool's outgoing spools out of the tool's location."""
         if self.config.dry_run:
             return
         where = {s.id: s.location for s in spools}
         target = self.config.eviction_location or None
-        for tool, st in self.tools.items():
+        for tool, st in list(self.tools.items()):
             location = self.config.tools.get(tool)
-            if st.evict is None or where.get(st.evict) != location:
-                if st.evict is not None:
-                    self._problems.clear(("evict", st.evict))
-                continue
-            try:
-                await self.spoolman.set_location(st.evict, target)
-            except httpx.HTTPError as e:
-                self._problems.fail(("evict", st.evict), e, "[%s] can't move spool %d out: %s",
-                                    location, st.evict, e)
-                continue
-            self._problems.clear(("evict", st.evict))
-            log.info("[%s] moved spool %d to %s", location, st.evict,
-                     repr(target) if target else "no location")
-            self.tools[tool] = replace(st, evict=None)
-            save_state(self.config.state_file, self.state)
+            for spool_id in st.evict:
+                if where.get(spool_id) != location:
+                    self._problems.clear(("evict", spool_id))
+                    continue
+                try:
+                    await self.spoolman.set_location(spool_id, target)
+                except httpx.HTTPError as e:
+                    self._problems.fail(("evict", spool_id), e,
+                                        "[%s] can't move spool %d out: %s",
+                                        location, spool_id, e)
+                    continue
+                self._problems.clear(("evict", spool_id))
+                log.info("[%s] moved spool %d to %s", location, spool_id,
+                         repr(target) if target else "no location")
+                st = replace(st, evict=tuple(i for i in st.evict if i != spool_id))
+                self.tools[tool] = st
+                save_state(self.config.state_file, self.state)
 
     async def sync_printer(self, spools: list[Spool]) -> None:
         """Write pending spools (and, if enabled, new flags) to the printer in one job."""

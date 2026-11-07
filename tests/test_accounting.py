@@ -150,7 +150,7 @@ def test_staged_swap_keeps_charging_old_spool_until_unload():
     ]
     assert kinds.count(EventKind.SWAP_STAGED) == 1
     assert EventKind.SWAP_COMMITTED in kinds
-    assert (state.active, state.assigned, state.evict) == (8, 8, 7)
+    assert (state.active, state.assigned, state.evict) == (8, 8, (7,))
 
 
 def test_evicted_spool_is_ignored_then_forgotten():
@@ -161,9 +161,27 @@ def test_evicted_spool_is_ignored_then_forgotten():
         (BOOT, r(300, unloads=1, at_unload=100), loc(7, 8)),  # 7 still in the location
     ])
     assert EventKind.AMBIGUOUS not in kinds
-    assert (state.active, state.evict) == (8, 7)
+    assert (state.active, state.evict) == (8, (7,))
     _, _, state = run([(BOOT, r(300, unloads=1, at_unload=100), loc(8))], state)
-    assert state.evict is None
+    assert state.evict == ()
+
+
+def test_second_swap_keeps_the_first_eviction_pending():
+    # Evictions never happen (dry run, or set_location keeps failing).
+    charges, kinds, state = run([
+        (BOOT, r(100), loc(7)),
+        (BOOT, r(100), loc(7, 8)),
+        (BOOT, r(200, unloads=1, at_unload=100), loc(7, 8)),  # 7 -> 8
+        (BOOT, r(300, unloads=1, at_unload=100), loc(7, 8, 9)),  # 9 staged
+        (BOOT, r(400, unloads=2, at_unload=300), loc(7, 8, 9)),  # 8 -> 9
+        (BOOT, r(500, unloads=2, at_unload=300), loc(7, 8, 9)),
+    ])
+    assert kinds.count(EventKind.SWAP_STAGED) == 2
+    assert EventKind.AMBIGUOUS not in kinds
+    assert (state.active, state.assigned, state.evict) == (9, 9, (7, 8))
+    assert charges[-1] == Charge(9, 100, "extruded")
+    _, _, state = run([(BOOT, r(500, unloads=2, at_unload=300), loc(8, 9))], state)
+    assert state.evict == (8,)
 
 
 def test_old_spool_moved_out_first_then_new_staged():
@@ -181,7 +199,7 @@ def test_old_spool_moved_out_first_then_new_staged():
         Charge(8, 30, "extruded"),
     ]
     assert kinds.count(EventKind.SWAP_STAGED) == 2
-    assert (state.active, state.evict) == (8, None)
+    assert (state.active, state.evict) == (8, ())
 
 
 def test_spool_removed_from_location_stays_active_until_unload():
@@ -202,7 +220,7 @@ def test_correction_by_uuid_switches_immediately():
     )
     assert EventKind.CORRECTION in kinds
     assert charges == [Charge(9, 50, "extruded"), Charge(9, 30, "extruded")]
-    assert (state.active, state.evict) == (9, 7)
+    assert (state.active, state.evict) == (9, (7,))
 
 
 def test_print_start_with_staged_swap_warns_and_keeps_old_spool():
@@ -253,7 +271,7 @@ def test_two_spools_neither_active_is_ambiguous():
 
 
 def test_resolve_assignment():
-    s = ToolState(active=7, evict=5)
+    s = ToolState(active=7, evict=(5,))
     assert resolve_assignment(s, []) is None
     assert resolve_assignment(s, [5]) is None
     assert resolve_assignment(s, [7]) == 7
@@ -289,7 +307,7 @@ def test_confirming_swap_before_print_moves_post_swap_usage():
         Charge(9, 50, "extruded"),
     ]
     assert EventKind.SWAP_CONFIRMED in kinds
-    assert (state.swap, state.active, state.evict) == (None, 9, 7)
+    assert (state.swap, state.active, state.evict) == (None, 9, (7,))
 
 
 def test_print_start_closes_swap_as_same_spool():
@@ -515,14 +533,14 @@ def test_legacy_assignment_change_switches_after_charging_outgoing():
     ])
     assert charges == [Charge(7, 150, "extruded"), Charge(8, 50, "extruded")]
     assert EventKind.SWAP_STAGED not in kinds
-    assert (state.active, state.evict) == (8, None)
+    assert (state.active, state.evict) == (8, ())
 
 
 # Persistence
 
 
 def test_state_round_trip():
-    s = ToolState(BOOT, 123, 2, 7, 8, 5, SwapFlag(7, 40), 42)
+    s = ToolState(BOOT, 123, 2, 7, 8, (5,), SwapFlag(7, 40), 42)
     assert ToolState.from_json(s.to_json()) == s
 
 
@@ -697,7 +715,7 @@ def test_claim_on_staged_spool_moves_usage_since_unload():
     ]
     assert EventKind.CLAIMED in [e.kind for e in res.events]
     s = res.state
-    assert (s.active, s.assigned, s.evict) == (9, 9, 7)
+    assert (s.active, s.assigned, s.evict) == (9, 9, (7,))
     assert (s.provisional, s.swap, s.staged_notice) == (None, None, None)
     assert s.needs_sync and s.sync_attempts == 0
     assert s.since_load == {7: 0, 9: 600}
@@ -717,7 +735,7 @@ def test_claim_moves_only_usage_since_reboot():
         Charge(7, -40, "moved to claimed spool"),
         Charge(9, 50, "extruded"),
     ]
-    assert (state.active, state.evict, state.staged_notice) == (9, 7, None)
+    assert (state.active, state.evict, state.staged_notice) == (9, (7,), None)
 
 
 def test_claim_moves_usage_from_every_spool_since_load():
@@ -769,7 +787,7 @@ def test_claim_after_unload_moves_nothing_but_switches():
     res = account(state, BOOT, r(200, material=None, unloads=1, at_unload=200), loc(7, 9),
                   claim=9)
     assert res.charges == []
-    assert (res.state.active, res.state.evict, res.state.swap) == (9, 7, None)
+    assert (res.state.active, res.state.evict, res.state.swap) == (9, (7,), None)
     assert res.state.needs_sync
 
 
@@ -857,7 +875,7 @@ def test_reboot_without_staging_flags_nothing():
 
 def test_state_round_trip_with_claim_fields():
     s = ToolState(
-        BOOT, 123, 2, 7, 8, 5, None, 42,
+        BOOT, 123, 2, 7, 8, (5,), None, 42,
         staged_notice=Notice(8, EventKind.STAGED_AT_REBOOT, "staged"),
         provisional=Provisional(7, 400, 42),
         since_load={7: 400, 9: -3},
@@ -874,6 +892,13 @@ def test_state_from_before_claims_loads():
     assert (s.provisional, s.staged_notice, s.since_load) == (None, None, {})
     assert s.reboot_pending is False
     assert s.notice == Notice(7, EventKind.SWAP_ASSUMED, "assumed")
+
+
+def test_state_with_one_eviction_loads():
+    old = ToolState(BOOT, 10, 1, 8, 8).to_json()
+    assert ToolState.from_json({**old, "evict": 7}).evict == (7,)
+    assert ToolState.from_json({**old, "evict": None}).evict == ()
+    assert ToolState.from_json({**old, "evict": [7, 9]}).evict == (7, 9)
 
 
 def test_claim_takes_usage_held_for_a_deleted_spool():

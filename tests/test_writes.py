@@ -750,6 +750,26 @@ async def test_evict_failure_logged_once(tmp_path, caplog):
     await bridge.aclose()
 
 
+async def test_failed_eviction_stays_pending_through_the_next_swap(tmp_path):
+    bridge, fake, printer = make(tmp_path, [spool(19)])
+    await bridge.poll()
+    fake.spools[20] = spool_x(20)
+    await bridge.poll()
+    printer.unloads, printer.at_unload = 1, 1000
+    fake.fail_patch = 500
+    await bridge.poll()  # 19 -> 20; 19 can't be moved out
+    fake.spools[21] = spool_x(21)
+    await bridge.poll()  # 21 staged
+    printer.unloads = 2
+    await bridge.poll()  # 20 -> 21
+    assert (bridge.tools[0].active, bridge.tools[0].evict) == (21, (19, 20))
+    fake.fail_patch = None
+    await bridge.poll()
+    assert fake.spools[19]["location"] is None and fake.spools[20]["location"] is None
+    assert bridge.tools[0].evict == ()
+    await bridge.aclose()
+
+
 async def test_flag_failure_logged_once(tmp_path, caplog):
     bridge, fake, printer = make(tmp_path, [spool(19)])
     caplog.set_level("INFO")
