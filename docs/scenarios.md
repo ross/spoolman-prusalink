@@ -106,7 +106,7 @@ rejected charges (M3) follow it once Q7 is implemented.
 | M3a | Active spool archived in Spoolman. | Looks moved out of the location (S10): stays active and charged until the next unload. Decided: also flag it as archived but still loaded (see Q7). | Implemented; flag not implemented |
 | M4 | Location renamed in Spoolman. | The location looks empty: the spool stays active until the next unload, then usage is held. There's no websocket event for renames. | Implemented |
 | M5 | Spool runs past empty in Spoolman. | Keeps charging, and logs once that the spool shows a negative remaining weight. No flag: spool weights are inexact, so slightly negative is normal (see Q8). | Tested |
-| M5a | Runout mid-print while Spoolman shows plenty left. | Flags the spool when it unloads during a started print with more than 5% of its net weight left. The flag clears when the spool is next loaded (see Q8). | Tested |
+| M5a | Runout mid-print while Spoolman shows plenty left. | Flags the spool when it unloads during a started print with more than 5% of its net weight left. The flag clears the next time the spool becomes active. Reloading the same spool with no Spoolman change keeps it (see Q8). | Tested |
 | M6 | Flag set by someone else on a spool. | Left alone: the bridge only clears flags it set. | Tested |
 | M7 | Spoolman's filament density is wrong. | Charges use the density at the time of each charge. Earlier charges aren't recalculated. | Implemented (Spoolman behavior) |
 

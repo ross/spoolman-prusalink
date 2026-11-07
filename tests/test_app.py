@@ -50,6 +50,17 @@ def test_parse_filament_unload_fields():
     assert (r.extruded, r.unload_count, r.extruded_at_unload) == (900, 2, 600)
 
 
+def test_parse_spool_remaining_weight_is_not_clamped():
+    data = spool_json(3, "Core One L+")
+    data["filament"]["weight"] = 1000.0
+    data["used_weight"], data["remaining_weight"] = 1012.0, 0.0  # Spoolman clamps at 0
+    assert parse_spool(data, None).remaining_weight == -12.0
+    data["initial_weight"] = 900.0  # the spool's own weight wins
+    assert parse_spool(data, None).net_weight == 900.0
+    del data["used_weight"]
+    assert parse_spool(data, None).remaining_weight is None
+
+
 def test_parse_spool_decodes_uuid_extra():
     s = parse_spool(spool_json(3, "Core One L+", uuid="abc"), "instance_uuid")
     assert s.instance_uuid == "abc"

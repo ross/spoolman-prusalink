@@ -162,7 +162,8 @@ the bridge creates on first use:
 - A swap assumed at print start, or a print started with a swap staged, until
   the next print start or unload.
 - An unload during a print while Spoolman shows more than 5% of the spool's
-  net weight left, until the spool is next loaded. That usually means an
+  net weight left, until the spool next becomes active in a tool. Reloading
+  the same spool keeps the flag. That usually means an
   earlier swap charged the wrong spool, though a planned color change looks
   the same. A loaded spool going below 0 g remaining is only logged, once:
   spool weights are inexact.

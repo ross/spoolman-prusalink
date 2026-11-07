@@ -837,8 +837,11 @@ async def test_fresh_install_does_not_rewrite(tmp_path):
 
 
 def weighted(spool_json, remaining, net=1000.0):
-    spool_json["remaining_weight"] = remaining
+    """Give a spool a net weight and usage, as Spoolman reports them. Spoolman clamps its
+    own remaining_weight at 0, so the bridge works from used_weight."""
     spool_json["filament"]["weight"] = net
+    spool_json["used_weight"] = net - remaining
+    spool_json["remaining_weight"] = max(remaining, 0)
     return spool_json
 
 
