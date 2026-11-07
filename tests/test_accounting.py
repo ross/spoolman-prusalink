@@ -437,6 +437,21 @@ def test_empty_tool_usage_held_through_reboot_counts_toward_open_swap():
                        Charge(7, -180, "moved to confirmed swap spool")]
 
 
+def test_usage_held_through_reboot_counts_toward_provisional_at_print_start():
+    # Unload, a print queued during the load, a reboot, and the print's first
+    # extrusion: the held load is part of the reloaded spool's provisional charge.
+    charges, kinds, state = run([
+        (BOOT, r(100), loc(7), None),
+        (BOOT, r(700, material=None, unloads=1, at_unload=600), loc(7), None),
+        (BOOT, r(760, material=None, unloads=1, at_unload=600), loc(7), 42),
+        (BOOT + 1, r(20), loc(7), 42),
+    ])
+    assert charges[-2:] == [Charge(7, 160, "held before the printer restarted"),
+                            Charge(7, 20, "extruded")]
+    assert EventKind.SWAP_ASSUMED in kinds
+    assert state.provisional == Provisional(7, 180, 42) and state.swap is None
+
+
 def test_usage_held_through_reboot_is_lost_at_unload_with_no_spool():
     _, _, state = run([(BOOT, r(100), loc()), (BOOT, r(900), loc())])
     res = account(state, BOOT + 1, r(50, unloads=1, at_unload=30), loc())
