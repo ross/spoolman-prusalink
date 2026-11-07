@@ -74,8 +74,17 @@ No print runs. About 30 minutes and a few grams of purge.
    hits the bed. Watch the printer the whole time, ready to stop it.
 2. **S7.** In Spoolman, move the old spool out of the location, then the new
    one in, then unload and load. The new spool is charged the load.
-3. **S14.** Unload and load twice within one idle poll (60 s). The bridge sees
-   both unloads at once and charges the purge to the right spools.
+3. **S14.** A swap at the printer takes a few minutes, so two can't fit
+   between two polls while the bridge runs. S14 happens when the bridge can't
+   see the printer, such as during a restart or a network outage. To set it
+   up, stop the bridge with
+   `ssh whale sudo /usr/local/bin/docker stop spoolman-prusalink`. With spool
+   A loaded, swap to spool B and then to spool C at the printer. In Spoolman,
+   move A out of the location and C in. Then start the bridge. It logs one
+   unload event for 2 unloads and charges A with everything up to the second
+   unload, including B's purge, because one counter reading can't be split
+   between the swaps. The swap commits from A to C, and C is charged with its
+   own purge after the second unload. B is charged nothing.
 4. **W14.** Edit the loaded spool's color, then its temperatures, in Spoolman.
    Each one starts a sync job. Check the printer's filament menu for the new
    temperatures, because the printer doesn't report them back.
