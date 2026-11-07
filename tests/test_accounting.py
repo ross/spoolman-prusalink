@@ -299,7 +299,7 @@ def test_unload_after_the_location_empties_holds_usage():
     # S6: the next unload with nothing assigned reports the usage before it lost.
     res = account(res.state, BOOT, r(300, unloads=2, at_unload=250), loc())
     assert [(e.kind, e.message) for e in res.events] == [
-        (EventKind.UNLOAD, "1 unload(s); 70 mm before the unload has no spool"),
+        (EventKind.UNLOAD, "1 unload(s) with no spool active"),
         (EventKind.LOST_UNASSIGNED, "70 mm before unload had no spool"),
         (EventKind.HOLD_UNASSIGNED, "holding usage: no spool assigned"),
     ]

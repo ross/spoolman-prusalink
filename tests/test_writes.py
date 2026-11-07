@@ -1157,6 +1157,30 @@ async def test_spoolman_edit_is_not_drift_while_its_job_runs(tmp_path):
     await bridge.aclose()
 
 
+async def test_wait_for_a_running_sync_job_is_not_logged(tmp_path, caplog):
+    bridge, fake, printer = await written_state(tmp_path)
+    queued = []
+
+    def start_job(gcode):  # The job starts but hasn't reached M865 yet.
+        printer.job, printer.job_name = 60, "spoolman-sync.gcode"
+        queued.append(gcode)
+
+    printer.run_job = start_job
+    caplog.clear()
+    fake.spools[20]["filament"]["color_hex"] = "00ff00"
+    await bridge.poll()
+    assert len(jobs(printer)) == 2
+    # The printer still shows the old color while the job runs. That's the job
+    # pending, not another reason to write.
+    await bridge.poll()
+    printer.job = None
+    Printer.run_job(printer, queued[0])
+    await bridge.poll()
+    assert caplog.text.count("printer will be set to spool 20") == 1
+    assert bridge.tools[0].needs_sync is False
+    await bridge.aclose()
+
+
 @pytest.mark.parametrize("flag_drift", [True, False])
 @pytest.mark.parametrize(
     "bad",
