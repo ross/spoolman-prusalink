@@ -8,6 +8,7 @@ filament. See `src/marlin_stubs/M865.cpp` in the firmware.
 from __future__ import annotations
 
 import re
+import uuid
 from dataclasses import dataclass
 
 from .color import same_color
@@ -110,9 +111,10 @@ class Preset:
 
 # Firmware preset filaments (`src/common/filament_presets.cpp`), with the preheat values
 # for printers with a load cell, which every supported model has. `M865 X R` resets every
-# parameter to zero or off, and `J` (inherit a preset) is ignored on these models, so the
-# job writes each value. PPS and PPA are left out: they need the HT idler-door setting,
-# which `M865` can't set.
+# parameter to the defaults in the firmware's `filament.hpp` (nozzle 215, preheat 170,
+# bed 60, everything else unset or off), and `J` (inherit a preset) is ignored on these
+# models, so the job writes each value. PPS and PPA are left out: they need the HT
+# idler-door setting, which `M865` can't set.
 PRESETS = {
     "PLA": Preset(215, 60, chamber=(20, 15, 38)),
     "PETG": Preset(230, 85, chamber=(30, 15, 45)),
@@ -122,13 +124,15 @@ PRESETS = {
     "ABS": Preset(255, 100, chamber=(70, 40, 75), filtration=True),
     "HIPS": Preset(220, 100, chamber=(70, 40, 75), filtration=True),
     "PP": Preset(240, 100, chamber=(60, 30, 70), filtration=True),
-    "FLEX": Preset(240, 50, preheat=210, chamber=(25, 15, 40), filtration=True,
-                   flexible=True),
+    "FLEX": Preset(240, 50, preheat=210, chamber=(25, 15, 40), filtration=True, flexible=True),
     "PA": Preset(285, 100, preheat=260, chamber=(65, 40, 70)),
     "PVA": Preset(210, 60, preheat=160, chamber=(25, 15, 38)),
     "BVOH": Preset(210, 60, preheat=160, chamber=(25, 15, 38)),
 }
 PRESET_ALIASES = {"TPU": "FLEX", "TPE": "FLEX"}
+# In the firmware only the PPS and PPA presets set `requires_ht_idler_door`, and `M865`
+# has no parameter for it, so an ad-hoc filament with these names would load without it.
+HT_IDLER_DOOR = frozenset({"PPS", "PPA"})
 
 NAME_LIMIT = 7  # The firmware's filament name holds at most 7 characters.
 MESSAGE_LIMIT = 40
@@ -149,6 +153,16 @@ def printer_name(spool: Spool) -> str | None:
             if name:
                 return name
     return None
+
+
+def loaded_from_menu(shown: str, spool: Spool) -> bool:
+    """Whether the printer shows `spool`'s HT idler-door material, loaded from its menu.
+
+    The bridge can't write these materials, and a menu load sets the preset's name but
+    not the spool's color or instance UUID, so the name is all that can match.
+    """
+    material = (spool.material or "").strip().upper()
+    return material in HT_IDLER_DOOR and shown.strip().upper() == material
 
 
 def preset_for(spool: Spool) -> str | None:
@@ -186,12 +200,19 @@ def filament_lines(write: ToolWrite) -> list[str]:
 
     `R` resets every parameter, so the line gives them all: from the material's
     firmware preset, with Spoolman's extruder and bed temperatures taking priority.
-    A material that isn't a preset needs both temperatures in Spoolman.
+    A material that isn't a preset needs both temperatures in Spoolman. PPS and PPA
+    can't be written at all.
     """
     spool, tool = write.spool, write.tool
     name = printer_name(spool)
     if name is None:
         raise CannotSync(f"spool {spool.id} has no material or name to write")
+    material = (spool.material or "").strip().upper()
+    if material in HT_IDLER_DOOR:
+        raise CannotSync(
+            f"spool {spool.id}'s material {material} needs the printer's HT idler-door "
+            "setting, which the bridge can't write; load it from the printer's menu"
+        )
     key = preset_for(spool)
     preset = PRESETS.get(key) if key else None
     nozzle = int(spool.extruder_temp) if spool.extruder_temp else None
@@ -201,8 +222,7 @@ def filament_lines(write: ToolWrite) -> list[str]:
             f"spool {spool.id}'s material {spool.material!r} isn't a printer preset; set its "
             "extruder and bed temperatures in Spoolman"
         )
-    parts = ["M865 X R", f'N"{name}"',
-             f"T{nozzle or preset.nozzle}", f"B{bed or preset.bed}"]
+    parts = ["M865 X R", f'N"{name}"', f"T{nozzle or preset.nozzle}", f"B{bed or preset.bed}"]
     if preset:
         parts.append(f"P{min(preset.preheat, nozzle or preset.nozzle)}")
         if preset.chamber:
@@ -218,8 +238,25 @@ def filament_lines(write: ToolWrite) -> list[str]:
     parts.append(f"L{tool}")
     lines = [" ".join(parts)]
     if tool == 0 and write.uuid:
-        lines.append(f'M865.1 I0 C"{write.uuid}"')
+        lines.append(f'M865.1 I0 C"{_uuid(spool, write.uuid)}"')
     return lines
+
+
+def _uuid(spool: Spool, value: str) -> str:
+    """Return `value` as a lowercase UUID, or raise CannotSync if it isn't one.
+
+    Only the plain hyphenated form passes. Drift compares Spoolman's value with the
+    printer's ignoring only case, so a value in another form would never match.
+    """
+    try:
+        canonical = str(uuid.UUID(value))
+    except ValueError:
+        canonical = None
+    if canonical != value.lower():
+        raise CannotSync(
+            f"spool {spool.id}'s instance UUID {value!r} isn't a UUID; fix or clear it in Spoolman"
+        )
+    return canonical
 
 
 def printer_matches_write(material: Material, written: str, uuids: bool) -> bool:
@@ -252,9 +289,13 @@ def build_job(
     writes: list[ToolWrite],
     notices: list[str],
     multi_tool: bool,
-) -> str:
-    """Return the job file: compatibility checks, homing if needed, filament writes, then
-    one `M117`."""
+) -> tuple[str, list[str]]:
+    """Return the job file and the notices its message shows.
+
+    The job has compatibility checks, homing if needed, filament writes, then one
+    `M117`. The screen holds one message, so it names the written spools if there are
+    any, else the first notice. Notices it doesn't show wait for a later job.
+    """
     lines = [*preamble, HOME_IF_NEEDED]
     labels = []
     for w in writes:
@@ -262,10 +303,12 @@ def build_job(
         label = _message(w.spool.name)
         labels.append(f"T{w.tool + 1} {label}" if multi_tool else label)
     message = ""
+    shown: list[str] = []
     if labels:
         message = "Spoolman: " + ", ".join(labels)
     elif notices:
         message = "Spoolman: " + notices[0]
+        shown = notices[:1]
     if message:
         lines.append(f"M117 {_message(message)}")
-    return "\n".join(lines) + "\n"
+    return "\n".join(lines) + "\n", shown

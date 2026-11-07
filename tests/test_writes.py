@@ -5,7 +5,9 @@ import math
 from dataclasses import replace
 
 import httpx
+import pytest
 
+from spoolman_prusalink.accounting import UNKNOWN_WRITE
 from spoolman_prusalink.app import Bridge
 from spoolman_prusalink.color import quantize
 from spoolman_prusalink.config import Config
@@ -41,7 +43,8 @@ class FakeSpoolman:
             if self.fail_read:
                 return httpx.Response(self.fail_read, text="oops")
             return httpx.Response(
-                200, json=[s for s in self.spools.values() if not s.get("archived")])
+                200, json=[s for s in self.spools.values() if not s.get("archived")]
+            )
         if path.startswith("/api/v1/spool/") and method == "GET":
             spool_id = int(path.rsplit("/", 1)[1])
             self.lookups.append(spool_id)
@@ -101,9 +104,19 @@ class FakeSpoolman:
 
 def spool(id, location=LOC, flag=None):
     extra = {} if flag is None else {"bridge_flag": json.dumps(flag)}
-    return {"id": id, "location": location, "extra": extra,
-            "filament": {"id": 1, "name": "Grey", "material": "PLA", "color_hex": "73767d",
-                         "diameter": 1.75, "density": 1.24}}
+    return {
+        "id": id,
+        "location": location,
+        "extra": extra,
+        "filament": {
+            "id": 1,
+            "name": "Grey",
+            "material": "PLA",
+            "color_hex": "73767d",
+            "diameter": 1.75,
+            "density": 1.24,
+        },
+    }
 
 
 class Printer:
@@ -134,8 +147,12 @@ class Printer:
         if request.url.path == "/api/v1/filament":
             if not self.filament_endpoint:
                 return httpx.Response(404)
-            tool = {"index": 0, "extruded": self.extruded, "unload_count": self.unloads,
-                    "extruded_at_unload": self.at_unload}
+            tool = {
+                "index": 0,
+                "extruded": self.extruded,
+                "unload_count": self.unloads,
+                "extruded_at_unload": self.at_unload,
+            }
             if not self.counters:
                 tool = {"index": 0}
                 if self.material:
@@ -147,8 +164,9 @@ class Printer:
         if request.url.path == "/api/v1/job":
             if not self.job:
                 return httpx.Response(204)
-            return httpx.Response(200, json={"id": self.job,
-                                             "file": {"display_name": self.job_name}})
+            return httpx.Response(
+                200, json={"id": self.job, "file": {"display_name": self.job_name}}
+            )
         if request.method == "PUT" and request.url.path.startswith("/api/v1/files/"):
             if self.busy or self.job:
                 return httpx.Response(409)
@@ -166,7 +184,6 @@ class Printer:
             return httpx.Response(200, json=data)
         raise AssertionError(f"unexpected printer request {request.method} {request.url}")
 
-
     def run_job(self, gcode):
         """Apply the job's M865 lines, as the firmware would, and finish at once."""
         for line in gcode.splitlines():
@@ -183,16 +200,25 @@ class Printer:
 def make(tmp_path, spools, **cfg):
     fake, printer = FakeSpoolman(spools), Printer()
     config = Config(
-        printer_url="http://printer", printer_api_key="k", spoolman_url="http://spoolman",
-        tools={0: LOC}, state_file=tmp_path / "state.json",
-        ledger_file=tmp_path / "ledger.jsonl", dry_run=False, **cfg,
+        printer_url="http://printer",
+        printer_api_key="k",
+        spoolman_url="http://spoolman",
+        tools={0: LOC},
+        state_file=tmp_path / "state.json",
+        ledger_file=tmp_path / "ledger.jsonl",
+        dry_run=False,
+        **cfg,
     )
     bridge = Bridge(
         config=config,
         printer=PrusaLink("http://printer", "k", transport=httpx.MockTransport(printer.handle)),
-        spoolman=Spoolman("http://spoolman", uuid_field=config.uuid_field,
-                          flag_field=config.flag_field, claim_field=config.claim_field,
-                          transport=httpx.MockTransport(fake.handle)),
+        spoolman=Spoolman(
+            "http://spoolman",
+            uuid_field=config.uuid_field,
+            flag_field=config.flag_field,
+            claim_field=config.claim_field,
+            transport=httpx.MockTransport(fake.handle),
+        ),
     )
     return bridge, fake, printer
 
@@ -210,6 +236,19 @@ async def test_charges_are_applied_and_recorded(tmp_path):
     applied = [r for r in ledger(tmp_path) if "use_length" in r]
     assert len(applied) == 1 and applied[0]["applied"] and applied[0]["dry_run"] is False
     assert load_state(tmp_path / "state.json").outbox == []
+    await bridge.aclose()
+
+
+async def test_usage_while_ambiguous_is_kept_over_a_reboot(tmp_path):
+    bridge, fake, printer = make(tmp_path, [spool(19)])
+    await bridge.poll()  # baseline at 1000
+    fake.spools[20], fake.spools[21] = spool(20), spool(21)
+    printer.extruded = 1500
+    await bridge.poll()  # ambiguous, skipped
+    printer.boot_id, printer.extruded = 2, 10
+    fake.spools.pop(20), fake.spools.pop(21)
+    await bridge.poll()
+    assert fake.used == {19: [500.0, 10.0]}
     await bridge.aclose()
 
 
@@ -243,8 +282,9 @@ async def test_queued_charge_survives_restart(tmp_path):
         "http://spoolman", flag_field="bridge_flag", transport=httpx.MockTransport(fake.handle)
     )
     restarted.state = load_state(tmp_path / "state.json")
-    restarted.printer = PrusaLink("http://printer", "k",
-                                  transport=httpx.MockTransport(printer.handle))
+    restarted.printer = PrusaLink(
+        "http://printer", "k", transport=httpx.MockTransport(printer.handle)
+    )
     printer.down = True
     await restarted.poll()
     assert fake.used == {19: [500.0]}
@@ -274,6 +314,23 @@ async def test_confirmed_swap_charges_new_before_refunding_old(tmp_path):
     await bridge.poll()  # user scans spool 20 in
     uses = [w for w in fake.writes if w[0] == "use"]
     assert uses == [("use", 19, 116.0), ("use", 20, 116.0), ("use", 19, -116.0)]
+    await bridge.aclose()
+
+
+async def test_two_step_swap_flags_the_old_spool_then_moves_its_usage(tmp_path):
+    bridge, fake, printer = make(tmp_path, [spool(19)])
+    await bridge.poll()
+    printer.unloads, printer.at_unload, printer.extruded = 1, 1000, 1116
+    await bridge.poll()  # unconfirmed swap: 116 to spool 19
+    fake.spools[19] = spool(19, location=None)  # spool 19 moved out first
+    printer.extruded += 50
+    await bridge.poll()
+    assert "moved out" in fake.flag(19)
+    fake.spools[20] = spool(20)  # then spool 20 moved in
+    await bridge.poll()
+    uses = [w for w in fake.writes if w[0] == "use"]
+    assert uses == [("use", 19, 116.0), ("use", 20, 116.0), ("use", 19, -116.0), ("use", 20, 50.0)]
+    assert not fake.flag(19)
     await bridge.aclose()
 
 
@@ -361,8 +418,13 @@ async def test_flags_disabled(tmp_path):
 
 def spool_x(id, location=LOC, material="PLA", color="ff0000", temps=(None, None), extra=None):
     s = spool(id, location)
-    s["filament"] = {**s["filament"], "material": material, "color_hex": color,
-                     "settings_extruder_temp": temps[0], "settings_bed_temp": temps[1]}
+    s["filament"] = {
+        **s["filament"],
+        "material": material,
+        "color_hex": color,
+        "settings_extruder_temp": temps[0],
+        "settings_bed_temp": temps[1],
+    }
     s["extra"] = extra or {}
     return s
 
@@ -426,6 +488,23 @@ async def test_own_sync_job_is_not_a_print_start(tmp_path):
     await bridge.aclose()
 
 
+async def test_emptied_location_has_no_spool_none_note(tmp_path, caplog):
+    bridge, fake, printer = make(tmp_path, [spool(19)], sync_drift=True)
+    await bridge.poll()
+    caplog.set_level("INFO")
+    fake.spools[19]["location"] = None  # Moved out, with nothing in its place.
+    printer.material = {"name": "PETG"}
+    for _ in range(3):
+        await bridge.poll()
+    assert jobs(printer) == []
+    assert "spool None" not in caplog.text
+    assert caplog.text.count("spool 19 is no longer in the location") == 1
+    # Spool 19 is still loaded, so the drift is reported, once, not written.
+    assert caplog.text.count("printer differs from spool 19") == 1
+    assert "printer filament differs" in fake.flag(19)
+    await bridge.aclose()
+
+
 async def test_busy_printer_defers_write(tmp_path):
     bridge, fake, printer = make(tmp_path, [spool(19)])
     await bridge.poll()
@@ -440,19 +519,86 @@ async def test_busy_printer_defers_write(tmp_path):
     await bridge.aclose()
 
 
-async def test_non_preset_without_temps_is_flagged_not_written(tmp_path):
+async def test_non_preset_without_temps_is_flagged_not_written(tmp_path, caplog):
     bridge, fake, printer = make(tmp_path, [spool(19)])
+    caplog.set_level("INFO")
     await bridge.poll()
     fake.spools[20] = spool_x(20, material="PLA-CF")
     printer.unloads, printer.at_unload, printer.material = 1, 1000, {"name": "PLA"}
     await bridge.poll()
     assert jobs(printer) == []
     assert "set its extruder and bed temperatures" in fake.flag(20)
+    patches = fake.writes.count(("patch", 20))
+
+    # The flag stays through a print, and the warning isn't repeated each poll.
+    await bridge.poll()
+    printer.job, printer.extruded = 7, 1200
+    await bridge.poll()
+    assert "set its extruder and bed temperatures" in fake.flag(20)
+    printer.job = None
+    await bridge.poll()
+    await bridge.poll()
+    assert jobs(printer) == []
+    assert fake.writes.count(("patch", 20)) == patches
+    assert caplog.text.count("can't write spool 20 to the printer") == 1
+    assert "printer will be set to spool 20" not in caplog.text
 
     fake.spools[20] = spool_x(20, material="PLA-CF", temps=(220, 60))
     await bridge.poll()
     (gcode,) = jobs(printer)
     assert 'M865 X R N"PLA-CF" T220 B60 O"#ff0000" L0' in gcode
+    await bridge.aclose()
+
+
+async def test_pps_with_temps_is_flagged_not_written_and_logged_once(tmp_path, caplog):
+    bridge, fake, printer = make(tmp_path, [spool(19)])
+    await bridge.poll()
+    fake.spools[20] = spool_x(20, material="PPS", temps=(320, 105))
+    printer.unloads, printer.at_unload, printer.material = 1, 1000, {"name": "PLA"}
+    for _ in range(3):
+        await bridge.poll()
+    assert jobs(printer) == []
+    assert "HT idler-door" in fake.flag(20)
+    assert caplog.text.count("can't write spool 20") == 1
+    assert "printer will be set" not in caplog.text
+    await bridge.aclose()
+
+
+async def test_pps_loaded_from_the_menu_clears_the_flag(tmp_path, caplog):
+    bridge, fake, printer = make(tmp_path, [spool(19)], uuid_field="instance_uuid")
+    await bridge.poll()
+    uuid = json.dumps("91da34d9-c1c1-470f-bac7-185a2346f86a")
+    fake.spools[20] = spool_x(20, material="PPS", temps=(320, 105), extra={"instance_uuid": uuid})
+    printer.unloads, printer.at_unload, printer.material = 1, 1000, {"name": "PLA"}
+    await bridge.poll()
+    await bridge.poll()
+    assert "HT idler-door" in fake.flag(20)
+
+    # The user loads it from the printer's menu, as the flag says: the printer shows
+    # the preset's name, but not the spool's color or UUID.
+    caplog.set_level("INFO")
+    printer.material = {"name": "PPS", "color": "#000000"}
+    for _ in range(3):
+        await bridge.poll()
+    assert fake.flag(20) is None
+    assert jobs(printer) == []
+    st = bridge.tools[0]
+    assert (st.needs_sync, st.sync_attempts) == (False, 0)
+    assert "differs" not in caplog.text
+    await bridge.aclose()
+
+
+async def test_bad_uuid_in_spoolman_is_flagged_not_written(tmp_path, caplog):
+    bridge, fake, printer = make(tmp_path, [spool(19)], uuid_field="instance_uuid")
+    await bridge.poll()
+    bad = json.dumps('44c406a5-c6f5-4440-bfba-e8060564b717"\nG1 Z-10\n;')
+    fake.spools[20] = spool_x(20, extra={"instance_uuid": bad})
+    printer.unloads, printer.at_unload, printer.material = 1, 1000, {"name": "PLA"}
+    for _ in range(3):
+        await bridge.poll()
+    assert jobs(printer) == []
+    assert "isn't a UUID" in fake.flag(20)
+    assert caplog.text.count("can't write spool 20") == 1
     await bridge.aclose()
 
 
@@ -498,6 +644,36 @@ async def test_printer_notices_show_each_flag_once(tmp_path):
     await bridge.aclose()
 
 
+async def test_printer_notice_waits_for_a_job_without_a_write(tmp_path):
+    # A jam: the W11 write and the swap flag are due in the same poll.
+    bridge, fake, printer = make(tmp_path, [spool(19)], printer_notices=True)
+    await bridge.poll()
+    printer.unloads, printer.at_unload, printer.material = 1, 1000, {"name": "PLA"}
+    await bridge.poll()
+    (write,) = jobs(printer)
+    assert write.rstrip().endswith("M117 Spoolman: Grey")
+    await bridge.poll()
+    notice = jobs(printer)[1]
+    assert "M117 Spoolman: Core One L+: filament was unl" in notice
+    await bridge.poll()
+    assert len(jobs(printer)) == 2
+    await bridge.aclose()
+
+
+async def test_printer_notices_show_two_new_flags_in_turn(tmp_path):
+    bridge, fake, printer = make(
+        tmp_path, [spool(19), spool(21, location=None)], printer_notices=True
+    )
+    await bridge.poll()
+    bridge.state.runouts[19] = Runout("first flag")
+    bridge.state.runouts[21] = Runout("second flag")
+    for _ in range(4):
+        await bridge.poll()
+    shown = [g.splitlines()[-1] for g in jobs(printer)]
+    assert shown == ["M117 Spoolman: first flag", "M117 Spoolman: second flag"]
+    await bridge.aclose()
+
+
 async def test_dry_run_never_uploads(tmp_path, caplog):
     bridge, fake, printer = make(tmp_path, [spool(19)], sync_drift=True)
     bridge.config = __import__("dataclasses").replace(bridge.config, dry_run=True)
@@ -506,6 +682,30 @@ async def test_dry_run_never_uploads(tmp_path, caplog):
     await bridge.poll()
     assert jobs(printer) == [] and "WOULD RUN printer job" in caplog.text
     assert not [w for w in fake.writes if w[0] != "field"]
+    await bridge.aclose()
+
+
+async def test_dry_run_logs_a_pending_job_once(tmp_path, caplog):
+    bridge, fake, printer = make(tmp_path, [spool(19)], uuid_field="instance_uuid")
+    bridge.config = replace(bridge.config, dry_run=True)
+    caplog.set_level("INFO")
+    await bridge.poll()
+    fake.spools[20] = spool_x(20)  # S1: staged, then unload and load.
+    await bridge.poll()
+    printer.unloads, printer.at_unload, printer.material = 1, 1000, {"name": "PLA"}
+    fake.spools[19]["location"] = None  # Dry run doesn't evict it.
+    for _ in range(4):
+        await bridge.poll()
+    assert jobs(printer) == []
+    assert caplog.text.count("WOULD RUN printer job") == 1
+    assert caplog.text.count("would give spool 20 instance UUID") == 1
+
+    # A different job is logged again.
+    fake.spools[20] = spool_x(20, color="00ff00")
+    await bridge.poll()
+    await bridge.poll()
+    assert caplog.text.count("WOULD RUN printer job") == 2
+    assert caplog.text.count("would give spool 20 instance UUID") == 1
     await bridge.aclose()
 
 
@@ -549,8 +749,9 @@ async def swap_to_spool_20(bridge, fake, printer):
 
 
 async def test_preamble_for_wrong_model_blocks_writes_and_flags(tmp_path, caplog):
-    bridge, fake, printer = make(tmp_path, [spool(19)], uuid_field="instance_uuid",
-                                 gcode_preamble=COREONEL_PREAMBLE)
+    bridge, fake, printer = make(
+        tmp_path, [spool(19)], uuid_field="instance_uuid", gcode_preamble=COREONEL_PREAMBLE
+    )
     printer.printer_type = "1.4.0"  # MK4
     await swap_to_spool_20(bridge, fake, printer)
     assert jobs(printer) == []
@@ -595,8 +796,9 @@ async def test_unknown_model_blocks_writes(tmp_path, caplog):
 
 async def test_matching_preamble_for_other_model_writes(tmp_path):
     preamble = ('M862.3 P "MK4S" ; printer model check', "M862.5 P2")
-    bridge, fake, printer = make(tmp_path, [spool(19)], uuid_field="instance_uuid",
-                                 gcode_preamble=preamble)
+    bridge, fake, printer = make(
+        tmp_path, [spool(19)], uuid_field="instance_uuid", gcode_preamble=preamble
+    )
     printer.printer_type = "1.4.1"
     await swap_to_spool_20(bridge, fake, printer)
     (gcode,) = jobs(printer)
@@ -700,6 +902,29 @@ async def test_spoolman_read_problems_logged_once(tmp_path, caplog):
     await bridge.aclose()
 
 
+async def test_dry_run_holds_queued_charges(tmp_path, caplog):
+    bridge, fake, printer = make(tmp_path, [spool(19)])
+    await bridge.poll()
+    printer.extruded = 1500
+    fake.fail_use = [503]
+    await bridge.poll()
+    assert len(bridge.state.outbox) == 1
+
+    # Restarted in dry run: the queued charge is neither sent nor dropped.
+    bridge.config = replace(bridge.config, dry_run=True)
+    caplog.set_level("INFO")
+    for _ in range(3):
+        await bridge.poll()
+    assert fake.used == {}
+    assert len(load_state(tmp_path / "state.json").outbox) == 1
+    assert caplog.text.count("1 queued charge(s) held until dry run is off") == 1
+
+    bridge.config = replace(bridge.config, dry_run=False)
+    await bridge.poll()
+    assert fake.used == {19: [500.0]} and bridge.state.outbox == []
+    await bridge.aclose()
+
+
 async def test_charge_failures_logged_once(tmp_path, caplog):
     bridge, fake, printer = make(tmp_path, [spool(19)])
     caplog.set_level("INFO")
@@ -734,6 +959,26 @@ async def test_evict_failure_logged_once(tmp_path, caplog):
     fake.fail_patch = None
     await bridge.poll()
     assert fake.spools[19]["location"] is None
+    await bridge.aclose()
+
+
+async def test_failed_eviction_stays_pending_through_the_next_swap(tmp_path):
+    bridge, fake, printer = make(tmp_path, [spool(19)])
+    await bridge.poll()
+    fake.spools[20] = spool_x(20)
+    await bridge.poll()
+    printer.unloads, printer.at_unload = 1, 1000
+    fake.fail_patch = 500
+    await bridge.poll()  # 19 -> 20; 19 can't be moved out
+    fake.spools[21] = spool_x(21)
+    await bridge.poll()  # 21 staged
+    printer.unloads = 2
+    await bridge.poll()  # 20 -> 21
+    assert (bridge.tools[0].active, bridge.tools[0].evict) == (21, (19, 20))
+    fake.fail_patch = None
+    await bridge.poll()
+    assert fake.spools[19]["location"] is None and fake.spools[20]["location"] is None
+    assert bridge.tools[0].evict == ()
     await bridge.aclose()
 
 
@@ -811,6 +1056,37 @@ async def written_state(tmp_path, **cfg):
     return bridge, fake, printer
 
 
+@pytest.mark.parametrize("sync_drift", [False, True])
+@pytest.mark.parametrize("reason", ["drift", "edited", "unknown_write", "needs_sync"])
+async def test_emptied_location_reports_only_real_drift(tmp_path, caplog, reason, sync_drift):
+    bridge, fake, printer = await written_state(tmp_path, sync_drift=sync_drift)
+    caplog.set_level("INFO")
+    fake.spools[20]["location"] = None  # Moved out, with nothing in its place.
+    if reason == "drift":
+        printer.material = {"name": "PETG"}
+    elif reason == "edited":
+        fake.spools[20]["filament"]["color_hex"] = "00ff00"
+    elif reason == "unknown_write":
+        bridge.tools[0] = replace(bridge.tools[0], written=UNKNOWN_WRITE)
+    else:
+        bridge.tools[0] = replace(bridge.tools[0], needs_sync=True)
+    for _ in range(3):
+        await bridge.poll()
+    assert len(jobs(printer)) == 1  # only the original write
+    assert "spool None" not in caplog.text
+    flag = fake.flag(20) or ""
+    if reason in ("drift", "edited"):
+        # A Spoolman edit the printer won't get is a real difference: report the
+        # field, not the edit as a pending write.
+        assert caplog.text.count("printer differs from spool 20") == 1
+        assert "printer filament differs" in flag
+        assert "since the last write" not in caplog.text
+    else:
+        assert "printer differs" not in caplog.text
+        assert "printer filament differs" not in flag
+    await bridge.aclose()
+
+
 async def test_spoolman_color_edit_is_written(tmp_path):
     bridge, fake, printer = await written_state(tmp_path)
     fake.spools[20]["filament"]["color_hex"] = "00ff00"
@@ -830,6 +1106,64 @@ async def test_spoolman_temperature_edit_is_written(tmp_path):
     assert " T205 " in jobs(printer)[-1]
     await bridge.poll()
     assert len(jobs(printer)) == 2
+    await bridge.aclose()
+
+
+async def test_spoolman_edit_that_doesnt_apply_is_retried_then_flagged(tmp_path):
+    bridge, fake, printer = await written_state(tmp_path, flag_drift=True)
+    printer.run_job = lambda gcode: None  # Cancelled on the screen: nothing changes.
+    fake.spools[20]["filament"]["color_hex"] = "00ff00"
+    for _ in range(4):
+        await bridge.poll()
+    assert len(jobs(printer)) == 3  # The swap write, then the edit twice (W5).
+    assert "didn't take" in fake.flag(20)
+    assert "printer filament differs" not in fake.flag(20)
+    await bridge.aclose()
+
+
+async def test_spoolman_edit_is_not_drift_while_its_job_runs(tmp_path):
+    bridge, fake, printer = await written_state(tmp_path, flag_drift=True)
+    queued = []
+
+    def start_job(gcode):  # The job starts but hasn't reached M865 yet.
+        printer.job, printer.job_name = 60, "spoolman-sync.gcode"
+        queued.append(gcode)
+
+    printer.run_job = start_job
+    fake.spools[20]["filament"]["color_hex"] = "00ff00"
+    await bridge.poll()
+    assert len(jobs(printer)) == 2
+    await bridge.poll()
+    assert fake.flag(20) is None
+    printer.job = None
+    Printer.run_job(printer, queued[0])
+    await bridge.poll()
+    await bridge.poll()
+    assert len(jobs(printer)) == 2 and fake.flag(20) is None
+    assert bridge.tools[0].needs_sync is False and bridge.tools[0].sync_attempts == 0
+    await bridge.aclose()
+
+
+@pytest.mark.parametrize("flag_drift", [True, False])
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "{44c406a5-c6f5-4440-bfba-e8060564b717}",
+        '44c406a5-c6f5-4440-bfba-e8060564b717"\nG1 Z-10\n;',
+    ],
+)
+async def test_spoolman_edit_to_a_bad_uuid_is_flagged_not_written(
+    tmp_path, caplog, flag_drift, bad
+):
+    bridge, fake, printer = await written_state(tmp_path, flag_drift=flag_drift)
+    caplog.set_level("INFO")
+    fake.spools[20]["extra"]["instance_uuid"] = json.dumps(bad)
+    for _ in range(3):
+        await bridge.poll()
+    assert len(jobs(printer)) == 1
+    assert "isn't a UUID" in fake.flag(20)
+    assert "printer filament differs" not in fake.flag(20)
+    assert caplog.text.count("can't write spool 20") == 1
     await bridge.aclose()
 
 
@@ -868,7 +1202,6 @@ async def test_fresh_install_does_not_rewrite(tmp_path):
         await bridge.poll()
     assert jobs(printer) == []
     await bridge.aclose()
-
 
 
 def weighted(spool_json, remaining, net=1000.0):
@@ -1030,11 +1363,252 @@ async def test_deleted_spool_holds_usage_for_the_next_spool(tmp_path, caplog):
     await bridge.poll()
     assert fake.used == {19: [500.0], 20: [400.0]}
     assert [r["reason"] for r in ledger(tmp_path) if r.get("spool_id") == 20] == [
-        "held after spool 19 was deleted"]
+        "held after spool 19 was deleted"
+    ]
     assert caplog.text.count("held after spool 19 was deleted") == 2  # Event and charge.
     st = load_state(tmp_path / "state.json").tools[0]
     assert (st.active, st.deleted_spool, st.held_mm) == (20, None, 0)
     await bridge.aclose()
+
+
+def restart(bridge, **cfg):
+    """A new bridge on the same printer, Spoolman and state file."""
+    config = replace(bridge.config, **cfg)
+    return Bridge(
+        config=config,
+        printer=bridge.printer,
+        spoolman=bridge.spoolman,
+        state=load_state(config.state_file),
+    )
+
+
+async def test_dry_run_deleted_spool_is_charged_as_after_an_outage(tmp_path, caplog):
+    bridge, fake, printer = make(tmp_path, [spool(19)])
+    await bridge.poll()
+    printer.extruded = 1500
+    await bridge.poll()
+    assert fake.used == {19: [500.0]}
+    saved = (tmp_path / "state.json").read_bytes()
+
+    # Restarted in dry run, the spool is deleted and printing goes on.
+    bridge = restart(bridge, dry_run=True)
+    caplog.set_level("INFO")
+    del fake.spools[19]
+    for extruded in (1700, 1800, 1900):
+        printer.extruded = extruded
+        await bridge.poll()
+    assert fake.lookups == [19]
+    assert caplog.text.count("spool 19 was deleted in Spoolman") == 1
+    assert (tmp_path / "state.json").read_bytes() == saved
+
+    # Live again, with a new spool moved in: it gets the 400 mm printed since the last
+    # live poll, as after an outage.
+    bridge = restart(bridge, dry_run=False)
+    await bridge.poll()
+    fake.spools[20] = spool(20)
+    await bridge.poll()
+    await bridge.poll()
+    assert fake.used == {19: [500.0], 20: [400.0]}
+    st = load_state(tmp_path / "state.json").tools[0]
+    assert (st.active, st.held_mm) == (20, 0)
+    await bridge.aclose()
+
+
+async def held_live_for_deleted_spool(tmp_path):
+    """Spool 19 is deleted during a live run, which holds 400 mm for the next spool."""
+    bridge, fake, printer = make(tmp_path, [spool(19)])
+    await bridge.poll()
+    printer.extruded = 1500
+    await bridge.poll()
+    del fake.spools[19]
+    for extruded in (1700, 1900):
+        printer.extruded = extruded
+        await bridge.poll()
+    st = load_state(tmp_path / "state.json").tools[0]
+    assert (st.deleted_spool, st.held_mm) == (19, 400)
+    return bridge, fake, printer
+
+
+async def test_dry_run_leaves_usage_held_live_as_it_was(tmp_path):
+    bridge, fake, printer = await held_live_for_deleted_spool(tmp_path)
+    saved = (tmp_path / "state.json").read_bytes()
+    bridge = restart(bridge, dry_run=True)
+    for extruded in (2000, 2100):  # 200 mm in dry run.
+        printer.extruded = extruded
+        await bridge.poll()
+    assert (tmp_path / "state.json").read_bytes() == saved
+
+    # The next spool gets the usage held live and the 200 mm, as after an outage.
+    bridge = restart(bridge, dry_run=False)
+    fake.spools[20] = spool(20)
+    await bridge.poll()
+    await bridge.poll()
+    assert fake.used == {19: [500.0], 20: [400.0, 200.0]}
+    await bridge.aclose()
+
+
+async def test_dry_run_keeps_usage_held_live(tmp_path, caplog):
+    bridge, fake, printer = await held_live_for_deleted_spool(tmp_path)
+    saved = (tmp_path / "state.json").read_bytes()
+    bridge = restart(bridge, dry_run=True)
+    caplog.set_level("INFO")
+    fake.spools[20] = spool(20)  # Moved in during dry run.
+    for _ in range(3):
+        await bridge.poll()
+    assert caplog.text.count("WOULD CHARGE spool 20") == 1
+    assert (tmp_path / "state.json").read_bytes() == saved
+
+    bridge = restart(bridge, dry_run=False)
+    await bridge.poll()
+    await bridge.poll()
+    assert fake.used == {19: [500.0], 20: [400.0]}
+    await bridge.aclose()
+
+
+async def dry_run_or_outage(tmp_path, dry, live, middle, after):
+    """Run `live`, then `middle` in dry run or with the bridge stopped, then `after` live.
+
+    Each step of `middle` changes the printer or Spoolman, and dry run polls twice after
+    each. Every phase starts with a restart that reloads `state.json`, which dry run
+    must leave byte-identical. Returns the fake Spoolman, the final state and the path.
+    """
+    path = tmp_path / ("dry" if dry else "outage")
+    bridge, fake, printer = make(path, [spool(19)])
+    await live(bridge, fake, printer)
+    saved = (path / "state.json").read_bytes()
+    bridge = restart(bridge, dry_run=True)
+    for step in middle:
+        step(fake, printer)
+        if dry:
+            await bridge.poll()
+            await bridge.poll()
+    assert (path / "state.json").read_bytes() == saved
+    bridge = restart(bridge, dry_run=False)
+    await after(bridge, fake, printer)
+    await bridge.aclose()
+    return fake, load_state(path / "state.json"), path
+
+
+async def assert_like_outage(tmp_path, live, middle, after, used):
+    """Going live after a dry run charges what it would after an outage as long."""
+    dry_fake, dry_state, path = await dry_run_or_outage(tmp_path, True, live, middle, after)
+    out_fake, out_state, _ = await dry_run_or_outage(tmp_path, False, live, middle, after)
+    assert dry_fake.used == out_fake.used == used
+    # Each run mints its own instance UUID, which `written` holds.
+    assert replace(dry_state.tools[0], written=None) == replace(out_state.tools[0], written=None)
+    return dry_state, path
+
+
+def extrude(mm):
+    def step(fake, printer):
+        printer.extruded = mm
+
+    return step
+
+
+async def test_dry_run_leaves_an_open_swap_as_live_left_it(tmp_path):
+    async def live(bridge, fake, printer):
+        await bridge.poll()
+        printer.extruded = 1500
+        await bridge.poll()
+        printer.unloads, printer.at_unload, printer.extruded = 1, 1500, 1600
+        await bridge.poll()
+        assert bridge.tools[0].swap.mm == 100
+
+    async def after(bridge, fake, printer):
+        await bridge.poll()  # The 200 mm printed in dry run, as after an outage.
+        fake.spools[19]["location"] = None
+        fake.spools[20] = spool(20)
+        await bridge.poll()
+
+    await assert_like_outage(
+        tmp_path,
+        live,
+        [extrude(1700), extrude(1800)],
+        after,
+        {19: [500.0, 100.0, 200.0, -300.0], 20: [300.0]},
+    )
+
+
+async def test_dry_run_leaves_the_claim_window_as_live_left_it(tmp_path):
+    async def live(bridge, fake, printer):
+        await bridge.poll()
+        printer.extruded = 1100
+        await bridge.poll()
+
+    async def after(bridge, fake, printer):
+        await bridge.poll()
+        fake.spools[20] = spool_x(20, extra=dict(CLAIMED))
+        await bridge.poll()
+
+    await assert_like_outage(
+        tmp_path,
+        live,
+        [extrude(1200), extrude(1300)],
+        after,
+        {19: [100.0, 200.0, -300.0], 20: [300.0]},
+    )
+
+
+async def test_dry_run_usage_held_then_charged_is_charged_once_live(tmp_path):
+    async def live(bridge, fake, printer):
+        await bridge.poll()
+        printer.extruded = 1500
+        await bridge.poll()
+
+    def no_filament(fake, printer):
+        printer.material, printer.extruded = None, 1700
+
+    def filament_back(fake, printer):
+        printer.material, printer.extruded = {"name": "PLA", "color": "#73737b"}, 1800
+
+    async def after(bridge, fake, printer):
+        await bridge.poll()
+        await bridge.poll()
+
+    _, path = await assert_like_outage(
+        tmp_path, live, [no_filament, filament_back], after, {19: [500.0, 300.0]}
+    )
+    # Dry run held the usage, then logged it as one charge.
+    assert [(r["spool_id"], r["extruded_mm"]) for r in ledger(path) if r.get("dry_run")] == [
+        (19, 300)
+    ]
+
+
+async def test_dry_run_leaves_a_provisional_charge_as_live_left_it(tmp_path):
+    async def live(bridge, fake, printer):
+        await bridge.poll()
+        printer.unloads, printer.at_unload, printer.extruded = 1, 1000, 1100
+        await bridge.poll()
+        printer.job = 7
+        await bridge.poll()
+        printer.extruded = 1200  # First extrusion: the swap is assumed, provisionally.
+        await bridge.poll()
+        assert bridge.tools[0].provisional.mm == 200
+
+    async def after(bridge, fake, printer):
+        await bridge.poll()
+
+    state, _ = await assert_like_outage(
+        tmp_path, live, [extrude(1300), extrude(1400)], after, {19: [100.0, 100.0, 200.0]}
+    )
+    assert state.tools[0].provisional.mm == 400
+
+
+async def test_claim_in_dry_run_is_handled_live(tmp_path):
+    async def live(bridge, fake, printer):
+        await bridge.poll()
+        printer.extruded = 1100
+        await bridge.poll()
+
+    def claim(fake, printer):
+        fake.spools[20] = spool_x(20, extra=dict(CLAIMED))
+
+    async def after(bridge, fake, printer):
+        await bridge.poll()
+        assert claim_box(fake, 20) is False
+
+    await assert_like_outage(tmp_path, live, [claim], after, {19: [100.0, -100.0], 20: [100.0]})
 
 
 async def test_404_in_flush_holds_the_charge(tmp_path, caplog):
@@ -1119,8 +1693,11 @@ async def test_wrong_spool_loaded_then_claimed(tmp_path):
     # S5: unload, load a different spool, forget Spoolman, print, then claim it.
     bridge, fake, printer = make(tmp_path, [spool(19)])
     await bridge.poll()
-    assert {"key": "bridge_claim", "name": "Claim held usage",
-            "field_type": "boolean"} in fake.fields
+    assert {
+        "key": "bridge_claim",
+        "name": "Claim held usage",
+        "field_type": "boolean",
+    } in fake.fields
     printer.unloads, printer.at_unload, printer.material = 1, 1000, {"name": "PLA"}
     printer.extruded = 1116  # menu load of spool 20, but Spoolman still has 19
     await bridge.poll()

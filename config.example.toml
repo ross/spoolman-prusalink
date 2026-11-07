@@ -39,7 +39,7 @@ location = "Core One L+"
 
 [bridge]
 state_file = "/data/state.json"
-# Every charge the bridge would make (phase 1) or made, one JSON object per line.
+# Every charge the bridge would make or made, one JSON object per line.
 ledger_file = "/data/ledger.jsonl"
 # Seconds between polls while printing or paused, and otherwise.
 poll_printing = 30

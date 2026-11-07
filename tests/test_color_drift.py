@@ -4,8 +4,15 @@ from spoolman_prusalink.models import Material, Spool
 
 
 def spool(**kw):
-    base = dict(id=1, location="Core One L+", name="X", material="PLA", color_hex="73767d",
-                diameter=1.75, density=1.24)
+    base = dict(
+        id=1,
+        location="Core One L+",
+        name="X",
+        material="PLA",
+        color_hex="73767d",
+        diameter=1.75,
+        density=1.24,
+    )
     base.update(kw)
     return Spool(**base)
 

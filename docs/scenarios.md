@@ -2,13 +2,15 @@
 
 This is the list of events and transitions the bridge has to handle, what it
 does for each, and how sure we are of it. It covers one single-tool printer.
-Multi-tool (INDX, XL) is out of scope until phase 4.
+Multi-tool (INDX, XL) is out of scope.
 
 Status values:
 
 - **Seen live**: the behavior has been observed on the Core One L+.
 - **Tested**: a unit test covers it, but it hasn't been seen live.
 - **Implemented**: code handles it, with no test.
+- **Decided**: the behavior is settled. Unless the row also says
+  "implemented", the code doesn't do it yet.
 - **Gap**: the bridge does something wrong or unhelpful.
 - **Question**: the behavior needs a decision.
 
@@ -33,14 +35,14 @@ archived active spool (M3, M3a) is logged once when the bridge finds it.
 | --- | --- | --- | --- |
 | S1 | Spoolman first: move the new spool into the location, then unload and load. | Stages the new spool and keeps charging the old one. At the unload, charges usage before it to the old spool, makes the new one active, and moves the old one out of the location. The load is charged to the new spool. Writes the new spool to the printer when idle. | Tested (live test with spool 18) |
 | S2 | Filament first: unload, then change Spoolman, then load. | Opens an unconfirmed swap and flags the old spool. The Spoolman change confirms it and clears the flag. Usage during the load is held until the printer reports a filament, then charged to the new spool. Writes when idle. | Seen live (19 → 14) |
-| S3 | Filament first, but Spoolman changed during the load. | As S2. Usage already charged to the old spool since the unload is moved to the new one. | Seen live (14 → 19) |
+| S3 | Filament first, but Spoolman changed during the load. | As S2. Usage already charged to the old spool since the unload is moved to the new one. If the old spool is moved out of the location before the new one is moved in, the swap stays open while the location is empty, even through a print start, and later usage is held. The next spool moved in confirms the swap and takes all the usage since the unload. Moving the old spool back in leaves the swap as if the spool never left: open, or, if a print started while it was out, closed as of that print start with a provisional charge (S4). An unload while the location is empty closes the swap with its usage on the old spool, and the usage held since the location emptied is reported lost (S6). | Seen live (14 → 19); the two-step change tested |
 | S4 | Unload and reload the same spool, with no Spoolman change, then print. | Opens an unconfirmed swap. The print start closes it as "assumed same spool", records a provisional charge (Q1) and flags the spool with the amount. The next unload keeps the usage there. | Seen live (job 126); provisional charge tested |
 | S5 | Unload, load a different spool, forget Spoolman, and print. | As S4: the print is charged to the old spool provisionally, and the flag says how to move it. Moving the right spool into the location and ticking **Claim held usage** on it moves the usage since the unload, makes it active, evicts the old spool and queues a write (see Q1 and [Claims](#claims)). | Decided and implemented; tested |
 | S6 | Unload with nothing assigned in Spoolman. | Usage before the unload is reported lost. Usage after it is held until a spool is assigned. | Tested |
-| S7 | Old spool moved out of the location first, then the new one moved in, then unload. | The old spool stays active until the unload. The new one is staged. | Tested |
+| S7 | Old spool moved out of the location first, then the new one moved in, then unload. | The old spool stays active until the unload. The new one is staged. If the filament was swapped first, see S3. | Tested |
 | S8 | Spool staged, then moved back out before any unload. | Staging is cancelled and logged. The active spool keeps being charged. | Tested |
 | S9 | Spool staged, and the user never unloads. | It stays staged indefinitely. Each print start logs that the staged spool isn't loaded and flags both the active and the staged spool. A reboot while it's staged flags the staged spool too. Claiming the staged spool makes it active (see Q2). | Decided and implemented; tested |
-| S10 | Spool moved out of the location with no replacement. | It stays active until the next unload, then usage is held as unassigned. | Tested |
+| S10 | Spool moved out of the location with no replacement. | It stays active until the next unload, then usage is held as unassigned. During an unconfirmed swap, usage is held at once and the swap stays open (S3). | Tested |
 | S11 | Two spools in the location, neither active. | Skips the tool and warns until one is removed. | Tested |
 | S12 | Spoolman changed to a spool whose UUID the printer already reports, with no unload. | Treated as a correction: switches immediately. | Tested |
 | S13 | Spoolman changed with no unload, and the printer doesn't report the new spool's UUID. | Staged until the next unload. If the user meant "I got it wrong; this spool is loaded", they claim it (see Q3). | Decided and implemented; tested |
@@ -67,7 +69,7 @@ archived active spool (M3, M3a) is logged once when the bridge finds it.
 
 | # | Scenario | What the bridge does | Status |
 | --- | --- | --- | --- |
-| C1 | Printer reboots or is power-cycled between prints. | New boot ID: counters restart from 0. Metadata stays on the printer. | Seen live |
+| C1 | Printer reboots or is power-cycled between prints. | New boot ID: counters restart from 0. Metadata stays on the printer. Usage held at the reboot, because the tool reported no filament, no spool was assigned or the location was ambiguous, is kept. It goes to the active spool as soon as there is one, and is logged then. An unload with no spool active first reports it lost, as in S6. | Seen live; held usage tested |
 | C2 | Printer switched off for hours. | Logs once when it goes away, hourly while it's away, and once when it's back. Polls every 60 s. | Tested |
 | C3 | Reboot and an unload in the same poll. | Handled in order: reboot, then unload. | Tested |
 | C4 | Counter goes backward within one boot. | Logs a counter anomaly and resyncs without charging. | Tested |
@@ -75,7 +77,7 @@ archived active spool (M3, M3a) is logged once when the bridge finds it.
 | C6 | Manual extrusion or retraction from the printer menu. | Extrusion is charged to the active spool. The counter only counts filament fed. | Implemented |
 | C7 | Tool reports no filament (after an unload, or a sensor problem). | Holds usage until a filament is reported. | Tested |
 | C8 | Firmware update. | A reboot (C1). The model is checked again. | Implemented |
-| C9 | Printer answers with an error (wrong API key, 500). | Warns every poll and charges nothing. | Implemented |
+| C9 | Printer answers with an error (wrong API key, 500). | Logs the error once, until it changes or clears. Charges nothing. | Implemented |
 
 ## Writing to the printer
 
@@ -88,7 +90,7 @@ archived active spool (M3, M3a) is logged once when the bridge finds it.
 | W5 | The printer still differs after two sync jobs. | Stops and flags the spool ("didn't take"). | Tested |
 | W6 | The bridge's own sync job. | Not counted as a print start: recognized by its file name. | Tested |
 | W7 | Spool's material isn't a preset and Spoolman has no temperatures. | Flags the spool and doesn't write. | Tested |
-| W8 | PPS or PPA. | Flags the spool and doesn't write: `M865` can't set the HT idler-door requirement. | Tested |
+| W8 | PPS or PPA. | Flags the spool and doesn't write: `M865` can't set the HT idler-door requirement. Once the printer shows the material, loaded from its menu, the flag clears; the color and UUID the menu load leaves out aren't drift. | Tested |
 | W9 | Printer differs with no swap or unload behind it (drift). | Flags it and leaves the printer alone, unless `sync_drift = true`. | Tested |
 | W10 | Unsupported, unknown or mismatched model. | Logs once, flags waiting spools, and doesn't write. Charging continues. | Tested |
 | W11 | Unconfirmed swap open. | Writes the assigned spool, so the printer shows what Spoolman thinks is loaded. | Tested |
@@ -118,7 +120,7 @@ archived active spool (M3, M3a) is logged once when the bridge finds it.
 | B2 | Restart mid-print. | Catches up in one charge, with no double charge and no loss. | Seen live (job 131) |
 | B3 | Killed between a charge being accepted and the outbox being saved. | That charge is sent again: up to one poll's worth, double-charged. | Implemented; known limit |
 | B4 | `state.json` lost. | Starts again from a baseline (B1). Usage since the last poll is lost, and swap state is forgotten. | Implemented; a lost state file is a deployment problem (see Out of scope) |
-| B6 | Dry run. | Logs what it would charge and write. Changes nothing. | Tested |
+| B6 | Dry run. | Logs what it would charge and write, and records the charges in the ledger. Changes nothing in Spoolman, on the printer or in `state.json`. The next live run charges everything since the last live run, as after an outage (B2). | Tested |
 
 ## Claims
 
@@ -170,8 +172,9 @@ bridge can't know. It answers Q1, Q2 and Q3. Decided and implemented.
 - **A claim in the same poll as an unload** is handled after the unload, so
   only usage after the unload moves.
 - **Handled once.** The bridge records each handled claim in `state.json`
-  until Spoolman shows the box clear, so a failed clear or dry-run mode
-  doesn't handle it again on the next poll.
+  until Spoolman shows the box clear, so a failed clear doesn't handle it
+  again on the next poll. Dry run records it only in memory, so the next live
+  run handles it again.
 
 Possible improvement: Spoolman's websocket pushes an event for every spool
 change as it happens. Listening on it would give the order of claims, and
@@ -213,10 +216,10 @@ configured. Each of these needs fixing in the deployment, not the code.
 - **Q3 (S13). Decided and implemented: claims.** The user claims the spool that's loaded (see [Claims](#claims)). We rejected treating a Spoolman change as a correction whenever the printer reports no UUID: a reload of the same spool also clears the UUID, so it would give false corrections.
 - **Q4 (P8). Decided and implemented: a print starts at its first extrusion.** A new job ID is only noted as pending. The first poll in that job where the counter increases is the print start, and all the start effects happen then: closing an unconfirmed swap, the provisional charge (Q1) and the staging flags (Q2). A job that ends without extruding changes nothing. This also gives the user preheat and bed leveling time to fix Spoolman, with the change treated as a confirmation. The first poll's extrusion is charged before the swap closes, to the same spool the swap would assume.
 - **Q5 (P12). Decided and implemented: keep the saved job ID across reboots.** The firmware stores job IDs in EEPROM and assigns a new one only when a print starts through the print preview (`marlin_server.cpp:2307` in the firmware), so IDs aren't reused and a power-panic resume should keep its ID. That's from the source, not a test. With the ID kept, a resumed job is the same print carrying on. If a resume does get a new ID, it's a print start under Q4, which is harmless. Usage between the last poll and the power cut is lost: saving it would need the firmware to put the counter in its power-panic data. Confirming the job ID needs a test with the power pulled mid-print.
-- **Q6 (W14). Decided and implemented: remember the last write.** The bridge stores the full `M865` line it last wrote for each tool. If the printer still matches that write and the line built from Spoolman now differs, Spoolman was edited, so the bridge writes it when idle. If the printer no longer matches the write, the printer changed, and that's drift as before. Comparing whole lines catches temperature edits too, which the printer doesn't report back. Tools in state from before this change have no stored line: the bridge rewrites each of them once when idle, even if the printer differs, which fixes the zero temperatures from the old `J`-based writes. A fresh install doesn't do this rewrite.
-- **Q7 (M3). Decided and implemented: hold usage for a deleted spool.** When a tool's active spool is missing from Spoolman's list of non-archived spools, the bridge looks it up once. A 404 means it was deleted. A 404 on a queued charge to the active spool means the same. The tool is left with no active spool, and that charge, any usage since an open unconfirmed swap's unload, and later usage go to a per-tool held total in raw extruded mm (`held_mm`, with the deleted spool in `deleted_spool`). Unlike a tool with no spool assigned, the held total survives a reboot and an unload. The bridge logs once when it finds the deletion, and flags the spool assigned to the location, if there is one. The next spool that becomes active takes the held usage, charged as "held after spool N was deleted": a spool moved into the location, or a staged spool at the next unload or print start. A typical case is deleting a spool and re-creating it in Spoolman. A claim also takes `held_mm`: the claimed spool becomes active, is charged the held usage, and the deleted state clears. The deleted spool's own charges from before the deletion aren't refunded or moved, since it no longer exists and the charges were accepted when made. That includes a provisional charge (Q1) on it: it's dropped, not held. An archived spool keeps being charged until the next unload, and is flagged "archived but still loaded". Other 4xx rejections stay as they are: logged and dropped, with the ledger as the record.
+- **Q6 (W14). Decided and implemented: remember the last write.** The bridge stores the full `M865` line it last wrote for each tool. If the printer still matches that write and the line built from Spoolman now differs, Spoolman was edited, so the bridge writes it when idle. If the printer no longer matches the write, the printer changed, and that's drift as before. Comparing whole lines catches temperature edits too, which the printer doesn't report back. Tools in state from before this change have no stored line: the bridge rewrites each of them once when idle, even if the printer differs, which fixes the zero temperatures from the old `J`-based writes. A fresh install doesn't do this rewrite. A color, name or UUID edit counts as applied only when a poll sees the printer match (see W5). The printer doesn't report temperatures, so a temperature-only edit counts as applied once its job uploads: if the user cancels the job before its `M865` runs, the edit is lost, and nothing retries or flags it. Detecting a cancelled sync job is out of scope.
+- **Q7 (M3). Decided and implemented: hold usage for a deleted spool.** When a tool's active spool is missing from Spoolman's list of non-archived spools, the bridge looks it up once. A 404 means it was deleted. A 404 on a queued charge to the active spool means the same. The tool is left with no active spool, and that charge, any usage since an open unconfirmed swap's unload, and later usage go to a per-tool held total in raw extruded mm (`held_mm`, with the deleted spool in `deleted_spool`). Usage held with no spool assigned survives a reboot too (C1), but an unload with no spool active reports it lost (S6). The held total for a deleted spool survives an unload as well. The bridge logs once when it finds the deletion, and flags the spool assigned to the location, if there is one. The next spool that becomes active takes the held usage, charged as "held after spool N was deleted": a spool moved into the location, or a staged spool at the next unload or print start. A typical case is deleting a spool and re-creating it in Spoolman. A claim also takes `held_mm`: the claimed spool becomes active, is charged the held usage, and the deleted state clears. The deleted spool's own charges from before the deletion aren't refunded or moved, since it no longer exists and the charges were accepted when made. That includes a provisional charge (Q1) on it: it's dropped, not held. An archived spool keeps being charged until the next unload, and is flagged "archived but still loaded". Other 4xx rejections stay as they are: logged and dropped, with the ledger as the record.
 - **Q8 (M5, M5a). Decided and implemented: log a negative remaining weight; flag a runout with plenty left.**
   - A spool whose remaining weight goes below 0 gets one log line and nothing else. Spool weights are inexact, so many spools end slightly negative. Spoolman itself shows 0 rather than a negative weight, so the bridge works it out from the used weight.
   - An unload during a print, after its first extrusion, while Spoolman shows more than a threshold remaining, flags the spool. That usually means an earlier swap charged the wrong spool. The flag says how much Spoolman thinks is left and suggests checking recent swaps. A jam or tangle that trips the filament sensor, and a planned `M600` color change, look the same to the bridge, so the wording allows for both. The threshold is 5% of the spool's net weight remaining, so it scales with 2 kg and 3 kg spools. A spool with no net weight in Spoolman is never flagged.
   - The flag clears when the user edits the spool's weight in Spoolman, since a corrected weight answers it. It also clears when another spool becomes active in the tool and then this one does. Reloading the same spool keeps it. The bridge keeps the spool's net and used weights with the flag. It moves the used weight on by each of its own charges when the charge's response matches, so any other change to either weight is an edit, even one made while a charge was queued. A charge whose response is lost is sent again and applied twice, so its response doesn't match: that also reads as an edit and clears the flag early, which costs only the flag.
-- **Q9 (B5). Decided: out of scope.** The bridge doesn't try to detect or prevent bad deployments. See [Out of scope](#out-of-scope).
+- **Q9 (B4). Decided: out of scope.** The bridge doesn't try to detect or prevent bad deployments. See [Out of scope](#out-of-scope).

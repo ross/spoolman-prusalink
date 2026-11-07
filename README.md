@@ -5,11 +5,19 @@ spools [Spoolman](https://github.com/Donkie/Spoolman) assigns to its tools.
 It reads the per-tool `extruded` counter from PrusaLink's
 `GET /api/v1/filament` endpoint and maps each tool to a Spoolman location.
 
-The bridge starts in dry-run mode, which logs and records what it would do
-but writes nothing. With `dry_run = false`, it charges usage to Spoolman,
-writes flags such as an unconfirmed swap to a text extra field on the spool,
-moves the old spool out of the tool's location when a swap takes effect, and
-writes the loaded spool's name, color and UUID to the printer.
+The bridge starts in dry-run mode, which logs what it would do and records
+what it would charge in the ledger, but changes nothing in Spoolman, on the
+printer or in `state.json`. With `dry_run = false`, it charges usage to
+Spoolman, writes flags such as an unconfirmed swap to a text extra field on
+the spool, moves the old spool out of the tool's location when a swap takes
+effect, and writes the loaded spool's name, color and UUID to the printer.
+
+Dry run is like a stopped bridge that shows what it would do. When it next
+runs live, the bridge starts from the state its last live run saved and
+charges everything printed since then, including during the dry run, as it
+would after an outage. Turning dry run on and off loses no usage, except
+that, as after an outage, a printer restart in between drops the usage
+before the restart.
 
 ## Requirements
 
@@ -57,7 +65,7 @@ Spoolman's location filter, because that filter matches partial text.
 | `PRUSALINK_API_KEY` | The printer's PrusaLink API key. |
 | `SPOOLMAN_URL` | Spoolman's base URL. |
 | `SPOOLMAN_PRUSALINK_LOCATION` | The Spoolman location that stands for the printer's single tool. |
-| `SPOOLMAN_PRUSALINK_DRY_RUN` | `true` (the default) logs what the bridge would do and writes nothing. |
+| `SPOOLMAN_PRUSALINK_DRY_RUN` | `true` (the default) logs what the bridge would do and changes nothing. |
 | `SPOOLMAN_PRUSALINK_CONFIG` | Optional path to a TOML config file. `/config/config.toml` is read if it exists. |
 | `LOG_LEVEL` | `INFO` by default. `DEBUG` also logs every HTTP request. |
 
@@ -68,9 +76,11 @@ that user. Run only one bridge per printer: two would charge the same usage
 twice.
 
 For multi-tool printers and the other settings, mount a config file based on
-`config.example.toml` at `/config/config.toml`. The environment variables
-above override the file. `compose.example.yaml` runs the bridge next to
-Spoolman.
+`config.example.toml` at `/config/config.toml`. `PRUSALINK_URL`,
+`PRUSALINK_API_KEY`, `SPOOLMAN_URL` and `SPOOLMAN_PRUSALINK_DRY_RUN` override
+the file. `SPOOLMAN_PRUSALINK_LOCATION` applies only when the file has no
+`[[tools]]` entries, because the file's tools take precedence.
+`compose.example.yaml` runs the bridge next to Spoolman.
 
 To verify, look for a `baseline` line for each tool in the log. After the
 printer extrudes, look for lines like this one (`WOULD CHARGE` in dry-run
@@ -85,9 +95,15 @@ with `once` in place of the default `run`.
 
 ### Run from source
 
+The example config is set up for the container. After copying it, edit
+`config.toml`: point `[printer] url` and `[spoolman] url` at your printer and
+Spoolman, and set `state_file` and `ledger_file` to a directory you can write
+to, such as `./data`.
+
 ```sh
 python3 -m venv .venv
 .venv/bin/pip install -e '.[dev]'
+cp config.example.toml config.toml
 PRUSALINK_API_KEY=API_KEY .venv/bin/spoolman-prusalink -c config.toml once
 .venv/bin/pytest
 ```
@@ -103,8 +119,10 @@ into the tool's location while the old filament is still loaded. The bridge
 stages the new spool and keeps charging the old one. When the printer reports
 an unload, usage up to the unload goes to the old spool, and everything after
 it, including the load and purge, goes to the new one. The old spool can stay
-in the location until then. The bridge ignores it after the unload and logs
-that it should be moved out.
+in the location until then. After the unload, the bridge ignores it. With
+`dry_run = false`, it also moves the old spool to `eviction_location`, which
+is no location by default. In dry-run mode, it only logs that it would move
+the spool. Set `eviction_location` in the config file.
 
 If you swap the filament first, the bridge flags an unconfirmed swap and keeps
 charging the assigned spool. Move the new spool into the location before the
@@ -114,6 +132,10 @@ after clearing a jam. It charges that spool provisionally and flags it with
 the amount. The next unload keeps the usage there. If a different spool was
 loaded, claim it (see [Claims](#claims)).
 
+You can also move the old spool out of the location before moving the new
+one in. While the location is empty, the bridge holds usage, even during a
+print, and the next spool you move in takes everything since the unload.
+
 Other rules:
 
 - The first poll of each tool records the current counter as a baseline.
@@ -121,8 +143,12 @@ Other rules:
 - When `boot_id` changes, the printer has rebooted and its counters restart
   at 0. Usage between the last poll and the reboot is lost, so a shorter poll
   interval loses less.
-- While the tool reports no filament, or no spool is active, usage is held
-  and charged once both are present.
+- While the tool reports no filament, no spool is active, or the location is
+  ambiguous, usage is held. It's charged once the tool reports filament, a
+  spool is active, and the location is clear. Usage held when the printer
+  reboots is kept, and charged as soon as a spool is active, even before the
+  tool reports filament. An unload with no spool active first
+  reports it lost.
 - If the location holds two spools and neither is the loaded one, or more
   than two, the bridge skips the tool and logs a warning until it clears.
 - A Spoolman change with no unload switches immediately only if the printer
@@ -190,7 +216,9 @@ Flags go to the `flag_field` extra field (`bridge_flag` by default), which
 the bridge creates on first use:
 
 - An unconfirmed swap, on the spool still assigned, until Spoolman changes,
-  a print starts, or the next unload.
+  a print starts, or the next unload. If that spool is moved out of the
+  location, the flag says so and lasts until a spool is moved in or the next
+  unload.
 - A provisional charge, on the spool assumed reloaded at print start, until
   the next unload or a claim. The amount shown updates between prints.
 - A print started with a swap staged, on both spools. The active spool's flag
@@ -217,7 +245,7 @@ Claims use the `claim_field` extra field (`bridge_claim` by default), a
 boolean field the bridge creates on first use and shows as **Claim held
 usage**. The bridge clears the box after it handles a claim. Set
 `claim_field = ""` to turn claims off. In dry-run mode the bridge handles each
-claim once but doesn't clear the box.
+claim once but doesn't clear the box, so the next live run handles it again.
 
 ## Writing to the printer
 

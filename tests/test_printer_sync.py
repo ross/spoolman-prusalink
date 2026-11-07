@@ -15,8 +15,15 @@ from spoolman_prusalink.printer_sync import (
 
 
 def spool(**kw):
-    base = dict(id=1, location="x", name="Polymaker PolySonic™ PLA Grey", material="PLA",
-                color_hex="8C9099", diameter=1.75, density=1.23)
+    base = dict(
+        id=1,
+        location="x",
+        name="Polymaker PolySonic™ PLA Grey",
+        material="PLA",
+        color_hex="8C9099",
+        diameter=1.75,
+        density=1.23,
+    )
     base.update(kw)
     return Spool(**base)
 
@@ -37,9 +44,29 @@ def test_preset_with_color_and_uuid():
 
 
 def test_spoolman_temps_override_preset_and_alias():
-    (line,) = filament_lines(ToolWrite(2, spool(material="TPU", extruder_temp=230,
-                                                bed_temp=50, color_hex=None), None))
+    (line,) = filament_lines(
+        ToolWrite(2, spool(material="TPU", extruder_temp=230, bed_temp=50, color_hex=None), None)
+    )
     assert line == 'M865 X R N"TPU" T230 B50 P210 C25 D15 E40 F1 G1 L2'
+
+
+def test_uuid_is_written_in_canonical_form():
+    lines = filament_lines(ToolWrite(0, spool(), "44C406A5-C6F5-4440-BFBA-E8060564B717"))
+    assert lines[1] == 'M865.1 I0 C"44c406a5-c6f5-4440-bfba-e8060564b717"'
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        '44c406a5-c6f5-4440-bfba-e8060564b717"\nG1 Z-10\n;',
+        "{44c406a5-c6f5-4440-bfba-e8060564b717}",
+        "44c406a5c6f54440bfbae8060564b717",
+        "44c406a5-c6f5-4440-bfba-e8060564b71",
+    ],
+)
+def test_uuid_that_isnt_canonical_is_refused(value):
+    with pytest.raises(CannotSync, match="isn't a UUID"):
+        filament_lines(ToolWrite(0, spool(), value))
 
 
 def test_uuid_only_on_tool_0():
@@ -52,28 +79,34 @@ def test_non_preset_needs_temps():
 
 
 def test_job_message_is_ascii_and_multi_tool_uses_screen_numbers():
-    job = build_job(COREONEL_PREAMBLE, [ToolWrite(1, spool(), None)], [], multi_tool=True)
+    job, shown = build_job(COREONEL_PREAMBLE, [ToolWrite(1, spool(), None)], ["n"], multi_tool=True)
     assert job.splitlines()[-1] == "M117 Spoolman: T2 Polymaker PolySonic PLA Gre"
     assert ";" not in job.splitlines()[-1]
+    assert shown == []  # The write's message replaces the notice.
 
 
 def test_notice_only_job():
-    job = build_job(COREONEL_PREAMBLE, [], ["Core One L+: a; b"], multi_tool=False)
+    job, shown = build_job(COREONEL_PREAMBLE, [], ["Core One L+: a; b", "other"], multi_tool=False)
     assert job.splitlines()[3:] == [
         "G28 O ; home only if not homed, so the end-of-job bed move is safe",
         "M117 Spoolman: Core One L+: a, b",
     ]
+    assert shown == ["Core One L+: a; b"]
 
 
 def test_non_preset_with_spoolman_temps():
-    (line,) = filament_lines(ToolWrite(0, spool(material="PLA-CF", extruder_temp=225,
-                                                bed_temp=65, color_hex=None), None))
+    (line,) = filament_lines(
+        ToolWrite(0, spool(material="PLA-CF", extruder_temp=225, bed_temp=65, color_hex=None), None)
+    )
     assert line == 'M865 X R N"PLA-CF" T225 B65 L0'
 
 
-def test_pps_needs_menu_load():
-    with pytest.raises(CannotSync):
-        filament_lines(ToolWrite(0, spool(material="PPS"), None))
+@pytest.mark.parametrize("material", ["PPS", "PPA", " pps "])
+def test_ht_idler_door_materials_need_menu_load(material):
+    # With temperatures set, these would otherwise pass as a non-preset material.
+    s = spool(material=material, extruder_temp=320, bed_temp=105)
+    with pytest.raises(CannotSync, match="HT idler-door"):
+        filament_lines(ToolWrite(0, s, None))
 
 
 def test_model_problems():
