@@ -275,6 +275,20 @@ CONFIG_BASE = (
     ('[bridge]\npoll_printing = -5\n', "bridge.poll_printing must be a number greater than 0"),
     ('[bridge]\npoll_idle = "soon"\n', "bridge.poll_idle must be a number greater than 0"),
     ('[bridge]\nlength_factor = "x"\n', "bridge.length_factor must be a number"),
+    ('[bridge]\npoll_idle = nan\n', "bridge.poll_idle must be a number greater than 0"),
+    ('[bridge]\npoll_printing = inf\n', "bridge.poll_printing must be a number greater than 0"),
+    ('[bridge]\npoll_printing = -nan\n', "bridge.poll_printing must be a number greater than 0"),
+    ('[bridge]\nlength_factor = nan\n', "bridge.length_factor must be a number"),
+    ('[bridge]\nlength_factor = inf\n', "bridge.length_factor must be a number"),
+    ('[bridge]\nuuid_field = 5\n', "bridge.uuid_field must be a string"),
+    ('[bridge]\nflag_field = true\n', "bridge.flag_field must be a string"),
+    ('[bridge]\nclaim_field = ["a"]\n', "bridge.claim_field must be a string"),
+    ('[bridge]\nstate_file = 5\n', "bridge.state_file must be a string"),
+    ('[bridge]\nledger_file = 5\n', "bridge.ledger_file must be a string"),
+    ('[bridge]\neviction_location = 5\n', "bridge.eviction_location must be a string"),
+    ('[printer]\nsync_storage = 5\n', "printer.sync_storage must be a string"),
+    ('[printer]\nsync_file = 5\n', "printer.sync_file must be a string"),
+    ('[printer]\napi_key = 5\n', "printer.api_key must be a string"),
 ])
 def test_config_rejects_bad_values(tmp_path, text, error):
     p = tmp_path / "c.toml"
@@ -298,6 +312,26 @@ def test_config_malformed_file_is_a_config_error(tmp_path, text, error):
     p = tmp_path / "c.toml"
     p.write_text(text)
     with pytest.raises(ConfigError, match=re.escape(error)):
+        load(p, env={"PRUSALINK_API_KEY": "k"})
+
+
+@pytest.mark.parametrize("text, error", [
+    ('[printer]\nurl = 5\n[spoolman]\nurl = "http://s"\n', "printer.url must be a string"),
+    ('[printer]\nurl = "http://p"\n[spoolman]\nurl = 5\n', "spoolman.url must be a string"),
+    ('[printer]\nurl = "http://p"\n[spoolman]\nurl = "http://s"\n'
+     '[[tools]]\nindex = 0\nlocation = 5\n', "tool location must be a string"),
+])
+def test_config_rejects_non_string_urls_and_locations(tmp_path, text, error):
+    p = tmp_path / "c.toml"
+    p.write_text(text)
+    with pytest.raises(ConfigError, match=re.escape(error)):
+        load(p, env={"PRUSALINK_API_KEY": "k"})
+
+
+def test_config_file_that_is_not_utf8_is_a_config_error(tmp_path):
+    p = tmp_path / "c.toml"
+    p.write_bytes(b'[printer]\nurl = "\xff\xfe"\n')
+    with pytest.raises(ConfigError, match="can't parse"):
         load(p, env={"PRUSALINK_API_KEY": "k"})
 
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import os
 import re
 import tomllib
@@ -74,16 +75,27 @@ def _bool(table: dict, key: str, default: bool, name: str) -> bool:
     return value
 
 
+def _str(table: dict, key: str, default: str, name: str) -> str:
+    """Return a TOML string. Anything else is an error, not str() of it."""
+    value = table.get(key, default)
+    if not isinstance(value, str):
+        raise ConfigError(f"{name} must be a string, got {value!r}")
+    return value
+
+
 def _number(table: dict, key: str, default: float, name: str) -> float:
     value = table.get(key, default)
     if isinstance(value, bool) or not isinstance(value, int | float):
         raise ConfigError(f"{name} must be a number, got {value!r}")
+    if not math.isfinite(value):
+        raise ConfigError(f"{name} must be a number, not nan or inf, got {value!r}")
     return float(value)
 
 
 def _interval(table: dict, key: str, default: float, name: str) -> float:
     value = table.get(key, default)
-    if isinstance(value, bool) or not isinstance(value, int | float) or value <= 0:
+    if (isinstance(value, bool) or not isinstance(value, int | float)
+            or not math.isfinite(value) or value <= 0):
         raise ConfigError(f"{name} must be a number greater than 0, got {value!r}")
     return float(value)
 
@@ -109,20 +121,25 @@ def load(path: str | os.PathLike | None, env: dict[str, str] | None = None) -> C
         with open(path, "rb") as f:
             try:
                 raw = tomllib.load(f)
-            except tomllib.TOMLDecodeError as e:
+            except (tomllib.TOMLDecodeError, UnicodeDecodeError) as e:
                 raise ConfigError(f"can't parse {path}: {e}") from e
 
     printer = _table(raw, "printer")
     spoolman = _table(raw, "spoolman")
     bridge = _table(raw, "bridge")
 
-    api_key = env.get("PRUSALINK_API_KEY") or printer.get("api_key")
+    # Check the file's values even when the environment overrides them.
+    file_api_key = _str(printer, "api_key", "", "printer.api_key")
+    file_printer_url = _str(printer, "url", "", "printer.url")
+    file_spoolman_url = _str(spoolman, "url", "", "spoolman.url")
+
+    api_key = env.get("PRUSALINK_API_KEY") or file_api_key
     if not api_key:
         raise ConfigError("set PRUSALINK_API_KEY or printer.api_key")
-    printer_url = env.get("PRUSALINK_URL") or printer.get("url")
+    printer_url = env.get("PRUSALINK_URL") or file_printer_url
     if not printer_url:
         raise ConfigError("set printer.url or PRUSALINK_URL")
-    spoolman_url = env.get("SPOOLMAN_URL") or spoolman.get("url")
+    spoolman_url = env.get("SPOOLMAN_URL") or file_spoolman_url
     if not spoolman_url:
         raise ConfigError("set spoolman.url or SPOOLMAN_URL")
 
@@ -133,7 +150,8 @@ def load(path: str | os.PathLike | None, env: dict[str, str] | None = None) -> C
     for entry in entries:
         if not isinstance(entry, dict) or "index" not in entry or "location" not in entry:
             raise ConfigError("each [[tools]] entry needs an index and a location")
-        index, location = entry["index"], str(entry["location"])
+        index = entry["index"]
+        location = _str(entry, "location", "", "tool location")
         if isinstance(index, bool) or not isinstance(index, int):
             raise ConfigError(f"tool index must be an integer, got {index!r}")
         if index in tools:
@@ -154,15 +172,15 @@ def load(path: str | os.PathLike | None, env: dict[str, str] | None = None) -> C
     if not 0 < length_factor <= 2:
         raise ConfigError(f"length_factor must be in (0, 2], got {length_factor}")
 
-    uuid_field = bridge.get("uuid_field", "instance_uuid") or None
-    flag_field = bridge.get("flag_field", "bridge_flag") or None
-    claim_field = bridge.get("claim_field", "bridge_claim") or None
+    uuid_field = _str(bridge, "uuid_field", "instance_uuid", "bridge.uuid_field") or None
+    flag_field = _str(bridge, "flag_field", "bridge_flag", "bridge.flag_field") or None
+    claim_field = _str(bridge, "claim_field", "bridge_claim", "bridge.claim_field") or None
     fields = (("uuid_field", uuid_field), ("flag_field", flag_field),
               ("claim_field", claim_field))
     for name, key in fields:
         if key is not None and not re.fullmatch(r"[a-z0-9_]{1,64}", key):
             raise ConfigError(f"{name} must match [a-z0-9_]{{1,64}}, got {key!r}")
-    sync_file = str(printer.get("sync_file", "spoolman-sync.gcode"))
+    sync_file = _str(printer, "sync_file", "spoolman-sync.gcode", "printer.sync_file")
     if not re.fullmatch(r"[A-Za-z0-9_.-]+\.gcode", sync_file):
         raise ConfigError(f"printer.sync_file must be a plain .gcode file name, got {sync_file!r}")
     keys = [key for _, key in fields if key is not None]
@@ -177,19 +195,19 @@ def load(path: str | os.PathLike | None, env: dict[str, str] | None = None) -> C
         printer_api_key=api_key,
         spoolman_url=spoolman_url,
         tools=tools,
-        state_file=Path(bridge.get("state_file", "/data/state.json")),
-        ledger_file=Path(bridge.get("ledger_file", "/data/ledger.jsonl")),
+        state_file=Path(_str(bridge, "state_file", "/data/state.json", "bridge.state_file")),
+        ledger_file=Path(_str(bridge, "ledger_file", "/data/ledger.jsonl", "bridge.ledger_file")),
         poll_printing=_interval(bridge, "poll_printing", 30, "bridge.poll_printing"),
         poll_idle=_interval(bridge, "poll_idle", 60, "bridge.poll_idle"),
         uuid_field=uuid_field,
-        eviction_location=str(bridge.get("eviction_location", "")),
+        eviction_location=_str(bridge, "eviction_location", "", "bridge.eviction_location"),
         dry_run=dry_run,
         length_factor=length_factor,
         flag_field=flag_field,
         claim_field=claim_field,
         flag_drift=_bool(bridge, "flag_drift", True, "bridge.flag_drift"),
         gcode_preamble=None if preamble is None else tuple(preamble),
-        sync_storage=str(printer.get("sync_storage", "usb")),
+        sync_storage=_str(printer, "sync_storage", "usb", "printer.sync_storage"),
         sync_file=sync_file,
         printer_sync=_bool(bridge, "printer_sync", True, "bridge.printer_sync"),
         sync_drift=_bool(bridge, "sync_drift", False, "bridge.sync_drift"),
