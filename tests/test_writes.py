@@ -450,6 +450,9 @@ async def test_emptied_location_has_no_spool_none_note(tmp_path, caplog):
     assert jobs(printer) == []
     assert "spool None" not in caplog.text
     assert caplog.text.count("spool 19 is no longer in the location") == 1
+    # Spool 19 is still loaded, so the drift is reported, once, not written.
+    assert caplog.text.count("printer differs from spool 19") == 1
+    assert "printer filament differs" in fake.flag(19)
     await bridge.aclose()
 
 
