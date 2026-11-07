@@ -472,14 +472,29 @@ async def test_busy_printer_defers_write(tmp_path):
     await bridge.aclose()
 
 
-async def test_non_preset_without_temps_is_flagged_not_written(tmp_path):
+async def test_non_preset_without_temps_is_flagged_not_written(tmp_path, caplog):
     bridge, fake, printer = make(tmp_path, [spool(19)])
+    caplog.set_level("INFO")
     await bridge.poll()
     fake.spools[20] = spool_x(20, material="PLA-CF")
     printer.unloads, printer.at_unload, printer.material = 1, 1000, {"name": "PLA"}
     await bridge.poll()
     assert jobs(printer) == []
     assert "set its extruder and bed temperatures" in fake.flag(20)
+    patches = fake.writes.count(("patch", 20))
+
+    # The flag stays through a print, and the warning isn't repeated each poll.
+    await bridge.poll()
+    printer.job, printer.extruded = 7, 1200
+    await bridge.poll()
+    assert "set its extruder and bed temperatures" in fake.flag(20)
+    printer.job = None
+    await bridge.poll()
+    await bridge.poll()
+    assert jobs(printer) == []
+    assert fake.writes.count(("patch", 20)) == patches
+    assert caplog.text.count("can't write spool 20 to the printer") == 1
+    assert "printer will be set to spool 20" not in caplog.text
 
     fake.spools[20] = spool_x(20, material="PLA-CF", temps=(220, 60))
     await bridge.poll()

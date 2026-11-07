@@ -668,6 +668,15 @@ class Bridge:
         return "\n".join(printer_sync.filament_lines(
             printer_sync.ToolWrite(tool, spool, uuid_value)))
 
+    @staticmethod
+    def _cannot_write(tool: int, spool: Spool) -> str | None:
+        """Return why `spool` can't be written to the printer, or None if it can."""
+        try:
+            printer_sync.filament_lines(printer_sync.ToolWrite(tool, spool, None))
+        except printer_sync.CannotSync as e:
+            return str(e)
+        return None
+
     def _classify_mismatch(self, tool, location, st, active, diffs, notes, flags,
                            edited: bool = False) -> None:
         """Decide whether a printer/spool mismatch is a pending write or drift."""
@@ -687,6 +696,10 @@ class Bridge:
                 flags.setdefault(active.id, []).append(
                     f"{location}: can't write to the printer: {self._model_error}"
                 )
+            elif settled and (problem := self._cannot_write(tool, active)):
+                notes.append(f"[{location}] can't write spool {active.id} to the printer: "
+                             f"{problem}")
+                flags.setdefault(active.id, []).append(f"{location}: {problem}")
             elif settled:
                 self._pending_writes.append(tool)
                 notes.append(f"[{location}] printer will be set to spool {active.id} when "
@@ -788,16 +801,6 @@ class Bridge:
             st = self.tools[tool]
             spool = by_id.get(st.active)
             if spool is None:
-                continue
-            try:
-                printer_sync.filament_lines(printer_sync.ToolWrite(tool, spool, None))
-            except printer_sync.CannotSync as e:
-                location = self.config.tools[tool]
-                self._notes(tool, [f"[{location}] can't write spool {spool.id} to the printer: "
-                                   f"{e}"])
-                self._flags[spool.id] = " | ".join(
-                    filter(None, [self._flags.get(spool.id), f"{location}: {e}"])
-                )
                 continue
             uuid_value = None
             if tool == 0 and self._uuids:
