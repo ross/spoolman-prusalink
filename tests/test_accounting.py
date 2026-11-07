@@ -454,6 +454,22 @@ def test_usage_during_ambiguous_location_survives_reboot():
                        Charge(7, 10, "extruded")]
 
 
+def test_usage_during_ambiguous_location_survives_two_reboots():
+    _, _, state = run([(BOOT, r(100), loc(7)), (BOOT, r(200), loc(7))])
+    kinds = []
+    for boot, extruded in ((BOOT, 700), (BOOT + 1, 300), (BOOT + 1, 3000)):
+        res = account(state, boot, r(extruded), loc(7, 8, 9))
+        assert res.skipped and res.charges == []
+        kinds += [e.kind for e in res.events]
+        state = res.state
+    assert kinds.count(EventKind.REBOOT) == 1
+    assert (state.boot_id, state.held_mm) == (BOOT + 1, 500)
+    charges, kinds, _ = run([(BOOT + 2, r(10), loc(7))], state)
+    assert charges == [Charge(7, 3500, "held before the printer restarted"),
+                       Charge(7, 10, "extruded")]
+    assert EventKind.LOST_UNASSIGNED not in kinds
+
+
 def test_hold_messages_stay_the_same_while_holding():
     _, _, state = run([(BOOT, r(100), loc())])
     first = account(state, BOOT, r(200), loc())

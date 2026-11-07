@@ -264,7 +264,9 @@ class Result:
     state: ToolState
     charges: list[Charge] = field(default_factory=list)
     events: list[Event] = field(default_factory=list)
-    skipped: bool = False  # True when the assignment was ambiguous and nothing changed.
+    # True when the assignment was ambiguous: nothing is charged and only the counter
+    # and any reboot are recorded.
+    skipped: bool = False
     claimed: bool = False  # True when the claim passed in was handled.
     # The spool that was in the tool when it unloaded during a started print: a runout,
     # a jam or tangle, or a planned color change, which all look the same.
@@ -363,20 +365,11 @@ def account(
             window[target] = window.get(target, 0) + mm
 
     assigned = resolve_assignment(state, location_ids)
-    if isinstance(assigned, list):
-        ids = ", ".join(str(i) for i in assigned)
-        event(EventKind.AMBIGUOUS, f"location holds spools {ids}; skipping until it's clear "
-              "which one is loaded")
-        out.skipped = True
-        if state.boot_id == boot_id:
-            # Nothing is charged, so the usage is held: keep track of it over a reboot.
-            out.state = replace(state, extruded=reading.extruded)
-        return out
-    evict = state.evict if state.evict in location_ids else None
+    ambiguous = isinstance(assigned, list)
 
     # First sight of this tool: take the current counter as the baseline. Usage before
     # the bridge started isn't attributable.
-    if state.boot_id is None:
+    if state.boot_id is None and not ambiguous:
         active = assigned
         if claim is not None:
             active, out.claimed = claim, True
@@ -394,8 +387,8 @@ def account(
         event(EventKind.BASELINE, f"baseline extruded={reading.extruded} spool={active}")
         return out
 
-    s = replace(state, evict=evict)
-    rebooted = boot_id != s.boot_id
+    s = state
+    rebooted = s.boot_id is not None and boot_id != s.boot_id
     if rebooted:
         # Usage held by not advancing `charged` would be lost with the counter.
         kept = max(s.extruded - s.charged, 0)
@@ -412,6 +405,19 @@ def account(
         # An unload just before a reboot can be missed, so a claim moves only usage
         # since the reboot.
         window.clear()
+
+    if ambiguous:
+        ids = ", ".join(str(i) for i in assigned)
+        event(EventKind.AMBIGUOUS, f"location holds spools {ids}; skipping until it's clear "
+              "which one is loaded")
+        out.skipped = True
+        if s.boot_id is not None:
+            # Nothing is charged, so the usage is held: keep track of it over a reboot,
+            # including one while the location stays ambiguous.
+            out.state = replace(s, extruded=reading.extruded, since_load=window)
+        return out
+    evict = s.evict if s.evict in location_ids else None
+    s = replace(s, evict=evict)
 
     if reading.extruded < s.charged:
         # Shouldn't happen within one boot. Resync rather than charge a negative amount.

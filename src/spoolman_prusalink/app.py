@@ -368,7 +368,7 @@ class Bridge:
                 matches=matches,
                 claim=claim,
             )
-            # A skipped tool's state changes only to record the counter.
+            # A skipped tool's state changes only to record the counter and any reboot.
             if not result.skipped or tool in self.tools:
                 self.tools[tool] = result.state
             if result.runout is not None:
