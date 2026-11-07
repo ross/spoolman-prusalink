@@ -1,4 +1,4 @@
-"""Read-only PrusaLink client."""
+"""PrusaLink client: reads status, filament and job, and uploads and starts sync jobs."""
 
 from __future__ import annotations
 

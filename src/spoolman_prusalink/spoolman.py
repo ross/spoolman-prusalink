@@ -1,4 +1,4 @@
-"""Spoolman client. Phase 1 only reads."""
+"""Spoolman client: reads spools, charges usage, moves spools and sets extra fields."""
 
 from __future__ import annotations
 

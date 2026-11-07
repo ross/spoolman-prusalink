@@ -111,9 +111,10 @@ class Preset:
 
 # Firmware preset filaments (`src/common/filament_presets.cpp`), with the preheat values
 # for printers with a load cell, which every supported model has. `M865 X R` resets every
-# parameter to zero or off, and `J` (inherit a preset) is ignored on these models, so the
-# job writes each value. PPS and PPA are left out: they need the HT idler-door setting,
-# which `M865` can't set.
+# parameter to the defaults in the firmware's `filament.hpp` (nozzle 215, preheat 170,
+# bed 60, everything else unset or off), and `J` (inherit a preset) is ignored on these
+# models, so the job writes each value. PPS and PPA are left out: they need the HT
+# idler-door setting, which `M865` can't set.
 PRESETS = {
     "PLA": Preset(215, 60, chamber=(20, 15, 38)),
     "PETG": Preset(230, 85, chamber=(30, 15, 45)),
