@@ -1,9 +1,16 @@
-# spoolman-prusalink configuration.
-# The PrusaLink API key comes from the PRUSALINK_API_KEY environment variable.
-# PRUSALINK_URL and SPOOLMAN_URL, when set, override the URLs below.
+# spoolman-prusalink configuration for one printer. For several printers, see the
+# [[printers]] example at the end.
+# The PrusaLink API key comes from the PRUSALINK_API_KEY environment variable, or from
+# api_key or api_key_env below. PRUSALINK_URL and SPOOLMAN_URL, when set, override the
+# URLs below.
 
 [printer]
 url = "http://192.168.1.22"
+# The printer's name keys its state and appears in ledger records, so keep it stable.
+# name = "default"
+# The API key, or the environment variable that holds it. Set one, not both.
+# api_key = ""
+# api_key_env = "PRUSALINK_API_KEY"
 # Compatibility checks at the start of every job the bridge runs. By default they come
 # from the printer's model. If you set them, the M862.3 model must match the printer, or
 # the bridge doesn't write to the printer.
@@ -73,3 +80,24 @@ flag_drift = true
 # true logs and records what the bridge would do without writing anything. Set it to
 # false to charge usage, write flags and move spools in Spoolman, and write the printer.
 dry_run = true
+
+# Several printers: replace [printer] and [[tools]] with one [[printers]] entry per
+# printer. Each takes the [printer] settings above plus its own [[printers.tools]].
+# PRUSALINK_URL, PRUSALINK_API_KEY and SPOOLMAN_PRUSALINK_LOCATION are an error with
+# this form. Each location must name one tool across all printers, and no two printers
+# can share a url.
+# [[printers]]
+# name = "core-one-l"
+# url = "http://192.168.1.22"
+# api_key_env = "PRUSALINK_API_KEY_CORE_ONE_L"
+# [[printers.tools]]
+# index = 0
+# location = "Core One L+"
+#
+# [[printers]]
+# name = "mk4s"
+# url = "http://192.168.1.23"
+# api_key_env = "PRUSALINK_API_KEY_MK4S"
+# [[printers.tools]]
+# index = 0
+# location = "MK4S"

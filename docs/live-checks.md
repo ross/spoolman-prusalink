@@ -64,6 +64,7 @@ happens, and how much the unit tests had to assume.
 | 7 | M1 | Usage lost while Spoolman is down | NAS reboots and updates | 4 |
 | 8 | S6, S8, S10, S11, P10 | Usage held or flagged when it shouldn't be | Spoolman mistakes | 1, 2 |
 | 9 | M3, M3a, M4, M6 | Usage held for a deleted spool or renamed location | Rare | 4 |
+| 10 | X1, X2, X4a, X8, X6 | A spool moved between printers charged to the wrong one, or an eviction undoing the move | Every spool carried from one printer to another | 5, when there's a second printer |
 
 ## Session 1: between prints
 
@@ -151,6 +152,29 @@ These use the throwaway spool record.
    location back, and the held usage goes to the spool in it.
 5. **M6.** Set a flag on a spool by hand. The bridge leaves it alone.
 
+## Session 5: a second printer
+
+The cross-printer rows (X1 to X16 in `scenarios.md`) need two printers on
+firmware with the filament endpoint, run by one bridge with a `[[printers]]`
+list. Don't schedule this session until then; the unit tests stand in. The
+first time, start the bridge with the existing printer alone so `state.json`
+migrates, then add the second printer.
+
+1. **X1.** Move the loaded spool to the other printer's location in Spoolman,
+   unload it, carry it over, and load it. Both printers log their side within
+   one poll. Check the ledger: the load on B goes to the spool, and A holds
+   from its unload.
+2. **X2.** The same swap with Spoolman changed last. Confirm A's "moved out"
+   flag text on the spool while B charges it, and that moving any spool into
+   `LA` clears it.
+3. **X4 and X4a.** Swap on A, then move the evicted spool into `LB` as fast
+   as possible, several times. The spool must never end up in the eviction
+   location.
+4. **X8.** Switch A off during a print on B. B's charges continue, and A's
+   outage logs once.
+5. **X6.** Hard to set up on purpose: it needs an unload missed across a
+   reboot. Check the logs when it happens.
+
 ## When they happen
 
 Don't set these up. Check the logs and ledger when they come up:
@@ -173,5 +197,7 @@ Don't set these up. Check the logs and ledger when they come up:
   cutting power mid-print. Either result is harmless (see Q5 in
   `scenarios.md`), so leave it unless a print is lost to a power cut anyway.
 - **W10, M2**: they need a different printer or a broken Spoolman.
+- **X3, X5, X7, X9 to X16**: the rest of the cross-printer rows. Unit tests
+  cover them, and they mirror single-printer rows already checked.
 - **B3, B4, M7**: known limits or deployment problems, as `scenarios.md`
   says.

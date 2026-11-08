@@ -13,6 +13,10 @@ services:
     depends_on:
       - spoolman
     environment:
+      # One printer. For several, drop PRUSALINK_URL, PRUSALINK_API_KEY and
+      # SPOOLMAN_PRUSALINK_LOCATION, list the printers in the mounted config file, and
+      # pass each key through the variable its api_key_env names, for example:
+      # PRUSALINK_API_KEY_CORE_ONE_L: ${PRUSALINK_API_KEY_CORE_ONE_L:?set it}
       PRUSALINK_URL: http://192.168.1.22
       PRUSALINK_API_KEY: ${PRUSALINK_API_KEY:?set PRUSALINK_API_KEY}
       SPOOLMAN_URL: http://spoolman:8000
@@ -21,7 +25,8 @@ services:
       SPOOLMAN_PRUSALINK_DRY_RUN: "false"
     volumes:
       - bridge-data:/data
-      # For more settings, mount a config file based on config.example.toml:
+      # For more settings or several printers, mount a config file based on
+      # config.example.toml:
       # - ./config.toml:/config/config.toml:ro
 
 volumes:

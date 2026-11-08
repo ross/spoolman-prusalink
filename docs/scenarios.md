@@ -1,8 +1,9 @@
 # Bridge scenarios
 
 This is the list of events and transitions the bridge has to handle, what it
-does for each, and how sure we are of it. It covers one single-tool printer.
-Multi-tool (INDX, XL) is out of scope.
+does for each, and how sure we are of it. It covers one single-tool printer,
+and [Several printers](#several-printers) covers what changes when one bridge
+serves two of them. Multi-tool (INDX, XL) is out of scope.
 
 Status values:
 
@@ -182,6 +183,35 @@ react to Spoolman changes within seconds rather than at the next poll. It
 needs a connection kept open alongside polling, and location renames still
 send no events.
 
+## Several printers
+
+One bridge can serve several printers against one Spoolman. Printer A has
+location `LA`; printer B has location `LB`. Each row says what happens from
+both sides. Most are the single-printer rows above seen from two printers at
+once, and the row names which. Everything here is tested with two fake
+printers against one fake Spoolman; none of it has been seen live, because
+there's no second printer yet (see session 5 in `live-checks.md`).
+
+| # | Scenario | What the bridge does | Status |
+| --- | --- | --- | --- |
+| X1 | Spoolman first: move the spool from `LA` to `LB`, unload at A, load at B. | A: S10. The spool stays active until A's unload, then A holds usage as unassigned. B: S1. The spool is staged until B's unload, then active and charged the load. A's unload and B's load in one poll interval are handled independently, in either order. | Tested |
+| X2 | Filament first: unload at A, load at B, then move the spool `LA` to `LB`. | A: S2 then S3. An unconfirmed swap opens and the spool is flagged; the move empties `LA`, so the swap stays open and A holds later usage for the next spool moved in. B: S2. B's unconfirmed swap on its old spool is confirmed by the move, and usage since B's unload moves to the spool. The spool carries A's "moved out" flag while active in B, until something is moved into `LA`. | Tested |
+| X3 | Spool moved `LA` to `LB` in Spoolman while still loaded in A, and never loaded in B. | A: S10, still charged. B: S9, staged and flagged at each B print start. Moving it back to `LA` is S8 on B and resumes A's assignment. | Tested |
+| X4 | Swap on A evicts the old spool; the user moves it into `LB` and loads it in B. | A: the eviction finds the spool already out of `LA` and clears it. B: S1 or S2 depending on order. A's flag on the spool, if any, clears when A's state no longer mentions it. | Tested |
+| X4a | The user moves the evicted spool into `LB` between the bridge's Spoolman read and its eviction. | `evict()` re-reads the spool and sees it in `LB`, so it doesn't move it. Without the re-read, the bridge would move it to the eviction location, undoing the user's move. | Tested |
+| X5 | A spool in `LB` is claimed while A still has it active, because A hasn't seen its unload yet (A is off). | B: a claim as in S5, from B's `since_load`. A: when it polls again, a reboot or unload at A ends the spool's time there; usage before it is charged to the spool, which is right, since the filament was in A. | Tested |
+| X6 | One spool active in two tools: A missed an unload across a reboot (Q2), and the spool is now loaded and active in B. | Logged once naming both locations, and flagged on the spool. A keeps charging it until A's next unload, print-start flag (S9), or a claim on A's staged spool. B charges it normally. | Tested |
+| X7 | Two spools claimed in one poll, one in `LA` and one in `LB`. | Two claims for two tools: each is handled on its own. The tie-break in Claims applies only within one tool. | Tested |
+| X8 | Printer A is off. | A's outage is logged once, hourly, and when it ends (C2). B is polled, charged, and written as normal. Flags, claims, and evictions still run every tick, including A's pending ones that don't need A. The interval follows B's state. | Tested |
+| X9 | Spoolman is unreachable. | Every printer skips accounting (M1). Printer reads still happen, so a printer outage that starts meanwhile is logged on time. Charges from both printers wait in one outbox and are sent in order. | Tested |
+| X10 | A's firmware lacks the filament endpoint (C9, MINI). | A logs once and charges nothing. B is unaffected. | Tested |
+| X11 | A charge from A is rejected with 404 (M3). | Held for A's tool, found by the record's `printer` and `tool`. A spool deleted while active in A and staged in B holds A's usage for A's next spool only. | Tested |
+| X12 | Printer notices on. A flag is raised on a spool in `LB`. | Shown with `M117` on B only, when B is idle. A flag on a spool in no tool's location is shown nowhere. | Tested |
+| X13 | A version 2 `state.json` with two printers configured. | The bridge refuses to start and says the state file is from one printer. Configure one printer, start once to migrate, then add the second. | Tested |
+| X14 | A printer is renamed in the config. | The old name's state stays in the file with a warning once. The new name starts from a baseline (B1). | Tested |
+| X15 | Two printers configured with one location, URL, or name. | Config error at start. | Tested |
+| X16 | A runout flag (M5a) set on A, then the spool becomes active in B after another spool was. | The flag clears, as it does within one tool: the rule is "another spool, then this one" in the tool where it becomes active. A weight edit clears it too. | Tested |
+
 ## Out of scope
 
 The bridge doesn't detect or work around problems in how it's deployed or
@@ -190,7 +220,7 @@ configured. Each of these needs fixing in the deployment, not the code.
 | Scenario | What happens |
 | --- | --- |
 | Two bridges against one printer | Every charge is doubled. |
-| Two printers' bridges sharing a Spoolman location | Both charge the same spool. |
+| Two bridges whose printers share a Spoolman location | Both charge the same spool. Within one bridge, a location mapped to tools on two printers is a config error. |
 | Another tool also charging the same spools, such as an OctoPrint or Klipper plugin | Charges are doubled. |
 | `state.json` lost, for example with no persistent volume | The bridge starts again from a baseline (B1) and forgets swaps in progress (B4). |
 | A wrong location name in the config | The location looks empty, so usage is held as unassigned. |
