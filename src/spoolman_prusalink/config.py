@@ -297,9 +297,6 @@ def _listed_printers(raw: dict, env: dict[str, str]) -> tuple[PrinterConfig, ...
                     f"{seen_locations[location]!r} and {printer.name!r}"
                 )
             seen_locations[location] = printer.name
-    if len(printers) > 1:
-        # Lifted once the poll loop serves every printer.
-        raise ConfigError("the bridge serves one printer for now; [[printers]] has several")
     return printers
 
 

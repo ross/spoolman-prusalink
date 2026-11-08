@@ -482,12 +482,7 @@ MK4S_TOOL = '[[printers.tools]]\nindex = 0\nlocation = "MK4S"\n'
 def test_config_lists_several_printers(tmp_path):
     p = tmp_path / "c.toml"
     p.write_text(PRINTERS_BASE)
-    # Every entry is checked, then the list is refused until the loop serves several.
-    with pytest.raises(ConfigError, match="serves one printer for now"):
-        load(p, env={"CORE_KEY": "ka"})
-    first, second = PRINTERS_BASE.split('[[printers]]\nname = "mk4s"')
-    p.write_text(first)
-    (core,) = load(p, env={"CORE_KEY": "ka"}).printers
+    core, mk4s = load(p, env={"CORE_KEY": "ka"}).printers
     assert (core.name, core.url, core.api_key, core.tools, core.uuids) == (
         "core",
         "http://a",
@@ -495,8 +490,6 @@ def test_config_lists_several_printers(tmp_path):
         {0: "Core One L+"},
         True,
     )
-    p.write_text(first.split("[[printers]]")[0] + '[[printers]]\nname = "mk4s"' + second)
-    (mk4s,) = load(p, env={}).printers
     assert (mk4s.name, mk4s.url, mk4s.api_key, mk4s.tools, mk4s.uuids) == (
         "mk4s",
         "http://b/",
@@ -643,6 +636,16 @@ def test_state_v2_is_refused_with_several_printers(tmp_path):
     path.write_text(json.dumps({**V2_STATE, "version": 1}))
     with pytest.raises(ValueError, match="unsupported state version 1"):
         load_state(path, ["core"])
+
+
+def test_main_exits_2_on_a_state_file_it_cannot_migrate(tmp_path, monkeypatch, caplog):
+    state = tmp_path / "state.json"
+    state.write_text(json.dumps(V2_STATE))
+    p = tmp_path / "c.toml"
+    p.write_text(PRINTERS_BASE + f'[bridge]\nstate_file = "{state}"\n')
+    monkeypatch.setenv("CORE_KEY", "ka")
+    assert main(["-c", str(p), "once"]) == 2
+    assert "state: " in caplog.text and "single-printer bridge" in caplog.text
 
 
 def test_main_exits_2_on_a_state_file_it_cannot_load(tmp_path, monkeypatch, caplog):

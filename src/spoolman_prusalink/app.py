@@ -27,7 +27,7 @@ from .config import Config, PrinterConfig
 from .models import FilamentReading, Spool
 from .prusalink import BUSY_STATES, IDLE_STATES, NoFilamentEndpoint, PrinterStatus, PrusaLink
 from .spoolman import Spoolman
-from .state import Runout, State, append_ledger, load_state, save_state
+from .state import PrinterState, Runout, State, append_ledger, load_state, save_state
 
 log = logging.getLogger("spoolman_prusalink")
 
@@ -172,6 +172,11 @@ class PrinterBridge:
         return self.config.name
 
     @property
+    def _prefix(self) -> str:
+        """`"printer NAME: "` when several printers share the log, else nothing."""
+        return f"{self.label}: " if self.label != "printer" else ""
+
+    @property
     def tools(self) -> dict[int, ToolState]:
         return self.bridge.state.tools(self.name)
 
@@ -182,6 +187,7 @@ class PrinterBridge:
         """
         try:
             status = await self.client.status()
+            self._last_state = status.state  # Known even when the counters can't be read.
             reading = await self.client.filament()
             job_id = await self._user_job_id(status)
         except httpx.TransportError as e:
@@ -193,9 +199,9 @@ class PrinterBridge:
             if not self._unsupported:
                 self._unsupported = True
                 log.error(
-                    "%s: %s; this firmware isn't supported, so nothing is charged. "
+                    "%s%s; this firmware isn't supported, so nothing is charged. "
                     "Checking again each poll.",
-                    self.label,
+                    self._prefix,
                     e,
                 )
             return None
@@ -222,7 +228,9 @@ class PrinterBridge:
         until the next unload, and is flagged. Each spool is looked up once, not every poll.
         """
         listed = {s.id for s in spools}
-        keep = {st.active for st in self.tools.values()} | set(self.bridge.state.flagged)
+        # The cache is shared, so keep every printer's active spools, not only this one's.
+        keep = {st.active for p in self.bridge.printers for st in p.tools.values()}
+        keep |= set(self.bridge.state.flagged)
         self.bridge._archived = {
             i: s for i, s in self.bridge._archived.items() if i not in listed and i in keep
         }
@@ -290,7 +298,7 @@ class PrinterBridge:
         except (httpx.HTTPError, ValueError) as e:
             error = f"can't read the printer model ({e})"
             if error != self._model_error:
-                log.warning("%s: %s; writes are off until it can", self.label, error)
+                log.warning("%s%s; printer writes are off until it can", self._prefix, error)
             self._model_error = error
             return
         self._model_boot = boot_id
@@ -727,16 +735,20 @@ class PrinterBridge:
 
         notices: list[str] = []
         if self.bridge.config.printer_notices:
-            # Flags this printer raised, its runout flags, and flags on spools in its tools'
-            # locations. A flag on a spool in no tool's location, such as an unplaced
-            # claim, is shown nowhere.
+            # Flags on spools in this printer's tool locations. A spool in no tool's
+            # location has no holder, so the printer that raised its flag shows it, and
+            # the bridge's own flags, such as an unplaced claim, go to whichever printer is
+            # idle first. Each text is shown once.
             locations = set(self.config.tools.values())
+            everywhere = {loc for p in self.bridge.printers for loc in p.config.tools.values()}
+            held = {s.id for s in spools if s.location in everywhere}
             runouts = self.bridge.state.runouts.items()
-            mine = (
+            raised = (
                 self._raised
-                | {s.id for s in spools if s.location in locations}
+                | self.bridge._raised
                 | {spool_id for spool_id, r in runouts if r.printer == self.name}
             )
+            mine = {s.id for s in spools if s.location in locations} | (raised - held)
             current = set(self.bridge._flags.values())
             notices = [
                 t
@@ -837,8 +849,11 @@ class Bridge:
     # Active spools missing from Spoolman's list that turned out to be archived, looked
     # up once each. Kept while active or flagged, so their flag can be set and cleared.
     _archived: dict[int, Spool] = field(default_factory=dict)
+    # Spools flagged by the bridge itself this poll, rather than by a printer's tool.
+    _raised: set[int] = field(default_factory=set)
     # Claimed spools outside every tool's location, logged once until that changes.
     _unplaced: set[int] = field(default_factory=set)
+    _shared: set[int] = field(default_factory=set)  # Spools active in two tools last poll.
     # Dry run: the UUID each spool would be given, reused so the job stays the same.
     _dry_uuids: dict[int, str] = field(default_factory=dict)
 
@@ -918,15 +933,26 @@ class Bridge:
         self._problems.clear("Spoolman read", "Spoolman reads working again")
         flags: dict[int, list[str]] = {}
         claims = self._claims(spools, flags)
+        self._raised = set(flags)
+        changed = False
         for printer in self.printers:
-            if printer.name not in reads:
-                continue
-            status, reading = reads[printer.name]
-            printer._last_state = status.state
-            await printer.check_missing(spools)
-            printer.process(reading, spools, status, claims.get(printer.name, {}), flags)
+            kept = self.state.printers.setdefault(printer.name, PrinterState())
+            if printer.name in reads:
+                status, reading = reads[printer.name]
+                await printer.check_missing(spools)
+                own: dict[int, list[str]] = {}
+                printer.process(reading, spools, status, claims.get(printer.name, {}), own)
+                if own != kept.flags:
+                    kept.flags = own
+                    changed = True
+            else:
+                own = kept.flags  # An unread printer's flags stand until it answers again.
+            for spool_id, texts in own.items():
+                flags.setdefault(spool_id, []).extend(texts)
+        before = {spool_id: len(texts) for spool_id, texts in flags.items()}
         self._check_shared(flags)
-        self._finish_flags(flags, spools)
+        self._raised |= {s for s, texts in flags.items() if len(texts) > before.get(s, 0)}
+        self._finish_flags(flags, spools, changed)
         await self.flush()
         await self.evict(spools)
         if not self.config.dry_run and self.config.claim_field:
@@ -950,11 +976,13 @@ class Bridge:
                     where.setdefault(st.active, []).append(
                         printer.config.tools.get(tool, str(tool))
                     )
-        for spool_id, locations in where.items():
+        shared = {spool_id for spool_id, locations in where.items() if len(locations) > 1}
+        for spool_id in self._shared - shared:
+            self._problems.clear(("shared", spool_id))
+        self._shared = shared
+        for spool_id in sorted(shared):
+            locations = where[spool_id]
             key = ("shared", spool_id)
-            if len(locations) < 2:
-                self._problems.clear(key)
-                continue
             names = " and ".join(locations)
             flags.setdefault(spool_id, []).append(
                 f"active in {names} at once. One of them missed an unload: unload and reload "
@@ -1024,10 +1052,10 @@ class Bridge:
             chosen.setdefault(name, {})[tool] = (winner.id, [s.id for s in others])
         return chosen
 
-    def _finish_flags(self, flags: dict[int, list[str]], spools: list[Spool]) -> None:
+    def _finish_flags(self, flags: dict[int, list[str]], spools: list[Spool], save: bool) -> None:
         """Add the Spoolman-wide flags to the printers' and keep the result for `sync_flags()`."""
         by_id = {s.id: s for s in spools}
-        if self._check_runout_edits(by_id):
+        if self._check_runout_edits(by_id) or save:
             self._save()
         for spool_id, runout in self.state.runouts.items():
             flags.setdefault(spool_id, []).append(runout.text)
@@ -1202,7 +1230,7 @@ class Bridge:
                             self._problems.clear(("evict", spool_id))
                             continue
                         await self.spoolman.set_location(spool_id, target)
-                    except httpx.HTTPError as e:
+                    except (httpx.HTTPError, ValueError, KeyError) as e:
                         self._problems.fail(
                             ("evict", spool_id),
                             e,
@@ -1315,10 +1343,16 @@ class Bridge:
 
     async def run(self, stop: asyncio.Event) -> None:
         log.info(
-            "starting%s: spoolman=%s %s",
+            "starting%s: %s spoolman=%s %s",
             " in dry-run mode" if self.config.dry_run else "",
+            " ".join(f"{p.label}={p.config.url}" for p in self.printers),
             self.config.spoolman_url,
-            " ".join(f"{p.label}={p.config.url} tools={p.config.tools}" for p in self.printers),
+            " ".join(
+                f"tools={p.config.tools}"
+                if len(self.printers) == 1
+                else f"{p.label} tools={p.config.tools}"
+                for p in self.printers
+            ),
         )
         if self.state.outbox:
             log.info("%d charge(s) queued from before the restart", len(self.state.outbox))

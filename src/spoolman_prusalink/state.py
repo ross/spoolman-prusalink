@@ -42,13 +42,22 @@ class Runout:
 @dataclass
 class PrinterState:
     tools: dict[int, ToolState] = field(default_factory=dict)
+    # The flag texts this printer's tools last asked for, by spool. They stand in while
+    # the printer can't be read, so an outage doesn't clear its flags in Spoolman.
+    flags: dict[int, list[str]] = field(default_factory=dict)
 
     def to_json(self) -> dict:
-        return {"tools": {str(k): v.to_json() for k, v in sorted(self.tools.items())}}
+        return {
+            "tools": {str(k): v.to_json() for k, v in sorted(self.tools.items())},
+            "flags": {str(k): list(v) for k, v in sorted(self.flags.items())},
+        }
 
     @classmethod
     def from_json(cls, data: dict) -> PrinterState:
-        return cls(tools={int(k): ToolState.from_json(v) for k, v in data.get("tools", {}).items()})
+        return cls(
+            tools={int(k): ToolState.from_json(v) for k, v in data.get("tools", {}).items()},
+            flags={int(k): [str(t) for t in v] for k, v in data.get("flags", {}).items()},
+        )
 
 
 @dataclass
