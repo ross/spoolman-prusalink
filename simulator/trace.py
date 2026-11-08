@@ -20,7 +20,7 @@ change, a new boot or a new job ID is cumulative, so the printer would have show
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -120,13 +120,18 @@ def read(path: Path) -> Trace:
 class Step:
     """A stretch of a trace during which the printer told the bridge the same things.
 
-    `job` is "none", "same" (the job seen before) or "new" (an ID not seen in the previous
-    sample). `boot` is "same" or "new". `material` is "none", "name", "color" (name and
+    `job` is "none", "same" (a job ID seen before) or "new" (an ID not seen before in the
+    trace). `boot` is "same" or "new". `material` is "none", "name", "color" (name and
     color) or "tagged" (name, color and UUID); `changed` says the identity differs from the
-    sample before. `unloads` is the change in `unload_count`. `extruded` is "+", "-", "±"
-    or "0" for how the counter moved over the stretch. A step with a new job, a new boot,
-    a material change or an unload is one sample long, since those are events; movement
-    seen in the same sample belongs to the step before, where it happened.
+    sample before. `unloads` is the change in `unload_count`. A step with a new job, a new
+    boot, a material change or an unload is one sample long, since those are events.
+
+    `extruded` is "+", "-", "±" or "0" for how the counter moved over the step's samples.
+    The fields that don't take part in equality describe that movement more closely, for
+    `compare()`: `entry` is the first sample's movement, which happened in the interval
+    before it and so may belong to the step before; `interior` is the movement over the
+    other samples, which is this step's for sure; `samples` and `moves` count the samples
+    and how many of them moved.
     """
 
     state: str
@@ -136,9 +141,17 @@ class Step:
     changed: bool
     unloads: int
     extruded: str
+    entry: str = field(default="0", compare=False)
+    interior: str = field(default="0", compare=False)
+    samples: int = field(default=1, compare=False)
+    moves: int = field(default=0, compare=False)
 
     def is_event(self) -> bool:
         return self.job == "new" or self.boot == "new" or self.changed or self.unloads != 0
+
+    def shape(self) -> tuple:
+        """Everything but the movement."""
+        return (self.state, self.job, self.boot, self.material, self.changed, self.unloads)
 
     def __str__(self) -> str:
         parts = [self.state, f"job={self.job}"]
@@ -192,6 +205,11 @@ def _merge_direction(a: str, b: str) -> str:
     return "±"
 
 
+def _has(direction: str, d: str) -> bool:
+    """Whether movement `direction` includes `d` ("+" or "-")."""
+    return direction == d or direction == "±"
+
+
 class Signer:
     """Turns samples into steps one at a time; `signature()` runs it over a list.
 
@@ -200,13 +218,13 @@ class Signer:
     unreachable gap. A job is "new" when its ID differs from the last job ID seen in the
     whole trace, so a job that hides during the start blip and comes back is "same". A
     sample whose status arrived but whose filament read failed keeps the last filament
-    reading: it says nothing new about the tool.
+    reading: it says nothing new about the tool. After a reboot the counters restart, so
+    the first sample's unloads and movement are counted from zero.
     """
 
     def __init__(self, tool: int = 0) -> None:
         self.tool = tool
         self.steps: list[Step] = []
-        self._last: Sample | None = None  # the last reachable sample
         self._last_job: int | None = None  # the last job ID seen anywhere in the trace
         self._filament: dict | None = None  # the last filament body that arrived
 
@@ -233,34 +251,27 @@ class Signer:
         here = _tool(filament, self.tool)
         before = _tool(self._filament, self.tool)
         if here is None:
-            material, changed, unloads, extruded = "unknown", False, 0, "0"
+            material, changed, unloads, moved = "unknown", False, 0, "0"
         else:
             material = _material_kind(here.get("material"))
             changed = before is not None and _identity(here.get("material")) != _identity(
                 before.get("material")
             )
-            if before is None or rebooted:
-                unloads, extruded = 0, "0"
+            if before is None:
+                unloads, moved = 0, "0"
+            elif rebooted:
+                unloads, moved = _int(here, "unload_count"), _direction(_int(here, "extruded"))
             else:
                 unloads = _int(here, "unload_count") - _int(before, "unload_count")
-                extruded = _direction(_int(here, "extruded") - _int(before, "extruded"))
-        step = Step(state, job, boot, material, changed, unloads, extruded)
+                moved = _direction(_int(here, "extruded") - _int(before, "extruded"))
+        step = Step(
+            state, job, boot, material, changed, unloads, moved, moved, "0", 1, int(moved != "0")
+        )
         self._add(step)
-        self._last, self._filament = s, filament
+        self._filament = filament
         return step
 
     def _add(self, step: Step) -> None:
-        if step.is_event() and step.extruded != "0":
-            # The movement happened in the interval before the event, during the run the
-            # event ends, so it belongs to that run. The probe and the simulator split an
-            # interval differently, and this keeps their steps the same.
-            for n in range(len(self.steps) - 1, -1, -1):
-                if not self.steps[n].is_event():
-                    self.steps[n] = _with_extruded(
-                        self.steps[n], _merge_direction(self.steps[n].extruded, step.extruded)
-                    )
-                    step = _with_extruded(step, "0")
-                    break
         last = self.steps[-1] if self.steps else None
         if (
             last is not None
@@ -268,15 +279,15 @@ class Signer:
             and not step.is_event()
             and (last.state, last.job, last.material) == (step.state, step.job, step.material)
         ):
-            self.steps[-1] = _with_extruded(last, _merge_direction(last.extruded, step.extruded))
+            self.steps[-1] = replace(
+                last,
+                extruded=_merge_direction(last.extruded, step.extruded),
+                interior=_merge_direction(last.interior, step.extruded),
+                samples=last.samples + 1,
+                moves=last.moves + step.moves,
+            )
         else:
             self.steps.append(step)
-
-
-def _with_extruded(step: Step, extruded: str) -> Step:
-    return Step(
-        step.state, step.job, step.boot, step.material, step.changed, step.unloads, extruded
-    )
 
 
 def signature(samples: list[Sample], tool: int = 0) -> list[Step]:
@@ -287,16 +298,17 @@ def signature(samples: list[Sample], tool: int = 0) -> list[Step]:
     return signer.steps
 
 
-FOLD_WINDOW = 8  # consecutive simulator steps one live sample may cover
+FOLD_WINDOW = 4  # consecutive simulator events one live sample may cover
+SUSTAINED = 2  # moving simulator samples that a live step watching the run must have seen
 
 
 def fold(steps: list[Step]) -> Step:
-    """What one sample would show after all of `steps` happened between two polls.
+    """What one sample shows after consecutive events happened between two polls.
 
-    A probe polling every second can see two events at once: a job appearing and its
-    `M865` applying, or two unloads (S14). The counters are cumulative, so unloads add,
-    a new boot or job stays new, a material change stays changed, and the state and the
-    material are the last ones. Movement is left out: `compare()` checks it separately.
+    A boot and the unload the idle sensor clear counts at it come in one sample, for
+    example. The counters are cumulative, so unloads add, a new boot or job stays new, a
+    material change stays changed, and the state and the material are the last ones.
+    Movement is left out: `compare()` checks it separately.
     """
     last = steps[-1]
     return Step(
@@ -310,71 +322,144 @@ def fold(steps: list[Step]) -> Step:
     )
 
 
-def _same_shape(a: Step, b: Step) -> bool:
-    return _with_extruded(a, "0") == _with_extruded(b, "0")
+def _states_after(sim: list[Step], k: int) -> set[str]:
+    """The states the printer passes through from event `k` until its next event."""
+    states = {sim[k].state}
+    for st in sim[k + 1 :]:
+        if st.is_event():
+            break
+        states.add(st.state)
+    return states
+
+
+def _match_event(step: Step, sim: list[Step], j: int) -> int | None:
+    """The index of the last simulator event that `step` folds `sim[j:]` up to, or None.
+
+    The live sample's state may be any state the printer reached before its next event,
+    since the sample can come after the event within the same poll.
+    """
+    for k in range(j, min(len(sim), j + FOLD_WINDOW)):
+        if not sim[k].is_event():
+            break
+        f = fold(sim[j : k + 1])
+        if f.shape()[1:] == step.shape()[1:] and step.state in _states_after(sim, k):
+            return k
+    return None
 
 
 def compare(live: list[Step], sim: list[Step]) -> list[str]:
     """Problems with `sim` as a stand-in for `live`: empty when the two agree.
 
-    Every live step must appear in the simulator's steps, in order. A live step may
-    stand for several consecutive simulator steps when their `fold()` equals it, since
-    one poll can cover more than one change. The simulator may have extra steps that
-    aren't events, because the probe can miss a state that lasts less than its interval.
-    It may not have extra events: an unload, a material change, a new boot or a new job
-    ID is cumulative, so the printer would have shown it too.
+    Shape first: every live step must appear in the simulator's steps, in order. The
+    simulator may have extra steps that aren't events, because the probe can miss a state
+    that lasts less than its interval. It may not have extra events: an unload, a material
+    change, a new boot or a new job ID is cumulative, so the printer would have shown it
+    too. A live event may stand for consecutive simulator events, and its state may be any
+    the printer reached before the next event.
 
-    Movement is compared per run: a live run's `extruded` must equal the movement over
-    the simulator steps it stands for, together with those folded into the events that
-    follow it, since both sides attribute an event's movement to the run before it.
+    Then movement, per live step, against the simulator steps from where it matched to
+    where the next live step matched. Movement inside a live step is the step's own, so
+    the simulator must show it there. A step's first sample straddles the change before
+    it, so that movement may be the neighbor's. And steady movement in the simulator, over
+    several samples, must have been seen by the live step that watched that stretch:
+    between its samples, or in the poll that crossed into the next step when the
+    movement filled less than half the stretch, unless that poll found the printer
+    unreachable.
     """
     problems: list[str] = []
-    ranges: list[tuple[int, int]] = []  # the simulator steps each live step stands for
+    matched: list[int] = []  # where in the simulator each live step matched
     j = 0
     for i, step in enumerate(live):
-        first = j
         while True:
             if j == len(sim):
                 problems.append(f"live step {i} not found in the simulator's steps: {step}")
                 if i + 1 < len(live):
                     problems.append(f"  (the next live step is: {live[i + 1]})")
                 return problems
-            end = None
-            for k in range(j, min(len(sim), j + FOLD_WINDOW)):
-                if _same_shape(fold(sim[j : k + 1]), step):
-                    end = k
+            if step.is_event():
+                if sim[j].is_event():
+                    k = _match_event(step, sim, j)
+                    if k is None:
+                        problems.append(
+                            f"simulator step {j} is an event the printer didn't show: {sim[j]}"
+                        )
+                        problems.append(f"  (while looking for live step {i}: {step})")
+                        return problems
+                    matched.append(j)
+                    j = k + 1
                     break
-            if end is not None:
-                j = end + 1
-                ranges.append((first, j))
-                break
-            if sim[j].is_event():
-                problems.append(f"simulator step {j} is an event the printer didn't show: {sim[j]}")
-                problems.append(f"  (while looking for live step {i}: {step})")
-                return problems
-            j += 1
+                j += 1  # a state the probe missed
+            else:
+                if sim[j].is_event():
+                    problems.append(
+                        f"simulator step {j} is an event the printer didn't show: {sim[j]}"
+                    )
+                    problems.append(f"  (while looking for live step {i}: {step})")
+                    return problems
+                if sim[j].shape() == step.shape():
+                    matched.append(j)
+                    j += 1
+                    break
+                j += 1
     for k in range(j, len(sim)):
         if sim[k].is_event():
             problems.append(f"simulator step {k} is an event after the printer's last: {sim[k]}")
             return problems
+    # A live step stands for the simulator steps from its match up to the next live
+    # step's match: the states the probe missed in between happened on its watch.
+    spans = [(m, n) for m, n in zip(matched, matched[1:] + [len(sim)], strict=True)]
+
+    def span_movement(i: int) -> tuple[str, int, int]:
+        """The span's merged direction, its moving samples and its samples in all."""
+        if not 0 <= i < len(spans):
+            return "0", 0, 0
+        moved, moves, samples = "0", 0, 0
+        for st in sim[spans[i][0] : spans[i][1]]:
+            moved = _merge_direction(moved, st.extruded)
+            moves += st.moves
+            samples += st.samples
+        return moved, moves, samples
 
     for i, step in enumerate(live):
-        if step.is_event():
-            continue
-        start, end = ranges[i]
-        k = i + 1
-        while k < len(live) and live[k].is_event():
-            end = ranges[k][1]
-            k += 1
-        moved = "0"
-        for st in sim[start:end]:
-            moved = _merge_direction(moved, st.extruded)
-        if moved != step.extruded:
-            problems.append(
-                f"live step {i} moved the counter {step.extruded!r} but the simulator moved it "
-                f"{moved!r} over its steps {start} to {end - 1}: {step}"
-            )
-            return problems
+        here, moves, span_samples = span_movement(i)
+        before, _, _ = span_movement(i - 1)
+        after, _, _ = span_movement(i + 1)
+        for d in "+-":
+            if _has(step.interior, d) and not _has(here, d):
+                problems.append(
+                    f"live step {i} moved {d!r} within it, but the simulator didn't over its "
+                    f"steps {spans[i][0]} to {spans[i][1] - 1}: {step}"
+                )
+                return problems
+            nearby = _merge_direction(before, here)
+            if step.is_event():
+                nearby = _merge_direction(nearby, after)
+            if _has(step.entry, d) and not _has(nearby, d):
+                problems.append(
+                    f"live step {i} began with movement {d!r} that the simulator shows "
+                    f"neither there nor just before: {step}"
+                )
+                return problems
+            if _has(here, d) and moves >= SUSTAINED:
+                # Movement on this step's watch shows up between the step's own samples.
+                # Movement over less than half the span may instead have fallen in the one
+                # poll that crossed into the next step, and shows up in its entry. It can't
+                # show up at all when that poll found the printer unreachable: the counters
+                # restart with it.
+                seen = step.interior if step.samples > 1 else step.entry
+                brief = step.samples == 1 or moves * 2 < span_samples
+                following = live[i + 1] if i + 1 < len(live) else None
+                if following is not None:
+                    if following.state == UNREACHABLE:
+                        continue
+                    if brief:
+                        seen = _merge_direction(seen, following.entry)
+                if not _has(seen, d):
+                    problems.append(
+                        f"the simulator moved {d!r} for {moves} samples over its steps "
+                        f"{spans[i][0]} to {spans[i][1] - 1}, and live step {i} saw none: {step}"
+                    )
+                    return problems
     return problems
 
 

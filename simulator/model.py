@@ -1043,7 +1043,11 @@ class SimPrinter:
                 dt -= used
                 if job.phase is not JobPhase.BLIP:
                     job.time_printing += used
-                if job.clean_at is not None and job.remaining <= job.clean_at + EPSILON:
+                if (
+                    job.phase is JobPhase.RECOVER
+                    and job.clean_at is not None
+                    and job.remaining <= job.clean_at + EPSILON
+                ):
                     job.clean_at = None
                     self._nozzle_clean(job)
                 if job.remaining <= EPSILON:
@@ -1104,7 +1108,7 @@ class SimPrinter:
 
     def _park(self, job: SimJob, end: State) -> None:
         job.phase, job.remaining, job.end_state = JobPhase.PARKING, self.settings.park_seconds, end
-        job.wait_tool = job.attention = job.paused_from = None
+        job.wait_tool = job.attention = job.paused_from = job.clean_at = None
         self._set_state(State.PRINTING)
 
     def _print_step(self, job: SimJob, dt: float) -> float:

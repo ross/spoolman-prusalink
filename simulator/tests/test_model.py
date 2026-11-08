@@ -920,6 +920,17 @@ def test_power_loss_with_a_cold_bed_waits_for_the_user():
     assert p.state is State.PRINTING
 
 
+def test_cancel_during_the_power_panic_recovery_cleans_nothing():
+    sim, p = make()
+    p.start_print(one_segment(100, preheat_s=0))
+    sim.tick(0.8 + 2)
+    p.reboot(keep_job=True)
+    assert p.state is State.BUSY and tool0(p).extruded == 0
+    p.cancel()
+    sim.tick(5)
+    assert p.job is None and p.state is State.STOPPED and tool0(p).extruded == 0
+
+
 def test_power_loss_resume_skips_the_idle_sensor_clear():
     sim, p = make()
     p.start_print(one_segment(100, preheat_s=0))

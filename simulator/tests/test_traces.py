@@ -1,15 +1,17 @@
 """Replays of the printer behaviors in docs/printer-behaviors.md against traces from the printer.
 
-Each `test_f*` performs one behavior in the simulator while sampling it the way the probe
+Each replay performs one behavior in the simulator while sampling it the way the probe
 samples a real printer, then checks the simulator's signature against the trace recorded
 live under `traces/`. A behavior whose trace hasn't been captured yet is skipped, and the
 skip says which file to capture. `python -m simulator.trace traces/F2-unload.jsonl` prints
 a trace's steps when a replay fails. `test_plumbing_traces.py` tests the format, the
-signature and the comparison on their own.
+signature and the comparison on their own, and thins these same replays the way the
+probe would to check that a correct simulator passes at any polling interval.
 """
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -20,6 +22,7 @@ from simulator.tests.util import make
 
 TRACES = Path(__file__).parent / "traces"
 STEP = 0.1
+LEAD = 2.5
 PETG = Material("PETG", None, None)
 TAGGED = Material("PETG", "#1f6fb2", "7b3d2d5e-1f7a-4d8c-9a1e-2c3b4d5e6f70")
 SYNC_JOB = (
@@ -28,11 +31,15 @@ SYNC_JOB = (
 )
 
 # Timing that keeps a replay to a few hundred ticks while every phase still lasts several
-# samples, as it does on the printer.
+# samples, as it does on the printer. Each replay starts with `LEAD` seconds at rest,
+# longer than any probe interval the plumbing tests try, so a trace polled from any
+# offset begins at rest, as docs/printer-behaviors.md asks of a recording. The scan
+# lasts longer than any probe interval too, so a job is always seen before the sync
+# job's G-code applies, as on the printer where the scan takes a few seconds.
 SETTINGS = dict(
     unload_seconds=2.0,
     load_rate_mm_s=20.0,
-    scan_seconds=0.5,
+    scan_seconds=2.5,
     blip_seconds=0.3,
     park_seconds=1.0,
     sync_job_seconds=2.0,
@@ -100,8 +107,7 @@ def check(name: str, rec: Recorder) -> None:
     )
 
 
-@pytest.fixture
-def rec() -> Recorder:
+def recorder() -> Recorder:
     sim, printer = make(**SETTINGS)
     return Recorder(sim, printer)
 
@@ -109,153 +115,163 @@ def rec() -> Recorder:
 # The replays. Each follows the steps for its row in docs/printer-behaviors.md.
 
 
-def test_f1_reboot(rec: Recorder):
-    rec.advance(1.0)
+def f1_reboot(rec: Recorder) -> None:
+    rec.advance(LEAD)
     rec.printer.set_power("off")
     rec.advance(3.0)
     rec.printer.set_power("on")
     rec.advance(2.0)
-    check("F1-reboot", rec)
 
 
-def test_f2_unload(rec: Recorder):
-    rec.advance(1.0)
+def f2_unload(rec: Recorder) -> None:
+    rec.advance(LEAD)
     rec.printer.unload(0)
     rec.settled()
-    rec.advance(1.0)
-    check("F2-unload", rec)
+    rec.advance(2.0)
 
 
-def test_f3_load_preset(rec: Recorder):
-    rec.printer.unload(0)
-    rec.settled()
-    rec.advance(1.0)
+def f3_load_preset(rec: Recorder) -> None:
+    f2_unload(rec)
     rec.printer.load(0, source="preset", name=PETG.name)
     rec.settled()
-    rec.advance(1.0)
-    check("F3-load-preset", rec)
+    rec.advance(2.0)
 
 
-def test_f4_load_tag(rec: Recorder):
-    rec.printer.unload(0)
-    rec.settled()
-    rec.advance(1.0)
+def f4_load_tag(rec: Recorder) -> None:
+    f2_unload(rec)
     m = TAGGED
     rec.printer.load(0, source="tag", name=m.name, color=m.color, uuid=m.instance_uuid)
     rec.settled()
-    rec.advance(1.0)
-    check("F4-load-tag", rec)
+    rec.advance(2.0)
 
 
 def _print(rec: Recorder, mm: float = 200.0, **kw) -> None:
     rec.printer.start_print(PrintSpec([Segment(0, mm)], **kw))
 
 
-def test_f5_print(rec: Recorder):
-    rec.advance(1.0)
+def _printing(rec: Recorder, mm: float = 20.0) -> None:
+    """Until the print has fed `mm` more."""
+    extruded = rec.printer.tools[0].extruded
+    rec.until(lambda: rec.printer.tools[0].extruded > extruded + mm)
+
+
+def f5_print(rec: Recorder) -> None:
+    rec.advance(LEAD)
     _print(rec)
     rec.ended()
-    rec.advance(1.0)
+    rec.advance(2.0)
     rec.printer.dismiss()
-    rec.advance(1.0)
-    check("F5-print", rec)
+    rec.advance(2.0)
 
 
-def test_f6_pause_resume(rec: Recorder):
-    rec.advance(1.0)
+def f6_pause_resume(rec: Recorder) -> None:
+    rec.advance(LEAD)
     _print(rec)
-    extruded = rec.printer.tools[0].extruded
-    rec.until(lambda: rec.printer.tools[0].extruded > extruded + 20)
+    _printing(rec)
     rec.printer.pause()
     rec.advance(3.0)
     rec.printer.resume()
     rec.ended()
-    rec.advance(1.0)
-    check("F6-pause-resume", rec)
+    rec.advance(2.0)
 
 
-def test_f7_cancel(rec: Recorder):
-    rec.advance(1.0)
+def f7_cancel(rec: Recorder) -> None:
+    rec.advance(LEAD)
     _print(rec)
-    extruded = rec.printer.tools[0].extruded
-    rec.until(lambda: rec.printer.tools[0].extruded > extruded + 20)
+    _printing(rec)
     rec.printer.cancel()
     rec.ended()
-    rec.advance(1.0)
-    check("F7-cancel", rec)
+    rec.advance(2.0)
 
 
-def _change_filament(rec: Recorder, name: str) -> None:
+def _change_filament(rec: Recorder) -> None:
     """A filament change during a print: the tool runs out or the user asks for one."""
     rec.until(lambda: rec.printer.state is State.ATTENTION)
-    rec.advance(2.0)
+    rec.advance(3.0)
     rec.printer.load(0)  # The reload keeps the type the printer had.
     rec.until(lambda: rec.printer.state is State.PAUSED)
-    rec.advance(1.0)
+    rec.advance(2.0)
     rec.printer.resume()
     rec.ended()
-    rec.advance(1.0)
-    check(name, rec)
+    rec.advance(2.0)
 
 
-def test_f8_change_filament(rec: Recorder):
-    rec.advance(1.0)
+def f8_change_filament(rec: Recorder) -> None:
+    rec.advance(LEAD)
     _print(rec)
-    extruded = rec.printer.tools[0].extruded
-    rec.until(lambda: rec.printer.tools[0].extruded > extruded + 20)
+    _printing(rec)
     rec.printer.runout(0)
-    _change_filament(rec, "F8-change-filament")
+    _change_filament(rec)
 
 
-def test_f9_m600(rec: Recorder):
-    rec.advance(1.0)
+def f9_m600(rec: Recorder) -> None:
+    rec.advance(LEAD)
     _print(rec, color_changes_mm=[60.0])
-    _change_filament(rec, "F9-m600")
+    _change_filament(rec)
 
 
-def test_f10_sync_job(rec: Recorder):
-    rec.advance(1.0)
+def f10_sync_job(rec: Recorder) -> None:
+    rec.advance(LEAD)
     rec.printer.upload("spoolman-sync.gcode", SYNC_JOB, print_after=True, overwrite=True)
     rec.ended()
-    rec.advance(1.0)
-    check("F10-sync-job", rec)
+    rec.advance(2.0)
 
 
-def test_f11_manual_extrude(rec: Recorder):
-    rec.advance(1.0)
+def f11_manual_extrude(rec: Recorder) -> None:
+    rec.advance(LEAD)
     rec.printer.extrude(0, 50)
-    rec.advance(1.0)
+    rec.advance(2.0)
     rec.printer.retract(0, 10)
-    rec.advance(1.0)
+    rec.advance(2.0)
     rec.printer.extrude(0, 50)
-    rec.advance(1.0)
-    check("F11-manual-extrude", rec)
+    rec.advance(2.0)
 
 
 def _power_cut(rec: Recorder, seconds: float, **on) -> None:
-    rec.advance(1.0)
+    rec.advance(LEAD)
     _print(rec)
-    extruded = rec.printer.tools[0].extruded
-    rec.until(lambda: rec.printer.tools[0].extruded > extruded + 20)
+    _printing(rec)
     rec.printer.set_power("off")
     rec.advance(seconds)
     rec.printer.set_power("on", resume=True, **on)
 
 
-def test_f12_power_panic(rec: Recorder):
+def f12_power_panic(rec: Recorder) -> None:
     """A short cut: the bed is still warm, so the print resumes on its own."""
     _power_cut(rec, 5.0)
     rec.ended()
-    rec.advance(1.0)
-    check("F12-power-panic", rec)
+    rec.advance(2.0)
 
 
-def test_f13_power_panic_cold_bed(rec: Recorder):
+def f13_power_panic_cold(rec: Recorder) -> None:
     """A long cut: the printer waits for the user before resuming."""
     _power_cut(rec, 5.0, cold_bed=True)
     rec.until(lambda: rec.printer.state is State.ATTENTION)
     rec.advance(3.0)
     rec.printer.resume()
     rec.ended()
-    rec.advance(1.0)
-    check("F13-power-panic-cold", rec)
+    rec.advance(2.0)
+
+
+REPLAYS: dict[str, Callable[[Recorder], None]] = {
+    "F1-reboot": f1_reboot,
+    "F2-unload": f2_unload,
+    "F3-load-preset": f3_load_preset,
+    "F4-load-tag": f4_load_tag,
+    "F5-print": f5_print,
+    "F6-pause-resume": f6_pause_resume,
+    "F7-cancel": f7_cancel,
+    "F8-change-filament": f8_change_filament,
+    "F9-m600": f9_m600,
+    "F10-sync-job": f10_sync_job,
+    "F11-manual-extrude": f11_manual_extrude,
+    "F12-power-panic": f12_power_panic,
+    "F13-power-panic-cold": f13_power_panic_cold,
+}
+
+
+@pytest.mark.parametrize("name", REPLAYS)
+def test_replay(name: str):
+    rec = recorder()
+    REPLAYS[name](rec)
+    check(name, rec)

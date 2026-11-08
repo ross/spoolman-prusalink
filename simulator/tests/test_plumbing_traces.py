@@ -2,7 +2,8 @@
 
 `test_traces.py` holds the replays against recorded traces. These tests pin down what the
 signature says about hand-built samples, that `compare()` notices a difference in each
-field, and that the probe's thinning keeps every event.
+field, and that a correct simulator passes against its own replays polled the way the
+probe polls, at any interval and offset.
 """
 
 from __future__ import annotations
@@ -13,7 +14,7 @@ import pytest
 
 from simulator import probe, trace
 from simulator.model import PrintSpec, Segment
-from simulator.tests.test_traces import SETTINGS, Recorder
+from simulator.tests.test_traces import REPLAYS, Recorder, recorder
 from simulator.tests.util import make
 
 PLA = {"name": "PLA", "color": "#73737b", "instance_uuid": "u1"}
@@ -40,6 +41,9 @@ def names(steps):
     return [str(s) for s in steps]
 
 
+# The signature.
+
+
 def test_signature_collapses_runs_and_keeps_events():
     samples = [
         sample(0, "IDLE", 100, PLA),
@@ -54,7 +58,8 @@ def test_signature_collapses_runs_and_keeps_events():
         sample(9, "PRINTING", 130, None, unloads=1, job=7),
         sample(10, "IDLE", 0, None, unloads=0, boot=2),
     ]
-    assert names(trace.signature(samples)) == [
+    steps = trace.signature(samples)
+    assert names(steps) == [
         "IDLE job=none mat=tagged ext=0",
         "BUSY job=none mat=tagged ext=0",
         "BUSY job=none mat=none! unload+1 ext=0",
@@ -63,6 +68,9 @@ def test_signature_collapses_runs_and_keeps_events():
         "PRINTING job=same mat=none ext=+",
         "IDLE job=none boot=new mat=none ext=0",
     ]
+    idle = steps[3]
+    assert (idle.entry, idle.interior, idle.samples, idle.moves) == ("0", "+", 4, 2)
+    assert (steps[0].samples, steps[2].samples) == (2, 1)
 
 
 def test_signature_sees_through_an_unreachable_gap():
@@ -87,16 +95,19 @@ def test_signature_sees_through_an_unreachable_gap():
     assert names(trace.signature(same_boot))[2] == "IDLE job=none mat=tagged ext=0"
     swapped = kept[:3] + [sample(3, "IDLE", 0, PETG, boot=2)]
     assert names(trace.signature(swapped))[2] == "IDLE job=none boot=new mat=tagged! ext=0"
-    # An unload counted at boot, as the idle sensor clear does.
-    cleared = kept[:3] + [sample(3, "IDLE", 0, None, boot=2)]
-    assert names(trace.signature(cleared))[2] == "IDLE job=none boot=new mat=none! ext=0"
+    # After a boot the counters restart, so what the first sample shows is counted from
+    # zero: an unload counted by the idle sensor clear, or a purge already made.
+    cleared = kept[:3] + [sample(3, "IDLE", 0, None, unloads=1, boot=2)]
+    assert names(trace.signature(cleared))[2] == "IDLE job=none boot=new mat=none! unload+1 ext=0"
+    purged = kept[:3] + [sample(3, "BUSY", 25, PLA, job=7, boot=2)]
+    assert names(trace.signature(purged))[2] == "BUSY job=same boot=new mat=tagged ext=+"
 
 
 def test_signature_keeps_the_last_filament_when_only_that_read_fails():
     samples = [
         sample(0, "PRINTING", 100, PLA, job=7),
         sample(1, "PRINTING", 110, PLA, job=7),
-        sample(2, "PRINTING", 110, PLA, job=7, filament=None, error="/api/v1/filament: HTTP 500"),
+        sample(2, "PRINTING", 110, PLA, job=7, filament=None, error="/api/v1/filament: 500"),
         sample(3, "PRINTING", 130, PLA, job=7),
     ]
     assert names(trace.signature(samples)) == [
@@ -125,6 +136,8 @@ def test_signature_job_hidden_by_the_blip_is_the_same_job():
     ]
 
 
+# The comparison, on hand-built traces.
+
 BASE = [
     sample(0, "IDLE", 100, PLA),
     sample(1, "BUSY", 100, PLA),
@@ -146,24 +159,75 @@ def test_compare_passes_an_identical_trace_and_a_sparser_one():
 
 
 @pytest.mark.parametrize(
-    "change, field",
+    "index, change, field",
     [
-        (lambda s: sample(2, "IDLE", 100, None, unloads=1), "state"),
-        (lambda s: sample(2, "BUSY", 100, None, unloads=1, job=3), "job"),
-        (lambda s: sample(2, "BUSY", 100, None, unloads=1, boot=9), "boot"),
-        (lambda s: sample(2, "BUSY", 100, {"name": "PLA"}, unloads=1), "material"),
-        (lambda s: sample(2, "BUSY", 100, PLA, unloads=1), "changed"),
-        (lambda s: sample(2, "BUSY", 100, None, unloads=2), "unloads"),
-        (lambda s: sample(2, "BUSY", 130, None, unloads=1), "extruded"),
+        # An event's state may be any the printer reached before its next event, so a
+        # state difference shows in a run, not at the event.
+        (3, lambda: sample(3, "PAUSED", 100, None, unloads=1), "state"),
+        (2, lambda: sample(2, "BUSY", 100, None, unloads=1, job=3), "job"),
+        (2, lambda: sample(2, "BUSY", 100, None, unloads=1, boot=9), "boot"),
+        (2, lambda: sample(2, "BUSY", 100, {"name": "PLA"}, unloads=1), "material"),
+        (2, lambda: sample(2, "BUSY", 100, PLA, unloads=1), "changed"),
+        (2, lambda: sample(2, "BUSY", 100, None, unloads=2), "unloads"),
     ],
 )
-def test_compare_reports_a_difference_in_each_field(change, field):
+def test_compare_reports_a_difference_in_each_shape_field(index, change, field):
     live = trace.signature(BASE)
     altered = list(BASE)
-    altered[2] = change(altered[2])
+    altered[index] = change()
     sim = trace.signature(altered)
     assert trace.compare(live, sim) != [], field
     assert trace.compare(sim, live) != [], field
+
+
+def test_compare_reports_movement_differences():
+    def pause(moving: bool):
+        e = 150
+        out = [sample(0, "IDLE", 100, PLA), sample(1, "PRINTING", 100, PLA, job=7)]
+        out += [sample(2 + n, "PRINTING", 100 + 10 * (n + 1), PLA, job=7) for n in range(5)]
+        for n in range(6):  # six seconds paused
+            e += 5 if moving else 0
+            out.append(sample(7 + n, "PAUSED", e, PLA, job=7))
+        out += [sample(13 + n, "PRINTING", e + 10 * (n + 1), PLA, job=7) for n in range(5)]
+        out.append(sample(18, "FINISHED", e + 50, PLA))
+        return trace.signature(out)
+
+    still, moving = pause(False), pause(True)
+    assert trace.compare(still, still) == [] and trace.compare(moving, moving) == []
+    # A simulator that moves the counter through a pause, or one that holds it while the
+    # printer moved, is wrong either way.
+    assert "saw none" in trace.compare(still, moving)[0]
+    assert "moved '+' within it" in trace.compare(moving, still)[0]
+
+    # Movement in a step's first sample straddles the change before it: a FINISHED poll
+    # that still carries the last second of printing is fine, while one in a step whose
+    # neighbors never moved is not.
+    straddle = trace.signature(
+        [
+            sample(0, "IDLE", 100, PLA),
+            sample(1, "PRINTING", 100, PLA, job=7),
+            sample(2, "PRINTING", 120, PLA, job=7),
+            sample(3, "PRINTING", 140, PLA, job=7),
+            sample(4, "FINISHED", 150, PLA),
+            sample(5, "FINISHED", 150, PLA),
+        ]
+    )
+    assert straddle[-1].entry == "+" and straddle[-1].interior == "0"
+    fine = trace.signature(
+        [sample(0, "IDLE", 100, PLA), sample(1, "PRINTING", 100, PLA, job=7)]
+        + [sample(1 + n / 10, "PRINTING", 100 + 2 * n, PLA, job=7) for n in range(1, 30)]
+        + [sample(4 + n / 10, "FINISHED", 158, PLA) for n in range(20)]
+    )
+    assert trace.compare(straddle, fine) == []
+    quiet = trace.signature(
+        [sample(0, "IDLE", 100, PLA), sample(1, "IDLE", 100, PLA), sample(2, "BUSY", 130, PLA)]
+        + [sample(3, "BUSY", 130, PLA), sample(4, "IDLE", 130, PLA)]
+    )
+    never = trace.signature(
+        [sample(0, "IDLE", 100, PLA), sample(1, "IDLE", 100, PLA), sample(2, "BUSY", 100, PLA)]
+        + [sample(3, "BUSY", 100, PLA), sample(4, "IDLE", 100, PLA)]
+    )
+    assert "neither there nor just before" in trace.compare(quiet, never)[0]
 
 
 def test_compare_rejects_events_the_printer_did_not_show():
@@ -186,83 +250,146 @@ def test_compare_rejects_events_the_printer_did_not_show():
     problems = trace.compare(live, trace.signature(trailing))
     assert problems and "after the printer's last" in problems[0]
     # Extra non-event steps after the printer's last are fine, like extra idle time.
-    assert (
-        trace.compare(live, trace.signature(BASE + [sample(7, "IDLE", 160, PETG, unloads=1)])) == []
-    )
+    longer = trace.signature(BASE + [sample(7, "IDLE", 160, PETG, unloads=1)])
+    assert trace.compare(live, longer) == []
 
 
-def test_compare_folds_events_one_poll_saw_together():
-    # S14: two unloads between polls. The printer shows unload+2 once.
-    live = trace.signature([sample(0, "IDLE", 100, PLA), sample(1, "IDLE", 150, None, unloads=2)])
-    two = trace.signature(
+def test_compare_lets_brief_movement_hide_in_the_poll_that_crossed_a_step():
+    # The load's counted feed at the end of a long ATTENTION rest: a coarse probe saw
+    # rest, rest, then the type change carrying the movement. That passes. A simulator
+    # that moved through the whole rest would have been seen between the live samples.
+    live = trace.signature(
         [
-            sample(0, "IDLE", 100, PLA),
-            sample(0.3, "IDLE", 100, None, unloads=1),
-            sample(0.6, "BUSY", 150, PETG, unloads=1),
-            sample(0.9, "IDLE", 150, None, unloads=2),
+            sample(0, "ATTENTION", 100, None, job=7),
+            sample(2, "ATTENTION", 100, None, job=7),
+            sample(4, "ATTENTION", 100, None, job=7),
+            sample(6, "ATTENTION", 120, PETG, job=7),
         ]
     )
-    assert trace.compare(live, two) == []
-    # Three unloads in the simulator don't fold into two.
-    three = trace.signature(
-        [
-            sample(0, "IDLE", 100, PLA),
-            sample(0.3, "IDLE", 100, None, unloads=1),
-            sample(0.6, "BUSY", 150, PETG, unloads=1),
-            sample(0.9, "IDLE", 150, None, unloads=2),
-            sample(1.2, "BUSY", 150, PETG, unloads=2),
-            sample(1.5, "IDLE", 150, None, unloads=3),
-        ]
-    )
-    assert trace.compare(live, three) != []
-    # A load whose type was set during a second of feeding: one live step, two simulator steps.
-    idle = sample(0, "IDLE", 100, None)
-    live = trace.signature([idle, sample(1, "BUSY", 100, None), sample(2, "BUSY", 120, PETG)])
+    rest = [sample(n / 2, "ATTENTION", 100, None, job=7) for n in range(10)]
+    tail = [sample(5, "ATTENTION", 110, None, job=7), sample(5.5, "ATTENTION", 120, None, job=7)]
+    change = [sample(6, "ATTENTION", 120, PETG, job=7)]
+    assert trace.compare(live, trace.signature(rest + tail + change)) == []
+    throughout = [sample(n / 2, "ATTENTION", 100 + 2 * n, None, job=7) for n in range(12)]
+    assert "saw none" in trace.compare(live, trace.signature(throughout + change))[0]
+    # Movement right before a power cut is lost with the counters, so it isn't demanded.
+    live = trace.signature([sample(0, "PRINTING", 100, PLA, job=7), down(2), down(4)])
     sim = trace.signature(
-        [
-            idle,
-            sample(1, "BUSY", 100, None),
-            sample(1.5, "BUSY", 120, None),
-            sample(1.6, "BUSY", 120, PETG),
-        ]
+        [sample(n / 2, "PRINTING", 100 + 5 * n, PLA, job=7) for n in range(4)] + [down(2), down(4)]
     )
     assert trace.compare(live, sim) == []
 
 
-def test_thinning_keeps_every_event_and_the_same_signature():
-    sim, printer = make(**SETTINGS)
-    rec = Recorder(sim, printer)
-    rec.advance(0.5)
-    printer.unload(0)
-    rec.settled()
-    rec.advance(2.0)  # Actions at a real printer are seconds apart, so a 1 s poll sees the gap.
-    printer.load(
-        0, source="tag", name="PETG", color="#1f6fb2", uuid="7b3d2d5e-1f7a-4d8c-9a1e-2c3b4d5e6f70"
+def test_compare_folds_consecutive_events_only():
+    # Two events in consecutive simulator samples, one live sample: the idle sensor clear
+    # counted at boot is the common case, and here an unload and a type restore.
+    live = trace.signature([sample(0, "IDLE", 100, PLA), sample(1, "IDLE", 100, PETG, unloads=1)])
+    sim = trace.signature(
+        [
+            sample(0, "IDLE", 100, PLA),
+            sample(0.5, "IDLE", 100, None, unloads=1),
+            sample(0.6, "IDLE", 100, PETG, unloads=1),
+            sample(0.7, "IDLE", 100, PETG, unloads=1),
+        ]
     )
-    rec.settled()
-    rec.advance(2.0)
-    printer.upload(
-        "spoolman-sync.gcode",
-        'M865 X R N"ASA" O"#d9342b" L0\nM865.1 I0 C"3c2d1e0f-1a2b-4c3d-8e9f-0a1b2c3d4e5f"\n',
-        print_after=True,
-        overwrite=True,
+    assert trace.compare(live, sim) == []
+    # A run between two events is time the probe would have seen, so S14's two unloads
+    # with a load between them can't hide in one live sample.
+    live = trace.signature([sample(0, "IDLE", 100, PLA), sample(1, "IDLE", 150, None, unloads=2)])
+    two = trace.signature(
+        [
+            sample(0, "IDLE", 100, PLA),
+            sample(0.2, "IDLE", 100, None, unloads=1),
+            sample(0.4, "BUSY", 110, None, unloads=1),
+            sample(0.6, "BUSY", 150, PETG, unloads=1),
+            sample(0.8, "IDLE", 150, PETG, unloads=1),
+            sample(1.0, "IDLE", 150, None, unloads=2),
+        ]
     )
-    rec.ended()
-    rec.advance(1.0)
+    assert "event the printer didn't show" in trace.compare(live, two)[0]
+
+
+def test_compare_lets_a_live_event_carry_a_later_state_without_eating_the_run():
+    # The probe saw the unload once the load had begun: BUSY, where the simulator shows
+    # the unload at IDLE and then a BUSY run the next live step still has to match.
+    live = trace.signature(
+        [
+            sample(0, "IDLE", 100, PLA),
+            sample(1, "BUSY", 100, None, unloads=1),
+            sample(2, "BUSY", 120, None, unloads=1),
+            sample(3, "BUSY", 140, None, unloads=1),
+        ]
+    )
+    sim = trace.signature(
+        [
+            sample(0, "IDLE", 100, PLA),
+            sample(0.5, "IDLE", 100, None, unloads=1),
+            sample(0.6, "IDLE", 100, None, unloads=1),
+            sample(0.7, "BUSY", 100, None, unloads=1),
+            sample(1.0, "BUSY", 110, None, unloads=1),
+            sample(2.0, "BUSY", 130, None, unloads=1),
+            sample(3.0, "BUSY", 140, None, unloads=1),
+        ]
+    )
+    assert trace.compare(live, sim) == []
+    # But not a state from after the next event.
+    later = trace.signature(
+        [
+            sample(0, "IDLE", 100, PLA),
+            sample(0.5, "IDLE", 100, None, unloads=1),
+            sample(0.6, "IDLE", 100, PETG, unloads=1),
+            sample(0.7, "BUSY", 100, PETG, unloads=1),
+        ]
+    )
+    assert trace.compare(live, later) != []
+
+
+# The probe's thinning, over the replays.
+
+
+def polled(rec: Recorder, interval: float, offset: int) -> list[trace.Sample]:
+    """The samples a probe at `interval` would have seen, starting `offset` ticks in."""
+    step = round(interval / 0.1)
+    return rec.samples[offset::step]
+
+
+@pytest.mark.parametrize("interval", [0.5, 1.0, 2.0])
+@pytest.mark.parametrize("name", REPLAYS)
+def test_a_correct_simulator_passes_its_own_replay_polled_like_the_probe(name, interval):
+    rec = recorder()
+    REPLAYS[name](rec)
     full = rec.steps()
-    # Whatever second the probe started on, and however sparse its polls, the kept
-    # samples give the printer's events, and the full replay accepts them.
-    for offset in range(10):
-        polled = rec.samples[offset::10]  # one poll per simulated second
-        kept = probe.thin(polled, heartbeat=10.0)
-        assert len(kept) < len(polled)
-        assert trace.signature(kept) == trace.signature(polled)
-        assert trace.compare(trace.signature(kept), full) == [], offset
-    assert any(s.changed for s in trace.signature(probe.thin(rec.samples, 10.0)))
+    step = round(interval / 0.1)
+    for offset in range(step):
+        samples = polled(rec, interval, offset)
+        kept = probe.thin(samples, heartbeat=10.0)
+        assert trace.signature(kept) == trace.signature(samples), (name, interval, offset)
+        live = trace.signature(kept)
+        problems = trace.compare(live, full)
+        assert not problems, "\n".join(
+            [f"{name} at {interval} s, offset {offset}:"]
+            + problems
+            + ["", "polled:", trace.describe(live), "", "full:", trace.describe(full)]
+        )
+
+
+def test_thinning_keeps_fewer_samples_and_every_event():
+    rec = recorder()
+    REPLAYS["F4-load-tag"](rec)
+    samples = polled(rec, 1.0, 0)
+    kept = probe.thin(samples, heartbeat=10.0)
+    assert len(kept) < len(samples)
+    assert [s for s in trace.signature(kept) if s.is_event()] == [
+        s for s in trace.signature(samples) if s.is_event()
+    ]
+    assert kept[-1] is samples[-1]  # the last run's end is flushed
+
+
+# The file format and the command.
 
 
 def test_round_trip(tmp_path: Path):
-    sim, printer = make(**SETTINGS)
+    sim, printer = make()
     rec = Recorder(sim, printer)
     rec.advance(0.3)
     printer.set_power("off")
@@ -282,7 +409,7 @@ def test_round_trip(tmp_path: Path):
 
 
 def test_cli_prints_signature_and_compares(tmp_path: Path, capsys):
-    sim, printer = make(**SETTINGS)
+    sim, printer = make()
     rec = Recorder(sim, printer)
     rec.advance(0.3)
     path = tmp_path / "t.jsonl"

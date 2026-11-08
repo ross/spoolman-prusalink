@@ -96,11 +96,18 @@ class Keeper:
             self._prev = s
         return out
 
+    def flush(self) -> list[trace.Sample]:
+        """The held-back poll, if any: the last run's end, written when the probe stops."""
+        out = [self._prev] if self._prev is not None else []
+        self._prev = None
+        return out
+
 
 def thin(samples: list[trace.Sample], heartbeat: float, tool: int = 0) -> list[trace.Sample]:
     """The samples `record()` would keep out of these, for tests."""
     keeper = Keeper(heartbeat, tool)
-    return [kept for s in samples for kept in keeper.take(s)]
+    kept = [k for s in samples for k in keeper.take(s)]
+    return kept + keeper.flush()
 
 
 def _git_commit() -> str | None:
@@ -189,6 +196,9 @@ def record(args: argparse.Namespace) -> int:
         except KeyboardInterrupt:
             pass
         finally:
+            for kept in keeper.flush():  # the last run's end
+                f.write(trace.dumps(kept) + "\n")
+                written += 1
             write_marks(f)  # a note typed since the last poll, such as "plugged back in"
     print(f"wrote {written} samples to {out}", file=sys.stderr)
     return 0

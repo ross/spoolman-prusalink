@@ -128,12 +128,23 @@ cheap filament.
    idle, or before a print starts: the first sample has nothing to be
    compared with, so a trace that begins in the middle of something can't
    show how it got there. A trace may begin later than the replay does, as
-   long as it begins at rest: the comparison requires that every step the
-   printer showed appears in the simulator's steps, in order, and that the
-   simulator shows no unload, material change, boot or job the printer
-   didn't. One poll can see two changes at once, such as a job appearing
-   and its `M865` applying, so a live step may stand for several
-   consecutive simulator steps when they add up to it.
+   long as it begins at rest, for longer than the polling interval: the
+   replay tests assume it. A trace is reduced to steps, each either an
+   event (a new job, a new boot, a material change or an unload, always one
+   sample) or a run of samples with the same state, job presence and kind
+   of material. The comparison requires that every step the printer showed
+   appears in the simulator's steps, in order. The simulator may show runs
+   the probe missed, but no event the printer didn't, and none after the
+   printer's last step. One poll can see several changes at once, such as an
+   unload and a material change, so a live event may stand for up to four
+   consecutive simulator events; runs never combine. Whether `extruded`
+   moved is checked separately for each step, over the simulator steps from
+   where it matched to where the next one did: the simulator states the
+   probe skipped belong to the step before them. Movement the printer showed
+   must appear there, and movement the simulator sustains must have been
+   seen: between the step's samples, or in the poll that crossed into the
+   next step when the movement filled less than half the stretch, unless
+   that poll found the printer unreachable.
 2. **Mark each step** by typing what you're about to do and pressing Enter,
    then do it at the printer: `unload from the menu`, `pulled the plug`.
    Marks carry their time and show up in the review.
