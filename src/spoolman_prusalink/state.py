@@ -92,8 +92,9 @@ def load_state(path: Path, printers: Sequence[str]) -> State:
             raise ValueError(
                 f"{path} is from a single-printer bridge (state version {version}); with "
                 f"{len(printers)} printers configured, the bridge can't tell which one it "
-                "belongs to. Start once with that printer alone to migrate it, then add "
-                "the others."
+                "belongs to. Configure that printer alone and poll once with dry run off and "
+                "the printer and Spoolman reachable, which saves the file as version "
+                f"{STATE_VERSION}. Then add the others."
             )
         data = _migrate_v2(data, printers[0])
     elif version != STATE_VERSION:

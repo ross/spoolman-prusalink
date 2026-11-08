@@ -8,6 +8,7 @@ import re
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlsplit
 
 # The name of the printer in the single-printer config form, which has no name of its own.
 DEFAULT_PRINTER_NAME = "default"
@@ -123,24 +124,42 @@ def _table(raw: dict, key: str) -> dict:
     return value
 
 
-def _tools(entries: object, what: str) -> dict[int, str]:
-    """Parse `[[tools]]` entries: each maps a tool index to a Spoolman location."""
+def _tools(entries: object, what: str, prefix: str = "") -> dict[int, str]:
+    """Parse `[[tools]]` entries: each maps a tool index to a Spoolman location.
+
+    `prefix` names the printer in errors when the entries belong to a listed printer.
+    """
     tools: dict[int, str] = {}
+    where = f"{prefix}: " if prefix else ""
     if not isinstance(entries, list):
-        raise ConfigError(f"tools must be {what} entries")
+        raise ConfigError(f"{where}tools must be {what} entries")
     for entry in entries:
         if not isinstance(entry, dict) or "index" not in entry or "location" not in entry:
-            raise ConfigError(f"each {what} entry needs an index and a location")
+            raise ConfigError(f"{where}each {what} entry needs an index and a location")
         index = entry["index"]
-        location = _str(entry, "location", "", "tool location")
+        location = _str(entry, "location", "", f"{where}tool location")
         if isinstance(index, bool) or not isinstance(index, int):
-            raise ConfigError(f"tool index must be an integer, got {index!r}")
+            raise ConfigError(f"{where}tool index must be an integer, got {index!r}")
         if index in tools:
-            raise ConfigError(f"tool {index} is configured twice")
+            raise ConfigError(f"{where}tool {index} is configured twice")
         if location in tools.values():
-            raise ConfigError(f"location {location!r} is mapped to more than one tool")
+            raise ConfigError(f"{where}location {location!r} is mapped to more than one tool")
         tools[index] = location
     return tools
+
+
+def _url_key(url: str) -> str:
+    """Normalize a printer URL for comparing two entries: scheme and host case, the default
+    port, and a trailing slash don't make a different printer."""
+    parts = urlsplit(url.strip())
+    scheme = parts.scheme.lower()
+    host = (parts.hostname or "").lower()
+    port = parts.port
+    if port is None or (scheme, port) in (("http", 80), ("https", 443)):
+        netloc = host
+    else:
+        netloc = f"{host}:{port}"
+    return f"{scheme}://{netloc}{parts.path.rstrip('/')}"
 
 
 def _printer_settings(table: dict, prefix: str) -> dict:
@@ -181,8 +200,11 @@ def _api_key_from_file(table: dict, prefix: str, env: dict[str, str]) -> str:
     return key
 
 
-def _single_printer(raw: dict, env: dict[str, str]) -> PrinterConfig:
-    """Parse the `[printer]` and `[[tools]]` form, with the environment on top."""
+def _single_identity(raw: dict, env: dict[str, str]) -> tuple[str, str]:
+    """Return the `[printer]` form's API key and URL, with the environment on top.
+
+    Checked before the Spoolman URL, so a bare start reports the printer first as before.
+    """
     printer = _table(raw, "printer")
     # Check the file's values even when the environment overrides them.
     file_api_key = _api_key_from_file(printer, "printer", env)
@@ -193,6 +215,12 @@ def _single_printer(raw: dict, env: dict[str, str]) -> PrinterConfig:
     url = env.get("PRUSALINK_URL") or file_url
     if not url:
         raise ConfigError("set printer.url or PRUSALINK_URL")
+    return api_key, url
+
+
+def _single_printer(raw: dict, env: dict[str, str], api_key: str, url: str) -> PrinterConfig:
+    """Parse the rest of the `[printer]` and `[[tools]]` form."""
+    printer = _table(raw, "printer")
     tools = _tools(raw.get("tools", []), "[[tools]]")
     if not tools and env.get("SPOOLMAN_PRUSALINK_LOCATION"):
         tools[0] = env["SPOOLMAN_PRUSALINK_LOCATION"]
@@ -222,7 +250,7 @@ def _listed_printer(entry: object, index: int, env: dict[str, str]) -> PrinterCo
     api_key = _api_key_from_file(entry, prefix, env)
     if not api_key:
         raise ConfigError(f"set {prefix}.api_key or {prefix}.api_key_env")
-    tools = _tools(entry.get("tools", []), "[[printers.tools]]")
+    tools = _tools(entry.get("tools", []), "[[printers.tools]]", prefix)
     if not tools:
         raise ConfigError(f"{prefix} needs [[printers.tools]] entries")
     return PrinterConfig(
@@ -234,10 +262,9 @@ def _listed_printer(entry: object, index: int, env: dict[str, str]) -> PrinterCo
 _SINGLE_PRINTER_VARS = ("PRUSALINK_URL", "PRUSALINK_API_KEY", "SPOOLMAN_PRUSALINK_LOCATION")
 
 
-def _printers(raw: dict, env: dict[str, str]) -> tuple[PrinterConfig, ...]:
-    entries = raw.get("printers")
-    if entries is None:
-        return (_single_printer(raw, env),)
+def _listed_printers(raw: dict, env: dict[str, str]) -> tuple[PrinterConfig, ...]:
+    """Parse the `[[printers]]` list."""
+    entries = raw["printers"]
     if "printer" in raw or "tools" in raw:
         raise ConfigError("use [printer] and [[tools]] or [[printers]], not both")
     for var in _SINGLE_PRINTER_VARS:
@@ -246,7 +273,9 @@ def _printers(raw: dict, env: dict[str, str]) -> tuple[PrinterConfig, ...]:
                 f"{var} configures a single [printer]; with [[printers]], set each "
                 "printer's url, api_key and tools in the file"
             )
-    if not isinstance(entries, list) or not entries:
+    if not isinstance(entries, list):
+        raise ConfigError("printers must be a list of [[printers]] tables")
+    if not entries:
         raise ConfigError("[[printers]] needs at least one entry")
     printers = tuple(_listed_printer(entry, i, env) for i, entry in enumerate(entries))
     seen_locations: dict[str, str] = {}
@@ -254,11 +283,11 @@ def _printers(raw: dict, env: dict[str, str]) -> tuple[PrinterConfig, ...]:
     for printer in printers:
         if sum(p.name == printer.name for p in printers) > 1:
             raise ConfigError(f"printer {printer.name!r} is configured twice")
-        url = printer.url.rstrip("/")
+        url = _url_key(printer.url)
         if url in seen_urls:
             raise ConfigError(
                 f"printers {seen_urls[url]!r} and {printer.name!r} have the same url; "
-                "two bridges on one printer would charge its usage twice"
+                "the printer's usage would be counted twice"
             )
         seen_urls[url] = printer.name
         for location in printer.tools.values():
@@ -268,6 +297,9 @@ def _printers(raw: dict, env: dict[str, str]) -> tuple[PrinterConfig, ...]:
                     f"{seen_locations[location]!r} and {printer.name!r}"
                 )
             seen_locations[location] = printer.name
+    if len(printers) > 1:
+        # Lifted once the poll loop serves every printer.
+        raise ConfigError("the bridge serves one printer for now; [[printers]] has several")
     return printers
 
 
@@ -292,13 +324,18 @@ def load(path: str | os.PathLike | None, env: dict[str, str] | None = None) -> C
     spoolman = _table(raw, "spoolman")
     bridge = _table(raw, "bridge")
 
-    # Check the file's values even when the environment overrides them.
+    # Check the file's values even when the environment overrides them. The one-printer
+    # form's key and URL are checked before the Spoolman URL, as they always were.
     file_spoolman_url = _str(spoolman, "url", "", "spoolman.url")
+    single = raw.get("printers") is None
+    identity = _single_identity(raw, env) if single else None
     spoolman_url = env.get("SPOOLMAN_URL") or file_spoolman_url
     if not spoolman_url:
         raise ConfigError("set spoolman.url or SPOOLMAN_URL")
-
-    printers = _printers(raw, env)
+    if identity is not None:
+        printers: tuple[PrinterConfig, ...] = (_single_printer(raw, env, *identity),)
+    else:
+        printers = _listed_printers(raw, env)
 
     dry_run = _env_bool(env, "SPOOLMAN_PRUSALINK_DRY_RUN")
     if dry_run is None:
