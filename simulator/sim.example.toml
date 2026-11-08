@@ -1,0 +1,72 @@
+# Printer simulator configuration. Copy to sim.toml and run `python -m simulator -c sim.toml`.
+# Every setting below is shown commented with its default.
+
+# Where the control page and API listen, and where snapshots are saved.
+# host = "127.0.0.1"
+# control_port = 8000
+# data_dir = "simulator/data"
+
+# Timing and lengths. Durations and rates are in simulated seconds.
+# time_scale = 1.0                  # simulated seconds per real second
+# feed_ratio = 0.95                 # extruded = slicer mm * feed_ratio
+# print_rate_mm_s = 5.0             # slicer mm per second for a print with no duration
+# load_rate_mm_s = 10.0             # feed and purge speed during a load
+# unload_seconds = 3.0
+# load_feed_mm = 36.0               # counted feed before the material is set
+# purge_mm = 40.0
+# toolchange_purge_mm = 30.0
+# jam_purge_mm = 60.0               # extra purge on the reload after a jam
+# preheat_seconds = 5.0
+# scan_seconds = 0.5
+# blip_seconds = 0.3
+# park_seconds = 1.0
+# sync_job_seconds = 3.0            # how long a sync job holds PRINTING after the blip
+# auto_accept_model_check = false   # accept a sync job's model check without a tap
+# start_blip = true                 # the brief IDLE between scanning and preheating
+
+# The port defaults to control_port + 1 + the printer's position in this file.
+
+[[printers]]
+name = "core-one-l"                 # [A-Za-z0-9_.-]{1,64}
+model = "8.1.0"                     # Core One L: holds an instance UUID on tool 0
+# api_key = "sim-core-one-l"
+# port = 8001
+# firmware = "full"                 # full, no_counters or no_endpoint; default by model
+# auto_accept_model_check = true    # this printer only; default is the global setting
+
+[[printers.tools]]
+index = 0
+# enabled = true
+material = { name = "PLA", color = "#73737b", instance_uuid = "44c406a5-c6f5-4440-bfba-e8060564b717" }
+extruded = 4310
+# unload_count = 0
+# extruded_at_unload = 0
+
+[[printers]]
+name = "mk4s"
+model = "1.4.1"
+
+[[printers.tools]]
+index = 0
+
+[[printers]]
+name = "indx"
+model = "8.10.0"                    # INDX: up to 8 tools, no UUIDs
+
+[[printers.tools]]
+index = 0
+material = { name = "PLA", color = "#73737b" }
+
+[[printers.tools]]
+index = 1
+material = { name = "PETG", color = "#1f6fb2" }
+
+[[printers.tools]]
+index = 2
+
+[[printers.tools]]
+index = 3
+enabled = false
+
+[[printers.tools]]
+index = 4

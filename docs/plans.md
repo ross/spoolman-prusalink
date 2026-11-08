@@ -17,6 +17,13 @@ The firmware facts in this plan come from the firmware source
 2026-11-08, not from hardware, except where a row says "Seen live". Paths
 in parentheses are in the firmware repo.
 
+## Status
+
+Workstreams 1 to 5 are built, under `simulator/`, with
+[simulator/README.md](../simulator/README.md) as the user guide. Scripted
+scenarios (workstream 6) are not. The decisions the build made where this
+plan was silent are listed in that README under "Choices made".
+
 ## Goal and non-goals
 
 The goal is to reproduce every printer-side event in
