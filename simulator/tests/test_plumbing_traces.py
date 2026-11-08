@@ -196,7 +196,7 @@ def test_compare_reports_movement_differences():
     assert trace.compare(still, still) == [] and trace.compare(moving, moving) == []
     # A simulator that moves the counter through a pause, or one that holds it while the
     # printer moved, is wrong either way.
-    assert "saw none" in trace.compare(still, moving)[0]
+    assert "where the printer showed none" in trace.compare(still, moving)[0]
     assert "moved '+' within it" in trace.compare(moving, still)[0]
 
     # Movement in a step's first sample straddles the change before it: a FINISHED poll
@@ -271,13 +271,60 @@ def test_compare_lets_brief_movement_hide_in_the_poll_that_crossed_a_step():
     change = [sample(6, "ATTENTION", 120, PETG, job=7)]
     assert trace.compare(live, trace.signature(rest + tail + change)) == []
     throughout = [sample(n / 2, "ATTENTION", 100 + 2 * n, None, job=7) for n in range(12)]
-    assert "saw none" in trace.compare(live, trace.signature(throughout + change))[0]
+    problems = trace.compare(live, trace.signature(throughout + change))
+    assert "where the printer showed none" in problems[0]
     # Movement right before a power cut is lost with the counters, so it isn't demanded.
     live = trace.signature([sample(0, "PRINTING", 100, PLA, job=7), down(2), down(4)])
     sim = trace.signature(
         [sample(n / 2, "PRINTING", 100 + 5 * n, PLA, job=7) for n in range(4)] + [down(2), down(4)]
     )
     assert trace.compare(live, sim) == []
+
+
+def test_compare_places_simulator_movement_by_where_it_falls():
+    gap = 1.0
+    still = [sample(0, "IDLE", 100, PLA)] + [sample(t, "BUSY", 100, PLA) for t in range(1, 22)]
+    still += [sample(22, "IDLE", 100, PLA), sample(23, "IDLE", 100, PLA)]
+    live = trace.signature(still)
+
+    def busy(moves: dict[float, int]) -> list[trace.Step]:
+        """A BUSY run of 20 s that extrudes `mm` at each of `moves`' seconds in one tick."""
+        e, out = 100, [sample(0, "IDLE", 100, PLA)]
+        t = 0.1
+        while t < 22.0 - 1e-9:
+            e += moves.get(round(t, 1), 0)
+            out.append(sample(round(t, 1), "BUSY" if t < 21.5 else "IDLE", e, PLA))
+            t += 0.1
+        return trace.signature(out)
+
+    # A purge as BUSY begins shows in the live step's first sample on the printer too.
+    purge = [sample(0, "IDLE", 100, PLA), sample(1, "BUSY", 140, PLA)]
+    purge += [sample(t, "BUSY", 140, PLA) for t in range(2, 22)] + [sample(22, "IDLE", 140, PLA)]
+    assert (
+        trace.compare(trace.signature(purge), busy({0.2: 10, 0.3: 10, 0.4: 10, 0.5: 10}), gap) == []
+    )
+    # The same purge against a printer that never moved is caught, as is a single tick's
+    # jump in the middle of the run, or at its end, and a retraction.
+    assert "at the start of" in trace.compare(live, busy({0.3: 40}), gap)[0]
+    assert "in the middle of" in trace.compare(live, busy({10.0: 50}), gap)[0]
+    assert "at the end of" in trace.compare(live, busy({21.3: 50}), gap)[0]
+    assert "moved '-' in the middle" in trace.compare(live, busy({10.0: -50}), gap)[0]
+    # Movement in the last poll gap before a power cut is lost with the counters, but
+    # movement earlier in the stretch is not.
+    cut = [sample(0, "IDLE", 100, PLA)] + [sample(t, "IDLE", 100, PLA) for t in range(1, 30)]
+    cut += [down(30), down(31)]
+    live_cut = trace.signature(cut)
+
+    def idle_then_cut(moves: dict[float, int]) -> list[trace.Step]:
+        e, out, t = 100, [], 0.0
+        while t < 30.0 - 1e-9:
+            e += moves.get(round(t, 1), 0)
+            out.append(sample(round(t, 1), "IDLE", e, PLA))
+            t += 0.1
+        return trace.signature(out + [down(30), down(31)])
+
+    assert trace.compare(live_cut, idle_then_cut({29.5: 20}), gap) == []
+    assert "in the middle of" in trace.compare(live_cut, idle_then_cut({15.0: 20}), gap)[0]
 
 
 def test_compare_folds_consecutive_events_only():
@@ -293,20 +340,24 @@ def test_compare_folds_consecutive_events_only():
         ]
     )
     assert trace.compare(live, sim) == []
-    # A run between two events is time the probe would have seen, so S14's two unloads
-    # with a load between them can't hide in one live sample.
+    # Runs between two events fold too while together they last less than a poll gap:
+    # the sync job's scan between the job appearing and its M865 applying, for example.
+    # Longer than that, the probe would have seen them, so S14's two unloads with a load
+    # between them can't hide in one live sample.
     live = trace.signature([sample(0, "IDLE", 100, PLA), sample(1, "IDLE", 150, None, unloads=2)])
-    two = trace.signature(
-        [
-            sample(0, "IDLE", 100, PLA),
-            sample(0.2, "IDLE", 100, None, unloads=1),
-            sample(0.4, "BUSY", 110, None, unloads=1),
-            sample(0.6, "BUSY", 150, PETG, unloads=1),
-            sample(0.8, "IDLE", 150, PETG, unloads=1),
-            sample(1.0, "IDLE", 150, None, unloads=2),
-        ]
-    )
-    assert "event the printer didn't show" in trace.compare(live, two)[0]
+
+    def two(load_seconds: float) -> list[trace.Step]:
+        n = round(load_seconds / 0.1)
+        return trace.signature(
+            [sample(0, "IDLE", 100, PLA), sample(0.1, "IDLE", 100, None, unloads=1)]
+            + [sample(0.2 + k / 10, "BUSY", 110 + k, None, unloads=1) for k in range(n)]
+            + [sample(0.2 + n / 10, "BUSY", 150, PETG, unloads=1)]
+            + [sample(0.3 + (n + k) / 10, "IDLE", 150, PETG, unloads=1) for k in range(n)]
+            + [sample(0.3 + 2 * n / 10, "IDLE", 150, None, unloads=2)]
+        )
+
+    assert trace.compare(live, two(0.3)) == []
+    assert "event the printer didn't show" in trace.compare(live, two(3.0))[0]
 
 
 def test_compare_lets_a_live_event_carry_a_later_state_without_eating_the_run():
@@ -365,7 +416,7 @@ def test_a_correct_simulator_passes_its_own_replay_polled_like_the_probe(name, i
         kept = probe.thin(samples, heartbeat=10.0)
         assert trace.signature(kept) == trace.signature(samples), (name, interval, offset)
         live = trace.signature(kept)
-        problems = trace.compare(live, full)
+        problems = trace.compare(live, full, interval)
         assert not problems, "\n".join(
             [f"{name} at {interval} s, offset {offset}:"]
             + problems
@@ -382,7 +433,9 @@ def test_thinning_keeps_fewer_samples_and_every_event():
     assert [s for s in trace.signature(kept) if s.is_event()] == [
         s for s in trace.signature(samples) if s.is_event()
     ]
-    assert kept[-1] is samples[-1]  # the last run's end is flushed
+    # The last run's end is held back until the probe stops, then flushed.
+    tail = [sample(t, "IDLE", 100, PLA) for t in (0, 1, 2)]
+    assert probe.thin(tail, heartbeat=10.0) == [tail[0], tail[2]]
 
 
 # The file format and the command.

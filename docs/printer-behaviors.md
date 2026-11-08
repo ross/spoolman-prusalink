@@ -137,14 +137,17 @@ cheap filament.
    the probe missed, but no event the printer didn't, and none after the
    printer's last step. One poll can see several changes at once, such as an
    unload and a material change, so a live event may stand for up to four
-   consecutive simulator events; runs never combine. Whether `extruded`
-   moved is checked separately for each step, over the simulator steps from
-   where it matched to where the next one did: the simulator states the
-   probe skipped belong to the step before them. Movement the printer showed
-   must appear there, and movement the simulator sustains must have been
-   seen: between the step's samples, or in the poll that crossed into the
-   next step when the movement filled less than half the stretch, unless
-   that poll found the printer unreachable.
+   consecutive simulator events, with runs between them that together last
+   less than one poll; longer runs never combine. Whether `extruded` moved
+   is checked separately for each step, over the simulator steps from where
+   it matched to where the next one did: the simulator states the probe
+   skipped belong to the step before them. Movement the printer showed must
+   appear there. The other way, every simulator sample that moved must have
+   been seen, and where it falls says where: within a poll of the stretch's
+   start, in the step's first sample; within a poll of its end, in the next
+   step's first sample; in between, between the step's own samples.
+   Movement in the last poll before a power cut is lost with the counters,
+   so it isn't demanded. Durations aren't compared otherwise.
 2. **Mark each step** by typing what you're about to do and pressing Enter,
    then do it at the printer: `unload from the menu`, `pulled the plug`.
    Marks carry their time and show up in the review.

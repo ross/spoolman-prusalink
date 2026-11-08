@@ -131,7 +131,9 @@ class Step:
     `compare()`: `entry` is the first sample's movement, which happened in the interval
     before it and so may belong to the step before; `interior` is the movement over the
     other samples, which is this step's for sure; `samples` and `moves` count the samples
-    and how many of them moved.
+    and how many of them moved. `t_first` and `t_last` are the times of the first and
+    last samples, and `moving` the time and direction of every sample that moved, so
+    `compare()` can tell movement at the edge of a stretch from movement in its middle.
     """
 
     state: str
@@ -145,6 +147,9 @@ class Step:
     interior: str = field(default="0", compare=False)
     samples: int = field(default=1, compare=False)
     moves: int = field(default=0, compare=False)
+    t_first: float = field(default=0.0, compare=False)
+    t_last: float = field(default=0.0, compare=False)
+    moving: tuple[tuple[float, str], ...] = field(default=(), compare=False)
 
     def is_event(self) -> bool:
         return self.job == "new" or self.boot == "new" or self.changed or self.unloads != 0
@@ -231,7 +236,9 @@ class Signer:
     def step(self, s: Sample) -> Step:
         """Classify one sample, fold it into `steps`, and return its own step."""
         if s.status is None:
-            step = Step(UNREACHABLE, "none", "same", "unknown", False, 0, "0")
+            step = Step(
+                UNREACHABLE, "none", "same", "unknown", False, 0, "0", t_first=s.t, t_last=s.t
+            )
             self._add(step)
             return step
         state = str(s.status.get("printer", {}).get("state", "?"))
@@ -265,7 +272,18 @@ class Signer:
                 unloads = _int(here, "unload_count") - _int(before, "unload_count")
                 moved = _direction(_int(here, "extruded") - _int(before, "extruded"))
         step = Step(
-            state, job, boot, material, changed, unloads, moved, moved, "0", 1, int(moved != "0")
+            state,
+            job,
+            boot,
+            material,
+            changed,
+            unloads,
+            moved,
+            entry=moved,
+            moves=int(moved != "0"),
+            t_first=s.t,
+            t_last=s.t,
+            moving=((s.t, moved),) if moved != "0" else (),
         )
         self._add(step)
         self._filament = filament
@@ -285,6 +303,8 @@ class Signer:
                 interior=_merge_direction(last.interior, step.extruded),
                 samples=last.samples + 1,
                 moves=last.moves + step.moves,
+                t_last=step.t_last,
+                moving=last.moving + step.moving,
             )
         else:
             self.steps.append(step)
@@ -299,7 +319,23 @@ def signature(samples: list[Sample], tool: int = 0) -> list[Step]:
 
 
 FOLD_WINDOW = 4  # consecutive simulator events one live sample may cover
-SUSTAINED = 2  # moving simulator samples that a live step watching the run must have seen
+SLACK = 1.5  # a poll gap may run this much over the interval before it's a missed sample
+
+
+def poll_gap(steps: list[Step]) -> float:
+    """The shortest spacing between consecutive samples: the polling interval.
+
+    A thinned trace keeps the poll before every change along with the change itself, so
+    at least one pair of samples one interval apart survives.
+    """
+    gaps = []
+    for a, b in zip(steps, steps[1:], strict=False):
+        gaps.append(b.t_first - a.t_last)
+    for st in steps:
+        if st.samples > 1:
+            gaps.append((st.t_last - st.t_first) / (st.samples - 1))
+    gaps = [g for g in gaps if g > 0]
+    return min(gaps) if gaps else 1.0
 
 
 def fold(steps: list[Step]) -> Step:
@@ -332,41 +368,58 @@ def _states_after(sim: list[Step], k: int) -> set[str]:
     return states
 
 
-def _match_event(step: Step, sim: list[Step], j: int) -> int | None:
+def _match_event(step: Step, sim: list[Step], j: int, window: float, tick: float) -> int | None:
     """The index of the last simulator event that `step` folds `sim[j:]` up to, or None.
 
     The live sample's state may be any state the printer reached before its next event,
-    since the sample can come after the event within the same poll.
+    since the sample can come after the event within the same poll. Runs between the
+    folded events are allowed while together they last less than `window`, one poll gap:
+    the probe could have missed them all.
     """
-    for k in range(j, min(len(sim), j + FOLD_WINDOW)):
-        if not sim[k].is_event():
-            break
-        f = fold(sim[j : k + 1])
-        if f.shape()[1:] == step.shape()[1:] and step.state in _states_after(sim, k):
-            return k
+    folded: list[Step] = []
+    skipped = 0.0
+    for k in range(j, len(sim)):
+        if sim[k].is_event():
+            folded.append(sim[k])
+            if len(folded) > FOLD_WINDOW:
+                return None
+            f = fold(folded)
+            if f.shape()[1:] == step.shape()[1:] and step.state in _states_after(sim, k):
+                return k
+        else:
+            skipped += sim[k].t_last - sim[k].t_first + tick
+            if skipped >= window:
+                return None
     return None
 
 
-def compare(live: list[Step], sim: list[Step]) -> list[str]:
+def compare(live: list[Step], sim: list[Step], gap: float | None = None) -> list[str]:
     """Problems with `sim` as a stand-in for `live`: empty when the two agree.
+
+    `gap` is the live trace's polling interval, taken from its samples when not given.
 
     Shape first: every live step must appear in the simulator's steps, in order. The
     simulator may have extra steps that aren't events, because the probe can miss a state
     that lasts less than its interval. It may not have extra events: an unload, a material
     change, a new boot or a new job ID is cumulative, so the printer would have shown it
-    too. A live event may stand for consecutive simulator events, and its state may be any
-    the printer reached before the next event.
+    too. A live event may stand for consecutive simulator events, with runs between them
+    that together last less than a poll gap, and its state may be any the printer reached
+    before the next event.
 
     Then movement, per live step, against the simulator steps from where it matched to
     where the next live step matched. Movement inside a live step is the step's own, so
     the simulator must show it there. A step's first sample straddles the change before
-    it, so that movement may be the neighbor's. And steady movement in the simulator, over
-    several samples, must have been seen by the live step that watched that stretch:
-    between its samples, or in the poll that crossed into the next step when the
-    movement filled less than half the stretch, unless that poll found the printer
-    unreachable.
+    it, so that movement may be the neighbor's. The other way, every simulator sample that
+    moved must have been seen by the live step watching that stretch, and where it falls
+    says where: within a poll gap of the stretch's start it may be in the step's first
+    sample, within a gap of its end it may be in the next step's first sample, and in
+    between it must be between the step's own samples. Movement at the end isn't demanded
+    when the next poll found the printer unreachable, since the counters restart, or when
+    the trace ended.
     """
     problems: list[str] = []
+    window = (gap if gap is not None else poll_gap(live)) * SLACK
+    tick = poll_gap(sim)
     matched: list[int] = []  # where in the simulator each live step matched
     j = 0
     for i, step in enumerate(live):
@@ -378,7 +431,7 @@ def compare(live: list[Step], sim: list[Step]) -> list[str]:
                 return problems
             if step.is_event():
                 if sim[j].is_event():
-                    k = _match_event(step, sim, j)
+                    k = _match_event(step, sim, j, window, tick)
                     if k is None:
                         problems.append(
                             f"simulator step {j} is an event the printer didn't show: {sim[j]}"
@@ -409,26 +462,42 @@ def compare(live: list[Step], sim: list[Step]) -> list[str]:
     # step's match: the states the probe missed in between happened on its watch.
     spans = [(m, n) for m, n in zip(matched, matched[1:] + [len(sim)], strict=True)]
 
-    def span_movement(i: int) -> tuple[str, int, int]:
-        """The span's merged direction, its moving samples and its samples in all."""
+    def span_movement(i: int) -> str:
+        """The merged direction over the simulator steps a live step stands for."""
         if not 0 <= i < len(spans):
-            return "0", 0, 0
-        moved, moves, samples = "0", 0, 0
+            return "0"
+        moved = "0"
         for st in sim[spans[i][0] : spans[i][1]]:
             moved = _merge_direction(moved, st.extruded)
-            moves += st.moves
-            samples += st.samples
-        return moved, moves, samples
+        return moved
 
     for i, step in enumerate(live):
-        here, moves, span_samples = span_movement(i)
-        before, _, _ = span_movement(i - 1)
-        after, _, _ = span_movement(i + 1)
+        a, b = spans[i]
+        here = span_movement(i)
+        before, after = span_movement(i - 1), span_movement(i + 1)
+        previous = live[i - 1] if i > 0 else None
+        following = live[i + 1] if i + 1 < len(live) else None
+        # Where the probe could have seen movement in this stretch: between this step's
+        # samples ("own"), in its first sample ("in"), or in the next step's first sample
+        # ("out"). A poll that found the printer unreachable shows no counter at all.
+        own = step.interior if step.samples > 1 else "0"
+        edge_in = step.entry
+        edge_out = (
+            following.entry if following is not None and following.state != UNREACHABLE else "0"
+        )
+        # An event's one sample may fall inside the stretch after it, so movement near
+        # the start of that stretch may have shown in the event's sample, and this step's
+        # first sample comes up to a poll gap later than usual.
+        head = window
+        if previous is not None and previous.samples == 1:
+            edge_in = _merge_direction(edge_in, previous.entry)
+            head = 2 * window
+        start, stop = sim[a].t_first, sim[b - 1].t_last
         for d in "+-":
             if _has(step.interior, d) and not _has(here, d):
                 problems.append(
                     f"live step {i} moved {d!r} within it, but the simulator didn't over its "
-                    f"steps {spans[i][0]} to {spans[i][1] - 1}: {step}"
+                    f"steps {a} to {b - 1}: {step}"
                 )
                 return problems
             nearby = _merge_direction(before, here)
@@ -440,26 +509,26 @@ def compare(live: list[Step], sim: list[Step]) -> list[str]:
                     f"neither there nor just before: {step}"
                 )
                 return problems
-            if _has(here, d) and moves >= SUSTAINED:
-                # Movement on this step's watch shows up between the step's own samples.
-                # Movement over less than half the span may instead have fallen in the one
-                # poll that crossed into the next step, and shows up in its entry. It can't
-                # show up at all when that poll found the printer unreachable: the counters
-                # restart with it.
-                seen = step.interior if step.samples > 1 else step.entry
-                brief = step.samples == 1 or moves * 2 < span_samples
-                following = live[i + 1] if i + 1 < len(live) else None
-                if following is not None:
-                    if following.state == UNREACHABLE:
+            for st in sim[a:b]:
+                for t, direction in st.moving:
+                    if direction != d:
                         continue
-                    if brief:
-                        seen = _merge_direction(seen, following.entry)
-                if not _has(seen, d):
-                    problems.append(
-                        f"the simulator moved {d!r} for {moves} samples over its steps "
-                        f"{spans[i][0]} to {spans[i][1] - 1}, and live step {i} saw none: {step}"
-                    )
-                    return problems
+                    seen = [own] if step.samples > 1 else [edge_in, edge_out]
+                    at = "in the middle of"
+                    if t - start <= head:
+                        seen += [edge_in, own]
+                        at = "at the start of"
+                    if stop - t <= window:
+                        if following is None or following.state == UNREACHABLE:
+                            continue  # lost with the counters, or after the trace ended
+                        seen += [own, edge_out]
+                        at = "at the end of" if at == "in the middle of" else "throughout"
+                    if not any(_has(place, d) for place in seen):
+                        problems.append(
+                            f"the simulator moved {d!r} {at} the stretch live step {i} watched "
+                            f"(its steps {a} to {b - 1}), where the printer showed none: {step}"
+                        )
+                        return problems
     return problems
 
 

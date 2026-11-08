@@ -34,12 +34,11 @@ SYNC_JOB = (
 # samples, as it does on the printer. Each replay starts with `LEAD` seconds at rest,
 # longer than any probe interval the plumbing tests try, so a trace polled from any
 # offset begins at rest, as docs/printer-behaviors.md asks of a recording. The scan
-# lasts longer than any probe interval too, so a job is always seen before the sync
-# job's G-code applies, as on the printer where the scan takes a few seconds.
+# keeps the model's default: how long the printer takes to scan the sync job's four
+# lines isn't recorded yet, and the comparison lets a poll miss it either way.
 SETTINGS = dict(
     unload_seconds=2.0,
     load_rate_mm_s=20.0,
-    scan_seconds=2.5,
     blip_seconds=0.3,
     park_seconds=1.0,
     sync_job_seconds=2.0,
@@ -101,7 +100,7 @@ def check(name: str, rec: Recorder) -> None:
     recorded = trace.read(path)
     live = trace.signature(recorded.samples, recorded.header.get("tool", 0))
     sim = rec.steps()
-    problems = trace.compare(live, sim)
+    problems = trace.compare(live, sim, recorded.header.get("interval"))
     assert not problems, "\n".join(
         problems + ["", "live:", trace.describe(live), "", "simulator:", trace.describe(sim)]
     )
