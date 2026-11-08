@@ -148,13 +148,18 @@ def _tools(entries: object, what: str, prefix: str = "") -> dict[int, str]:
     return tools
 
 
-def _url_key(url: str) -> str:
+def _url_key(url: str, prefix: str) -> str:
     """Normalize a printer URL for comparing two entries: scheme and host case, the default
     port, and a trailing slash don't make a different printer."""
-    parts = urlsplit(url.strip())
+    try:
+        parts = urlsplit(url.strip())
+        port = parts.port  # Also raises for a port that isn't a number or is out of range.
+    except ValueError as e:
+        raise ConfigError(f"{prefix}.url isn't a valid url: {e}") from e
     scheme = parts.scheme.lower()
-    host = (parts.hostname or "").lower()
-    port = parts.port
+    host = parts.hostname or ""
+    if ":" in host:  # IPv6 keeps its brackets, so the port stays apart from the address.
+        host = f"[{host}]"
     if port is None or (scheme, port) in (("http", 80), ("https", 443)):
         netloc = host
     else:
@@ -200,15 +205,8 @@ def _api_key_from_file(table: dict, prefix: str, env: dict[str, str]) -> str:
     return key
 
 
-def _single_identity(raw: dict, env: dict[str, str]) -> tuple[str, str]:
-    """Return the `[printer]` form's API key and URL, with the environment on top.
-
-    Checked before the Spoolman URL, so a bare start reports the printer first as before.
-    """
-    printer = _table(raw, "printer")
-    # Check the file's values even when the environment overrides them.
-    file_api_key = _api_key_from_file(printer, "printer", env)
-    file_url = _str(printer, "url", "", "printer.url")
+def _single_identity(env: dict[str, str], file_api_key: str, file_url: str) -> tuple[str, str]:
+    """Return the `[printer]` form's API key and URL, with the environment on top."""
     api_key = env.get("PRUSALINK_API_KEY") or file_api_key
     if not api_key:
         raise ConfigError("set PRUSALINK_API_KEY or printer.api_key")
@@ -283,7 +281,7 @@ def _listed_printers(raw: dict, env: dict[str, str]) -> tuple[PrinterConfig, ...
     for printer in printers:
         if sum(p.name == printer.name for p in printers) > 1:
             raise ConfigError(f"printer {printer.name!r} is configured twice")
-        url = _url_key(printer.url)
+        url = _url_key(printer.url, f"printers[{printer.name}]")
         if url in seen_urls:
             raise ConfigError(
                 f"printers {seen_urls[url]!r} and {printer.name!r} have the same url; "
@@ -318,14 +316,19 @@ def load(path: str | os.PathLike | None, env: dict[str, str] | None = None) -> C
             except (tomllib.TOMLDecodeError, UnicodeDecodeError) as e:
                 raise ConfigError(f"can't parse {path}: {e}") from e
 
+    # The one-printer form's checks run in the order they always have: the printer's
+    # values before Spoolman's, and types before missing values.
+    single = raw.get("printers") is None
+    file_api_key = file_url = ""
+    if single:
+        printer = _table(raw, "printer")
+        file_api_key = _api_key_from_file(printer, "printer", env)
+        file_url = _str(printer, "url", "", "printer.url")
     spoolman = _table(raw, "spoolman")
     bridge = _table(raw, "bridge")
-
-    # Check the file's values even when the environment overrides them. The one-printer
-    # form's key and URL are checked before the Spoolman URL, as they always were.
+    # Check the file's values even when the environment overrides them.
     file_spoolman_url = _str(spoolman, "url", "", "spoolman.url")
-    single = raw.get("printers") is None
-    identity = _single_identity(raw, env) if single else None
+    identity = _single_identity(env, file_api_key, file_url) if single else None
     spoolman_url = env.get("SPOOLMAN_URL") or file_spoolman_url
     if not spoolman_url:
         raise ConfigError("set spoolman.url or SPOOLMAN_URL")
