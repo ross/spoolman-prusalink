@@ -47,6 +47,8 @@ class Config:
     sync_file: str = "spoolman-sync.gcode"
     # Write the spool to the printer after a swap or unload, once the printer is idle.
     printer_sync: bool = True
+    # Seconds the printer must stay idle before the sync job runs; 0 runs it at once.
+    sync_delay: float = 0.0
     # Also overwrite drift (a mismatch with no swap or unload to explain it).
     sync_drift: bool = False
     # Write the instance UUID on tool 0, minting one in Spoolman if the spool has none.
@@ -101,6 +103,18 @@ def _interval(table: dict, key: str, default: float, name: str) -> float:
         or value <= 0
     ):
         raise ConfigError(f"{name} must be a number greater than 0, got {value!r}")
+    return float(value)
+
+
+def _delay(table: dict, key: str, default: float, name: str) -> float:
+    value = table.get(key, default)
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int | float)
+        or not math.isfinite(value)
+        or value < 0
+    ):
+        raise ConfigError(f"{name} must be a number of seconds, 0 or more, got {value!r}")
     return float(value)
 
 
@@ -214,6 +228,7 @@ def load(path: str | os.PathLike | None, env: dict[str, str] | None = None) -> C
         sync_storage=_str(printer, "sync_storage", "usb", "printer.sync_storage"),
         sync_file=sync_file,
         printer_sync=_bool(bridge, "printer_sync", True, "bridge.printer_sync"),
+        sync_delay=_delay(bridge, "sync_delay", 0, "bridge.sync_delay"),
         sync_drift=_bool(bridge, "sync_drift", False, "bridge.sync_drift"),
         printer_uuids=_bool(printer, "uuids", True, "printer.uuids"),
         printer_notices=_bool(bridge, "printer_notices", False, "bridge.printer_notices"),
