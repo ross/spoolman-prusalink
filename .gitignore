@@ -10,3 +10,4 @@ dist/
 /bridge-data/
 /spoolman-data/
 .env
+/simulator/data/

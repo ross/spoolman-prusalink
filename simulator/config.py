@@ -1,0 +1,325 @@
+"""Simulator configuration from a TOML file, and the bridge config derived from it."""
+
+from __future__ import annotations
+
+import json
+import math
+import os
+import re
+import tomllib
+import uuid
+from dataclasses import dataclass, field, fields
+
+from simulator.model import MODELS, Firmware, Settings
+
+_NAME_PATTERN = r"[A-Za-z0-9_.-]{1,64}"
+_MATERIAL_PATTERN = r"[A-Za-z0-9_-]{1,7}"
+_COLOR_PATTERN = r"#[0-9a-fA-F]{6}"
+
+_TOP_KEYS = {"host", "control_port", "data_dir", "printers"}
+_PRINTER_KEYS = {"name", "model", "api_key", "port", "firmware", "auto_accept_model_check", "tools"}
+_TOOL_KEYS = {"index", "enabled", "material", "extruded", "unload_count", "extruded_at_unload"}
+_MATERIAL_KEYS = {"name", "color", "instance_uuid"}
+
+
+class ConfigError(ValueError):
+    pass
+
+
+@dataclass(frozen=True)
+class ToolConfig:
+    index: int
+    enabled: bool = True
+    # {"name": str, "color": str | None, "instance_uuid": str | None}
+    material: dict | None = None
+    extruded: float = 0.0
+    unload_count: int = 0
+    extruded_at_unload: int = 0
+
+
+@dataclass(frozen=True)
+class PrinterConfig:
+    name: str
+    model: str
+    api_key: str
+    port: int
+    # None means the model's default.
+    firmware: str | None = None
+    # None means the global setting.
+    auto_accept_model_check: bool | None = None
+    tools: tuple[ToolConfig, ...] = (ToolConfig(0),)
+
+
+@dataclass(frozen=True)
+class SimConfig:
+    host: str = "127.0.0.1"
+    control_port: int = 8000
+    data_dir: str = "simulator/data"
+    # Overrides for the fields of model.Settings, checked by name and type.
+    settings: dict[str, float | bool] = field(default_factory=dict)
+    printers: tuple[PrinterConfig, ...] = ()
+
+
+@dataclass(frozen=True)
+class Location:
+    """One tool's Spoolman location, as the bridge config names it."""
+
+    printer: str
+    tool: int
+    location: str
+    # Whether the printer's model holds an instance UUID (tool 0 only).
+    uuids: bool
+
+
+def _int(value: object, name: str, minimum: int | None = None) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ConfigError(f"{name} must be an integer, got {value!r}")
+    if minimum is not None and value < minimum:
+        raise ConfigError(f"{name} must be at least {minimum}, got {value!r}")
+    return value
+
+
+def _number(value: object, name: str, minimum: float | None = None) -> float:
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        raise ConfigError(f"{name} must be a number, got {value!r}")
+    if not math.isfinite(value):
+        raise ConfigError(f"{name} must be a number, not nan or inf, got {value!r}")
+    if minimum is not None and value < minimum:
+        raise ConfigError(f"{name} must be at least {minimum}, got {value!r}")
+    return float(value)
+
+
+def _bool(value: object, name: str) -> bool:
+    if not isinstance(value, bool):
+        raise ConfigError(f"{name} must be true or false, got {value!r}")
+    return value
+
+
+def _str(value: object, name: str) -> str:
+    if not isinstance(value, str):
+        raise ConfigError(f"{name} must be a string, got {value!r}")
+    return value
+
+
+def _port(value: object, name: str) -> int:
+    port = _int(value, name)
+    if not 1 <= port <= 65535:
+        raise ConfigError(f"{name} must be between 1 and 65535, got {port}")
+    return port
+
+
+def _unknown(table: dict, allowed: set[str], prefix: str) -> None:
+    for key in table:
+        if key not in allowed:
+            where = f"{prefix}.{key}" if prefix else key
+            raise ConfigError(f"{where} isn't a known key")
+
+
+def _material(value: object, prefix: str, uuids: bool, tool: int) -> dict:
+    name = f"{prefix}.material"
+    if not isinstance(value, dict):
+        raise ConfigError(f"{name} must be a table with a name, got {value!r}")
+    _unknown(value, _MATERIAL_KEYS, name)
+    if "name" not in value:
+        raise ConfigError(f"{name} needs a name")
+    material_name = _str(value["name"], f"{name}.name")
+    if not re.fullmatch(_MATERIAL_PATTERN, material_name):
+        raise ConfigError(f"{name}.name must match {_MATERIAL_PATTERN}, got {material_name!r}")
+    color = None
+    if "color" in value:
+        color = _str(value["color"], f"{name}.color")
+        if not re.fullmatch(_COLOR_PATTERN, color):
+            raise ConfigError(f"{name}.color must look like #rrggbb, got {color!r}")
+        color = color.lower()
+    instance_uuid = None
+    if "instance_uuid" in value:
+        raw = _str(value["instance_uuid"], f"{name}.instance_uuid")
+        try:
+            instance_uuid = str(uuid.UUID(raw))
+        except ValueError as e:
+            raise ConfigError(f"{name}.instance_uuid isn't a UUID, got {raw!r}") from e
+        if not uuids:
+            raise ConfigError(f"{name}.instance_uuid needs a model that holds UUIDs")
+        if tool != 0:
+            raise ConfigError(f"{name}.instance_uuid is only for tool 0")
+    return {"name": material_name, "color": color, "instance_uuid": instance_uuid}
+
+
+def _tool(entry: object, prefix: str, model_code: str) -> ToolConfig:
+    if not isinstance(entry, dict):
+        raise ConfigError(f"{prefix} must be a table")
+    _unknown(entry, _TOOL_KEYS, prefix)
+    if "index" not in entry:
+        raise ConfigError(f"{prefix} needs an index")
+    info = MODELS[model_code]
+    index = _int(entry["index"], f"{prefix}.index", 0)
+    if index >= info.max_tools:
+        raise ConfigError(
+            f"{prefix}.index must be below {info.max_tools}, the most tools model "
+            f"{model_code} has, got {index}"
+        )
+    enabled = _bool(entry.get("enabled", True), f"{prefix}.enabled")
+    material = None
+    if "material" in entry:
+        material = _material(entry["material"], prefix, info.uuids, index)
+    extruded = _number(entry.get("extruded", 0), f"{prefix}.extruded", 0)
+    unload_count = _int(entry.get("unload_count", 0), f"{prefix}.unload_count", 0)
+    at_unload = _int(entry.get("extruded_at_unload", 0), f"{prefix}.extruded_at_unload", 0)
+    if at_unload > extruded:
+        raise ConfigError(f"{prefix}.extruded_at_unload can't exceed extruded ({extruded:g})")
+    return ToolConfig(index, enabled, material, extruded, unload_count, at_unload)
+
+
+def _tools(raw: object, prefix: str, model_code: str) -> tuple[ToolConfig, ...]:
+    if raw is None:
+        return (ToolConfig(0),)
+    if not isinstance(raw, list) or not raw:
+        raise ConfigError(f"{prefix}.tools must be a list of [[printers.tools]] tables")
+    max_tools = MODELS[model_code].max_tools
+    if len(raw) > max_tools:
+        raise ConfigError(
+            f"{prefix}.tools has {len(raw)} entries, more than the {max_tools} that "
+            f"model {model_code} has"
+        )
+    tools = tuple(_tool(entry, f"{prefix}.tools[{i}]", model_code) for i, entry in enumerate(raw))
+    seen: set[int] = set()
+    for i, tool in enumerate(tools):
+        if tool.index in seen:
+            raise ConfigError(f"{prefix}.tools[{i}].index {tool.index} is configured twice")
+        seen.add(tool.index)
+    return tools
+
+
+def _printer(entry: object, position: int, control_port: int) -> PrinterConfig:
+    prefix = f"printers[{position}]"
+    if not isinstance(entry, dict):
+        raise ConfigError(f"{prefix} must be a table")
+    _unknown(entry, _PRINTER_KEYS, prefix)
+    if "name" not in entry:
+        raise ConfigError(f"{prefix} needs a name")
+    name = _str(entry["name"], f"{prefix}.name")
+    if not re.fullmatch(_NAME_PATTERN, name):
+        raise ConfigError(f"{prefix}.name must match {_NAME_PATTERN}, got {name!r}")
+    if "model" not in entry:
+        raise ConfigError(f"{prefix} needs a model")
+    model = _str(entry["model"], f"{prefix}.model")
+    if model not in MODELS:
+        known = ", ".join(MODELS)
+        raise ConfigError(f"{prefix}.model must be one of {known}, got {model!r}")
+    api_key = _str(entry.get("api_key", f"sim-{name}"), f"{prefix}.api_key")
+    if not api_key:
+        raise ConfigError(f"{prefix}.api_key can't be empty")
+    port = _port(entry.get("port", control_port + 1 + position), f"{prefix}.port")
+    firmware = None
+    if "firmware" in entry:
+        firmware = _str(entry["firmware"], f"{prefix}.firmware")
+        if firmware not in {f.value for f in Firmware}:
+            known = ", ".join(f.value for f in Firmware)
+            raise ConfigError(f"{prefix}.firmware must be one of {known}, got {firmware!r}")
+    auto_accept = None
+    if "auto_accept_model_check" in entry:
+        auto_accept = _bool(entry["auto_accept_model_check"], f"{prefix}.auto_accept_model_check")
+    return PrinterConfig(
+        name=name,
+        model=model,
+        api_key=api_key,
+        port=port,
+        firmware=firmware,
+        auto_accept_model_check=auto_accept,
+        tools=_tools(entry.get("tools"), prefix, model),
+    )
+
+
+def _settings(raw: dict) -> dict[str, float | bool]:
+    """Pick the Settings overrides out of the top level, checking each one's type."""
+    defaults = Settings()
+    result: dict[str, float | bool] = {}
+    for f in fields(Settings):
+        if f.name not in raw:
+            continue
+        if isinstance(getattr(defaults, f.name), bool):
+            result[f.name] = _bool(raw[f.name], f.name)
+        else:
+            result[f.name] = _number(raw[f.name], f.name)
+    return result
+
+
+def load(path: str | os.PathLike) -> SimConfig:
+    """Load and validate the simulator config. Every error names the key that is wrong."""
+    with open(path, "rb") as f:
+        try:
+            raw = tomllib.load(f)
+        except (tomllib.TOMLDecodeError, UnicodeDecodeError) as e:
+            raise ConfigError(f"can't parse {path}: {e}") from e
+
+    _unknown(raw, _TOP_KEYS | {f.name for f in fields(Settings)}, "")
+    host = _str(raw.get("host", "127.0.0.1"), "host")
+    control_port = _port(raw.get("control_port", 8000), "control_port")
+    data_dir = _str(raw.get("data_dir", "simulator/data"), "data_dir")
+    settings = _settings(raw)
+    if settings.get("time_scale", 1.0) <= 0:
+        raise ConfigError(f"time_scale must be greater than 0, got {settings['time_scale']!r}")
+
+    entries = raw.get("printers", [])
+    if not isinstance(entries, list):
+        raise ConfigError("printers must be a list of [[printers]] tables")
+    printers = tuple(_printer(entry, i, control_port) for i, entry in enumerate(entries))
+
+    names: set[str] = set()
+    ports = {control_port: "control_port"}
+    for i, printer in enumerate(printers):
+        if printer.name in names:
+            raise ConfigError(f"printers[{i}].name {printer.name!r} is configured twice")
+        names.add(printer.name)
+        if printer.port in ports:
+            other = ports[printer.port]
+            raise ConfigError(f"printers[{i}].port {printer.port} is already used by {other}")
+        ports[printer.port] = f"printers[{i}]"
+    return SimConfig(host, control_port, data_dir, settings, printers)
+
+
+def _location(printer: PrinterConfig, tool: ToolConfig) -> str:
+    if len(printer.tools) == 1:
+        return printer.name
+    return f"{printer.name} T{tool.index + 1}"
+
+
+def locations(cfg: SimConfig) -> list[Location]:
+    """Every tool's location, disabled tools included: the bridge can't tell them apart."""
+    return [
+        Location(p.name, t.index, _location(p, t), MODELS[p.model].uuids)
+        for p in cfg.printers
+        for t in p.tools
+    ]
+
+
+def _quote(value: str) -> str:
+    # A JSON string is a valid TOML basic string.
+    return json.dumps(value)
+
+
+def bridge_config(cfg: SimConfig) -> str:
+    """Render the `[[printers]]` tables the bridge needs to talk to these printers."""
+    lines = [
+        "# Generated by the printer simulator; run `bridge-config` again after editing sim.toml.",
+        "# The bridge still needs [spoolman] url, [bridge] dry_run and the poll_* intervals.",
+        "",
+    ]
+    for printer in cfg.printers:
+        lines += [
+            "[[printers]]",
+            f"name = {_quote(printer.name)}",
+            f"url = {_quote(f'http://{cfg.host}:{printer.port}')}",
+            f"api_key = {_quote(printer.api_key)}",
+        ]
+        if not MODELS[printer.model].uuids:
+            lines.append("uuids = false")
+        lines.append("")
+        for tool in printer.tools:
+            lines += [
+                "[[printers.tools]]",
+                f"index = {tool.index}",
+                f"location = {_quote(_location(printer, tool))}",
+                "",
+            ]
+    return "\n".join(lines)

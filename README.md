@@ -421,3 +421,11 @@ The `/data` volume holds two files:
   differ from the dry run's. To total what Spoolman received, add up
   `use_length` over records with `applied`. Compare that against the
   slicer's `filament used [mm]` to validate the counts.
+
+## Simulator
+
+`simulator/` holds a stand-in for one or more printers, for developing and
+testing without hardware: it serves the PrusaLink endpoints the bridge
+uses, keeps each tool's counters and filament, and has a page with buttons
+for loads, unloads, prints, runouts, jams, reboots and outages. See
+[simulator/README.md](simulator/README.md).

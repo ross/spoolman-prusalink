@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Printer simulator</title>
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<div id="banner" class="banner" hidden>Disconnected from the simulator. Retrying...</div>
+<div id="gtoast" class="gtoast" hidden></div>
+<header class="strip">
+  <div id="settings" class="settings"></div>
+  <div class="snap">
+    <span class="now">sim time <b id="now">0:00</b></span>
+    <input id="snap-name" type="text" placeholder="snapshot name" size="14" maxlength="64">
+    <button id="snap-save" type="button">Save</button>
+    <select id="snap-list"></select>
+    <button id="snap-restore" type="button">Restore</button>
+  </div>
+</header>
+<main id="cards" class="cards"></main>
+<section class="logsec">
+  <div class="logbar">
+    <b>Event log</b>
+    <label>printer <select id="log-printer"></select></label>
+    <span id="log-kinds" class="kinds"></span>
+    <label title="show GET requests"><input id="log-polls" type="checkbox">polls</label>
+    <button id="log-clear" type="button">clear</button>
+  </div>
+  <table class="log">
+    <thead><tr><th>time</th><th>printer</th><th>kind</th><th>text</th></tr></thead>
+    <tbody id="log-body"></tbody>
+  </table>
+</section>
+<script src="/static/app.js"></script>
+</body>
+</html>
