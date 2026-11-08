@@ -612,7 +612,7 @@ def test_config_url_keys_keep_ipv6_hosts_apart_from_their_port(tmp_path):
         ("[printer]\napi_key = 5\n[spoolman]\nurl = 5\n", {}, "printer.api_key must be a string"),
         ("[printer]\nurl = 5\n[spoolman]\nurl = 5\n", {}, "printer.url must be a string"),
         ("printer = 5\nspoolman = 5\n", {}, "[printer] must be a table"),
-        ("[printer]\nurl = 5\nspoolman = 5\n", {}, "[spoolman] must be a table"),
+        ("spoolman = 5\n[printer]\nurl = 5\n", {}, "[spoolman] must be a table"),
     ],
 )
 def test_config_single_printer_reports_errors_in_the_old_order(tmp_path, text, env, error):
