@@ -174,15 +174,21 @@ cheap filament.
    Passing means the simulator reproduces every step the printer showed and
    adds no event of its own. A failure prints both step lists. The printer
    is right: when the trace and a reading of the firmware source disagree,
-   the simulator follows the trace, and the source is re-read to explain
-   it. So the fix is usually in `simulator/model.py`, with the row updated
-   to say what the printer did; sometimes it's the replay's choreography in
-   the test.
+   the simulator follows the trace. The source is then re-read to explain
+   the difference, but the two may never agree: the printer may run a
+   different firmware version from the one read, or a setting or a detail
+   of the model may change the path taken. The trace's header records what
+   the printer said it was (`firmware`, and the `/api/version` and
+   `/api/v1/info` bodies: model, hostname, serial, nozzle), so a
+   disagreement can be tied to a printer and a version. So the fix is
+   usually in `simulator/model.py`, with the row updated to say what the
+   printer did; sometimes it's the replay's choreography in the test.
 6. **Record it.** Set the row's status to Traced with the date, and commit
    the trace with the model or test change. If the printer did anything
    the row's firmware column didn't predict, add a line to
-   [Disagreements](#disagreements-between-the-source-and-the-printer),
-   even when the difference turned out to be harmless.
+   [Disagreements](#disagreements-between-the-source-and-the-printer) with
+   the firmware version from the trace's header, even when the difference
+   turned out to be harmless or unexplained.
 
 ### Disagreements between the source and the printer
 
@@ -190,11 +196,12 @@ Each line is a place where a reading of the firmware source said one thing
 and a trace showed another. They're worth revisiting: a wrong reading may
 hide a second one nearby, a firmware update may change the behavior, and
 the bridge may be leaning on the reading somewhere else. Keep the line
-after the simulator is fixed.
+after the simulator is fixed. "Why" is the explanation found in the
+source, a version or setting mismatch, or "unexplained".
 
-| Date | Row | The source said | The printer showed | What changed |
-| --- | --- | --- | --- | --- |
-| | | | | |
+| Date | Row | Firmware | The source said | The printer showed | Why | What changed |
+| --- | --- | --- | --- | --- | --- | --- |
+| | | | | | | |
 
 Redo a spoiled trace with `--force`. Use `--interval 0.5` for the power
 cuts, where the states move fast once the printer is back. Each trace is a
