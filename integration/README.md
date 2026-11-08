@@ -69,7 +69,7 @@ current and that the scenario rows name their tests.
 | P8 | `test_prints.py::test_p8_cancelled_during_preheat_is_not_a_print_start` | Print cancelled in preheat: not a print start, so the open swap is still confirmed. |
 | P9 | `test_prints.py::test_p9_restart_after_a_failure_is_a_new_print_start` | A print cancelled and started again under a new job ID is a second print start. |
 | P10 | `test_prints.py::test_p10_spoolman_changed_mid_print_is_staged` | Spoolman changed mid-print with no unload: staged, the old spool charged until unload. |
-| P11 | `test_prints.py::test_p11_pause_and_resume_changes_nothing` | Pause and resume with no filament change: no events, and the counter carries on. |
+| P11 | `test_prints.py::test_p11_pause_and_resume_changes_nothing` | Pause and resume with no filament change: one print start, and the counter carries on. |
 | P12 | `test_prints.py::test_p12_power_panic_resume_keeps_the_job` | Power loss mid-print and resume: a reboot with the same job, so no new print start. |
 | W1 | `test_writes.py::test_w1_write_after_swap` | Menu load after a Spoolman-first swap: the bridge writes name, color and UUID. |
 <!-- table:end -->
@@ -92,10 +92,10 @@ current and that the scenario rows name their tests.
    `w.since(mark)` (filter them with `events()` and `charges()`), spools in
    Spoolman (`w.used()`, `w.flag()`, `w.spoolman.extra()`), and the printer
    (`w.material()`, `w.requests()`, `w.sim.events`).
+5. Set the row's Status in `docs/scenarios.md` to end to end, naming the test,
+   and run `python -m integration.table --write`.
+   `pytest tests/test_integration_table.py` checks all three.
 
 Poll where a real bridge would have polled. Some behaviour depends on what two
 polls in a row see: the bridge counts a print as started only when the counter
 moves between two polls of the same job, for example.
-5. Set the row's Status in `docs/scenarios.md` to end to end, naming the test,
-   and run `python -m integration.table --write`.
-   `pytest tests/test_integration_table.py` checks all three.

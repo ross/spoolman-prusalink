@@ -184,10 +184,13 @@ async def test_p9_restart_after_a_failure_is_a_new_print_start(
 
 
 async def test_p11_pause_and_resume_changes_nothing(world: World, caplog: pytest.LogCaptureFixture):
-    """Pause and resume with no filament change: no events, and the counter carries on."""
+    """Pause and resume with no filament change: one print start, and the counter carries on."""
     caplog.set_level(logging.INFO, logger="spoolman_prusalink")
     w = world
     await baseline(w)
+    # A print start on its own writes nothing, so stage B first: then a start writes
+    # staged_at_print, and a resume counted as a second start would write it again.
+    await stage_b(w)
     start = w.counter
 
     mark = w.mark()
@@ -203,10 +206,10 @@ async def test_p11_pause_and_resume_changes_nothing(world: World, caplog: pytest
     w.printer.resume()
     await finish(w)
     records = w.since(mark) + await w.poll()
-    assert [e["event"] for e in events(records)] == []
+    assert [e["event"] for e in events(records)] == ["staged_at_print"]
     assert w.charged(records, "A") == w.counter - start
     assert {r["spool_id"] for r in charges(records)} == {w.spools["A"]}
-    assert warnings(caplog) == []
+    assert len(warnings(caplog)) == 1 and "print started" in warnings(caplog)[0]
 
 
 async def test_p10_spoolman_changed_mid_print_is_staged(world: World):
@@ -265,7 +268,10 @@ async def test_p12_power_panic_resume_keeps_the_job(world: World, caplog: pytest
     w.advance(3.0)
 
     w.printer.set_power("on", resume=True)
-    records = await w.run_until(lambda: w.printer.state is State.PRINTING, poll_every=0.5)
+    # Recovery: BUSY with the nozzle clean's 25 mm purge, PAUSED while unparking, PRINTING.
+    records = await w.run_until(lambda: w.printer.state is not State.BUSY, poll_every=0.5)
+    assert w.printer.state is State.PAUSED and w.counter == 25
+    records += await w.run_until(lambda: w.printer.state is State.PRINTING, poll_every=0.5)
     assert w.printer.job.id == job
     reboots = events(records, "reboot")
     assert len(reboots) == 1 and "counters restart at 0" in reboots[0]["message"]
@@ -281,4 +287,3 @@ async def test_p12_power_panic_resume_keeps_the_job(world: World, caplog: pytest
     assert len(events(records, "staged_at_print")) == 1
     assert w.charged(records, "B") == 0
     assert w.charged(records, "A") == before_cut + w.counter
-    assert w.counter > 25

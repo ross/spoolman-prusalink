@@ -42,8 +42,8 @@ def _sort_key(test: Test) -> tuple:
 
 def _row_of(function: str) -> str:
     for token in function.removeprefix("test_").split("_"):
-        if ROW_ID.match(token):
-            return token.upper()
+        if m := ROW_ID.match(token):
+            return m.group(1).upper() + m.group(2) + m.group(3)  # M5a, as scenarios.md has it
     return ""
 
 
