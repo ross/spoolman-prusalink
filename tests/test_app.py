@@ -592,8 +592,10 @@ def test_config_url_keys_keep_ipv6_hosts_apart_from_their_port(tmp_path):
             'url = "http://b/"\n', 'url = "http://[::1:8080]"\n', 1
         )
     )
-    with pytest.raises(ConfigError, match="serves one printer for now"):  # Not "same url".
-        load(p, env={"CORE_KEY": "ka"})
+    assert [x.url for x in load(p, env={"CORE_KEY": "ka"}).printers] == [
+        "http://[::1]:8080",
+        "http://[::1:8080]",
+    ]  # Two printers, not "the same url".
 
 
 @pytest.mark.parametrize(
