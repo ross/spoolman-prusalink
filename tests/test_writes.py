@@ -682,8 +682,9 @@ async def test_printer_notices_show_two_new_flags_in_turn(tmp_path):
     )
     await bridge.poll()
     bridge.state.runouts[19] = Runout("first flag")  # Spool 19 is in the tool's location.
-    # Spool 21 isn't: the flag is shown because this printer owns it, or, for a runout
-    # from before printer names or from a renamed printer, because no printer does.
+    # Spool 21 isn't: the flag is shown because this printer owns it. A runout from before
+    # printer names, or from a renamed printer, has no owner, so on a spool in no tool's
+    # location it's flagged in Spoolman only.
     bridge.state.runouts[21] = Runout("second flag", printer="default")
     bridge.state.runouts[22] = Runout("third flag")
     bridge.state.runouts[23] = Runout("fourth flag", printer="old-name")
@@ -692,7 +693,8 @@ async def test_printer_notices_show_two_new_flags_in_turn(tmp_path):
     for _ in range(6):
         await bridge.poll()
     shown = [g.splitlines()[-1] for g in jobs(printer)]
-    assert shown == [f"M117 Spoolman: {t} flag" for t in ("first", "second", "third", "fourth")]
+    assert shown == ["M117 Spoolman: first flag", "M117 Spoolman: second flag"]
+    assert fake.flag(22) == "third flag" and fake.flag(23) == "fourth flag"
     await bridge.aclose()
 
 

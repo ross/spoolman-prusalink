@@ -736,21 +736,15 @@ class PrinterBridge:
         notices: list[str] = []
         if self.bridge.config.printer_notices:
             # Flags on spools in this printer's tool locations. A spool in no tool's
-            # location has no holder, so the printer that raised its flag shows it, and
-            # the bridge's own flags, such as an unplaced claim, go to whichever printer is
-            # idle first. Each text is shown once.
+            # location has no holder, so the printer that raised its flag shows it. A flag
+            # that no printer raised, such as an unplaced claim or a runout from a printer
+            # that's no longer configured, is shown on no screen: the Spoolman flag is its
+            # record, since a notice on an arbitrary printer wouldn't be acted on there.
             locations = set(self.config.tools.values())
             everywhere = {loc for p in self.bridge.printers for loc in p.config.tools.values()}
             held = {s.id for s in spools if s.location in everywhere}
-            # A runout with no printer, or one that's no longer configured, belongs to
-            # the bridge, so it goes to the first idle printer, as every flag did with one.
-            names = {p.name for p in self.bridge.printers}
             runouts = self.bridge.state.runouts.items()
-            raised = (
-                self._raised
-                | self.bridge._raised
-                | {s for s, r in runouts if r.printer == self.name or r.printer not in names}
-            )
+            raised = self._raised | {s for s, r in runouts if r.printer == self.name}
             mine = {s.id for s in spools if s.location in locations} | (raised - held)
             current = set(self.bridge._flags.values())
             notices = [
@@ -852,8 +846,6 @@ class Bridge:
     # Active spools missing from Spoolman's list that turned out to be archived, looked
     # up once each. Kept while active or flagged, so their flag can be set and cleared.
     _archived: dict[int, Spool] = field(default_factory=dict)
-    # Spools flagged by the bridge itself this poll, rather than by a printer's tool.
-    _raised: set[int] = field(default_factory=set)
     # Claimed spools outside every tool's location, logged once until that changes.
     _unplaced: set[int] = field(default_factory=set)
     _shared: set[int] = field(default_factory=set)  # Spools active in two tools last poll.
@@ -936,7 +928,6 @@ class Bridge:
         self._problems.clear("Spoolman read", "Spoolman reads working again")
         flags: dict[int, list[str]] = {}
         claims = self._claims(spools, flags)
-        self._raised = set(flags)
         changed = False
         for printer in self.printers:
             kept = self.state.printers.setdefault(printer.name, PrinterState())
@@ -952,9 +943,7 @@ class Bridge:
                 own = kept.flags  # An unread printer's flags stand until it answers again.
             for spool_id, texts in own.items():
                 flags.setdefault(spool_id, []).extend(texts)
-        before = {spool_id: len(texts) for spool_id, texts in flags.items()}
         self._check_shared(flags)
-        self._raised |= {s for s, texts in flags.items() if len(texts) > before.get(s, 0)}
         self._finish_flags(flags, spools, changed)
         await self.flush()
         await self.evict(spools)

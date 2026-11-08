@@ -397,13 +397,13 @@ async def test_x12_notices_go_to_the_printer_whose_tool_holds_the_spool(tmp_path
     assert "moved out" in fake.flag(19)
     assert (len(jobs(a)), len(jobs(b))) == (a_jobs, b_jobs + 1)
     assert "M117 Spoolman: Tool a: filament was unloaded," in jobs(b)[-1]
-    # The bridge's own flag on a claimed spool in no tool's location goes to the first idle
-    # printer, as it does with one printer.
+    # The bridge's own flag on a claimed spool in no tool's location is flagged in
+    # Spoolman and shown on no printer: there's no printer it belongs to.
     fake.spools[26] = {**spool(26, "shelf"), "extra": dict(CLAIMED)}
     await bridge.poll()
+    await bridge.poll()
     assert "isn't in a printer tool's location" in fake.flag(26)
-    assert any("'Claim held usage'" in g for g in jobs(a))
-    assert not any("'Claim held usage'" in g for g in jobs(b))
+    assert not any("'Claim held usage'" in g for p in (a, b) for g in jobs(p))
     await bridge.aclose()
 
 
