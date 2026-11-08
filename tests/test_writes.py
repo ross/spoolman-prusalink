@@ -1428,13 +1428,13 @@ async def test_deleted_spool_holds_usage_for_the_next_spool(tmp_path, caplog):
 
 
 def restart(bridge, **cfg):
-    """A new bridge on the same printer, Spoolman and state file."""
+    """A new bridge on the same printers, Spoolman and state file."""
     config = replace(bridge.config, **cfg)
     return Bridge(
         config=config,
         spoolman=bridge.spoolman,
         clients=bridge.clients,
-        state=load_state(config.state_file, ["default"]),
+        state=load_state(config.state_file, [p.name for p in config.printers]),
     )
 
 

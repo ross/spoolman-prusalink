@@ -1,7 +1,7 @@
 """Two printers against one Spoolman: the X scenarios in docs/multi-printer.md."""
 
 import httpx
-from test_writes import CLAIMED, jobs, ledger, spool, two_printers
+from test_writes import CLAIMED, jobs, ledger, restart, spool, two_printers
 
 from spoolman_prusalink.accounting import ToolState
 from spoolman_prusalink.state import Runout, load_state
@@ -247,6 +247,35 @@ async def test_x8_one_printer_off(tmp_path, caplog):
     await bridge.aclose()
 
 
+async def test_x8_an_unread_printers_flags_stay_set(tmp_path, caplog):
+    # a has an unconfirmed swap flagged when it goes off. The flag stays in Spoolman and
+    # isn't shown again when a comes back, including across a restart while a is off.
+    bridge, fake, printers = await baseline(
+        tmp_path, [spool(19, A), spool(20, B)], printer_notices=True
+    )
+    a, b = printers["a"], printers["b"]
+    unload(a)
+    await bridge.poll()
+    text = "unloaded with no Spoolman change"
+    assert text in fake.flag(19)
+    assert len(bridge.state.noticed) == 1
+    a.down = True
+    b.extruded += 10
+    await bridge.poll()
+    assert text in fake.flag(19)
+    assert len(bridge.state.noticed) == 1
+    restarted = restart(bridge)
+    await restarted.poll()
+    assert text in fake.flag(19)
+    assert len(restarted.state.noticed) == 1
+    a.down = False
+    shown = len(jobs(a))
+    await restarted.poll()
+    assert text in fake.flag(19)
+    assert len(jobs(a)) == shown  # Not shown again.
+    await restarted.aclose()
+
+
 async def test_x9_spoolman_down_queues_both_printers_charges_in_order(tmp_path):
     bridge, fake, printers = await baseline(tmp_path, [spool(19, A), spool(20, B)])
     a, b = printers["a"], printers["b"]
@@ -275,6 +304,8 @@ async def test_x10_unsupported_firmware_on_one_printer(tmp_path, caplog):
     await bridge.poll()
     assert caplog.text.count("printer a: ") == 1 and "isn't supported" in caplog.text
     assert fake.used == {20: [100.0]}
+    # a's status still reads, so a doesn't hold the bridge at the printing rate.
+    assert bridge.interval() == bridge.config.poll_idle
     a.filament_endpoint = True
     await bridge.poll()
     assert "printer a now reports filament; resuming" in caplog.text
@@ -297,12 +328,24 @@ async def test_x12_notices_go_to_the_printer_whose_tool_holds_the_spool(tmp_path
     await bridge.poll()
     assert fake.flag(21) and "Tool b" in fake.flag(21)
     assert [g for g in jobs(b) if "M117" in g] and not jobs(a)
-    # A claimed spool in no tool's location is flagged but shown on neither printer.
+    # A flag a raises on a spool that's now in b's location is shown on b: a's "moved out"
+    # flag after the spool left Tool a for Tool b (X2).
+    unload(a)
+    await bridge.poll()  # a shows its own open swap, since the spool is still in Tool a.
+    assert "no Spoolman change" in fake.flag(19)
+    a_jobs, b_jobs = len(jobs(a)), len(jobs(b))
+    fake.spools[19]["location"] = B
+    await bridge.poll()
+    assert "moved out" in fake.flag(19)
+    assert (len(jobs(a)), len(jobs(b))) == (a_jobs, b_jobs + 1)
+    assert "M117 Spoolman: Tool a: filament was unloaded," in jobs(b)[-1]
+    # The bridge's own flag on a claimed spool in no tool's location goes to the first idle
+    # printer, as it does with one printer.
     fake.spools[26] = {**spool(26, "shelf"), "extra": dict(CLAIMED)}
     await bridge.poll()
     assert "isn't in a printer tool's location" in fake.flag(26)
-    shown = "\n".join(g for p in (a, b) for g in jobs(p))
-    assert "isn't in a printer tool's location" not in shown
+    assert any("'Claim held usage'" in g for g in jobs(a))
+    assert not any("'Claim held usage'" in g for g in jobs(b))
     await bridge.aclose()
 
 
