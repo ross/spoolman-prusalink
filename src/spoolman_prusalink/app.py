@@ -742,11 +742,14 @@ class PrinterBridge:
             locations = set(self.config.tools.values())
             everywhere = {loc for p in self.bridge.printers for loc in p.config.tools.values()}
             held = {s.id for s in spools if s.location in everywhere}
+            # A runout with no printer, or one that's no longer configured, belongs to
+            # the bridge, so it goes to the first idle printer, as every flag did with one.
+            names = {p.name for p in self.bridge.printers}
             runouts = self.bridge.state.runouts.items()
             raised = (
                 self._raised
                 | self.bridge._raised
-                | {spool_id for spool_id, r in runouts if r.printer == self.name}
+                | {s for s, r in runouts if r.printer == self.name or r.printer not in names}
             )
             mine = {s.id for s in spools if s.location in locations} | (raised - held)
             current = set(self.bridge._flags.values())

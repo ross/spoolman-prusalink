@@ -119,12 +119,17 @@ def load_state(path: Path, printers: Sequence[str]) -> State:
 
 
 def _migrate_v2(data: dict, printer: str) -> dict:
-    """Nest a version 2 file's tools under `printer` and stamp its outbox records."""
+    """Nest a version 2 file's tools under `printer` and stamp its outbox and runouts."""
+    runouts = {
+        k: {**(v if isinstance(v, dict) else {"text": v}), "printer": printer}
+        for k, v in data.get("runouts", {}).items()
+    }
     return {
         **data,
         "version": STATE_VERSION,
         "printers": {printer: {"tools": data.get("tools", {})}},
         "outbox": [{**r, "printer": printer} for r in data.get("outbox", [])],
+        "runouts": runouts,
     }
 
 

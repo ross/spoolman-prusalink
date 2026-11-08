@@ -649,12 +649,16 @@ V2_STATE = {
 
 def test_state_v2_migrates_to_the_only_printer(tmp_path):
     path = tmp_path / "state.json"
-    path.write_text(json.dumps(V2_STATE))
+    runouts = {"8": "old text form", "9": {"text": "with weights", "net": 1000.0, "used": 10.0}}
+    path.write_text(json.dumps({**V2_STATE, "runouts": runouts}))
     state = load_state(path, ["core"])
     assert list(state.printers) == ["core"]
     assert state.tools("core")[0].active == 7
-    # Outbox records are stamped so flush() can find the record's tool.
+    # Outbox records and runouts are stamped: flush() finds the record's tool by it, and
+    # notices go to the printer that owns the runout.
     assert [r["printer"] for r in state.outbox] == ["core"]
+    assert {k: r.printer for k, r in state.runouts.items()} == {8: "core", 9: "core"}
+    assert (state.runouts[8].text, state.runouts[9].net) == ("old text form", 1000.0)
     assert state.flagged == [7]
     assert save_state(path, state)
     saved = json.loads(path.read_text())
