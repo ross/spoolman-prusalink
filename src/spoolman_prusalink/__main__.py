@@ -49,7 +49,11 @@ def main(argv: list[str] | None = None) -> int:
 
 
 async def _run(cfg: config_mod.Config, *, once: bool) -> int:
-    bridge = Bridge.from_config(cfg)
+    try:
+        bridge = Bridge.from_config(cfg)
+    except ValueError as e:  # An unreadable state file.
+        logging.error("state: %s", e)
+        return 2
     try:
         if once:
             await bridge.poll()

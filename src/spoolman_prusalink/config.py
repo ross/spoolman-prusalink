@@ -8,6 +8,11 @@ import re
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlsplit
+
+# The name of the printer in the single-printer config form, which has no name of its own.
+DEFAULT_PRINTER_NAME = "default"
+_NAME_PATTERN = r"[A-Za-z0-9_.-]{1,64}"
 
 
 class ConfigError(ValueError):
@@ -15,12 +20,29 @@ class ConfigError(ValueError):
 
 
 @dataclass(frozen=True)
-class Config:
-    printer_url: str
-    printer_api_key: str
-    spoolman_url: str
+class PrinterConfig:
+    """One printer: how to reach it, its tools, and how to write to it."""
+
+    # Keys the printer's state and appears in ledger records, so it must stay stable.
+    name: str
+    url: str
+    api_key: str
     # Tool index -> exact Spoolman location name.
     tools: dict[int, str]
+    # Compatibility checks for the sync job; None uses the printer model's default.
+    gcode_preamble: tuple[str, ...] | None = None
+    # Where the sync job is uploaded, and its file name (overwritten each time).
+    sync_storage: str = "usb"
+    sync_file: str = "spoolman-sync.gcode"
+    # Write the instance UUID on tool 0, minting one in Spoolman if the spool has none.
+    # False on printers without NFC support, such as INDX.
+    uuids: bool = True
+
+
+@dataclass(frozen=True)
+class Config:
+    spoolman_url: str
+    printers: tuple[PrinterConfig, ...]
     state_file: Path = Path("/data/state.json")
     ledger_file: Path = Path("/data/ledger.jsonl")
     poll_printing: float = 30.0
@@ -39,21 +61,12 @@ class Config:
     claim_field: str | None = "bridge_claim"
     # Whether a printer/spool mismatch (drift) is written as a flag.
     flag_drift: bool = True
-    # Compatibility-check lines at the start of every job file.
-    # Compatibility checks for the sync job; None uses the printer model's default.
-    gcode_preamble: tuple[str, ...] | None = None
-    # Where the sync job is uploaded, and its file name (overwritten each time).
-    sync_storage: str = "usb"
-    sync_file: str = "spoolman-sync.gcode"
     # Write the spool to the printer after a swap or unload, once the printer is idle.
     printer_sync: bool = True
     # Seconds the printer must stay idle before the sync job runs; 0 runs it at once.
     sync_delay: float = 0.0
     # Also overwrite drift (a mismatch with no swap or unload to explain it).
     sync_drift: bool = False
-    # Write the instance UUID on tool 0, minting one in Spoolman if the spool has none.
-    # False on printers without NFC support, such as INDX.
-    printer_uuids: bool = True
     # Show new flags on the printer screen with M117 through a job, when idle.
     printer_notices: bool = False
 
@@ -125,13 +138,188 @@ def _table(raw: dict, key: str) -> dict:
     return value
 
 
+def _tools(entries: object, what: str, prefix: str = "") -> dict[int, str]:
+    """Parse `[[tools]]` entries: each maps a tool index to a Spoolman location.
+
+    `prefix` names the printer in errors when the entries belong to a listed printer.
+    """
+    tools: dict[int, str] = {}
+    where = f"{prefix}: " if prefix else ""
+    if not isinstance(entries, list):
+        raise ConfigError(f"{where}tools must be {what} entries")
+    for entry in entries:
+        if not isinstance(entry, dict) or "index" not in entry or "location" not in entry:
+            raise ConfigError(f"{where}each {what} entry needs an index and a location")
+        index = entry["index"]
+        location = _str(entry, "location", "", f"{where}tool location")
+        if isinstance(index, bool) or not isinstance(index, int):
+            raise ConfigError(f"{where}tool index must be an integer, got {index!r}")
+        if index in tools:
+            raise ConfigError(f"{where}tool {index} is configured twice")
+        if location in tools.values():
+            raise ConfigError(f"{where}location {location!r} is mapped to more than one tool")
+        tools[index] = location
+    return tools
+
+
+def _url_key(url: str, prefix: str) -> str:
+    """Normalize a printer URL for comparing two entries: scheme and host case, the default
+    port, and a trailing slash don't make a different printer."""
+    try:
+        parts = urlsplit(url.strip())
+        port = parts.port  # Also raises for a port that isn't a number or is out of range.
+    except ValueError as e:
+        raise ConfigError(f"{prefix}.url isn't a valid url: {e}") from e
+    scheme = parts.scheme.lower()
+    host = parts.hostname or ""
+    if ":" in host:  # IPv6 keeps its brackets, so the port stays apart from the address.
+        host = f"[{host}]"
+    if port is None or (scheme, port) in (("http", 80), ("https", 443)):
+        netloc = host
+    else:
+        netloc = f"{host}:{port}"
+    return f"{scheme}://{netloc}{parts.path.rstrip('/')}"
+
+
+def _printer_settings(table: dict, prefix: str) -> dict:
+    """Parse the settings every printer form shares: the sync job and UUIDs."""
+    sync_file = _str(table, "sync_file", "spoolman-sync.gcode", f"{prefix}.sync_file")
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+\.gcode", sync_file):
+        raise ConfigError(f"{prefix}.sync_file must be a plain .gcode file name, got {sync_file!r}")
+    preamble = table.get("gcode_preamble")
+    if preamble is not None and (
+        not isinstance(preamble, list) or not all(isinstance(x, str) for x in preamble)
+    ):
+        raise ConfigError(f"{prefix}.gcode_preamble must be a list of strings, got {preamble!r}")
+    return {
+        "gcode_preamble": None if preamble is None else tuple(preamble),
+        "sync_storage": _str(table, "sync_storage", "usb", f"{prefix}.sync_storage"),
+        "sync_file": sync_file,
+        "uuids": _bool(table, "uuids", True, f"{prefix}.uuids"),
+    }
+
+
+def _name(table: dict, prefix: str, default: str) -> str:
+    name = _str(table, "name", default, f"{prefix}.name")
+    if not re.fullmatch(_NAME_PATTERN, name):
+        raise ConfigError(f"{prefix}.name must match {_NAME_PATTERN}, got {name!r}")
+    return name
+
+
+def _api_key_from_file(table: dict, prefix: str, env: dict[str, str]) -> str:
+    """Return the key from `api_key_env`, else `api_key`, else ""."""
+    key = _str(table, "api_key", "", f"{prefix}.api_key")
+    key_env = _str(table, "api_key_env", "", f"{prefix}.api_key_env")
+    if key and key_env:
+        raise ConfigError(f"set {prefix}.api_key or {prefix}.api_key_env, not both")
+    if key_env:
+        if not env.get(key_env):
+            raise ConfigError(f"{prefix}.api_key_env names {key_env}, which isn't set")
+        return env[key_env]
+    return key
+
+
+def _single_identity(env: dict[str, str], file_api_key: str, file_url: str) -> tuple[str, str]:
+    """Return the `[printer]` form's API key and URL, with the environment on top."""
+    api_key = env.get("PRUSALINK_API_KEY") or file_api_key
+    if not api_key:
+        raise ConfigError("set PRUSALINK_API_KEY or printer.api_key")
+    url = env.get("PRUSALINK_URL") or file_url
+    if not url:
+        raise ConfigError("set printer.url or PRUSALINK_URL")
+    return api_key, url
+
+
+def _single_printer(raw: dict, env: dict[str, str], api_key: str, url: str) -> PrinterConfig:
+    """Parse the rest of the `[printer]` and `[[tools]]` form."""
+    printer = _table(raw, "printer")
+    tools = _tools(raw.get("tools", []), "[[tools]]")
+    if not tools and env.get("SPOOLMAN_PRUSALINK_LOCATION"):
+        tools[0] = env["SPOOLMAN_PRUSALINK_LOCATION"]
+    if not tools:
+        raise ConfigError("set SPOOLMAN_PRUSALINK_LOCATION or configure [[tools]] entries")
+    return PrinterConfig(
+        name=_name(printer, "printer", DEFAULT_PRINTER_NAME),
+        url=url,
+        api_key=api_key,
+        tools=tools,
+        **_printer_settings(printer, "printer"),
+    )
+
+
+def _listed_printer(entry: object, index: int, env: dict[str, str]) -> PrinterConfig:
+    """Parse one `[[printers]]` entry. Nothing in the environment applies to it."""
+    prefix = f"printers[{index}]"
+    if not isinstance(entry, dict):
+        raise ConfigError(f"{prefix} must be a table")
+    if not entry.get("name"):
+        raise ConfigError(f"{prefix} needs a name")
+    name = _name(entry, prefix, "")
+    prefix = f"printers[{name}]"
+    url = _str(entry, "url", "", f"{prefix}.url")
+    if not url:
+        raise ConfigError(f"{prefix} needs a url")
+    api_key = _api_key_from_file(entry, prefix, env)
+    if not api_key:
+        raise ConfigError(f"set {prefix}.api_key or {prefix}.api_key_env")
+    tools = _tools(entry.get("tools", []), "[[printers.tools]]", prefix)
+    if not tools:
+        raise ConfigError(f"{prefix} needs [[printers.tools]] entries")
+    return PrinterConfig(
+        name=name, url=url, api_key=api_key, tools=tools, **_printer_settings(entry, prefix)
+    )
+
+
+# Environment variables that configure the single-printer form only.
+_SINGLE_PRINTER_VARS = ("PRUSALINK_URL", "PRUSALINK_API_KEY", "SPOOLMAN_PRUSALINK_LOCATION")
+
+
+def _listed_printers(raw: dict, env: dict[str, str]) -> tuple[PrinterConfig, ...]:
+    """Parse the `[[printers]]` list."""
+    entries = raw["printers"]
+    if "printer" in raw or "tools" in raw:
+        raise ConfigError("use [printer] and [[tools]] or [[printers]], not both")
+    for var in _SINGLE_PRINTER_VARS:
+        if env.get(var):
+            raise ConfigError(
+                f"{var} configures a single [printer]; with [[printers]], set each "
+                "printer's url, api_key and tools in the file"
+            )
+    if not isinstance(entries, list):
+        raise ConfigError("printers must be a list of [[printers]] tables")
+    if not entries:
+        raise ConfigError("[[printers]] needs at least one entry")
+    printers = tuple(_listed_printer(entry, i, env) for i, entry in enumerate(entries))
+    seen_locations: dict[str, str] = {}
+    seen_urls: dict[str, str] = {}
+    for printer in printers:
+        if sum(p.name == printer.name for p in printers) > 1:
+            raise ConfigError(f"printer {printer.name!r} is configured twice")
+        url = _url_key(printer.url, f"printers[{printer.name}]")
+        if url in seen_urls:
+            raise ConfigError(
+                f"printers {seen_urls[url]!r} and {printer.name!r} have the same url; "
+                "the printer's usage would be counted twice"
+            )
+        seen_urls[url] = printer.name
+        for location in printer.tools.values():
+            if location in seen_locations:
+                raise ConfigError(
+                    f"location {location!r} is mapped to a tool on both "
+                    f"{seen_locations[location]!r} and {printer.name!r}"
+                )
+            seen_locations[location] = printer.name
+    return printers
+
+
 def load(path: str | os.PathLike | None, env: dict[str, str] | None = None) -> Config:
     """Load the config from a TOML file, or from the environment alone if `path` is None.
 
-    The environment overrides the file for the basic settings: PRUSALINK_URL,
-    PRUSALINK_API_KEY, SPOOLMAN_URL, SPOOLMAN_PRUSALINK_LOCATION (the location of a
-    single-tool printer, used when the file has no [[tools]]) and
-    SPOOLMAN_PRUSALINK_DRY_RUN.
+    A file configures one printer with `[printer]` and `[[tools]]`, or several with
+    `[[printers]]`. The environment overrides the one-printer form for the basic settings:
+    PRUSALINK_URL, PRUSALINK_API_KEY, SPOOLMAN_URL, SPOOLMAN_PRUSALINK_LOCATION (the
+    location of a single-tool printer, used when the file has no [[tools]]) and
+    SPOOLMAN_PRUSALINK_DRY_RUN. With `[[printers]]`, the printer variables are an error.
     """
     env = dict(os.environ) if env is None else env
     raw: dict = {}
@@ -142,45 +330,26 @@ def load(path: str | os.PathLike | None, env: dict[str, str] | None = None) -> C
             except (tomllib.TOMLDecodeError, UnicodeDecodeError) as e:
                 raise ConfigError(f"can't parse {path}: {e}") from e
 
-    printer = _table(raw, "printer")
+    # The one-printer form's checks run in the order they always have: the printer's
+    # values before Spoolman's, and types before missing values.
+    single = raw.get("printers") is None
+    printer = _table(raw, "printer") if single else {}
     spoolman = _table(raw, "spoolman")
     bridge = _table(raw, "bridge")
-
+    file_api_key = file_url = ""
+    if single:
+        file_api_key = _api_key_from_file(printer, "printer", env)
+        file_url = _str(printer, "url", "", "printer.url")
     # Check the file's values even when the environment overrides them.
-    file_api_key = _str(printer, "api_key", "", "printer.api_key")
-    file_printer_url = _str(printer, "url", "", "printer.url")
     file_spoolman_url = _str(spoolman, "url", "", "spoolman.url")
-
-    api_key = env.get("PRUSALINK_API_KEY") or file_api_key
-    if not api_key:
-        raise ConfigError("set PRUSALINK_API_KEY or printer.api_key")
-    printer_url = env.get("PRUSALINK_URL") or file_printer_url
-    if not printer_url:
-        raise ConfigError("set printer.url or PRUSALINK_URL")
+    identity = _single_identity(env, file_api_key, file_url) if single else None
     spoolman_url = env.get("SPOOLMAN_URL") or file_spoolman_url
     if not spoolman_url:
         raise ConfigError("set spoolman.url or SPOOLMAN_URL")
-
-    tools: dict[int, str] = {}
-    entries = raw.get("tools", [])
-    if not isinstance(entries, list):
-        raise ConfigError("tools must be [[tools]] entries")
-    for entry in entries:
-        if not isinstance(entry, dict) or "index" not in entry or "location" not in entry:
-            raise ConfigError("each [[tools]] entry needs an index and a location")
-        index = entry["index"]
-        location = _str(entry, "location", "", "tool location")
-        if isinstance(index, bool) or not isinstance(index, int):
-            raise ConfigError(f"tool index must be an integer, got {index!r}")
-        if index in tools:
-            raise ConfigError(f"tool {index} is configured twice")
-        if location in tools.values():
-            raise ConfigError(f"location {location!r} is mapped to more than one tool")
-        tools[index] = location
-    if not tools and env.get("SPOOLMAN_PRUSALINK_LOCATION"):
-        tools[0] = env["SPOOLMAN_PRUSALINK_LOCATION"]
-    if not tools:
-        raise ConfigError("set SPOOLMAN_PRUSALINK_LOCATION or configure [[tools]] entries")
+    if identity is not None:
+        printers: tuple[PrinterConfig, ...] = (_single_printer(raw, env, *identity),)
+    else:
+        printers = _listed_printers(raw, env)
 
     dry_run = _env_bool(env, "SPOOLMAN_PRUSALINK_DRY_RUN")
     if dry_run is None:
@@ -197,22 +366,12 @@ def load(path: str | os.PathLike | None, env: dict[str, str] | None = None) -> C
     for name, key in fields:
         if key is not None and not re.fullmatch(r"[a-z0-9_]{1,64}", key):
             raise ConfigError(f"{name} must match [a-z0-9_]{{1,64}}, got {key!r}")
-    sync_file = _str(printer, "sync_file", "spoolman-sync.gcode", "printer.sync_file")
-    if not re.fullmatch(r"[A-Za-z0-9_.-]+\.gcode", sync_file):
-        raise ConfigError(f"printer.sync_file must be a plain .gcode file name, got {sync_file!r}")
     keys = [key for _, key in fields if key is not None]
     if len(keys) != len(set(keys)):
         raise ConfigError("uuid_field, flag_field and claim_field must differ")
-    preamble = printer.get("gcode_preamble")
-    if preamble is not None and (
-        not isinstance(preamble, list) or not all(isinstance(x, str) for x in preamble)
-    ):
-        raise ConfigError(f"printer.gcode_preamble must be a list of strings, got {preamble!r}")
     return Config(
-        printer_url=printer_url,
-        printer_api_key=api_key,
         spoolman_url=spoolman_url,
-        tools=tools,
+        printers=printers,
         state_file=Path(_str(bridge, "state_file", "/data/state.json", "bridge.state_file")),
         ledger_file=Path(_str(bridge, "ledger_file", "/data/ledger.jsonl", "bridge.ledger_file")),
         poll_printing=_interval(bridge, "poll_printing", 30, "bridge.poll_printing"),
@@ -224,12 +383,8 @@ def load(path: str | os.PathLike | None, env: dict[str, str] | None = None) -> C
         flag_field=flag_field,
         claim_field=claim_field,
         flag_drift=_bool(bridge, "flag_drift", True, "bridge.flag_drift"),
-        gcode_preamble=None if preamble is None else tuple(preamble),
-        sync_storage=_str(printer, "sync_storage", "usb", "printer.sync_storage"),
-        sync_file=sync_file,
         printer_sync=_bool(bridge, "printer_sync", True, "bridge.printer_sync"),
         sync_delay=_delay(bridge, "sync_delay", 0, "bridge.sync_delay"),
         sync_drift=_bool(bridge, "sync_drift", False, "bridge.sync_drift"),
-        printer_uuids=_bool(printer, "uuids", True, "printer.uuids"),
         printer_notices=_bool(bridge, "printer_notices", False, "bridge.printer_notices"),
     )

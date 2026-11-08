@@ -1,8 +1,8 @@
 # spoolman-prusalink
 
-A sidecar service that charges filament usage from a Prusa printer to the
-spools [Spoolman](https://github.com/Donkie/Spoolman) assigns to its tools.
-It reads the per-tool `extruded` counter from PrusaLink's
+A sidecar service that charges filament usage from one or more Prusa
+printers to the spools [Spoolman](https://github.com/Donkie/Spoolman) assigns
+to their tools. It reads the per-tool `extruded` counter from PrusaLink's
 `GET /api/v1/filament` endpoint and maps each tool to a Spoolman location.
 
 The bridge starts in dry-run mode, which logs what it would do and records
@@ -39,12 +39,13 @@ and only later usage goes to the spool loaded now.
 
   On firmware without the endpoint or its counters, the bridge logs an error
   once and charges nothing, then resumes on its own if they appear.
-- The printer's PrusaLink API key.
-- Spoolman, reachable from the bridge over HTTP.
+- Each printer's PrusaLink API key.
+- One Spoolman, reachable from the bridge over HTTP. A bridge serves one
+  Spoolman and any number of printers.
 
 ## Run it
 
-The image needs only environment variables for a single-tool printer:
+The image needs only environment variables for one single-tool printer:
 
 ```sh
 docker build -t spoolman-prusalink .
@@ -64,10 +65,10 @@ Spoolman's location filter, because that filter matches partial text.
 
 | Variable | Meaning |
 |---|---|
-| `PRUSALINK_URL` | The printer's PrusaLink URL. |
-| `PRUSALINK_API_KEY` | The printer's PrusaLink API key. |
+| `PRUSALINK_URL` | The printer's PrusaLink URL. Single-printer form only. |
+| `PRUSALINK_API_KEY` | The printer's PrusaLink API key. Single-printer form only. |
 | `SPOOLMAN_URL` | Spoolman's base URL. |
-| `SPOOLMAN_PRUSALINK_LOCATION` | The Spoolman location that stands for the printer's single tool. |
+| `SPOOLMAN_PRUSALINK_LOCATION` | The Spoolman location that stands for the printer's single tool. Single-printer form only. |
 | `SPOOLMAN_PRUSALINK_DRY_RUN` | `true` (the default) logs what the bridge would do and changes nothing. |
 | `SPOOLMAN_PRUSALINK_CONFIG` | Optional path to a TOML config file. `/config/config.toml` is read if it exists. |
 | `LOG_LEVEL` | `INFO` by default. `DEBUG` also logs every HTTP request. |
@@ -76,14 +77,20 @@ Keep `/data` on a persistent volume: it holds the state file, which the
 bridge needs to avoid dropping or repeating charges across restarts. The
 container runs as UID 1000, so a bind-mounted directory must be writable by
 that user. Run only one bridge per printer: two would charge the same usage
-twice.
+twice. Run only one bridge per Spoolman, too: flags, claims and evictions
+are keyed by spool, and a spool moves between printers, so two bridges would
+overwrite each other's flags. One bridge serves every printer (see [Several
+printers](#several-printers)).
 
 For multi-tool printers and the other settings, mount a config file based on
 `config.example.toml` at `/config/config.toml`. `PRUSALINK_URL`,
 `PRUSALINK_API_KEY`, `SPOOLMAN_URL` and `SPOOLMAN_PRUSALINK_DRY_RUN` override
 the file. `SPOOLMAN_PRUSALINK_LOCATION` applies only when the file has no
-`[[tools]]` entries, because the file's tools take precedence.
-`compose.example.yaml` runs the bridge next to Spoolman.
+`[[tools]]` entries, because the file's tools take precedence. In the file,
+`[printer]` also takes `api_key`, or `api_key_env` naming the variable that
+holds the key, and an optional `name` (`default` if unset) that keys the
+printer's state and appears in ledger records. `compose.example.yaml` runs
+the bridge next to Spoolman.
 
 To verify, look for a `baseline` line for each tool in the log. After the
 printer extrudes, look for lines like this one (`WOULD CHARGE` in dry-run
@@ -95,6 +102,73 @@ mode):
 
 To poll once and exit, for example while testing the config, run the command
 with `once` in place of the default `run`.
+
+### Several printers
+
+To serve several printers from one bridge, replace `[printer]` and `[[tools]]`
+in the config file with a `[[printers]]` list. Each entry has a `name`, a
+`url`, the API key as `api_key` or as `api_key_env` naming the environment
+variable that holds it, its own `[[printers.tools]]` entries, and any of
+`gcode_preamble`, `sync_storage`, `sync_file` and `uuids`:
+
+```toml
+[[printers]]
+name = "core-one-l"
+url = "http://192.168.1.22"
+api_key_env = "PRUSALINK_API_KEY_CORE_ONE_L"
+[[printers.tools]]
+index = 0
+location = "Core One L+"
+
+[[printers]]
+name = "mk4s"
+url = "http://192.168.1.23"
+api_key_env = "PRUSALINK_API_KEY_MK4S"
+[[printers.tools]]
+index = 0
+location = "MK4S"
+```
+
+With a `[[printers]]` list, `PRUSALINK_URL`, `PRUSALINK_API_KEY` and
+`SPOOLMAN_PRUSALINK_LOCATION` are an error, because there's no one printer
+for them to apply to. Each location must name exactly one tool across all
+printers, and two entries can't share a URL: the bridge refuses to start
+otherwise.
+
+The name keys the printer's state in `state.json` and appears in every
+ledger record, so keep it stable. Renaming a printer leaves the old name's
+state in the file, which the bridge keeps and warns about at each start, and
+starts the new name from a baseline.
+
+A `state.json` from a single-printer bridge loads only while one printer is
+configured: its tools become that printer's. With several printers
+configured, the bridge refuses to start, because it can't tell which printer
+the file belongs to. To migrate, configure the original printer alone under
+the name it's going to keep (`name` in `[printer]`, or a one-entry
+`[[printers]]` list; `default` otherwise), set `dry_run = false`, and let the
+bridge complete one poll with the printer and Spoolman reachable. That poll
+rewrites the file as version 3. Dry run saves nothing, so a dry-run start
+doesn't migrate. Then add the other printers. Ledger lines from before this
+version have no `printer` field.
+
+Every printer is polled each tick, and Spoolman is read once for all of
+them. When no printer can be read, whether it's off, answers with an error,
+or lacks the filament endpoint, the tick ends there. The interval is the
+printing rate while any printer that can be reached is busy or hasn't
+reported its state yet. A printer that's off is logged as an outage, once
+and then hourly; one that answers with an error is logged once per distinct
+error. Either way it's skipped until it can be read, its flags in Spoolman
+stay as they were, and the others carry on. Log lines about a tool
+keep the `[location]` prefix; lines about a whole printer name it when there
+are several. A spool active in two tools at once, which happens when one
+printer misses an unload across a reboot, is logged once and flagged on the
+spool naming both locations.
+
+With `printer_notices = true`, a new flag is shown on the printer whose tool
+location holds the spool. A flag on a spool in no tool's location is shown on
+the printer that raised it. A flag that no printer raised, on a spool in no
+tool's location, such as a claim on a spool that's nowhere, is written to
+Spoolman and shown on no screen, because no printer is the right place for it.
 
 ### Run from source
 
@@ -331,13 +405,14 @@ The bridge's own job doesn't count as a print start: it's recognized by
 
 The `/data` volume holds two files:
 
-- `state.json` stores each tool's counters and swap state, the queue of
-  charges not yet accepted by Spoolman, and the spools the bridge has
-  flagged. Keep it across restarts: without it, the bridge takes a new
-  baseline, drops queued charges, and loses track of open swaps. Run only one
-  bridge per state file and printer.
+- `state.json` stores each printer's tools, by printer name, with their
+  counters and swap state, the queue of charges not yet accepted by Spoolman,
+  and the spools the bridge has flagged. Keep it across restarts: without it,
+  the bridge takes a new baseline, drops queued charges, and loses track of
+  open swaps. Run only one bridge per state file, printer and Spoolman.
 - `ledger.jsonl` stores one JSON object per line for every charge, and every
-  event, such as a reboot or swap. Every record has `dry_run`. A charge also
+  event, such as a reboot or swap. Every record has `dry_run`, `printer` (the
+  printer's name; `default` when `[printer]` sets none) and `tool`. A charge also
   has, when it was sent, `applied` (the time Spoolman accepted it) or
   `failed` (the HTTP status that rejected it; a charge held for a deleted
   spool also has `held` and is charged again later as part of a new charge).

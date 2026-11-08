@@ -8,10 +8,10 @@ import pytest
 from spoolman_prusalink.__main__ import main
 from spoolman_prusalink.accounting import ToolState
 from spoolman_prusalink.app import Bridge
-from spoolman_prusalink.config import Config, ConfigError, load
+from spoolman_prusalink.config import Config, ConfigError, PrinterConfig, load
 from spoolman_prusalink.prusalink import PrusaLink, parse_filament
 from spoolman_prusalink.spoolman import Spoolman, parse_spool
-from spoolman_prusalink.state import State, load_state, save_state
+from spoolman_prusalink.state import PrinterState, State, load_state, save_state
 
 FILAMENT = {
     "boot_id": 3308742886,
@@ -109,11 +109,12 @@ def test_parse_spool_claim_and_last_used():
 
 
 def make_config(tmp_path, **kw):
+    printer = PrinterConfig(
+        name="default", url="http://printer", api_key="k", tools={0: "Core One L+"}
+    )
     return Config(
-        printer_url="http://printer",
-        printer_api_key="k",
         spoolman_url="http://spoolman",
-        tools={0: "Core One L+"},
+        printers=(printer,),
         state_file=tmp_path / "state.json",
         ledger_file=tmp_path / "ledger.jsonl",
         **kw,
@@ -140,8 +141,8 @@ def make_bridge(tmp_path, filament, spools):
     cfg = make_config(tmp_path)
     return Bridge(
         config=cfg,
-        printer=PrusaLink(cfg.printer_url, "k", transport=transport),
         spoolman=Spoolman(cfg.spoolman_url, uuid_field="instance_uuid", transport=transport),
+        clients={"default": PrusaLink(cfg.printers[0].url, "k", transport=transport)},
     )
 
 
@@ -169,7 +170,7 @@ async def test_poll_logs_would_charge_and_saves_nothing(tmp_path, caplog):
     assert [(r["spool_id"], r["use_length"]) for r in charges] == [(7, 1000)]
     assert any("event" in r for r in ledger)
     assert all(r["dry_run"] is True for r in ledger)  # Events too, not just charges.
-    assert bridge.tools[0].charged == 5310
+    assert bridge.printers[0].tools[0].charged == 5310
     assert not (tmp_path / "state.json").exists()  # Dry run saves nothing.
     assert bridge.interval() == bridge.config.poll_printing
     await bridge.aclose()
@@ -183,7 +184,7 @@ async def test_two_spools_in_location_skips_tool(tmp_path, caplog):
     )
     await bridge.poll()
     assert "location holds spools 7, 9" in caplog.text
-    assert 0 not in bridge.tools
+    assert 0 not in bridge.printers[0].tools
     await bridge.aclose()
 
 
@@ -203,7 +204,9 @@ async def test_printer_error_skips_poll(tmp_path, caplog):
 
     cfg = make_config(tmp_path)
     t = httpx.MockTransport(handler)
-    bridge = Bridge(cfg, PrusaLink("http://p", "k", transport=t), Spoolman("http://s", transport=t))
+    bridge = Bridge(
+        cfg, Spoolman("http://s", transport=t), {"default": PrusaLink("http://p", "k", transport=t)}
+    )
     await bridge.poll()
     assert "printer read failed" in caplog.text
     assert not (tmp_path / "state.json").exists()
@@ -221,8 +224,10 @@ async def test_printer_outage_logged_on_change(tmp_path, caplog):
 
     cfg = make_config(tmp_path)
     t = httpx.MockTransport(handler)
-    bridge = Bridge(cfg, PrusaLink("http://p", "k", transport=t), Spoolman("http://s", transport=t))
-    bridge._printer_outage.clock = lambda: now["v"]
+    bridge = Bridge(
+        cfg, Spoolman("http://s", transport=t), {"default": PrusaLink("http://p", "k", transport=t)}
+    )
+    bridge.printers[0]._printer_outage.clock = lambda: now["v"]
     caplog.set_level("INFO")
 
     for _ in range(5):
@@ -239,18 +244,19 @@ async def test_printer_outage_logged_on_change(tmp_path, caplog):
     up["v"] = True
     await bridge.poll()
     assert "printer reachable again after 3h 00m" in caplog.text
-    assert not bridge._printer_outage.down
+    assert not bridge.printers[0]._printer_outage.down
     await bridge.aclose()
 
 
 def test_save_state_skips_unchanged(tmp_path):
     path = tmp_path / "state.json"
-    state = State(tools={0: ToolState(boot_id=1, charged=100)})
+    state = State(printers={"default": PrinterState({0: ToolState(boot_id=1, charged=100)})})
     assert save_state(path, state)
     assert not save_state(path, state)
-    state.tools[0] = replace(state.tools[0], charged=150)
+    tools = state.tools("default")
+    tools[0] = replace(tools[0], charged=150)
     assert save_state(path, state)
-    assert load_state(path).tools[0].charged == 150
+    assert load_state(path, ["default"]).tools("default")[0].charged == 150
 
 
 def test_config_load(tmp_path):
@@ -261,8 +267,9 @@ def test_config_load(tmp_path):
         '[[tools]]\nindex = 0\nlocation = "Core One L+"\n'
     )
     cfg = load(p, env={"PRUSALINK_API_KEY": "secret"})
-    assert cfg.tools == {0: "Core One L+"}
-    assert cfg.printer_api_key == "secret"
+    assert cfg.printers[0].tools == {0: "Core One L+"}
+    assert cfg.printers[0].api_key == "secret"
+    assert cfg.printers[0].name == "default"
     assert cfg.dry_run
 
     assert cfg.length_factor == 1.0
@@ -413,8 +420,8 @@ def test_config_accepts_booleans_and_preamble_list(tmp_path):
         + "[bridge]\nprinter_sync = false\ndry_run = false\npoll_idle = 0.5\n"
     )
     cfg = load(p, env={"PRUSALINK_API_KEY": "k"})
-    assert cfg.printer_sync is False and cfg.dry_run is False and cfg.printer_uuids is False
-    assert cfg.gcode_preamble == ('M862.3 P "COREONEL"',)
+    assert cfg.printer_sync is False and cfg.dry_run is False and cfg.printers[0].uuids is False
+    assert cfg.printers[0].gcode_preamble == ('M862.3 P "COREONEL"',)
     assert cfg.poll_idle == 0.5
 
 
@@ -448,7 +455,7 @@ def test_config_from_environment_only():
             "SPOOLMAN_PRUSALINK_DRY_RUN": "false",
         },
     )
-    assert cfg.tools == {0: "Core One L+"} and cfg.dry_run is False
+    assert cfg.printers[0].tools == {0: "Core One L+"} and cfg.dry_run is False
     assert cfg.state_file.as_posix() == "/data/state.json"
     with pytest.raises(ConfigError, match="SPOOLMAN_PRUSALINK_LOCATION"):
         load(None, env={"PRUSALINK_URL": "p", "PRUSALINK_API_KEY": "k", "SPOOLMAN_URL": "s"})
@@ -463,3 +470,248 @@ def test_config_from_environment_only():
                 "SPOOLMAN_PRUSALINK_DRY_RUN": "maybe",
             },
         )
+
+
+PRINTERS_BASE = (
+    '[spoolman]\nurl = "http://s"\n'
+    '[[printers]]\nname = "core"\nurl = "http://a"\napi_key_env = "CORE_KEY"\n'
+    '[[printers.tools]]\nindex = 0\nlocation = "Core One L+"\n'
+    '[[printers]]\nname = "mk4s"\nurl = "http://b/"\napi_key = "kb"\nuuids = false\n'
+    '[[printers.tools]]\nindex = 0\nlocation = "MK4S"\n'
+)
+MK4S_TOOL = '[[printers.tools]]\nindex = 0\nlocation = "MK4S"\n'
+
+
+def test_config_lists_several_printers(tmp_path):
+    p = tmp_path / "c.toml"
+    p.write_text(PRINTERS_BASE)
+    core, mk4s = load(p, env={"CORE_KEY": "ka"}).printers
+    assert (core.name, core.url, core.api_key, core.tools, core.uuids) == (
+        "core",
+        "http://a",
+        "ka",
+        {0: "Core One L+"},
+        True,
+    )
+    assert (mk4s.name, mk4s.url, mk4s.api_key, mk4s.tools, mk4s.uuids) == (
+        "mk4s",
+        "http://b/",
+        "kb",
+        {0: "MK4S"},
+        False,
+    )
+
+
+@pytest.mark.parametrize(
+    "edit, error",
+    [
+        (('name = "core"\n', ""), "printers[0] needs a name"),
+        (('name = "core"\n', 'name = "a b"\n'), "printers[0].name must match"),
+        (('url = "http://a"\n', ""), "printers[core] needs a url"),
+        (
+            ('api_key_env = "CORE_KEY"\n', ""),
+            "set printers[core].api_key or printers[core].api_key_env",
+        ),
+        (
+            ('api_key_env = "CORE_KEY"\n', 'api_key_env = "NO_SUCH_KEY"\n'),
+            "NO_SUCH_KEY, which isn't set",
+        ),
+        (
+            ('api_key_env = "CORE_KEY"\n', 'api_key_env = "CORE_KEY"\napi_key = "x"\n'),
+            "set printers[core].api_key or printers[core].api_key_env, not both",
+        ),
+        (
+            ('[[printers.tools]]\nindex = 0\nlocation = "Core One L+"\n', ""),
+            "printers[core] needs [[printers.tools]]",
+        ),
+        (('name = "mk4s"\n', 'name = "core"\n'), "printer 'core' is configured twice"),
+        (
+            ('url = "http://b/"\n', 'url = "http://a/"\n'),
+            "printers 'core' and 'mk4s' have the same url",
+        ),
+        (
+            ('url = "http://b/"\n', 'url = "HTTP://A:80"\n'),
+            "printers 'core' and 'mk4s' have the same url",
+        ),
+        (('url = "http://b/"\n', 'url = "http://b:80a"\n'), "printers[mk4s].url isn't a valid"),
+        (('url = "http://b/"\n', 'url = "http://b:99999"\n'), "printers[mk4s].url isn't a valid"),
+        (('url = "http://b/"\n', 'url = "http://[::1"\n'), "printers[mk4s].url isn't a valid"),
+        (
+            (MK4S_TOOL, MK4S_TOOL + '[[printers.tools]]\nindex = 0\nlocation = "MK4S T2"\n'),
+            "printers[mk4s]: tool 0 is configured twice",
+        ),
+        (
+            (MK4S_TOOL, MK4S_TOOL + '[[printers.tools]]\nindex = 1\nlocation = "MK4S"\n'),
+            "printers[mk4s]: location 'MK4S' is mapped to more than one tool",
+        ),
+        (
+            ('location = "MK4S"\n', 'location = "Core One L+"\n'),
+            "location 'Core One L+' is mapped to a tool on both 'core' and 'mk4s'",
+        ),
+        (("[spoolman]\n", '[printer]\nurl = "http://p"\n[spoolman]\n'), "not both"),
+        (("[spoolman]\n", '[[tools]]\nindex = 0\nlocation = "X"\n[spoolman]\n'), "not both"),
+        (("uuids = false\n", 'uuids = "no"\n'), "printers[mk4s].uuids must be true or false"),
+    ],
+)
+def test_config_rejects_bad_printer_lists(tmp_path, edit, error):
+    old, new = edit
+    text = PRINTERS_BASE.replace(old, new, 1)
+    assert text != PRINTERS_BASE or new == old
+    p = tmp_path / "c.toml"
+    p.write_text(text)
+    with pytest.raises(ConfigError, match=re.escape(error)):
+        load(p, env={"CORE_KEY": "ka"})
+
+
+@pytest.mark.parametrize(
+    "text, error",
+    [
+        ("printers = []\n", "[[printers]] needs at least one entry"),
+        ("printers = 5\n", "printers must be a list of [[printers]] tables"),
+        ("printers = [1]\n", "printers[0] must be a table"),
+    ],
+)
+def test_config_rejects_a_printer_list_that_is_not_a_list_of_tables(tmp_path, text, error):
+    p = tmp_path / "c.toml"
+    p.write_text(text + '[spoolman]\nurl = "http://s"\n')
+    with pytest.raises(ConfigError, match=re.escape(error)):
+        load(p, env={})
+
+
+@pytest.mark.parametrize(
+    "var", ["PRUSALINK_URL", "PRUSALINK_API_KEY", "SPOOLMAN_PRUSALINK_LOCATION"]
+)
+def test_config_single_printer_variables_are_an_error_with_a_printer_list(tmp_path, var):
+    p = tmp_path / "c.toml"
+    p.write_text(PRINTERS_BASE)
+    with pytest.raises(ConfigError, match=f"{var} configures a single"):
+        load(p, env={"CORE_KEY": "ka", var: "x"})
+
+
+def test_config_url_keys_keep_ipv6_hosts_apart_from_their_port(tmp_path):
+    p = tmp_path / "c.toml"
+    p.write_text(
+        PRINTERS_BASE.replace('url = "http://a"\n', 'url = "http://[::1]:8080"\n', 1).replace(
+            'url = "http://b/"\n', 'url = "http://[::1:8080]"\n', 1
+        )
+    )
+    assert [x.url for x in load(p, env={"CORE_KEY": "ka"}).printers] == [
+        "http://[::1]:8080",
+        "http://[::1:8080]",
+    ]  # Two printers, not "the same url".
+
+
+@pytest.mark.parametrize(
+    "text, env, error",
+    [
+        ("", {}, "set PRUSALINK_API_KEY or printer.api_key"),
+        ("", {"PRUSALINK_API_KEY": "k"}, "set printer.url or PRUSALINK_URL"),
+        ("", {"PRUSALINK_API_KEY": "k", "PRUSALINK_URL": "http://p"}, "set spoolman.url"),
+        ("[printer]\napi_key = 5\n[spoolman]\nurl = 5\n", {}, "printer.api_key must be a string"),
+        ("[printer]\nurl = 5\n[spoolman]\nurl = 5\n", {}, "printer.url must be a string"),
+        ("printer = 5\nspoolman = 5\n", {}, "[printer] must be a table"),
+        ("spoolman = 5\n[printer]\nurl = 5\n", {}, "[spoolman] must be a table"),
+    ],
+)
+def test_config_single_printer_reports_errors_in_the_old_order(tmp_path, text, env, error):
+    # The order of these first errors is what a bare start shows; it hasn't changed.
+    p = tmp_path / "c.toml"
+    p.write_text(text)
+    with pytest.raises(ConfigError, match=re.escape(error)):
+        load(p, env=env)
+
+
+def test_config_single_printer_takes_a_name_and_api_key_env(tmp_path):
+    p = tmp_path / "c.toml"
+    p.write_text(
+        CONFIG_BASE.replace("[printer]\n", '[printer]\nname = "core"\napi_key_env = "MY_KEY"\n')
+    )
+    cfg = load(p, env={"MY_KEY": "from-env"})
+    assert (cfg.printers[0].name, cfg.printers[0].api_key) == ("core", "from-env")
+    # PRUSALINK_API_KEY still wins, as before, and PRUSALINK_URL still overrides the file.
+    cfg = load(p, env={"MY_KEY": "x", "PRUSALINK_API_KEY": "k", "PRUSALINK_URL": "http://e"})
+    assert (cfg.printers[0].api_key, cfg.printers[0].url) == ("k", "http://e")
+    # A file error is reported even when the environment would have supplied the key.
+    for env in ({}, {"PRUSALINK_API_KEY": "k"}):
+        with pytest.raises(ConfigError, match="MY_KEY, which isn't set"):
+            load(p, env=env)
+    p.write_text(CONFIG_BASE.replace("[printer]\n", '[printer]\nname = "core one"\n'))
+    with pytest.raises(ConfigError, match="printer.name must match"):
+        load(p, env={"PRUSALINK_API_KEY": "k"})
+
+
+V2_STATE = {
+    "version": 2,
+    "tools": {"0": ToolState(boot_id=1, charged=100, active=7, assigned=7).to_json()},
+    "outbox": [{"tool": 0, "spool_id": 7, "use_length": 50.0, "extruded_mm": 50}],
+    "flagged": [7],
+    "noticed": [],
+    "runouts": {},
+    "claimed": [],
+}
+
+
+def test_state_v2_migrates_to_the_only_printer(tmp_path):
+    path = tmp_path / "state.json"
+    runouts = {"8": "old text form", "9": {"text": "with weights", "net": 1000.0, "used": 10.0}}
+    path.write_text(json.dumps({**V2_STATE, "runouts": runouts}))
+    state = load_state(path, ["core"])
+    assert list(state.printers) == ["core"]
+    assert state.tools("core")[0].active == 7
+    # Outbox records and runouts are stamped: flush() finds the record's tool by it, and
+    # notices go to the printer that owns the runout.
+    assert [r["printer"] for r in state.outbox] == ["core"]
+    assert {k: r.printer for k, r in state.runouts.items()} == {8: "core", 9: "core"}
+    assert (state.runouts[8].text, state.runouts[9].net) == ("old text form", 1000.0)
+    assert state.flagged == [7]
+    assert save_state(path, state)
+    saved = json.loads(path.read_text())
+    assert saved["version"] == 3 and "tools" not in saved
+    assert saved["printers"]["core"]["tools"]["0"]["active"] == 7
+    assert load_state(path, ["core"]) == state
+
+
+def test_state_v2_is_refused_with_several_printers(tmp_path):
+    path = tmp_path / "state.json"
+    path.write_text(json.dumps(V2_STATE))
+    with pytest.raises(ValueError, match="single-printer bridge.*2 printers configured"):
+        load_state(path, ["core", "mk4s"])
+    path.write_text(json.dumps({**V2_STATE, "version": 1}))
+    with pytest.raises(ValueError, match="unsupported state version 1"):
+        load_state(path, ["core"])
+
+
+def test_main_exits_2_on_a_state_file_it_cannot_migrate(tmp_path, monkeypatch, caplog):
+    state = tmp_path / "state.json"
+    state.write_text(json.dumps(V2_STATE))
+    p = tmp_path / "c.toml"
+    p.write_text(PRINTERS_BASE + f'[bridge]\nstate_file = "{state}"\n')
+    monkeypatch.setenv("CORE_KEY", "ka")
+    assert main(["-c", str(p), "once"]) == 2
+    assert "state: " in caplog.text and "single-printer bridge" in caplog.text
+
+
+def test_main_exits_2_on_a_state_file_it_cannot_load(tmp_path, monkeypatch, caplog):
+    state = tmp_path / "state.json"
+    state.write_text(json.dumps({**V2_STATE, "version": 1}))
+    p = tmp_path / "c.toml"
+    p.write_text(CONFIG_BASE + f'[bridge]\nstate_file = "{state}"\n')
+    monkeypatch.setenv("PRUSALINK_API_KEY", "k")
+    assert main(["-c", str(p), "once"]) == 2
+    assert "state: " in caplog.text and "unsupported state version 1" in caplog.text
+
+
+def test_bridge_keeps_and_warns_about_an_unconfigured_printer(tmp_path, caplog):
+    # X14: a renamed printer leaves its old state behind, which is kept.
+    cfg = make_config(tmp_path)
+    old = PrinterState({0: ToolState(boot_id=1, charged=100, active=7, assigned=7)})
+    t = httpx.MockTransport(lambda request: httpx.Response(404))
+    bridge = Bridge(
+        cfg,
+        Spoolman("http://s", transport=t),
+        {"default": PrusaLink("http://p", "k", transport=t)},
+        State(printers={"old": old}),
+    )
+    assert "printer 'old' that isn't configured; keeping its state" in caplog.text
+    assert bridge.printers[0].tools == {}
+    assert bridge.state.printers["old"] == old
