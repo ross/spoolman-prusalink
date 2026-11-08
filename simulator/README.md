@@ -135,4 +135,4 @@ Choices made where the firmware was silent or the plan left it open:
 pytest simulator/tests
 ```
 
-They don't run with the bridge's own suite, which stays on `tests/`.
+They're part of the default `pytest` run, with the bridge's own suite on `tests/`.
