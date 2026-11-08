@@ -13,6 +13,7 @@ from simulator.model import SNAPSHOT_NAME, Busy, Invalid, PrintSpec, Simulation
 
 STATIC = Path(__file__).parent / "static"
 STATE_INTERVAL = 0.1  # at most ten state events a second per client
+ADVANCE_LIMIT = 24 * 3600.0  # one jump at most a day, in simulated seconds
 HEARTBEAT = 15.0
 
 ACTIONS = frozenset(
@@ -146,6 +147,19 @@ def make_app(sim: Simulation) -> web.Application:
         sim.log(None, "action", "settings " + ", ".join(f"{k}={v}" for k, v in body.items()))
         return web.json_response({"ok": True})
 
+    async def advance(request: web.Request) -> web.Response:
+        """Jump simulated time forward, for scripts that drive a scenario step by step."""
+        try:
+            body = await _body(request)
+            seconds = float(body.get("seconds", 0))
+        except (Invalid, TypeError, ValueError) as e:
+            return _error(f"bad seconds: {e}", 400)
+        if not 0 < seconds <= ADVANCE_LIMIT:
+            return _error(f"seconds must be in (0, {ADVANCE_LIMIT}]", 400)
+        sim.log(None, "action", f"advance {seconds:g} s")
+        sim.advance(seconds)
+        return web.json_response({"ok": True, "now": sim.now})
+
     def snapshot_path(request: web.Request) -> Path:
         name = request.match_info["name"]
         if not SNAPSHOT_NAME.match(name):
@@ -188,6 +202,7 @@ def make_app(sim: Simulation) -> web.Application:
     app.router.add_get("/api/events", events)
     app.router.add_post("/api/printers/{name}/{action}", action)
     app.router.add_post("/api/settings", settings)
+    app.router.add_post("/api/advance", advance)
     app.router.add_post("/api/snapshot/{name}", save)
     app.router.add_post("/api/restore/{name}", restore)
     app.router.add_get("/api/snapshots", snapshots)

@@ -81,7 +81,9 @@ with the reason; bad parameters answer 400.
 `GET /api/state` is everything the page shows, `GET /api/events` streams it
 as server-sent events, `POST /api/settings` changes a setting, and
 `POST /api/snapshot/<name>` and `POST /api/restore/<name>` save and load the
-whole model under `simulator/data/`.
+whole model under `simulator/data/`. `POST /api/advance` with
+`{"seconds": 30}` jumps simulated time forward, so a script can step through
+a scenario without waiting.
 
 The event log at the bottom of the page shows every action, state change,
 and request each printer received, with the body of every uploaded job.

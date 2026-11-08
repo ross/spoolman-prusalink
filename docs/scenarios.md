@@ -8,6 +8,9 @@ serves two of them. Multi-tool (INDX, XL) is out of scope.
 Status values:
 
 - **Seen live**: the behavior has been observed on the Core One L+.
+- **End to end**: a test in `integration/` runs the bridge, the simulator and
+  a real Spoolman through it, in lockstep. Named after the "Seen live" or
+  "Tested" status where both apply.
 - **Tested**: a unit test covers it, but it hasn't been seen live.
 - **Implemented**: code handles it, with no test.
 - **Decided**: the behavior is settled. Unless the row also says
@@ -34,8 +37,8 @@ archived active spool (M3, M3a) is logged once when the bridge finds it.
 
 | # | Scenario | What the bridge does | Status |
 | --- | --- | --- | --- |
-| S1 | Spoolman first: move the new spool into the location, then unload and load. | Stages the new spool and keeps charging the old one. At the unload, charges usage before it to the old spool, makes the new one active, and moves the old one out of the location. The load is charged to the new spool. Writes the new spool to the printer when idle. | Tested (live test with spool 18) |
-| S2 | Filament first: unload, then change Spoolman, then load. | Opens an unconfirmed swap and flags the old spool. The Spoolman change confirms it and clears the flag. Usage during the load is held until the printer reports a filament, then charged to the new spool. Writes when idle. | Seen live (19 → 14) |
+| S1 | Spoolman first: move the new spool into the location, then unload and load. | Stages the new spool and keeps charging the old one. At the unload, charges usage before it to the old spool, makes the new one active, and moves the old one out of the location. The load is charged to the new spool. Writes the new spool to the printer when idle. | Tested (live test with spool 18); end to end (`test_s1_spoolman_first_swap`) |
+| S2 | Filament first: unload, then change Spoolman, then load. | Opens an unconfirmed swap and flags the old spool. The Spoolman change confirms it and clears the flag. Usage during the load is held until the printer reports a filament, then charged to the new spool. Writes when idle. | Seen live (19 → 14); end to end (`test_s2_filament_first_swap`) |
 | S3 | Filament first, but Spoolman changed during the load. | As S2. Usage already charged to the old spool since the unload is moved to the new one. If the old spool is moved out of the location before the new one is moved in, the swap stays open while the location is empty, even through a print start, and later usage is held. The next spool moved in confirms the swap and takes all the usage since the unload. Moving the old spool back in leaves the swap as if the spool never left: open, or, if a print started while it was out, closed as of that print start with a provisional charge (S4). An unload while the location is empty closes the swap with its usage on the old spool, and the usage held since the location emptied is reported lost (S6). | Seen live (14 → 19); the two-step change tested |
 | S4 | Unload and reload the same spool, with no Spoolman change, then print. | Opens an unconfirmed swap. The print start closes it as "assumed same spool", records a provisional charge (Q1) and flags the spool with the amount. The next unload keeps the usage there. | Seen live (job 126); provisional charge tested |
 | S5 | Unload, load a different spool, forget Spoolman, and print. | As S4: the print is charged to the old spool provisionally, and the flag says how to move it. Moving the right spool into the location and ticking **Claim held usage** on it moves the usage since the unload, makes it active, evicts the old spool and queues a write (see Q1 and [Claims](#claims)). | Decided and implemented; tested |
@@ -47,14 +50,14 @@ archived active spool (M3, M3a) is logged once when the bridge finds it.
 | S11 | Two spools in the location, neither active. | Skips the tool and warns until one is removed. | Seen live (spools 2 and 7) |
 | S12 | Spoolman changed to a spool whose UUID the printer already reports, with no unload. | Treated as a correction: switches immediately. | Tested |
 | S13 | Spoolman changed with no unload, and the printer doesn't report the new spool's UUID. | Staged until the next unload. If the user meant "I got it wrong; this spool is loaded", they claim it (see Q3). | Decided and implemented; tested |
-| S14 | Several unloads and loads between two polls. | Counts them as one unload. Usage up to the last unload goes to the active spool. | Seen live (14 → 7 → 20, with the bridge stopped during the swaps) |
+| S14 | Several unloads and loads between two polls. | Counts them as one unload. Usage up to the last unload goes to the active spool. | Seen live (14 → 7 → 20, with the bridge stopped during the swaps); end to end (`test_s14_several_swaps_between_polls`) |
 
 ## During a print
 
 | # | Scenario | What the bridge does | Status |
 | --- | --- | --- | --- |
 | P1 | Normal print. | Charges each poll's change in the counter, every 30 s. | Seen live |
-| P2 | Runout mid-print, Spoolman updated during the pause. | The runout unload opens an unconfirmed swap. The Spoolman change confirms it. The reload keeps the old spool's metadata on the printer, so a write is queued for when the print ends. | Seen live (19 → 20); the write was missed before `4dffd99` |
+| P2 | Runout mid-print, Spoolman updated during the pause. | The runout unload opens an unconfirmed swap. The Spoolman change confirms it. The reload keeps the old spool's metadata on the printer, so a write is queued for when the print ends. | Seen live (19 → 20); the write was missed before `4dffd99`; end to end (`test_p2_runout_with_spoolman_updated_during_pause`) |
 | P3 | Runout mid-print, Spoolman updated after the print ends. | The unconfirmed swap stays open: the running job isn't a new print start. The later Spoolman change confirms it and moves the usage since the unload. | Tested |
 | P4 | Runout, and the same spool type is reloaded with no Spoolman change ever. | Stays open until the next print start, which closes it as "assumed same spool", records a provisional charge (Q1) and flags the spool with the amount. The next unload keeps the usage there, or a claim moves it. | Tested |
 | P5 | Planned color change (`M600` in the G-code). | Same as a runout: each change is an unload. | Tested |
@@ -84,7 +87,7 @@ archived active spool (M3, M3a) is logged once when the bridge finds it.
 
 | # | Scenario | What the bridge does | Status |
 | --- | --- | --- | --- |
-| W1 | Write after a swap, printer idle. | Uploads and runs the sync job: model checks, `G28 O`, `M865` with every parameter, `M865.1` UUID, `M117`. Gives the spool a UUID first if it has none. | Seen live |
+| W1 | Write after a swap, printer idle. | Uploads and runs the sync job: model checks, `G28 O`, `M865` with every parameter, `M865.1` UUID, `M117`. Gives the spool a UUID first if it has none. | Seen live; end to end (`test_w1_write_after_swap`) |
 | W2 | Write due while the printer is printing. | Waits until it's idle. | Tested |
 | W3 | Printer refuses the upload (409 busy). | Waits for the next idle poll. | Tested |
 | W4 | User starts a print within a minute of loading. | The write waits until that print ends, so the print runs with the menu's metadata. | Tested |

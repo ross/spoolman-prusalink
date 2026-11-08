@@ -419,3 +419,24 @@ testing without hardware: it serves the PrusaLink endpoints the bridge
 uses, keeps each tool's counters and filament, and has a page with buttons
 for loads, unloads, prints, runouts, jams, reboots and outages. See
 [simulator/README.md](simulator/README.md).
+
+## Tests
+
+```
+pip install -e '.[dev]'
+pytest
+```
+
+That's the unit suite: the bridge's tests in `tests/` and the simulator's in
+`simulator/tests`, self-contained and quick. Run it before every change.
+
+The end-to-end tests in `integration/` run the bridge, the simulator and a
+real Spoolman together, one scenario from `docs/scenarios.md` per test. They
+need a Spoolman to talk to and take longer, so they run only when asked:
+
+```
+podman run -d --name spoolman-it -p 127.0.0.1:7912:8000 ghcr.io/donkie/spoolman:0.27.1
+SPOOLMAN_URL=http://127.0.0.1:7912 pytest integration
+```
+
+CI runs both, as separate jobs. See [integration/README.md](integration/README.md).
