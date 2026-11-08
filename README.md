@@ -166,9 +166,9 @@ spool naming both locations.
 
 With `printer_notices = true`, a new flag is shown on the printer whose tool
 location holds the spool. A flag on a spool in no tool's location is shown on
-the printer that raised it. A flag that no printer raised, such as a claim on
-a spool that's in no tool's location, is written to Spoolman and shown on no
-screen, because no printer is the right place for it.
+the printer that raised it. A flag that no printer raised, on a spool in no
+tool's location, such as a claim on a spool that's nowhere, is written to
+Spoolman and shown on no screen, because no printer is the right place for it.
 
 ### Run from source
 
