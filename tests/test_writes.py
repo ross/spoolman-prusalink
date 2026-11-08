@@ -476,7 +476,8 @@ async def test_spoolman_first_swap_evicts_and_writes_printer(tmp_path):
     ]
     assert 'M865 X R N"PLA" T215 B60 P170 C20 D15 E38 O"#ff0000" L0' in gcode
     assert f'M865.1 I0 C"{minted}"' in gcode
-    assert gcode.rstrip().endswith("M117 Spoolman: Grey")
+    assert gcode.rstrip().endswith(f'M865.1 I0 C"{minted}"')
+    assert "M117" not in gcode
     assert printer.uploads[0][0] == "/api/v1/files/usb/spoolman-sync.gcode"
 
     await bridge.poll()  # printer now matches: no second job, no flag
@@ -650,53 +651,14 @@ async def test_drift_is_flagged_not_overwritten_unless_enabled(tmp_path):
     await bridge.aclose()
 
 
-async def test_printer_notices_show_each_flag_once(tmp_path):
-    bridge, fake, printer = make(tmp_path, [spool(19)], printer_notices=True)
+async def test_a_flag_runs_no_job(tmp_path):
+    bridge, fake, printer = make(tmp_path, [spool(19)])
     await bridge.poll()
     printer.unloads, printer.at_unload = 1, 1000  # unconfirmed swap, printer idle
     await bridge.poll()
     await bridge.poll()
-    (gcode,) = jobs(printer)
-    assert "M117 Spoolman: Core One L+: filament was unl" in gcode
-    assert "M865" not in gcode
-    await bridge.aclose()
-
-
-async def test_printer_notice_waits_for_a_job_without_a_write(tmp_path):
-    # A jam: the W11 write and the swap flag are due in the same poll.
-    bridge, fake, printer = make(tmp_path, [spool(19)], printer_notices=True)
-    await bridge.poll()
-    printer.unloads, printer.at_unload, printer.material = 1, 1000, {"name": "PLA"}
-    await bridge.poll()
-    (write,) = jobs(printer)
-    assert write.rstrip().endswith("M117 Spoolman: Grey")
-    await bridge.poll()
-    notice = jobs(printer)[1]
-    assert "M117 Spoolman: Core One L+: filament was unl" in notice
-    await bridge.poll()
-    assert len(jobs(printer)) == 2
-    await bridge.aclose()
-
-
-async def test_printer_notices_show_two_new_flags_in_turn(tmp_path):
-    bridge, fake, printer = make(
-        tmp_path, [spool(19), spool(21, location=None)], printer_notices=True
-    )
-    await bridge.poll()
-    bridge.state.runouts[19] = Runout("first flag")  # Spool 19 is in the tool's location.
-    # Spool 21 isn't: the flag is shown because this printer owns it. A runout from before
-    # printer names, or from a renamed printer, has no owner, so on a spool in no tool's
-    # location it's flagged in Spoolman only.
-    bridge.state.runouts[21] = Runout("second flag", printer="default")
-    bridge.state.runouts[22] = Runout("third flag")
-    bridge.state.runouts[23] = Runout("fourth flag", printer="old-name")
-    fake.spools[22] = spool(22, location=None)
-    fake.spools[23] = spool(23, location=None)
-    for _ in range(6):
-        await bridge.poll()
-    shown = [g.splitlines()[-1] for g in jobs(printer)]
-    assert shown == ["M117 Spoolman: first flag", "M117 Spoolman: second flag"]
-    assert fake.flag(22) == "third flag" and fake.flag(23) == "fourth flag"
+    assert "filament was unloaded" in fake.flag(19)
+    assert jobs(printer) == []
     await bridge.aclose()
 
 

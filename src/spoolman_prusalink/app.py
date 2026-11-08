@@ -161,8 +161,6 @@ class PrinterBridge:
     # Per tool: the provisional charge and the amount its flag shows. The amount is
     # updated only between prints, so the flag isn't rewritten on every poll.
     _provisional_shown: dict[int, tuple[tuple[int, int | None], int]] = field(default_factory=dict)
-    # Spools this printer put a flag on in the last poll, for its screen notices.
-    _raised: set[int] = field(default_factory=set)
     # When the printer was first seen idle since it was last busy or unreachable.
     _idle_since: float | None = None
 
@@ -382,7 +380,6 @@ class PrinterBridge:
         charges: list[dict] = []
         dry = self.bridge.config.dry_run
         self._pending_writes = []
-        counts = {spool_id: len(texts) for spool_id, texts in flags.items()}
 
         for tool, location in self.config.tools.items():
             tool_reading = reading.tools.get(tool)
@@ -544,7 +541,6 @@ class PrinterBridge:
                     )
             self._notes(tool, notes)
 
-        self._raised = {s for s, texts in flags.items() if len(texts) > counts.get(s, 0)}
         if dry:
             append_ledger(self.bridge.config.ledger_file, events + charges)
         else:
@@ -685,8 +681,8 @@ class PrinterBridge:
             st.needs_sync or self.bridge.config.sync_drift or edited
         )
         # Wait while a swap is staged: the active spool is about to change. During an
-        # unconfirmed swap, write the assigned spool: the M117 then shows the user what
-        # Spoolman thinks is loaded, and confirming a different spool rewrites it.
+        # unconfirmed swap, write the assigned spool: the printer then shows what Spoolman
+        # thinks is loaded, and confirming a different spool rewrites it.
         settled = st.assigned == st.active
         if self.bridge.config.printer_sync and expected and st.sync_attempts < MAX_SYNC_ATTEMPTS:
             if settled and self._model_error:
@@ -731,7 +727,7 @@ class PrinterBridge:
             )
 
     async def sync_printer(self, spools: list[Spool]) -> None:
-        """Write pending spools (and, if enabled, new flags) to the printer in one job."""
+        """Write pending spools to the printer in one job."""
         if self._model_error:
             return
         by_id = {s.id: s for s in spools}
@@ -746,28 +742,7 @@ class PrinterBridge:
                 uuid_value = spool.instance_uuid or await self.bridge._mint_uuid(spool)
             writes.append(printer_sync.ToolWrite(tool, spool, uuid_value))
 
-        notices: list[str] = []
-        if self.bridge.config.printer_notices:
-            # Flags on spools in this printer's tool locations. A spool in no tool's
-            # location has no holder, so the printer that raised its flag shows it. A flag
-            # that no printer raised, such as an unplaced claim or a runout from a printer
-            # that's no longer configured, is shown on no screen: the Spoolman flag is its
-            # record, since a notice on an arbitrary printer wouldn't be acted on there.
-            locations = set(self.config.tools.values())
-            everywhere = {loc for p in self.bridge.printers for loc in p.config.tools.values()}
-            held = {s.id for s in spools if s.location in everywhere}
-            runouts = self.bridge.state.runouts.items()
-            raised = self._raised | {s for s, r in runouts if r.printer == self.name}
-            mine = {s.id for s in spools if s.location in locations} | (raised - held)
-            current = set(self.bridge._flags.values())
-            notices = [
-                t
-                for spool_id, t in self.bridge._flags.items()
-                if spool_id in mine and t not in self.bridge.state.noticed
-            ]
-            self.bridge.state.noticed = [t for t in self.bridge.state.noticed if t in current]
-
-        if not writes and not notices:
+        if not writes:
             self.bridge._problems.clear((self.name, "dry-run job"))
             self.bridge._problems.clear((self.name, "sync busy"))
             self.bridge._problems.clear((self.name, "sync failed"))
@@ -788,9 +763,7 @@ class PrinterBridge:
             )
             return
         self.bridge._problems.clear((self.name, "sync delay"))
-        gcode, shown = printer_sync.build_job(
-            self._preamble(), writes, notices, multi_tool=len(self.config.tools) > 1
-        )
+        gcode = printer_sync.build_job(self._preamble(), writes)
         if self.bridge.config.dry_run:
             # Nothing is recorded as written, so the same job is due every idle poll.
             self.bridge._problems.fail(
@@ -860,7 +833,6 @@ class PrinterBridge:
                 sync_attempts=st.sync_attempts + 1,
                 written="\n".join(printer_sync.filament_lines(w)),
             )
-        self.bridge.state.noticed += shown
         self._pending_writes = []
         self._last_state = "BUSY"  # The job is starting; poll again soon to verify it.
         self.bridge._save()

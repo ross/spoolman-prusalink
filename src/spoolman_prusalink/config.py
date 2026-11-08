@@ -67,8 +67,6 @@ class Config:
     sync_delay: float = 0.0
     # Also overwrite drift (a mismatch with no swap or unload to explain it).
     sync_drift: bool = False
-    # Show new flags on the printer screen with M117 through a job, when idle.
-    printer_notices: bool = False
 
 
 def _env_bool(env: dict[str, str], key: str) -> bool | None:
@@ -386,5 +384,4 @@ def load(path: str | os.PathLike | None, env: dict[str, str] | None = None) -> C
         printer_sync=_bool(bridge, "printer_sync", True, "bridge.printer_sync"),
         sync_delay=_delay(bridge, "sync_delay", 0, "bridge.sync_delay"),
         sync_drift=_bool(bridge, "sync_drift", False, "bridge.sync_drift"),
-        printer_notices=_bool(bridge, "printer_notices", False, "bridge.printer_notices"),
     )

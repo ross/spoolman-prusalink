@@ -71,8 +71,6 @@ class State:
     outbox: list[dict] = field(default_factory=list)
     # Spools whose flag field the bridge has set, so it clears only its own flags.
     flagged: list[int] = field(default_factory=list)
-    # Flag texts already shown on the printer with M117, so each is shown once.
-    noticed: list[str] = field(default_factory=list)
     # Flags for spools that ran out mid-print while Spoolman showed plenty left, by
     # spool ID. Each clears when another spool becomes active and then this one does, or
     # when the user edits the spool's weight in Spoolman.
@@ -112,7 +110,6 @@ def load_state(path: Path, printers: Sequence[str]) -> State:
         printers={k: PrinterState.from_json(v) for k, v in data.get("printers", {}).items()},
         outbox=list(data.get("outbox", [])),
         flagged=[int(i) for i in data.get("flagged", [])],
-        noticed=list(data.get("noticed", [])),
         runouts={int(k): Runout.from_json(v) for k, v in data.get("runouts", {}).items()},
         claimed=[int(i) for i in data.get("claimed", [])],
     )
@@ -144,7 +141,6 @@ def save_state(path: Path, state: State) -> bool:
         "printers": {k: v.to_json() for k, v in sorted(state.printers.items())},
         "outbox": state.outbox,
         "flagged": state.flagged,
-        "noticed": state.noticed,
         "runouts": {str(k): v.to_json() for k, v in sorted(state.runouts.items())},
         "claimed": state.claimed,
     }

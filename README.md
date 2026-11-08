@@ -164,12 +164,6 @@ are several. A spool active in two tools at once, which happens when one
 printer misses an unload across a reboot, is logged once and flagged on the
 spool naming both locations.
 
-With `printer_notices = true`, a new flag is shown on the printer whose tool
-location holds the spool. A flag on a spool in no tool's location is shown on
-the printer that raised it. A flag that no printer raised, on a spool in no
-tool's location, such as a claim on a spool that's nowhere, is written to
-Spoolman and shown on no screen, because no printer is the right place for it.
-
 ### Run from source
 
 The example config is set up for the container. After copying it, edit
@@ -333,12 +327,9 @@ the printer's job history. The job starts with the compatibility checks for
 the printer's model, then `G28 O` to home only if the position isn't
 known: every job ends by lowering the bed, and with Z unhomed (as after a
 boot) the printer would drive the bed into its stop. It then sets the
-filament with `M865` without moving any,
-sets the instance UUID with `M865.1` on tool 0, and ends with an `M117`
-message naming the spool. Don't count on seeing that message: the printer
-shows an `M117` for 5 seconds, the finished-job screen covers it, and later
-messages push it out of the eight-entry **Tune** > **Messages** history. The
-spool's flag in Spoolman is the reliable record.
+filament with `M865` without moving any, and sets the instance UUID with
+`M865.1` on tool 0. The bridge shows nothing on the printer screen: each job
+is logged, and problems are flagged on the spool in Spoolman.
 
 The bridge writes a tool once the printer is idle, after a swap takes effect
 or the tool unloads. A menu load replaces the filament with a preset, which

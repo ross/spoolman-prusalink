@@ -307,7 +307,6 @@ CONFIG_BASE = (
         ('[bridge]\nprinter_sync = "false"\n', "bridge.printer_sync must be true or false"),
         ('[bridge]\nflag_drift = "no"\n', "bridge.flag_drift must be true or false"),
         ("[bridge]\nsync_drift = 1\n", "bridge.sync_drift must be true or false"),
-        ('[bridge]\nprinter_notices = "yes"\n', "bridge.printer_notices must be true or false"),
         ('[bridge]\ndry_run = "false"\n', "bridge.dry_run must be true or false"),
         ('[printer]\nuuids = "false"\n', "printer.uuids must be true or false"),
         ('[printer]\ngcode_preamble = "M862.3"\n', "gcode_preamble must be a list of strings"),
@@ -658,8 +657,7 @@ def test_state_v2_migrates_to_the_only_printer(tmp_path):
     state = load_state(path, ["core"])
     assert list(state.printers) == ["core"]
     assert state.tools("core")[0].active == 7
-    # Outbox records and runouts are stamped: flush() finds the record's tool by it, and
-    # notices go to the printer that owns the runout.
+    # Outbox records and runouts are stamped: flush() finds the record's tool by it.
     assert [r["printer"] for r in state.outbox] == ["core"]
     assert {k: r.printer for k, r in state.runouts.items()} == {8: "core", 9: "core"}
     assert (state.runouts[8].text, state.runouts[9].net) == ("old text form", 1000.0)
