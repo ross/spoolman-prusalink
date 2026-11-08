@@ -135,7 +135,6 @@ PRESET_ALIASES = {"TPU": "FLEX", "TPE": "FLEX"}
 HT_IDLER_DOOR = frozenset({"PPS", "PPA"})
 
 NAME_LIMIT = 7  # The firmware's filament name holds at most 7 characters.
-MESSAGE_LIMIT = 40
 
 
 class CannotSync(ValueError):
@@ -179,13 +178,6 @@ def _color(spool: Spool) -> str | None:
         return None
     value = spool.color_hex.strip().lstrip("#").lower()[:6]
     return f"#{value}" if re.fullmatch(r"[0-9a-f]{6}", value) else None
-
-
-def _message(text: str) -> str:
-    """Make text safe for `M117`: ASCII, no `;` (a comment), and short."""
-    text = text.encode("ascii", "ignore").decode().replace(";", ",").replace('"', "'")
-    text = " ".join(text.split())
-    return text[:MESSAGE_LIMIT]
 
 
 @dataclass(frozen=True)
@@ -284,31 +276,9 @@ def printer_matches_write(material: Material, written: str, uuids: bool) -> bool
 HOME_IF_NEEDED = "G28 O ; home only if not homed, so the end-of-job bed move is safe"
 
 
-def build_job(
-    preamble: tuple[str, ...] | list[str],
-    writes: list[ToolWrite],
-    notices: list[str],
-    multi_tool: bool,
-) -> tuple[str, list[str]]:
-    """Return the job file and the notices its message shows.
-
-    The job has compatibility checks, homing if needed, filament writes, then one
-    `M117`. The screen holds one message, so it names the written spools if there are
-    any, else the first notice. Notices it doesn't show wait for a later job.
-    """
+def build_job(preamble: tuple[str, ...] | list[str], writes: list[ToolWrite]) -> str:
+    """Return the job file: compatibility checks, homing if needed, then filament writes."""
     lines = [*preamble, HOME_IF_NEEDED]
-    labels = []
     for w in writes:
         lines += filament_lines(w)
-        label = _message(w.spool.name)
-        labels.append(f"T{w.tool + 1} {label}" if multi_tool else label)
-    message = ""
-    shown: list[str] = []
-    if labels:
-        message = "Spoolman: " + ", ".join(labels)
-    elif notices:
-        message = "Spoolman: " + notices[0]
-        shown = notices[:1]
-    if message:
-        lines.append(f"M117 {_message(message)}")
-    return "\n".join(lines) + "\n", shown
+    return "\n".join(lines) + "\n"
