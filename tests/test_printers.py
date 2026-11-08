@@ -211,6 +211,64 @@ async def test_x5_x6_claim_on_b_while_a_still_has_the_spool(tmp_path, caplog):
     await bridge.aclose()
 
 
+async def test_x6_shared_spool_logs_again_when_it_recurs(tmp_path, caplog):
+    # When both tools drop the spool in one poll, it never passes through being active in
+    # exactly one tool, and the "shared" problem must still clear so a recurrence logs.
+    bridge, fake, printers = two_printers(tmp_path, [spool(19, A), spool(20, B)])
+    a_tools, b_tools = bridge.state.tools("a"), bridge.state.tools("b")
+    warning = "spool 19 is active in Tool a and Tool b at once"
+    for _ in range(2):
+        a_tools[0] = ToolState(boot_id=1, active=19, assigned=19)
+        b_tools[0] = ToolState(boot_id=1, active=19, assigned=20)
+        bridge._check_shared({})
+        bridge._check_shared({})
+        a_tools[0] = ToolState(boot_id=1, active=None, assigned=19)
+        b_tools[0] = ToolState(boot_id=1, active=None, assigned=20)
+        bridge._check_shared({})
+    assert caplog.text.count(warning) == 2
+    await bridge.aclose()
+
+
+async def test_archived_spool_on_the_first_printer_is_looked_up_once(tmp_path, caplog):
+    # The archived-spool cache is shared: b's check must not drop what a found.
+    bridge, fake, printers = await baseline(tmp_path, [spool(19, A), spool(20, B)])
+    a = printers["a"]
+    fake.spools[19]["archived"] = True
+    for _ in range(3):
+        a.extruded += 100
+        await bridge.poll()
+    assert fake.lookups == [19]
+    assert fake.flag(19) == "Tool a: spool is archived but still loaded"
+    assert caplog.text.count("spool 19 is archived but still loaded") == 1
+    await bridge.aclose()
+
+
+async def test_eviction_reread_with_a_malformed_body_is_logged_and_retried(tmp_path, caplog):
+    bridge, fake, printers = await baseline(tmp_path, [spool(19, A), spool(20, B)])
+    a = printers["a"]
+    fake.spools[22] = spool(22, A)
+    await bridge.poll()
+    unload(a, load={"name": "PLA", "color": "#73737b"})
+    a.extruded += 100
+    handle = fake.handle
+
+    def bad_gateway(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and request.url.path == "/api/v1/spool/19":
+            return httpx.Response(200, text="<html>bad gateway</html>")
+        return handle(request)
+
+    transport = bridge.spoolman._client._transport
+    bridge.spoolman._client._transport = httpx.MockTransport(bad_gateway)
+    await bridge.poll()  # Doesn't raise; the eviction waits.
+    await bridge.poll()
+    assert caplog.text.count("can't move spool 19 out") == 1
+    assert fake.spools[19]["location"] == A and tools(bridge)["a"].active == 22
+    bridge.spoolman._client._transport = transport
+    await bridge.poll()
+    assert fake.spools[19]["location"] is None
+    await bridge.aclose()
+
+
 async def test_x7_two_claims_one_per_printer(tmp_path):
     bridge, fake, printers = await baseline(tmp_path, [spool(19, A), spool(20, B)])
     fake.spools[23] = {**spool(23, A), "extra": dict(CLAIMED)}
