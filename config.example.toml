@@ -58,6 +58,9 @@ eviction_location = ""
 # After a swap or unload, write the loaded spool's name, color and UUID to the printer
 # once it's idle, through a job uploaded to the printer.
 printer_sync = true
+# Seconds the printer must stay idle before that job runs, so it doesn't take over
+# the printer while you're at it choosing a print. 0 runs it on the first idle poll.
+sync_delay = 0
 # Also overwrite the printer when it differs with no swap or unload to explain it.
 sync_drift = false
 # Show new flags on the printer screen with M117. Each notice runs as a print job.
