@@ -328,7 +328,7 @@ the printer's model, then `G28 O` to home only if the position isn't
 known: every job ends by lowering the bed, and with Z unhomed (as after a
 boot) the printer would drive the bed into its stop. It then sets the
 filament with `M865` without moving any, and sets the instance UUID with
-`M865.1` on tool 0. The bridge shows nothing on the printer screen: each job
+`M865.1` on tool 0. The job shows no message on the printer screen: each job
 is logged, and problems are flagged on the spool in Spoolman.
 
 The bridge writes a tool once the printer is idle, after a swap takes effect
