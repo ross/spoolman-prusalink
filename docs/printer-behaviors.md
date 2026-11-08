@@ -193,12 +193,12 @@ there's time.
 Things the source says that the bridge or its tests should take up. None is
 a live check.
 
-1. **F15, the preview.** A user who picks a file on the screen sits in the
-   preview, which reads `IDLE` with no `job`. A sync job uploaded then
-   replaces the user's pending print. `sync_delay` narrows the window and
-   nothing closes it: the API doesn't show the preview. Decide whether to
-   accept it, add a longer delay after a load, or ask the firmware branch to
-   report the preview. Model the preview in the simulator either way.
+1. **F15, the preview. Accepted (2026-11-08).** A user who picks a file on
+   the screen sits in the preview, which reads `IDLE` with no `job`. A sync
+   job uploaded then replaces the user's pending print, and the user starts
+   it again once the sync job has finished. `sync_delay` narrows the window
+   and nothing closes it: the API doesn't show the preview. Listed under
+   "Out of scope" in scenarios.md. The simulator doesn't model the preview.
 2. **F15, the blip.** An upload during the blip succeeds and runs nothing.
    The bridge then expects the job by name (W6) and never sees it. W5's
    "didn't take" catches it after a second attempt. Add an end-to-end test

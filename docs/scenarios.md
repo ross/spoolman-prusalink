@@ -233,6 +233,7 @@ configured. Each of these needs fixing in the deployment, not the code.
 | `state.json` lost, for example with no persistent volume | The bridge starts again from a baseline (B1) and forgets swaps in progress (B4). |
 | A wrong location name in the config | The location looks empty, so usage is held as unassigned. |
 | The bridge pointed at the wrong printer or Spoolman | Charges go to the wrong place. |
+| A sync job uploaded while the user is on the print preview screen | The preview reads `IDLE` with no job, so the bridge sees an idle printer, and the firmware replaces the pending print with the sync job (F15 in [printer-behaviors.md](printer-behaviors.md)). The user starts the print again afterwards. `sync_delay` narrows the window; the API can't show the preview, so nothing closes it. Accepted 2026-11-08. |
 
 ## Questions
 
