@@ -537,6 +537,9 @@ def test_config_lists_several_printers(tmp_path):
             ('url = "http://b/"\n', 'url = "HTTP://A:80"\n'),
             "printers 'core' and 'mk4s' have the same url",
         ),
+        (('url = "http://b/"\n', 'url = "http://b:80a"\n'), "printers[mk4s].url isn't a valid"),
+        (('url = "http://b/"\n', 'url = "http://b:99999"\n'), "printers[mk4s].url isn't a valid"),
+        (('url = "http://b/"\n', 'url = "http://[::1"\n'), "printers[mk4s].url isn't a valid"),
         (
             (MK4S_TOOL, MK4S_TOOL + '[[printers.tools]]\nindex = 0\nlocation = "MK4S T2"\n'),
             "printers[mk4s]: tool 0 is configured twice",
@@ -587,6 +590,36 @@ def test_config_single_printer_variables_are_an_error_with_a_printer_list(tmp_pa
     p.write_text(PRINTERS_BASE)
     with pytest.raises(ConfigError, match=f"{var} configures a single"):
         load(p, env={"CORE_KEY": "ka", var: "x"})
+
+
+def test_config_url_keys_keep_ipv6_hosts_apart_from_their_port(tmp_path):
+    p = tmp_path / "c.toml"
+    p.write_text(
+        PRINTERS_BASE.replace('url = "http://a"\n', 'url = "http://[::1]:8080"\n', 1).replace(
+            'url = "http://b/"\n', 'url = "http://[::1:8080]"\n', 1
+        )
+    )
+    with pytest.raises(ConfigError, match="serves one printer for now"):  # Not "same url".
+        load(p, env={"CORE_KEY": "ka"})
+
+
+@pytest.mark.parametrize(
+    "text, env, error",
+    [
+        ("", {}, "set PRUSALINK_API_KEY or printer.api_key"),
+        ("", {"PRUSALINK_API_KEY": "k"}, "set printer.url or PRUSALINK_URL"),
+        ("", {"PRUSALINK_API_KEY": "k", "PRUSALINK_URL": "http://p"}, "set spoolman.url"),
+        ("[printer]\napi_key = 5\n[spoolman]\nurl = 5\n", {}, "printer.api_key must be a string"),
+        ("[printer]\nurl = 5\n[spoolman]\nurl = 5\n", {}, "printer.url must be a string"),
+        ("printer = 5\nspoolman = 5\n", {}, "[printer] must be a table"),
+    ],
+)
+def test_config_single_printer_reports_errors_in_the_old_order(tmp_path, text, env, error):
+    # The order of these first errors is what a bare start shows; it hasn't changed.
+    p = tmp_path / "c.toml"
+    p.write_text(text)
+    with pytest.raises(ConfigError, match=re.escape(error)):
+        load(p, env=env)
 
 
 def test_config_single_printer_takes_a_name_and_api_key_env(tmp_path):
