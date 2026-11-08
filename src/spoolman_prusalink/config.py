@@ -319,13 +319,13 @@ def load(path: str | os.PathLike | None, env: dict[str, str] | None = None) -> C
     # The one-printer form's checks run in the order they always have: the printer's
     # values before Spoolman's, and types before missing values.
     single = raw.get("printers") is None
-    file_api_key = file_url = ""
-    if single:
-        printer = _table(raw, "printer")
-        file_api_key = _api_key_from_file(printer, "printer", env)
-        file_url = _str(printer, "url", "", "printer.url")
+    printer = _table(raw, "printer") if single else {}
     spoolman = _table(raw, "spoolman")
     bridge = _table(raw, "bridge")
+    file_api_key = file_url = ""
+    if single:
+        file_api_key = _api_key_from_file(printer, "printer", env)
+        file_url = _str(printer, "url", "", "printer.url")
     # Check the file's values even when the environment overrides them.
     file_spoolman_url = _str(spoolman, "url", "", "spoolman.url")
     identity = _single_identity(env, file_api_key, file_url) if single else None
