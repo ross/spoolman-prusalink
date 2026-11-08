@@ -20,9 +20,16 @@ in parentheses are in the firmware repo.
 ## Status
 
 Workstreams 1 to 5 are built, under `simulator/`, with
-[simulator/README.md](../simulator/README.md) as the user guide. Scripted
-scenarios (workstream 6) are not. The decisions the build made where this
-plan was silent are listed in that README under "Choices made".
+[simulator/README.md](../simulator/README.md) as the user guide. The
+decisions the build made where this plan was silent are listed in that
+README under "Choices made".
+
+Workstream 6 took a different shape from the sketch below: instead of a
+scenario file format and snapshots, `integration/` holds pytest tests that
+run the bridge, the simulator and a real Spoolman in lockstep, one scenario
+per test, with no wall-clock timing. The simulator gained `POST
+/api/advance` for scripts that want the same control from outside. See
+[integration/README.md](../integration/README.md).
 
 ## Goal and non-goals
 

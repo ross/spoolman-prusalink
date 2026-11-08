@@ -1440,6 +1440,14 @@ class Simulation:
         if any(active):
             self.changed()
 
+    def advance(self, seconds: float, step: float = 0.1) -> None:
+        """Tick through `seconds` in the clock task's steps, so phases end in order."""
+        done = 0.0
+        while done < seconds - 1e-9:
+            dt = min(step, seconds - done)
+            self.tick(dt)
+            done += dt
+
     def snapshot(self) -> dict:
         return {
             "now": self.now,

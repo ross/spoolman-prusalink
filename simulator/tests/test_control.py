@@ -93,3 +93,14 @@ async def test_close_ends_the_stream_wherever_it_is_in_a_batch(setup):
     sim.push(("close", None))
     await asyncio.wait_for(resp.content.read(), 2)  # returns at EOF, not the 15 s heartbeat
     assert resp.content.at_eof()
+
+
+async def test_advance_moves_simulated_time(setup):
+    sim, p, client = setup
+    p.unload(0)  # three simulated seconds by default
+    assert p.state is State.BUSY
+    resp = await client.post("/api/advance", json={"seconds": 5})
+    assert resp.status == 200 and (await resp.json())["now"] == pytest.approx(5)
+    assert p.state is State.IDLE and p.tools[0].unload_count == 1
+    assert (await client.post("/api/advance", json={"seconds": 0})).status == 400
+    assert (await client.post("/api/advance", json={"seconds": "x"})).status == 400
