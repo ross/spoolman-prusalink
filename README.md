@@ -284,6 +284,15 @@ Any other mismatch, with no swap, unload or Spoolman edit behind it, is drift:
 something changed on the printer. The bridge flags it and leaves the printer
 alone, unless `sync_drift = true`.
 
+The job takes over the printer, so the bridge checks the printer's state
+again just before uploading it and holds the job if a print has started.
+The printer still reports idle while someone browses its menus, so a job
+can interrupt you choosing a print, often right after a filament load. Set
+`sync_delay` to the number of seconds the printer must stay idle before the
+job runs. The wait starts at the first poll that sees the printer idle, and
+it's checked once per poll, so the job runs up to `poll_idle` seconds later.
+The default, 0, runs the job on the first idle poll.
+
 After upgrading from a version that didn't record its writes, the bridge
 rewrites each tool once when idle. Those versions relied on `J` for
 temperatures, which the firmware ignores, so they left the nozzle and bed
