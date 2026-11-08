@@ -60,7 +60,7 @@ Each row says what the probe should see for tool 0. "Counted" means
 | F10 | The bridge's sync job | Upload accepted when `IDLE`, `FINISHED` or `STOPPED` (409 "Can't print right now" otherwise, with the file kept); a `job` with its own ID and the file's name in `/api/v1/job`; `PRINTING` with the F5 blip; `M865 R` clears the slot including UUIDs, then sets name, color and temperatures; `M865.1` sets the UUID; `FINISHED` with no `job`. `extruded` held throughout. | Accepted states (`printer_state.cpp:592-608`); 409 after the file is saved (`lib/WUI/nhttp/gcode_upload.cpp:286-295`). `M865 R` resets every parameter (`src/marlin_stubs/M865.cpp:83-85`); parameters on a preset are ignored but `L` still loads it, and `N` on a preset is an error (`:133-137, 189-191`). `M865.1` is built for Core One and Core One L only (`:145-171`). Names are 1 to 7 of `a-zA-Z0-9_-` (`filament_common.cpp:27-42`). | `upload()` and `gcode.py` | Seen live (W1, W6, W13, W14). Trace `F10-sync-job`. |
 | F11 | Manual moves from the menu: Move E, retract, Purge filament | Move E forward is counted once past the gap; a retract never lowers `extruded`; Purge filament is counted and leaves `material` as it was, with no unload. | Move E goes through the planner (`src/gui/screen_menu_move.cpp:201-212`), where every positive move past the gap counts and the gap is clamped at 40 mm (`filament_tracker.cpp:22-27`). Purge filament is `M701 L0 W2` (`MItem_filament.cpp:168`, `M701_2.cpp:123`): a purge that re-sets the chosen type without an unload. | `extrude()`, `retract()` | From source (C6 has no test). Trace `F11-manual-extrude`. |
 | F12 | Power cut during a print, bed still warm | Unreachable; then a new `boot_id`, counters at 0, the same `job` ID; `BUSY`, during which about 25 mm is counted (the nozzle clean); briefly `PAUSED`; then `PRINTING`. The trace settles where the 25 mm shows. | No new ID: the resume skips the preview (`marlin_server.cpp:2081-2094`) and loads the saved ID (`:1393`). Warm bed resumes on its own (`src/common/power_panic.cpp:294-315`): `PowerPanic_Resume` reads `BUSY`, the unpark reads `PAUSED` (`marlin_server.cpp:2105`, `printer_state.cpp:399-424`). XY are homed, Z restored (`power_panic.cpp:400, 450-456`). Core One and Core One L run `G12 S21`, which includes `G750 E25` through the planner (`power_panic.cpp:484-488`, `nozzle_cleaner.cpp:96-106`, `G750.cpp:40`). The counters aren't in the power-panic data. Resume needs the USB drive present and not the reset button (`print_utils.cpp:45-50`). | `set_power("on", resume=True)` | From source (P12). Trace `F12-power-panic`. |
-| F13 | Power cut during a print, bed gone cold | As F12, but `ATTENTION` after the first `BUSY` until the user taps resume; the nozzle clean comes after that. | `PowerPanic_AwaitingResume` with the `HeatbedColdAfterPP` warning (`marlin_server.cpp:2089-2094, 2053-2055`) reads `ATTENTION` (`printer_state.cpp:343`). A print that was paused when power failed comes back `PAUSED` (`marlin_server.cpp:2108-2116`). | `set_power("on", resume=True, cold_bed=True)` | From source. Trace `F13-power-panic-cold`, optional. |
+| F13 | Power cut during a print, bed gone cold | As F12, but `ATTENTION` after the first `BUSY` until the user taps resume; the nozzle clean comes after that. The threshold and whether the job's `state` in `/api/v1/job` reads `PAUSED` throughout are for the trace. | `PowerPanic_AwaitingResume` with the `HeatbedColdAfterPP` warning (`marlin_server.cpp:2089-2094, 2053-2055`) reads `ATTENTION` (`printer_state.cpp:343`). A print that was paused when power failed comes back `PAUSED` (`marlin_server.cpp:2108-2116`). | `set_power("on", resume=True, cold_bed=True)` | From source. Trace `F13-power-panic-cold`, optional. |
 | F14 | Idle sensor clear | Outside a print, when the tool's sensor sees no filament while a type is stored: `material` goes and `unload_count` goes up by one. At boot, `extruded_at_unload` is 0. | Runs on every sensor step when not printing and the sensor surely sees nothing (`filament_sensors_handler.cpp:303-312`, `marlin_server.cpp:959`). No multi-tool guard: it applies to tool 0 of a single-tool printer. Skipped while a load or unload dialog is open, while printing, paused or resuming from a power panic (`marlin_server.cpp:1448-1460`), and when the sensor is disabled or uncalibrated (`filament_sensors_handler.hpp:88-89`). | `_idle_sensor_clear()` | From source. Not traced: it needs filament pulled from a cold extruder. See the note below. |
 | F15 | Upload while a print is starting | During the scan (`PRINTING`): 409. During the `IDLE` blip: 2xx, and nothing happens; the user's print goes on and the file never runs. While the preview screen is open before a user confirms a print (`IDLE`, no `job`): the upload replaces the pending start. | The state check passes in the blip but `print_start` ignores it from `PrintInit` (`marlin_server.cpp:1527-1550`); in the preview a new request replaces the pending one (`:1538-1539`). | The blip drop. The preview isn't modeled. | From source. Not traced on purpose: see the bridge follow-ups. |
 | F16 | Other unload paths | Stuck filament counts an unload only if the user picks Unload. Pulling filament out during a load counts only after the type has been set (the purge). The color-wrong retry or eject doesn't count. Clearing a type that's already hidden counts nothing. | `pause.cpp:1213-1223, 1881-1888, 994-1012`; `store_definition.cpp:258-272`. Also counted: cold pull (`M1702.cpp:394`), XL multi-change (`multi_filament_change.cpp:199-205`), `M865 L` with a type that resolves to none (`M865.cpp:194-195`). | Not modeled beyond F2 and F8. | From source. Check when they happen. |
@@ -72,7 +72,13 @@ Each row says what the probe should see for tool 0. "Counted" means
 INDX and XL are several toolheads, each with its own filament path, sensor
 and counters. None is at hand: these rows are from the source and the plan
 (`plans.md`, "Multi-tool"), and get traced when the Core One L+ becomes an
-INDX. Until then the simulator is the only place they run.
+INDX. They're tracked here all the same, because the bridge's accounting
+and state already handle several tools per printer on the strength of
+these readings, and the integration tests for them shouldn't wait for the
+hardware. When the INDX arrives, every row below is a trace to record, and
+the single-tool rows above are recorded again on it: a tool change in a
+print (F20) and the per-tool idle clear (F23) are where the firmware's
+behavior is least covered by what the Core One L+ can show.
 
 | ID | Behavior | What PrusaLink shows | Firmware | Simulator | Status |
 | --- | --- | --- | --- | --- | --- |
@@ -159,7 +165,22 @@ cheap filament.
    to say what the printer did; sometimes it's the replay's choreography in
    the test.
 6. **Record it.** Set the row's status to Traced with the date, and commit
-   the trace with the model or test change.
+   the trace with the model or test change. If the printer did anything
+   the row's firmware column didn't predict, add a line to
+   [Disagreements](#disagreements-between-the-source-and-the-printer),
+   even when the difference turned out to be harmless.
+
+### Disagreements between the source and the printer
+
+Each line is a place where a reading of the firmware source said one thing
+and a trace showed another. They're worth revisiting: a wrong reading may
+hide a second one nearby, a firmware update may change the behavior, and
+the bridge may be leaning on the reading somewhere else. Keep the line
+after the simulator is fixed.
+
+| Date | Row | The source said | The printer showed | What changed |
+| --- | --- | --- | --- | --- |
+| | | | | |
 
 Redo a spoiled trace with `--force`. Use `--interval 0.5` for the power
 cuts, where the states move fast once the printer is back. Each trace is a
@@ -240,16 +261,21 @@ does and how often it happens, as the old live-check ranks had it:
 
 1. **Claims and print starts**: S5, S13, P8, P9, P11, S9, P10.
 2. **Writes**: W2 to W5, W9, W11, W12, W14, and the blip drop above.
-3. **Spoolman faults**: M1, M2 and X9 need a Spoolman that fails on demand.
+3. **Multi-tool**: an INDX print with tool changes, a swap on one tool
+   while another prints, and the per-tool write. Checked by hand once
+   (three segments: tool 0 charged 505 = 475 + 30 purge, tool 1 charged
+   315) with no test. INDX and XL store no UUIDs, so `M865.1` does nothing
+   there and the bridge doesn't yet skip it. scenarios.md has no multi-tool
+   rows yet and says INDX and XL are out of scope; these tests bring a
+   "Multi-tool" section with them, written from F19 to F23, since the
+   hardware is months away and the bridge's code for several tools exists
+   now.
+4. **Spoolman faults**: M1, M2 and X9 need a Spoolman that fails on demand.
    A small in-process proxy between the bridge and Spoolman, toggled by the
    test to refuse connections or return 4xx, covers them on a shared
    Spoolman. Then M3, M3a, M4, M6.
-4. **Several printers**: X1 to X16 with a two-printer `world`. The
+5. **Several printers**: X1 to X16 with a two-printer `world`. The
    simulator already runs any number.
-5. **Multi-tool**: an INDX print with tool changes. Checked by hand once
-   (three segments: tool 0 charged 505 = 475 + 30 purge, tool 1 charged 315)
-   with no test. INDX and XL store no UUIDs, so `M865.1` does nothing there
-   and the bridge doesn't yet skip it.
 6. **`sync_delay` above 0**, unit-tested only so far.
 7. **Counters and boots**: C1 to C9, B1 to B6, P12 with the power-panic
    resume the simulator has now.
