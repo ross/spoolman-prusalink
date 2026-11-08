@@ -207,11 +207,13 @@ so the prefix already says which printer a line is about.
   nothing in Spoolman.
 - **Notices.** A flag shown with `M117` goes to the printer whose tool
   location holds the spool. A spool in no tool's location has no holder, so
-  the printer that raised the flag shows it, and the bridge's own flags, such
-  as an unplaced claim, go to whichever printer is idle first, and so does a
-  runout flag whose printer isn't configured (from before names, or after a
-  rename). With one printer, every flag shows on it, as before. `noticed`
-  stays one list, keyed by text, so each text is shown once.
+  the printer that raised the flag shows it. A flag that no printer raised,
+  such as an unplaced claim, a shared-spool flag, or a runout whose printer
+  isn't configured (from before names, or after a rename), is written to
+  Spoolman and shown on no screen: a notice on an arbitrary printer wouldn't
+  be acted on there. With one printer, those are the only notices it stops
+  showing. `noticed` stays one list, keyed by text, so each text is shown
+  once.
 - **Claims.** The location says which printer and tool. The rest is
   unchanged.
 - **Evictions.** `evict()` moves a spool out of a tool's location based on
