@@ -204,6 +204,7 @@ class Bridge:
     async def poll(self) -> None:
         # Send charges left over from a failed poll or a restart before reading anything.
         if not await self.flush():
+            self._idle_since = None  # The printer wasn't read; restart the idle wait.
             return
         try:
             status = await self.printer.status()
@@ -216,6 +217,7 @@ class Bridge:
             return
         except NoFilamentEndpoint as e:
             self._printer_outage.ok()
+            self._idle_since = None
             if not self._unsupported:
                 self._unsupported = True
                 log.error(
@@ -227,6 +229,7 @@ class Bridge:
         except (httpx.HTTPError, ValueError, KeyError) as e:
             self._printer_outage.ok()  # It answered, even if badly.
             self._problems.fail("printer read", e, "printer read failed, skipping poll: %s", e)
+            self._idle_since = None
             return
         self._printer_outage.ok()
         self._problems.clear("printer read", "printer reads working again")
@@ -1009,7 +1012,7 @@ class Bridge:
             self._problems.fail(
                 "sync delay",
                 "waiting",
-                "sync job waits until the printer has been idle for %ds",
+                "sync job waits until the printer has been idle for %gs",
                 delay,
                 level=logging.INFO,
             )

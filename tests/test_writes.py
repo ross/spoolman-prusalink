@@ -1198,6 +1198,41 @@ async def test_sync_delay_waits_for_the_printer_to_stay_idle(tmp_path, caplog):
     await bridge.aclose()
 
 
+async def test_sync_delay_logs_a_fractional_delay(tmp_path, caplog):
+    caplog.set_level("INFO")
+    bridge, fake, printer = make(tmp_path, [spool(19)], uuid_field="instance_uuid", sync_delay=2.5)
+    bridge.clock = lambda: 1000.0
+    await swap_to_spool_20(bridge, fake, printer)
+    assert "until the printer has been idle for 2.5s" in caplog.text
+    await bridge.aclose()
+
+
+@pytest.mark.parametrize("failure", ["printer", "spoolman"])
+async def test_sync_delay_restarts_after_polls_that_miss_the_printer(tmp_path, failure):
+    # A print the bridge never saw, because the printer read failed or a queued
+    # charge kept failing, mustn't count as idle time.
+    bridge, fake, printer = make(tmp_path, [spool(19)], uuid_field="instance_uuid", sync_delay=300)
+    now = [1000.0]
+    bridge.clock = lambda: now[0]
+    await bridge.poll()  # Idle from t=1000.
+    if failure == "printer":
+        printer.error = 503
+    else:
+        fake.fail_use = [503] * 5
+        printer.extruded = 1100
+        await bridge.poll()  # The charge fails and is queued.
+    await bridge.poll()  # No printer read: the read or the queued charge fails.
+    now[0] += 4000
+    printer.error = None
+    fake.fail_use = []
+    await swap_to_spool_20(bridge, fake, printer)
+    assert jobs(printer) == []  # The wait started over when reads came back.
+    now[0] += 300
+    await bridge.poll()
+    assert len(jobs(printer)) == 1
+    await bridge.aclose()
+
+
 async def test_wait_for_a_running_sync_job_is_not_logged(tmp_path, caplog):
     bridge, fake, printer = await written_state(tmp_path)
     queued = []

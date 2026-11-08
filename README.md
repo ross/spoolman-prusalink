@@ -290,7 +290,8 @@ The printer still reports idle while someone browses its menus, so a job
 can interrupt you choosing a print, often right after a filament load. Set
 `sync_delay` to the number of seconds the printer must stay idle before the
 job runs. The wait starts at the first poll that sees the printer idle, and
-it's checked once per poll, so the job runs up to `poll_idle` seconds later.
+starts over after any poll that couldn't read the printer. It's checked once
+per poll, so the job runs up to `poll_idle` seconds later.
 The default, 0, runs the job on the first idle poll.
 
 After upgrading from a version that didn't record its writes, the bridge
