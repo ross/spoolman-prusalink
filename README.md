@@ -152,11 +152,13 @@ doesn't migrate. Then add the other printers. Ledger lines from before this
 version have no `printer` field.
 
 Every printer is polled each tick, and Spoolman is read once for all of
-them. When no printer answers, the tick ends there. The interval is the
-printing rate while any printer is busy. A printer that's off is logged as an
-outage, once and then hourly; one that answers with an error is logged once
-per distinct error. Either way it's skipped until it answers, its flags in
-Spoolman stay as they were, and the others carry on. Log lines about a tool
+them. When no printer can be read, whether it's off, answers with an error,
+or lacks the filament endpoint, the tick ends there. The interval is the
+printing rate while any printer that can be reached is busy or hasn't
+reported its state yet. A printer that's off is logged as an outage, once
+and then hourly; one that answers with an error is logged once per distinct
+error. Either way it's skipped until it can be read, its flags in Spoolman
+stay as they were, and the others carry on. Log lines about a tool
 keep the `[location]` prefix; lines about a whole printer name it when there
 are several. A spool active in two tools at once, which happens when one
 printer misses an unload across a reboot, is logged once and flagged on the
