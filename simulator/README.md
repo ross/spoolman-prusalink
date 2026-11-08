@@ -120,9 +120,10 @@ that trace. The points that matter for the bridge, in short:
   `no_endpoint` firmware mode answers 404, like stock firmware.
 
 - A power-panic resume (`reboot` with `keep_job`, or `set_power` on with
-  `resume`) keeps the job ID, restarts the counters, and goes through `BUSY`,
-  a short `PAUSED`, and a nozzle clean that purges `panic_purge_mm`, before
-  `PRINTING`. With `cold_bed` it waits in `ATTENTION` for `resume` first.
+  `resume`) keeps the job ID, restarts the counters, skips the idle sensor
+  clear, and goes through `BUSY`, during which a nozzle clean purges
+  `panic_purge_mm`, then a short `PAUSED`, then `PRINTING`. With `cold_bed`
+  it waits in `ATTENTION` for `resume` before the clean.
 - An upload during the start blip is accepted and dropped: the firmware's
   state check passes while it reads `IDLE`, but the print start ignores it.
   The user's print goes on and the uploaded file never runs.

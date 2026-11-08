@@ -4,7 +4,8 @@ Each `test_f*` performs one behavior in the simulator while sampling it the way 
 samples a real printer, then checks the simulator's signature against the trace recorded
 live under `traces/`. A behavior whose trace hasn't been captured yet is skipped, and the
 skip says which file to capture. `python -m simulator.trace traces/F2-unload.jsonl` prints
-a trace's steps when a replay fails.
+a trace's steps when a replay fails. `test_plumbing_traces.py` tests the format, the
+signature and the comparison on their own.
 """
 
 from __future__ import annotations
@@ -15,7 +16,7 @@ import pytest
 
 from simulator import trace
 from simulator.model import Material, Power, PrintSpec, Segment, SimPrinter, Simulation, State
-from simulator.tests.util import PLA, make
+from simulator.tests.util import make
 
 TRACES = Path(__file__).parent / "traces"
 STEP = 0.1
@@ -258,87 +259,3 @@ def test_f13_power_panic_cold_bed(rec: Recorder):
     rec.ended()
     rec.advance(1.0)
     check("F13-power-panic-cold", rec)
-
-
-# The plumbing, with no live trace involved.
-
-
-def test_signature_collapses_runs_and_keeps_events():
-    def s(t, state, extruded, material=None, unloads=0, job=None, boot=1):
-        tool = {"index": 0, "extruded": extruded, "unload_count": unloads, "extruded_at_unload": 0}
-        if material:
-            tool["material"] = material
-        status = {"printer": {"state": state}}
-        if job is not None:
-            status["job"] = {"id": job}
-        return trace.Sample(t, status, {"boot_id": boot, "tools": [tool]}, None)
-
-    pla = {"name": "PLA", "color": "#73737b", "instance_uuid": "u"}
-    samples = [
-        s(0, "IDLE", 100, pla),
-        s(1, "IDLE", 100, pla),
-        s(2, "BUSY", 100, pla),
-        s(3, "BUSY", 100, None, unloads=1),
-        s(4, "IDLE", 100, None, unloads=1),
-        s(5, "IDLE", 110, None, unloads=1),
-        s(6, "IDLE", 120, None, unloads=1),
-        s(7, "IDLE", 120, None, unloads=1),
-        s(8, "PRINTING", 120, None, unloads=1, job=7),
-        s(9, "PRINTING", 130, None, unloads=1, job=7),
-        s(10, "IDLE", 0, None, unloads=0, boot=2),
-    ]
-    assert [str(x) for x in trace.signature(samples)] == [
-        "IDLE job=none mat=tagged ext=0",
-        "BUSY job=none mat=tagged ext=0",
-        "BUSY job=none mat=none! unload+1 ext=0",
-        "IDLE job=none mat=none ext=+",
-        "PRINTING job=new mat=none ext=0",
-        "PRINTING job=same mat=none ext=+",
-        "IDLE job=none boot=new mat=none ext=0",
-    ]
-
-
-def test_compare_allows_missed_short_states():
-    sim, printer = make(**SETTINGS)
-    rec = Recorder(sim, printer)
-    rec.advance(0.5)
-    printer.start_print(PrintSpec([Segment(0, 100)]))
-    rec.ended()
-    full = rec.steps()
-    # A probe at 1 s misses the blip and most of the scan: drop every step shorter than that.
-    sparse = [st for st in full if st.state != "IDLE" or st.job != "none" or st is full[0]]
-    assert len(sparse) < len(full)
-    assert trace.compare(sparse, full) == []
-    assert trace.compare(full, sparse) != []
-
-
-def test_round_trip(tmp_path: Path):
-    sim, printer = make(**SETTINGS)
-    rec = Recorder(sim, printer)
-    rec.advance(0.3)
-    printer.set_power("off")
-    rec.advance(0.3)
-    printer.set_power("on")
-    rec.advance(0.3)
-    t = trace.Trace(trace.header("round-trip", note="test"), list(rec.samples))
-    t.entries.insert(2, trace.Mark(0.15, "switched off"))
-    path = tmp_path / "t.jsonl"
-    trace.write(path, t)
-    back = trace.read(path)
-    assert back.header["name"] == "round-trip"
-    assert [m.text for m in back.marks] == ["switched off"]
-    assert trace.signature(back.samples) == rec.steps()
-    assert any(st.state == trace.UNREACHABLE for st in rec.steps())
-    assert trace.compare(rec.steps(), rec.steps()) == []
-
-
-def test_cli_prints_signature(tmp_path: Path, capsys):
-    sim, printer = make(**SETTINGS)
-    rec = Recorder(sim, printer)
-    rec.advance(0.3)
-    path = tmp_path / "t.jsonl"
-    trace.write(path, trace.Trace(trace.header("cli"), list(rec.samples)))
-    assert trace.main([str(path), str(path)]) == 0
-    out = capsys.readouterr().out
-    assert "IDLE job=none mat=tagged" in out and "every live step appears" in out
-    assert PLA.name  # the default tool's material, so the signature above isn't empty

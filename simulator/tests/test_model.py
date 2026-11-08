@@ -421,9 +421,11 @@ def test_power_loss_resume_keeps_the_job():
     sim.tick(0.8 + 2)
     p.reboot(keep_job=True)
     assert p.job.id == 1 and p.state is State.BUSY and tool0(p).extruded == 0
-    sim.tick(2)  # recovered: the head unparks
-    assert p.state is State.PAUSED and tool0(p).extruded == 0
-    sim.tick(1)  # unparked: the nozzle clean purged 25 mm, and the print goes on
+    sim.tick(1)  # halfway through the recovery the nozzle clean purges
+    assert p.state is State.BUSY and tool0(p).extruded == 25
+    sim.tick(1)  # recovered: the head unparks
+    assert p.state is State.PAUSED and tool0(p).extruded == 25
+    sim.tick(1)  # unparked: the print goes on
     assert p.state is State.PRINTING and tool0(p).extruded == 25
     sim.tick(1)
     assert tool0(p).extruded > 25
@@ -907,12 +909,28 @@ def test_power_loss_with_a_cold_bed_waits_for_the_user():
     assert p.job.id == 1 and p.state is State.BUSY
     sim.tick(2)
     assert p.state is State.ATTENTION and p.job_json()["state"] == "PAUSED"
+    assert tool0(p).extruded == 0  # no nozzle clean before the user answers
     sim.tick(60)
     assert p.state is State.ATTENTION  # nothing happens until the user resumes
     p.resume()
-    assert p.state is State.PAUSED
+    assert p.state is State.BUSY
+    sim.tick(2)
+    assert p.state is State.PAUSED and tool0(p).extruded == 25
     sim.tick(1)
-    assert p.state is State.PRINTING and tool0(p).extruded == 25
+    assert p.state is State.PRINTING
+
+
+def test_power_loss_resume_skips_the_idle_sensor_clear():
+    sim, p = make()
+    p.start_print(one_segment(100, preheat_s=0))
+    sim.tick(0.8 + 2)
+    p.set_power("off")
+    p.unload(0)  # pulled out by hand while off
+    p.set_power("on", resume=True)
+    assert p.job.id == 1 and p.state is State.BUSY
+    assert tool0(p).unload_count == 0 and tool0(p).material == PLA
+    sim.tick(2 + 1)  # recovered and unparked: the empty tool stops the print
+    assert p.state is State.ATTENTION and tool0(p).extruded == 0
 
 
 def test_power_loss_while_paused_comes_back_paused():

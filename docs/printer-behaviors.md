@@ -59,13 +59,28 @@ Each row says what the probe should see for tool 0. "Counted" means
 | F9 | Planned color change, `M600` in the G-code | As F8, at the point the file asks for it. | Same path as F8. | `PrintSpec(color_changes_mm=...)` | From source (P5 unit-tested). Trace `F9-m600`. |
 | F10 | The bridge's sync job | Upload accepted when `IDLE`, `FINISHED` or `STOPPED` (409 "Can't print right now" otherwise, with the file kept); a `job` with its own ID and the file's name in `/api/v1/job`; `PRINTING` with the F5 blip; `M865 R` clears the slot including UUIDs, then sets name, color and temperatures; `M865.1` sets the UUID; `FINISHED` with no `job`. `extruded` held throughout. | Accepted states (`printer_state.cpp:592-608`); 409 after the file is saved (`lib/WUI/nhttp/gcode_upload.cpp:286-295`). `M865 R` resets every parameter (`src/marlin_stubs/M865.cpp:83-85`); parameters on a preset are ignored but `L` still loads it, and `N` on a preset is an error (`:133-137, 189-191`). `M865.1` is built for Core One and Core One L only (`:145-171`). Names are 1 to 7 of `a-zA-Z0-9_-` (`filament_common.cpp:27-42`). | `upload()` and `gcode.py` | Seen live (W1, W6, W13, W14). Trace `F10-sync-job`. |
 | F11 | Manual moves from the menu: Move E, retract, Purge filament | Move E forward is counted once past the gap; a retract never lowers `extruded`; Purge filament is counted and leaves `material` as it was, with no unload. | Move E goes through the planner (`src/gui/screen_menu_move.cpp:201-212`), where every positive move past the gap counts and the gap is clamped at 40 mm (`filament_tracker.cpp:22-27`). Purge filament is `M701 L0 W2` (`MItem_filament.cpp:168`, `M701_2.cpp:123`): a purge that re-sets the chosen type without an unload. | `extrude()`, `retract()` | From source (C6 has no test). Trace `F11-manual-extrude`. |
-| F12 | Power cut during a print, bed still warm | Unreachable; then a new `boot_id`, counters at 0, the same `job` ID; `BUSY`, briefly `PAUSED`, then `PRINTING`; about 25 mm counted before printing resumes (the nozzle clean). | No new ID: the resume skips the preview (`marlin_server.cpp:2081-2094`) and loads the saved ID (`:1393`). Warm bed resumes on its own (`src/common/power_panic.cpp:294-315`): `PowerPanic_Resume` reads `BUSY`, the unpark reads `PAUSED` (`marlin_server.cpp:2105`, `printer_state.cpp:399-424`). XY are homed, Z restored (`power_panic.cpp:400, 450-456`). Core One and Core One L run `G12 S21`, which includes `G750 E25` through the planner (`power_panic.cpp:484-488`, `nozzle_cleaner.cpp:96-106`, `G750.cpp:40`). The counters aren't in the power-panic data. Resume needs the USB drive present and not the reset button (`print_utils.cpp:45-50`). | `set_power("on", resume=True)` | From source (P12). Trace `F12-power-panic`. |
-| F13 | Power cut during a print, bed gone cold | As F12, but `ATTENTION` after `BUSY` until the user taps resume. | `PowerPanic_AwaitingResume` with the `HeatbedColdAfterPP` warning (`marlin_server.cpp:2089-2094, 2053-2055`) reads `ATTENTION` (`printer_state.cpp:343`). A print that was paused when power failed comes back `PAUSED` (`marlin_server.cpp:2108-2116`). | `set_power("on", resume=True, cold_bed=True)` | From source. Trace `F13-power-panic-cold`, optional. |
+| F12 | Power cut during a print, bed still warm | Unreachable; then a new `boot_id`, counters at 0, the same `job` ID; `BUSY`, during which about 25 mm is counted (the nozzle clean); briefly `PAUSED`; then `PRINTING`. The trace settles where the 25 mm shows. | No new ID: the resume skips the preview (`marlin_server.cpp:2081-2094`) and loads the saved ID (`:1393`). Warm bed resumes on its own (`src/common/power_panic.cpp:294-315`): `PowerPanic_Resume` reads `BUSY`, the unpark reads `PAUSED` (`marlin_server.cpp:2105`, `printer_state.cpp:399-424`). XY are homed, Z restored (`power_panic.cpp:400, 450-456`). Core One and Core One L run `G12 S21`, which includes `G750 E25` through the planner (`power_panic.cpp:484-488`, `nozzle_cleaner.cpp:96-106`, `G750.cpp:40`). The counters aren't in the power-panic data. Resume needs the USB drive present and not the reset button (`print_utils.cpp:45-50`). | `set_power("on", resume=True)` | From source (P12). Trace `F12-power-panic`. |
+| F13 | Power cut during a print, bed gone cold | As F12, but `ATTENTION` after the first `BUSY` until the user taps resume; the nozzle clean comes after that. | `PowerPanic_AwaitingResume` with the `HeatbedColdAfterPP` warning (`marlin_server.cpp:2089-2094, 2053-2055`) reads `ATTENTION` (`printer_state.cpp:343`). A print that was paused when power failed comes back `PAUSED` (`marlin_server.cpp:2108-2116`). | `set_power("on", resume=True, cold_bed=True)` | From source. Trace `F13-power-panic-cold`, optional. |
 | F14 | Idle sensor clear | Outside a print, when the tool's sensor sees no filament while a type is stored: `material` goes and `unload_count` goes up by one. At boot, `extruded_at_unload` is 0. | Runs on every sensor step when not printing and the sensor surely sees nothing (`filament_sensors_handler.cpp:303-312`, `marlin_server.cpp:959`). No multi-tool guard: it applies to tool 0 of a single-tool printer. Skipped while a load or unload dialog is open, while printing, paused or resuming from a power panic (`marlin_server.cpp:1448-1460`), and when the sensor is disabled or uncalibrated (`filament_sensors_handler.hpp:88-89`). | `_idle_sensor_clear()` | From source. Not traced: it needs filament pulled from a cold extruder. See the note below. |
 | F15 | Upload while a print is starting | During the scan (`PRINTING`): 409. During the `IDLE` blip: 2xx, and nothing happens; the user's print goes on and the file never runs. While the preview screen is open before a user confirms a print (`IDLE`, no `job`): the upload replaces the pending start. | The state check passes in the blip but `print_start` ignores it from `PrintInit` (`marlin_server.cpp:1527-1550`); in the preview a new request replaces the pending one (`:1538-1539`). | The blip drop. The preview isn't modeled. | From source. Not traced on purpose: see the bridge follow-ups. |
 | F16 | Other unload paths | Stuck filament counts an unload only if the user picks Unload. Pulling filament out during a load counts only after the type has been set (the purge). The color-wrong retry or eject doesn't count. Clearing a type that's already hidden counts nothing. | `pause.cpp:1213-1223, 1881-1888, 994-1012`; `store_definition.cpp:258-272`. Also counted: cold pull (`M1702.cpp:394`), XL multi-change (`multi_filament_change.cpp:199-205`), `M865 L` with a type that resolves to none (`M865.cpp:194-195`). | Not modeled beyond F2 and F8. | From source. Check when they happen. |
 | F17 | Stock firmware, MINI, MK3.5 | 404 on `/api/v1/filament`, or 200 with `material` and no counters. | Stock firmware has no endpoint. | `firmware` mode | Other hardware. |
 | F18 | API faults | 401 without the key; 500 on an internal error; connection refused while off; a hang on a stuck network. | nhttp. | `set_fault()`, `set_power()` | Seen live (401 and off, C1); the rest from source. |
+
+### Multi-tool printers
+
+INDX and XL are several toolheads, each with its own filament path, sensor
+and counters. None is at hand: these rows are from the source and the plan
+(`plans.md`, "Multi-tool"), and get traced when the Core One L+ becomes an
+INDX. Until then the simulator is the only place they run.
+
+| ID | Behavior | What PrusaLink shows | Firmware | Simulator | Status |
+| --- | --- | --- | --- | --- | --- |
+| F19 | Several tools | One `tools` entry per enabled tool, in index order, with gaps for tools whose dock isn't calibrated. Each has its own `extruded`, `unload_count`, `extruded_at_unload` and `material`. Nothing else in PrusaLink says how many tools there are or which is selected. | `filament_renderer.cpp`; the tracker is per tool. | `SimTool`, `set_tool_enabled()` | Other hardware. |
+| F20 | Tool change during a print | Not an unload: `unload_count` holds on both tools and the state stays `PRINTING`. Ramming or retract before `T<n>` counts on the old tool (a retract only grows its gap); the purge after pickup counts on the new one. | Planner-time counting per active tool (`planner.cpp:2206-2219`); INDX service moves excluded (`:2194`). | `Segment(tool, mm)`, `toolchange_purge_mm` | Other hardware. |
+| F21 | No tags | `material` has a name and maybe a color, never `instance_uuid`. `M865.1` does nothing. | `M865.1` is built with `HAS_ANFC`, Core One and Core One L only (`ProjectOptions.cmake:814`). | `ModelInfo.uuids` | Other hardware. The bridge still writes `M865.1` there; see "From here". |
+| F22 | `M865 L<n>` on another tool | Sets tool `n`'s type with no motion. `M865` with an empty tool's type copied into `n` counts as an unload of `n`. | `M865.cpp:194-195`. | `gcode.py` honors `L` | Other hardware. |
+| F23 | Idle sensor clear on a picked tool | Picking a tool whose sensor sees no filament while it has a type counts an unload on it (F14 per tool). | `filament_sensors_handler.cpp:303-312`. | `select_tool()` | Other hardware. |
 
 ### Notes from the source
 
@@ -82,7 +97,9 @@ Each row says what the probe should see for tool 0. "Counted" means
 - **F12 costs the usage since the last poll**, up to one poll interval, and
   then counts the 25 mm nozzle clean to whichever spool is active after the
   boot. The material is restored from the config store, so it's charged, not
-  held.
+  held. The simulator counts the purge halfway through its `BUSY` phase;
+  where it falls in the firmware's resume sequence, and whether the
+  firmware's `time_printing` grows during the recovery, the trace will say.
 - **F10's `M865 R`** wipes the UUID too, so a sync job that doesn't carry
   `M865.1` leaves the tool with no UUID. The bridge always writes both.
 
@@ -101,10 +118,16 @@ cheap filament.
        --out simulator/tests/traces/F2-unload.jsonl --note "menu unload, spool 20"
    ```
 
-   It prints one line per sample it keeps. Wait for the first line and check
-   it shows the state the row starts from. A trace may begin later than the
-   replay does: the comparison only requires that every step the printer
-   showed appears in the simulator's steps, in order.
+   It prints one line per sample it keeps. Start it while the printer is
+   idle, or before a print starts: the first sample has nothing to be
+   compared with, so a trace that begins in the middle of something can't
+   show how it got there. A trace may begin later than the replay does, as
+   long as it begins at rest: the comparison requires that every step the
+   printer showed appears in the simulator's steps, in order, and that the
+   simulator shows no unload, material change, boot or job the printer
+   didn't. One poll can see two changes at once, such as a job appearing
+   and its `M865` applying, so a live step may stand for several
+   consecutive simulator steps when they add up to it.
 2. **Mark each step** by typing what you're about to do and pressing Enter,
    then do it at the printer: `unload from the menu`, `pulled the plug`.
    Marks carry their time and show up in the review.
@@ -128,12 +151,13 @@ cheap filament.
    pytest simulator/tests/test_traces.py -k f2
    ```
 
-   Passing means the simulator reproduces every step the printer showed. A
-   failure prints both step lists. Decide which side is wrong: usually the
-   simulator, which gets fixed in `simulator/model.py` with the row's
-   firmware citation; sometimes the replay's choreography, which gets fixed
-   in the test; and sometimes the row, which means the firmware surprised
-   us.
+   Passing means the simulator reproduces every step the printer showed and
+   adds no event of its own. A failure prints both step lists. The printer
+   is right: when the trace and a reading of the firmware source disagree,
+   the simulator follows the trace, and the source is re-read to explain
+   it. So the fix is usually in `simulator/model.py`, with the row updated
+   to say what the printer did; sometimes it's the replay's choreography in
+   the test.
 6. **Record it.** Set the row's status to Traced with the date, and commit
    the trace with the model or test change.
 

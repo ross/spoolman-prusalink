@@ -8,7 +8,9 @@ It only reads, so it can run beside the production bridge. It polls `/api/v1/sta
 something the bridge could notice has changed (the state, the job, the boot ID, the
 material, the unload counters, or whether the counter is moving), and otherwise every
 `--heartbeat` seconds. Each line you type on stdin while it runs is saved as a mark with
-its time, so note what you did at the printer as you do it. Stop it with Ctrl-C or EOF.
+its time, so note what you did at the printer as you do it. Stop it with Ctrl-C, or Ctrl-D
+at a terminal. Start it while the printer is idle: the first sample has nothing to be
+compared with, so a trace that begins mid-print can't show how it got there.
 
 Progress goes to stderr: one line per sample written, so you can watch the printer's
 state and counters change as you work.
@@ -58,11 +60,47 @@ def sample(client: httpx.Client, t: float) -> trace.Sample:
     return trace.Sample(t, status, filament, job, error)
 
 
-def _projection(s: trace.Sample, prev: trace.Sample | None, tool: int) -> tuple:
-    """What a change in means a sample is worth keeping. See the module docstring."""
-    steps = trace.signature([prev, s] if prev is not None else [s], tool)
-    step = steps[-1]
-    return (step.state, step.job != "none", step.boot, step.material, step.unloads, step.extruded)
+class Keeper:
+    """Decides which polled samples go into the trace.
+
+    Every sample is run through one `trace.Signer`, so events are judged against the last
+    poll, not the last sample kept. A sample is kept when its step is an event, when the
+    state, the presence of a job, the material kind or the counter's direction differ from
+    the last kept sample's, or when `heartbeat` seconds have passed. When a sample is kept
+    for a change, the poll before it is kept too, so the counter movement between the two
+    stays with the run it belongs to. The kept samples then give the same steps as the
+    polled ones.
+    """
+
+    def __init__(self, heartbeat: float, tool: int = 0) -> None:
+        self.heartbeat = heartbeat
+        self.signer = trace.Signer(tool)
+        self._last: tuple | None = None
+        self._last_t = -1e9
+        self._prev: trace.Sample | None = None  # the previous poll, if it wasn't kept
+
+    def take(self, s: trace.Sample) -> list[trace.Sample]:
+        """The samples to write for this poll: none, this one, or the previous one and this."""
+        step = self.signer.step(s)
+        run = (step.state, step.job != "none", step.material, step.extruded)
+        out: list[trace.Sample] = []
+        if self._last is None or step.is_event() or run != self._last:
+            if self._prev is not None:
+                out.append(self._prev)
+            out.append(s)
+        elif s.t - self._last_t >= self.heartbeat:
+            out.append(s)
+        if out:
+            self._last, self._last_t, self._prev = run, s.t, None
+        else:
+            self._prev = s
+        return out
+
+
+def thin(samples: list[trace.Sample], heartbeat: float, tool: int = 0) -> list[trace.Sample]:
+    """The samples `record()` would keep out of these, for tests."""
+    keeper = Keeper(heartbeat, tool)
+    return [kept for s in samples for kept in keeper.take(s)]
 
 
 def _git_commit() -> str | None:
@@ -75,12 +113,18 @@ def _git_commit() -> str | None:
     return out.stdout.strip() or None
 
 
-def _read_marks(marks: list[tuple[float, str]], lock: threading.Lock, started: float) -> None:
+def _read_marks(
+    marks: list[tuple[float, str]], lock: threading.Lock, started: float, eof: threading.Event
+) -> None:
     for line in sys.stdin:
         text = line.strip()
         if text:
             with lock:
                 marks.append((time.monotonic() - started, text))
+    # Ctrl-D at a terminal ends the recording. A pipe or /dev/null hits EOF at once, and
+    # a scripted run shouldn't stop for that.
+    if sys.stdin.isatty():
+        eof.set()
 
 
 def record(args: argparse.Namespace) -> int:
@@ -112,13 +156,19 @@ def record(args: argparse.Namespace) -> int:
 
     marks: list[tuple[float, str]] = []
     lock = threading.Lock()
+    eof = threading.Event()
     started = time.monotonic()
-    threading.Thread(target=_read_marks, args=(marks, lock, started), daemon=True).start()
+    threading.Thread(target=_read_marks, args=(marks, lock, started, eof), daemon=True).start()
+
+    def write_marks(f) -> None:
+        with lock:
+            pending, marks[:] = list(marks), []
+        for mt, text in pending:
+            f.write(trace.dumps(trace.Mark(mt, text)) + "\n")
+            print(f"{mt:8.1f}s  mark: {text}", file=sys.stderr)
 
     written = 0
-    prev: trace.Sample | None = None
-    last_written_t = -1e9
-    last_projection: tuple | None = None
+    keeper = Keeper(args.heartbeat, args.tool)
     print(
         f"recording {out}; type a note and press Enter to mark it; Ctrl-C to stop",
         file=sys.stderr,
@@ -126,30 +176,20 @@ def record(args: argparse.Namespace) -> int:
     with out.open("w") as f:
         f.write(trace.dumps(head) + "\n")
         try:
-            while True:
+            while not eof.is_set():
                 t = time.monotonic() - started
                 s = sample(client, t)
-                with lock:
-                    pending, marks[:] = list(marks), []
-                for mt, text in pending:
-                    f.write(trace.dumps(trace.Mark(mt, text)) + "\n")
-                    print(f"{mt:8.1f}s  mark: {text}", file=sys.stderr)
-                projection = _projection(s, prev, args.tool)
-                keep = (
-                    prev is None
-                    or projection != last_projection
-                    or t - last_written_t >= args.heartbeat
-                )
-                if keep:
-                    f.write(trace.dumps(s) + "\n")
-                    f.flush()
+                write_marks(f)
+                for kept in keeper.take(s):
+                    f.write(trace.dumps(kept) + "\n")
                     written += 1
-                    last_written_t, last_projection = t, projection
-                    print(f"{t:8.1f}s  {_summary(s, args.tool)}", file=sys.stderr)
-                prev = s
-                time.sleep(max(0.0, args.interval - ((time.monotonic() - started) - t)))
+                    print(f"{kept.t:8.1f}s  {_summary(kept, args.tool)}", file=sys.stderr)
+                f.flush()
+                eof.wait(max(0.0, args.interval - ((time.monotonic() - started) - t)))
         except KeyboardInterrupt:
             pass
+        finally:
+            write_marks(f)  # a note typed since the last poll, such as "plugged back in"
     print(f"wrote {written} samples to {out}", file=sys.stderr)
     return 0
 
