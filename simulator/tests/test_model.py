@@ -420,9 +420,13 @@ def test_power_loss_resume_keeps_the_job():
     p.start_print(one_segment(100, preheat_s=0))
     sim.tick(0.8 + 2)
     p.reboot(keep_job=True)
-    assert p.job.id == 1 and p.state is State.PRINTING and tool0(p).extruded == 0
+    assert p.job.id == 1 and p.state is State.BUSY and tool0(p).extruded == 0
+    sim.tick(2)  # recovered: the head unparks
+    assert p.state is State.PAUSED and tool0(p).extruded == 0
+    sim.tick(1)  # unparked: the nozzle clean purged 25 mm, and the print goes on
+    assert p.state is State.PRINTING and tool0(p).extruded == 25
     sim.tick(1)
-    assert tool0(p).extruded > 0
+    assert tool0(p).extruded > 25
     p.reboot()
     assert p.job is None and p.state is State.IDLE and p.job_counter == 1
 
@@ -891,3 +895,43 @@ def test_home_sets_the_flag_only_when_idle():
     assert p.homed  # a print starts by homing
     with pytest.raises(Busy):
         p.home()
+
+
+def test_power_loss_with_a_cold_bed_waits_for_the_user():
+    sim, p = make()
+    p.start_print(one_segment(100, preheat_s=0))
+    sim.tick(0.8 + 2)
+    p.set_power("off")
+    sim.tick(600)
+    p.set_power("on", resume=True, cold_bed=True)
+    assert p.job.id == 1 and p.state is State.BUSY
+    sim.tick(2)
+    assert p.state is State.ATTENTION and p.job_json()["state"] == "PAUSED"
+    sim.tick(60)
+    assert p.state is State.ATTENTION  # nothing happens until the user resumes
+    p.resume()
+    assert p.state is State.PAUSED
+    sim.tick(1)
+    assert p.state is State.PRINTING and tool0(p).extruded == 25
+
+
+def test_power_loss_while_paused_comes_back_paused():
+    sim, p = make()
+    p.start_print(one_segment(100, preheat_s=0))
+    sim.tick(0.8 + 2)
+    p.pause()
+    p.reboot(keep_job=True)
+    assert p.job.id == 1 and p.state is State.PAUSED and tool0(p).extruded == 0
+    p.resume()
+    assert p.state is State.PRINTING
+
+
+def test_upload_during_the_start_blip_is_dropped():
+    sim, p = make()
+    p.start_print(one_segment(100, preheat_s=0))
+    sim.tick(0.5)
+    assert p.job.phase is JobPhase.BLIP
+    p.upload("spoolman.gcode", JOB, print_after=True, overwrite=True)  # no Busy
+    assert p.job.id == 1 and p.job.kind == "user" and "spoolman.gcode" in p.files
+    sim.tick(0.3 + 1)
+    assert p.state is State.PRINTING and p.job.kind == "user"

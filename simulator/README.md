@@ -90,9 +90,11 @@ and request each printer received, with the body of every uploaded job.
 
 ## What it copies from the firmware
 
-The behaviour comes from the firmware source, not from hardware, except
-where `docs/scenarios.md` says "Seen live". The points that matter for the
-bridge:
+[docs/printer-behaviors.md](../docs/printer-behaviors.md) is the list of
+printer behaviors the simulator has to get right, each with its firmware
+source, the trace recorded from the printer where there is one, and the
+replay in `simulator/tests/test_traces.py` that checks the simulator against
+that trace. The points that matter for the bridge, in short:
 
 - An unload bumps `unload_count` and `extruded_at_unload` and hides the
   material, but keeps it: a runout or `M600` reload restores the old name,
@@ -117,14 +119,20 @@ bridge:
 - MINI, MK3.5 and MK3.5S report the material with no counters. The
   `no_endpoint` firmware mode answers 404, like stock firmware.
 
+- A power-panic resume (`reboot` with `keep_job`, or `set_power` on with
+  `resume`) keeps the job ID, restarts the counters, and goes through `BUSY`,
+  a short `PAUSED`, and a nozzle clean that purges `panic_purge_mm`, before
+  `PRINTING`. With `cold_bed` it waits in `ATTENTION` for `resume` first.
+- An upload during the start blip is accepted and dropped: the firmware's
+  state check passes while it reads `IDLE`, but the print start ignores it.
+  The user's print goes on and the uploaded file never runs.
+
 Choices made where the firmware was silent or the plan left it open:
 
-- An upload during the start blip is refused with 409 rather than replacing
-  the print that's starting, so the collision the plan worries about isn't
-  reproducible yet.
 - While a printer is off, `load` and `unload` change the filament by hand
   with no counters. At the next boot, a tool with a stored type and no
-  filament counts one unload, as the firmware's idle sensor clear would.
+  filament counts one unload, as the firmware's idle sensor clear does on
+  every printer, single-tool included.
 - A `jam` with `unload` off goes to `ATTENTION` without counting anything and
   `clear_jam` resumes it. With `unload` on, it's a runout whose reload purges
   more.
@@ -136,3 +144,18 @@ pytest simulator/tests
 ```
 
 They're part of the default `pytest` run, with the bridge's own suite on `tests/`.
+
+`simulator/tests/test_traces.py` replays each behavior in
+`docs/printer-behaviors.md` and compares the simulator with the trace
+recorded from the printer under `simulator/tests/traces/`. A behavior with
+no trace yet is skipped. To record one:
+
+```
+python -m simulator.probe --url http://<printer> --key-env PRUSALINK_API_KEY \
+    --out simulator/tests/traces/F2-unload.jsonl --note "menu unload"
+```
+
+The probe only reads, so it can run beside a live bridge. It writes a sample
+whenever the state, job, boot ID, material or counters change, and a line
+typed on stdin becomes a timed mark. `python -m simulator.trace FILE` prints
+a trace's steps, and with two files compares them the way the test does.

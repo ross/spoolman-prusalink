@@ -65,10 +65,21 @@ class JobPhase(StrEnum):
     HOLD = "HOLD"  # ATTENTION until the user taps through or clears a jam
     RUN = "RUN"  # a sync job applying its G-code
     PARKING = "PARKING"
+    RECOVER = "RECOVER"  # BUSY after a power-panic boot, before the resume
+    AWAIT_RESUME = "AWAIT_RESUME"  # ATTENTION: the bed went cold during the outage
+    UNPARK = "UNPARK"  # PAUSED briefly while the head unparks, then the nozzle clean purges
 
 
 IDLE_STATES = (State.IDLE, State.FINISHED, State.STOPPED)
-TIMED_PHASES = (JobPhase.SCANNING, JobPhase.BLIP, JobPhase.PREHEAT, JobPhase.RUN, JobPhase.PARKING)
+TIMED_PHASES = (
+    JobPhase.SCANNING,
+    JobPhase.BLIP,
+    JobPhase.PREHEAT,
+    JobPhase.RUN,
+    JobPhase.PARKING,
+    JobPhase.RECOVER,
+    JobPhase.UNPARK,
+)
 
 
 @dataclass(frozen=True)
@@ -130,6 +141,9 @@ class Settings:
     blip_seconds: float = 0.3
     park_seconds: float = 1.0
     sync_job_seconds: float = 3.0
+    recover_seconds: float = 2.0  # BUSY after a power-panic boot
+    unpark_seconds: float = 1.0  # PAUSED while the head unparks on a power-panic resume
+    panic_purge_mm: float = 25.0  # the nozzle clean's purge on a power-panic resume
     auto_accept_model_check: bool = False
     start_blip: bool = True
 
@@ -244,6 +258,7 @@ class SimJob:
     attention: str | None = None
     jam: bool = False
     toolchange_purge: bool = False  # a tool change into an empty tool purges after the reload
+    cold_bed: bool = False  # a power-panic resume waits for the user when the bed went cold
     run_seconds: float = 0.0  # the length of a sync job's RUN phase
 
     def progress(self) -> int:
@@ -413,10 +428,10 @@ class SimPrinter:
         return job is not None and job.id is not None and job.phase is not JobPhase.BLIP
 
     def can_print(self) -> bool:
-        # The firmware's rule is state-only: IDLE, READY, STOPPED or FINISHED. What it does
-        # with a print asked for during the PrintInit blip, which reads IDLE, is unknown, so
-        # the job check refusing it there is the conservative choice. A running load or unload
-        # refuses too: the firmware reads BUSY then.
+        # The firmware's rule is state-only: IDLE, READY, STOPPED or FINISHED. A print asked
+        # for during the PrintInit blip, which reads IDLE, passes that rule and is then
+        # dropped; `print_file` handles it. A running load or unload refuses too: the
+        # firmware reads BUSY then.
         busy_tool = any(t.process is not None for t in self.tools.values())
         return (
             self.state in IDLE_STATES
@@ -529,6 +544,12 @@ class SimPrinter:
 
     def print_file(self, name: str) -> None:
         """Print a stored file. A wrong model asks first, before the firmware counts the job."""
+        if self.job is not None and self.job.phase is JobPhase.BLIP:
+            # The firmware's state check passes during PrintInit, but print_start ignores
+            # the request there, so the upload succeeds and the print that's starting goes
+            # on (`marlin_server.cpp:1527-1550` at 2db93db5).
+            self._log("job", f"{name}: asked for during the start blip; the firmware drops it")
+            return
         if not self.can_print():
             raise Busy("Can't print right now")
         body = self.files[name]
@@ -704,6 +725,10 @@ class SimPrinter:
 
     def resume(self) -> None:
         job = self.job
+        if job is not None and job.phase is JobPhase.AWAIT_RESUME:
+            self._log("action", "resume after the power panic")
+            self._unpark(job)
+            return
         if job is None or job.phase is not JobPhase.PAUSED or self.state is not State.PAUSED:
             raise Busy("nothing to resume")
         self._log("action", "resume")
@@ -834,32 +859,52 @@ class SimPrinter:
         if selected is not None:
             self._idle_sensor_clear(selected, sensor_fault_counts=False)
 
-    def reboot(self, *, keep_job: bool = False) -> None:
-        """Reboot. With keep_job a print in progress resumes with the same ID (power panic)."""
+    def reboot(self, *, keep_job: bool = False, cold_bed: bool = False) -> None:
+        """Reboot. With keep_job a print in progress resumes with the same ID (power panic).
+
+        The resume is BUSY while the firmware recovers, PAUSED while the head unparks, a
+        nozzle clean that purges `panic_purge_mm`, then PRINTING. With `cold_bed` it waits
+        in ATTENTION for `resume()` first. A print that was paused comes back paused.
+        """
         self._need_power()
         self._log("action", "power loss and resume" if keep_job else "reboot")
-        self._reboot(keep_job)
+        self._reboot(keep_job, cold_bed)
 
-    def _reboot(self, keep_job: bool) -> None:
+    def _reboot(self, keep_job: bool, cold_bed: bool = False) -> None:
         job = self.job
         resumable = (JobPhase.PRINTING, JobPhase.PAUSED, JobPhase.PREHEAT, JobPhase.WAIT_LOAD)
         keep = keep_job and job is not None and job.kind == "user" and job.phase in resumable
+        was_paused = keep and job.phase in (JobPhase.PAUSED, JobPhase.WAIT_LOAD)
         self.boot()
-        if keep:
-            job.paused_from = job.wait_tool = job.attention = None
-            job.jam = False
-            self._begin_feeding(job)
-        else:
+        if not keep:
             self.job = None
             self._set_state(State.IDLE)
+            return
+        job.wait_tool = job.attention = None
+        job.jam = False
+        if was_paused:
+            job.phase, job.paused_from = JobPhase.PAUSED, JobPhase.PRINTING
+            self._set_state(State.PAUSED)
+            return
+        job.paused_from = None
+        job.phase, job.remaining, job.cold_bed = (
+            JobPhase.RECOVER,
+            self.settings.recover_seconds,
+            cold_bed,
+        )
+        self._set_state(State.BUSY)
 
-    def set_power(self, power: str) -> None:
-        """Off freezes the printer; leaving off boots it, which drops any job."""
+    def _unpark(self, job: SimJob) -> None:
+        job.phase, job.remaining = JobPhase.UNPARK, self.settings.unpark_seconds
+        self._set_state(State.PAUSED)
+
+    def set_power(self, power: str, *, resume: bool = False, cold_bed: bool = False) -> None:
+        """Off freezes the printer; leaving off boots it, which drops any job unless `resume`."""
         power = _enum(Power, power)
         old, self.power = self.power, power
         self._log("action", f"power {power}")
         if old is Power.OFF and power is not Power.OFF:
-            self._reboot(False)
+            self._reboot(resume, cold_bed)
 
     def set_fault(self, fault: str) -> None:
         self.fault = _enum(Fault, fault)
@@ -998,6 +1043,19 @@ class SimPrinter:
             self._begin_feeding(job)
         elif job.phase is JobPhase.RUN:
             self._park(job, State.FINISHED)
+        elif job.phase is JobPhase.RECOVER:
+            if job.cold_bed:
+                job.phase, job.attention = JobPhase.AWAIT_RESUME, "bed cold after the power panic"
+                self._set_state(State.ATTENTION)
+            else:
+                self._unpark(job)
+        elif job.phase is JobPhase.UNPARK:
+            # Core One and Core One L clean the nozzle on the way back, which purges.
+            tool = self.tools[job.spec.segments[job.segment].tool]
+            if tool.loaded:
+                _feed(tool, s.panic_purge_mm)
+                self._log("job", f"nozzle clean purged {s.panic_purge_mm:g} mm")
+            self._begin_feeding(job)
         elif job.phase is JobPhase.PARKING:
             self.job = None
             self._log("job", f"job {job.id} {job.end_state.lower()}")

@@ -7,10 +7,15 @@ serves two of them. Multi-tool (INDX, XL) is out of scope.
 
 Status values:
 
-- **Seen live**: the behavior has been observed on the Core One L+.
 - **End to end**: a test in `integration/` runs the bridge, the simulator and
-  a real Spoolman through it, in lockstep. Named after the "Seen live" or
-  "Tested" status where both apply.
+  a real Spoolman through it, in lockstep. This is the status every row is
+  heading for: it runs on every CI turn, and the simulator's printer
+  behavior is checked against the printer itself by
+  [printer-behaviors.md](printer-behaviors.md). Named after the "Seen live"
+  or "Tested" status where both apply.
+- **Seen live**: the behavior has been observed on the Core One L+. Kept as
+  history on rows that have it. New live work goes into the printer
+  behaviors, not into scenario rows.
 - **Tested**: a unit test covers it, but it hasn't been seen live.
 - **Implemented**: code handles it, with no test.
 - **Decided**: the behavior is settled. Unless the row also says
@@ -193,7 +198,7 @@ location `LA`; printer B has location `LB`. Each row says what happens from
 both sides. Most are the single-printer rows above seen from two printers at
 once, and the row names which. Everything here is tested with two fake
 printers against one fake Spoolman; none of it has been seen live, because
-there's no second printer yet (see session 5 in `live-checks.md`).
+there's no second printer yet (see "A second printer" in `live-checks.md`).
 
 | # | Scenario | What the bridge does | Status |
 | --- | --- | --- | --- |

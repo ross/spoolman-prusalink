@@ -256,7 +256,7 @@ and each of those PRs could merge on its own or be dropped.
    `once` command covers every printer.
 6. **Docs and examples.** `README.md`, `config.example.toml`,
    `compose.example.yaml`. The scenario table lives in `scenarios.md` under
-   "Several printers", the live checks are session 5 in `live-checks.md`,
+   "Several printers", the live checks are under "A second printer" in `live-checks.md`,
    and the out-of-scope row about shared locations names the config error.
 
 The eviction re-read narrows the race to the instant between the re-read and
@@ -268,4 +268,4 @@ useful on one printer too. If the stack stalls, they can be pulled out and merge
 The scenarios, X1 to X16, are the "Several printers" section of
 `scenarios.md`. Each is tested with two fake printers against one fake
 Spoolman in `tests/test_printers.py`. The live checks that need a second
-printer are session 5 in `live-checks.md`.
+printer are under "A second printer" in `live-checks.md`.

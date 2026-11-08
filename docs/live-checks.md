@@ -1,206 +1,81 @@
 # Live checks
 
-This is the plan for confirming the scenarios in [scenarios.md](scenarios.md)
-on the Core One L+ and the production Spoolman. Unit tests already cover the
-bridge's logic. A live check confirms what the tests only assume: what the
-firmware reports, what Spoolman's API does, and what the sync job does to the
-printer.
+What still has to be watched on the Core One L+ and the production Spoolman,
+and why. Most of the old sessions in this document are gone: the scenarios
+in [scenarios.md](scenarios.md) are compositions of what the printer reports
+and what the bridge does with it, and only the printer's part needs hardware.
+That part is now [printer-behaviors.md](printer-behaviors.md), which records
+each printer behavior as a trace and checks the simulator against it. Once a
+scenario's behaviors are traced, its end-to-end test in `integration/` is
+the record, and it runs on every CI turn.
 
-Most checks are grouped into sessions, so one sitting at the printer covers
-several scenarios. Run the sessions in the order of the [priority
-list](#priority).
+This document shrinks as traces land, and goes away when the integration
+tests cover every scenario row.
 
-## Before any session
+## Sessions done
 
-- **Run current `main` on whale.** Whale ran `4dffd99` as of 2026-11-06.
-  Checking older code confirms the wrong thing. The homelab deploy belongs to
-  the `composed` session, so ask it to redeploy, and note the commit it runs.
-- **Run only the production bridge.** Don't start a second bridge, even in
-  dry run, because a second live bridge double-charges and a dry-run one
-  muddies the logs. Every check below runs against whale.
-- **Use a cheap filament.** Every check charges real usage. Where a check
-  needs a spool record you can delete or archive, create a throwaway Spoolman
-  spool for the same physical spool, and move its usage back to the real
-  record afterwards.
+- **Session 1, 2026-11-07**: W13, S7, S14, W14, S10, S6, S11 and S8, between
+  prints. All passed; the scenario rows carry the spool IDs.
+- Earlier one-off checks, before the sessions existed: S1 to S4, P1, P2, P6,
+  P7, P9, C1, W1, B1 and B2.
 
-## Recording a check
+No trace was recorded during these. The behaviors they exercised are
+recorded again as traces, as printer-behaviors.md says, because a trace is
+what the simulator is checked against and a log read by eye isn't.
 
-For each check, record:
+## What is still live
 
-- The date, the bridge commit and the firmware version.
-- The job IDs and spool IDs involved.
-- What you did, step by step, with the time of each step.
-- The bridge log lines and ledger entries from those times. Read the logs with
-  `ssh whale sudo /usr/local/bin/docker logs spoolman-prusalink`, or in Loki
-  with the syslog tag `spoolman-prusalink`.
-- Each spool's `used_weight` in Spoolman before and after, and any flags.
-- What the printer shows, for checks that write to it.
+1. **Traces.** The capture plan in printer-behaviors.md: one idle session,
+   one short-print session, and one power cut. That document has the steps.
+2. **Power-panic resume (P12).** Part of the power cut in the capture plan.
+   The trace shows whether the job ID survives (Q5 in scenarios.md) and what
+   the counters and state do on the way back.
+3. **The `length_factor` scale check.** Weigh the spool before and after a
+   print of 200 g or more and compare with Spoolman's used weight. The first
+   attempt was inconclusive on a small print. Nothing in the simulator can
+   stand in for this: it's the firmware's counter against a scale.
+4. **A second printer.** Only when there is one with this firmware. For the
+   foreseeable future that's the INDX upgrade, which also brings multi-tool
+   behavior the simulator copies from source only. Cross-printer rows X1 to
+   X16 and the multi-tool rows get end-to-end tests meanwhile.
 
-The check passes when everything matches the scenario's row in
-`scenarios.md`. Then change the row's status to `Seen live` with the job or
-spool IDs, as the existing rows do. If it fails, open an issue with the
-record, add a unit test that reproduces it, and fix it before marking the
-row.
+## Rules for anything live
 
-A read-only probe that logs PrusaLink's status and filament counters
-(`unload_count`, `extruded`, `extruded_at_unload`, the job ID and state) every
-few seconds would make the firmware checks in sessions 2 and 3 much easier to
-read than 30 s polls. It only reads, so it can run alongside the bridge.
-Build it before session 2.
-
-## Priority
-
-Priority comes from how much damage a failure does, how often the scenario
-happens, and how much the unit tests had to assume.
-
-| Rank | Scenarios | Damage if wrong | How often | Session |
-| --- | --- | --- | --- | --- |
-| 1 | W13, W4 | The bed moves on an unhomed printer, or a sync job collides with the user's print | Every swap after a boot; loading then printing is the usual order | 1, 2 |
-| 2 | S5, S13 (claims) | A whole print charged to the wrong spool, with no live-tested way to fix it | Whenever Spoolman is forgotten | 2 |
-| 3 | S7, S14 | A swap charged to the wrong spool | The usual ways to swap in Spoolman and at the printer | 1 |
-| 4 | P8, P9, P11, S9 | A false print start closes a swap early | Every cancelled or paused print | 2 |
-| 5 | P5, M5a, W2, P3, P4 | Usage after a color change charged to the wrong spool; missed or early writes | Every multi-color print and every runout | 3 |
-| 6 | W14 | A temperature edit never reaches the printer, and nothing reports it | Whenever a spool is edited | 1 |
-| 7 | M1 | Usage lost while Spoolman is down | NAS reboots and updates | 4 |
-| 8 | S6, S8, S10, S11, P10 | Usage held or flagged when it shouldn't be | Spoolman mistakes | 1, 2 |
-| 9 | M3, M3a, M4, M6 | Usage held for a deleted spool or renamed location | Rare | 4 |
-| 10 | X1, X2, X4a, X8, X6 | A spool moved between printers charged to the wrong one, or an eviction undoing the move | Every spool carried from one printer to another | 5, when there's a second printer |
-
-## Session 1: between prints
-
-No print runs. About 30 minutes and a few grams of purge.
-
-1. **W13.** Power-cycle the printer, then swap spools so the bridge writes.
-   Confirm the sync job homes before its end-of-job move, and that nothing
-   hits the bed. Watch the printer the whole time, ready to stop it.
-2. **S7.** In Spoolman, move the old spool out of the location, then the new
-   one in, then unload and load. The new spool is charged the load.
-3. **S14.** A swap at the printer takes a few minutes, so two can't fit
-   between two polls while the bridge runs. S14 happens when the bridge can't
-   see the printer, such as during a restart or a network outage. To set it
-   up, stop the bridge with
-   `ssh whale sudo /usr/local/bin/docker stop spoolman-prusalink`. With spool
-   A loaded, swap to spool B and then to spool C at the printer. In Spoolman,
-   move A out of the location and C in. Then start the bridge. It logs one
-   unload event for 2 unloads and charges A with everything up to the second
-   unload, including B's purge, because one counter reading can't be split
-   between the swaps. The swap commits from A to C, and C is charged with its
-   own purge after the second unload. B is charged nothing.
-4. **W14.** Edit the loaded spool's color, then its temperatures, in Spoolman.
-   Each one starts a sync job. Check the printer's filament menu for the new
-   temperatures, because the printer doesn't report them back.
-5. **S10, S6.** With spool A loaded and active, move A out of the location in
-   Spoolman and put nothing in. A is still charged. At the printer, unload A
-   and load spool B without changing Spoolman. Usage up to the unload goes to
-   A, A stops being active, and B's purge is held as unassigned. Then unload B
-   and load spool C. With nothing assigned, B's held purge is reported lost,
-   and C's purge is held. B and C can be the same physical spool.
-6. **S11.** With no spool active after step 5, put two spools in the
-   location. The bridge skips the tool and warns until you remove one.
-7. **S8.** Stage a spool, then move it back out before unloading. The staging
-   is cancelled and logged.
-
-## Session 2: short prints with interventions
-
-Use a small print, around 10 minutes.
-
-1. **W4.** Swap spools and start the print within a minute. Confirm the sync
-   job doesn't interfere with the print, and the write happens after it ends.
-2. **P8.** Start a print and cancel it during preheat. Nothing changes in the
-   ledger. Then open an unconfirmed swap, start a print, and fix Spoolman
-   during preheat: the change confirms the swap.
-3. **S5, S13.** Unload, load a different spool, don't change Spoolman, and
-   print. After the print starts, move the right spool into the location and
-   tick **Claim held usage**. The usage since the unload moves, and the box
-   clears. Repeat with the claim made while the job waits for its first
-   extrusion.
-4. **P11.** Pause and resume a print. Nothing besides charging happens.
-5. **P9.** Cancel a print partway and start it again. The second job ID is a
-   new print start.
-6. **S9, P10.** Stage a spool while a print runs. The old spool is still
-   charged. Start a second print with it still staged: both spools are
-   flagged at each print start.
-
-## Session 3: filament changes during a print
-
-Use a print with two or more planned color changes, or use **Tune > Change
-filament** twice in one print.
-
-1. **P5.** Each change is an unload. Usage after each change goes to the spool
-   loaded for it. This also shows whether the firmware counts `M600` as an
-   unload, which the tests assume.
-2. **M5a.** A change on a nearly full spool flags it.
-3. **W2.** Update Spoolman during a change. The write waits for the print to
-   end, then runs once.
-4. **P3.** In another print, change filament and update Spoolman only after
-   the print ends. The update moves the usage since the change.
-5. **P4.** Change filament, reload the same spool, and never update Spoolman.
-   The next print start closes the swap with a provisional charge.
-
-## Session 4: Spoolman changes
-
-These use the throwaway spool record.
-
-1. **M1.** During a print, stop the Spoolman container for a few minutes, then
-   start it. Charges queue and catch up with no loss.
-2. **M3a.** Archive the active spool. It's still charged and flagged until the
-   next unload.
-3. **M3.** Delete the active spool. Usage is held, and the next spool moved in
-   takes it.
-4. **M4.** Rename the location in Spoolman, then unload and load. The spool
-   is charged until the unload, and usage after it is held. Rename the
-   location back, and the held usage goes to the spool in it.
-5. **M6.** Set a flag on a spool by hand. The bridge leaves it alone.
-
-## Session 5: a second printer
-
-The cross-printer rows (X1 to X16 in `scenarios.md`) need two printers on
-firmware with the filament endpoint, run by one bridge with a `[[printers]]`
-list. Don't schedule this session until then; the unit tests stand in. The
-first time, run the bridge with the existing printer alone, under the name
-it keeps, with dry run off, and let one poll complete, so `state.json` is
-rewritten as version 3. Then add the second printer.
-
-1. **X1.** Move the loaded spool to the other printer's location in Spoolman,
-   unload it, carry it over, and load it. Both printers log their side within
-   one poll. Check the ledger: the load on B goes to the spool, and A holds
-   from its unload.
-2. **X2.** The same swap with Spoolman changed last. Confirm A's "moved out"
-   flag text on the spool while B charges it, and that moving any spool into
-   `LA` clears it.
-3. **X4 and X4a.** Swap on A, then move the evicted spool into `LB` as fast
-   as possible, several times. The spool should stay in `LB`. A move in the
-   instant between the bridge's re-read and its write can still be undone;
-   note how often that happens.
-4. **X8.** Switch A off during a print on B. B's charges continue, A's outage
-   logs once (then hourly, and once more when A is back), and the flags on
-   A's spools in Spoolman don't change while A is off.
-5. **X6.** Hard to set up on purpose: it needs an unload missed across a
-   reboot. Check the logs when it happens.
+- **Run current `main` on whale**, and note the commit. The homelab deploy
+  belongs to the `composed` session; ask it to redeploy.
+- **Run only the production bridge.** A second live bridge double-charges,
+  and a dry-run one muddies the logs. The probe in `simulator/probe.py` only
+  reads, so it can run beside the bridge.
+- **Use a cheap filament**, and a throwaway Spoolman spool where a check
+  needs a record you can delete or archive. Move the usage back afterwards.
+- **Record**: the date, the bridge commit, the firmware version (the probe
+  puts `/api/version` in the trace header), the job and spool IDs, the steps
+  with their times, and the bridge log lines from those times
+  (`ssh whale sudo /usr/local/bin/docker logs spoolman-prusalink`, or Loki
+  with the syslog tag `spoolman-prusalink`).
 
 ## When they happen
 
-Don't set these up. Check the logs and ledger when they come up:
+Don't set these up. Run the probe if there's time, and check the logs and
+ledger afterwards:
 
 - **C2**: the printer off overnight.
-- **C8**: the next firmware update.
-- **W3**: a sync job refused with 409.
+- **C8**: the next firmware update. A trace of the first boot afterwards is
+  worth having.
+- **P2** with a real runout at the end of a spool, and **P6**, a jam. Both
+  were seen live once. The filament change behavior they share is traced
+  from a Tune menu change instead (F8 in printer-behaviors.md).
 - **M5**: a spool going past empty in Spoolman.
-- **P2, P3, P4** with a real runout at the end of a spool.
-- **C3, C4, C5, C6, W5, W7, W8, W9**: as they occur.
 - **S12**: the printer reports one spool's UUID while Spoolman has another
-  active. A menu reload clears the UUID, so this is hard to set up on
-  purpose.
-- The `length_factor` scale check: weigh the spool before and after a print
-  of 200 g or more.
+  active. A menu reload clears the UUID, so it's hard to set up on purpose.
 
 ## Not checked live
 
-- **P12**: confirming that a power-panic resume keeps its job ID means
-  cutting power mid-print. Either result is harmless (see Q5 in
-  `scenarios.md`), so leave it unless a print is lost to a power cut anyway.
-- **W10, M2**: they need a different printer or a broken Spoolman.
-- **X3, X5, X7, X9 to X16**: the rest of the cross-printer rows. Unit tests
-  cover them, and they mirror single-printer rows already checked.
-- **B3, B4, M7**: known limits or deployment problems, as `scenarios.md`
-  says.
+- **W10, M2**: they need a different printer or a broken Spoolman. The
+  simulator has both.
+- **M1, M3, M3a, M4, M6, S5, S13, S9, P8, P10, P11, W2 to W9, W11, W12**: bridge
+  and Spoolman logic over printer behaviors that are traced or seen. They
+  go straight to end-to-end tests, as scenarios.md tracks.
+- **X1 to X16**: no second printer; end-to-end tests with two simulated
+  printers.
+- **B3, B4, M7**: known limits or deployment problems, as scenarios.md says.
