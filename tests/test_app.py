@@ -475,29 +475,34 @@ PRINTERS_BASE = (
     '[[printers]]\nname = "mk4s"\nurl = "http://b/"\napi_key = "kb"\nuuids = false\n'
     '[[printers.tools]]\nindex = 0\nlocation = "MK4S"\n'
 )
+MK4S_TOOL = '[[printers.tools]]\nindex = 0\nlocation = "MK4S"\n'
 
 
 def test_config_lists_several_printers(tmp_path):
     p = tmp_path / "c.toml"
     p.write_text(PRINTERS_BASE)
-    cfg = load(p, env={"CORE_KEY": "ka"})
-    assert [x.name for x in cfg.printers] == ["core", "mk4s"]
-    core, mk4s = cfg.printers
-    assert (core.url, core.api_key, core.tools, core.uuids) == (
+    # Every entry is checked, then the list is refused until the loop serves several.
+    with pytest.raises(ConfigError, match="serves one printer for now"):
+        load(p, env={"CORE_KEY": "ka"})
+    first, second = PRINTERS_BASE.split('[[printers]]\nname = "mk4s"')
+    p.write_text(first)
+    (core,) = load(p, env={"CORE_KEY": "ka"}).printers
+    assert (core.name, core.url, core.api_key, core.tools, core.uuids) == (
+        "core",
         "http://a",
         "ka",
         {0: "Core One L+"},
         True,
     )
-    assert (mk4s.url, mk4s.api_key, mk4s.tools, mk4s.uuids) == (
+    p.write_text(first.split("[[printers]]")[0] + '[[printers]]\nname = "mk4s"' + second)
+    (mk4s,) = load(p, env={}).printers
+    assert (mk4s.name, mk4s.url, mk4s.api_key, mk4s.tools, mk4s.uuids) == (
+        "mk4s",
         "http://b/",
         "kb",
         {0: "MK4S"},
         False,
     )
-    # The bridge serves one printer until the loop handles several.
-    with pytest.raises(ValueError, match="2 printers"):
-        _ = cfg.printer
 
 
 @pytest.mark.parametrize(
@@ -528,6 +533,18 @@ def test_config_lists_several_printers(tmp_path):
             "printers 'core' and 'mk4s' have the same url",
         ),
         (
+            ('url = "http://b/"\n', 'url = "HTTP://A:80"\n'),
+            "printers 'core' and 'mk4s' have the same url",
+        ),
+        (
+            (MK4S_TOOL, MK4S_TOOL + '[[printers.tools]]\nindex = 0\nlocation = "MK4S T2"\n'),
+            "printers[mk4s]: tool 0 is configured twice",
+        ),
+        (
+            (MK4S_TOOL, MK4S_TOOL + '[[printers.tools]]\nindex = 1\nlocation = "MK4S"\n'),
+            "printers[mk4s]: location 'MK4S' is mapped to more than one tool",
+        ),
+        (
             ('location = "MK4S"\n', 'location = "Core One L+"\n'),
             "location 'Core One L+' is mapped to a tool on both 'core' and 'mk4s'",
         ),
@@ -550,7 +567,7 @@ def test_config_rejects_bad_printer_lists(tmp_path, edit, error):
     "text, error",
     [
         ("printers = []\n", "[[printers]] needs at least one entry"),
-        ("printers = 5\n", "[[printers]] needs at least one entry"),
+        ("printers = 5\n", "printers must be a list of [[printers]] tables"),
         ("printers = [1]\n", "printers[0] must be a table"),
     ],
 )
@@ -578,10 +595,13 @@ def test_config_single_printer_takes_a_name_and_api_key_env(tmp_path):
     )
     cfg = load(p, env={"MY_KEY": "from-env"})
     assert (cfg.printer.name, cfg.printer.api_key) == ("core", "from-env")
-    # PRUSALINK_API_KEY still wins, as before.
-    assert load(p, env={"MY_KEY": "x", "PRUSALINK_API_KEY": "k"}).printer.api_key == "k"
-    with pytest.raises(ConfigError, match="MY_KEY, which isn't set"):
-        load(p, env={})
+    # PRUSALINK_API_KEY still wins, as before, and PRUSALINK_URL still overrides the file.
+    cfg = load(p, env={"MY_KEY": "x", "PRUSALINK_API_KEY": "k", "PRUSALINK_URL": "http://e"})
+    assert (cfg.printer.api_key, cfg.printer.url) == ("k", "http://e")
+    # A file error is reported even when the environment would have supplied the key.
+    for env in ({}, {"PRUSALINK_API_KEY": "k"}):
+        with pytest.raises(ConfigError, match="MY_KEY, which isn't set"):
+            load(p, env=env)
     p.write_text(CONFIG_BASE.replace("[printer]\n", '[printer]\nname = "core one"\n'))
     with pytest.raises(ConfigError, match="printer.name must match"):
         load(p, env={"PRUSALINK_API_KEY": "k"})
