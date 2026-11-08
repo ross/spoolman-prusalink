@@ -645,14 +645,14 @@ def test_state_v2_is_refused_with_several_printers(tmp_path):
         load_state(path, ["core"])
 
 
-def test_main_exits_2_on_a_state_file_it_cannot_migrate(tmp_path, monkeypatch, caplog):
+def test_main_exits_2_on_a_state_file_it_cannot_load(tmp_path, monkeypatch, caplog):
     state = tmp_path / "state.json"
-    state.write_text(json.dumps(V2_STATE))
+    state.write_text(json.dumps({**V2_STATE, "version": 1}))
     p = tmp_path / "c.toml"
-    p.write_text(PRINTERS_BASE + f'[bridge]\nstate_file = "{state}"\n')
-    monkeypatch.setenv("CORE_KEY", "ka")
+    p.write_text(CONFIG_BASE + f'[bridge]\nstate_file = "{state}"\n')
+    monkeypatch.setenv("PRUSALINK_API_KEY", "k")
     assert main(["-c", str(p), "once"]) == 2
-    assert "state: " in caplog.text and "single-printer bridge" in caplog.text
+    assert "state: " in caplog.text and "unsupported state version 1" in caplog.text
 
 
 def test_bridge_keeps_and_warns_about_an_unconfigured_printer(tmp_path, caplog):
