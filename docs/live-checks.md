@@ -157,8 +157,9 @@ These use the throwaway spool record.
 The cross-printer rows (X1 to X16 in `scenarios.md`) need two printers on
 firmware with the filament endpoint, run by one bridge with a `[[printers]]`
 list. Don't schedule this session until then; the unit tests stand in. The
-first time, start the bridge with the existing printer alone so `state.json`
-migrates, then add the second printer.
+first time, run the bridge with the existing printer alone, under the name
+it keeps, with dry run off, and let one poll complete, so `state.json` is
+rewritten as version 3. Then add the second printer.
 
 1. **X1.** Move the loaded spool to the other printer's location in Spoolman,
    unload it, carry it over, and load it. Both printers log their side within
@@ -168,10 +169,12 @@ migrates, then add the second printer.
    flag text on the spool while B charges it, and that moving any spool into
    `LA` clears it.
 3. **X4 and X4a.** Swap on A, then move the evicted spool into `LB` as fast
-   as possible, several times. The spool must never end up in the eviction
-   location.
-4. **X8.** Switch A off during a print on B. B's charges continue, and A's
-   outage logs once.
+   as possible, several times. The spool should stay in `LB`. A move in the
+   instant between the bridge's re-read and its write can still be undone;
+   note how often that happens.
+4. **X8.** Switch A off during a print on B. B's charges continue, A's outage
+   logs once (then hourly, and once more when A is back), and the flags on
+   A's spools in Spoolman don't change while A is off.
 5. **X6.** Hard to set up on purpose: it needs an unload missed across a
    reboot. Check the logs when it happens.
 

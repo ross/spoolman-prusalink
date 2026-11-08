@@ -143,16 +143,29 @@ starts the new name from a baseline.
 A `state.json` from a single-printer bridge loads only while one printer is
 configured: its tools become that printer's. With several printers
 configured, the bridge refuses to start, because it can't tell which printer
-the file belongs to. Start once with the original printer alone, under the
-`[[printers]]` name you want it to keep, then add the others.
+the file belongs to. To migrate, configure the original printer alone under
+the name it's going to keep (`name` in `[printer]`, or a one-entry
+`[[printers]]` list; `default` otherwise), set `dry_run = false`, and let the
+bridge complete one poll with the printer and Spoolman reachable. That poll
+rewrites the file as version 3. Dry run saves nothing, so a dry-run start
+doesn't migrate. Then add the other printers. Ledger lines from before this
+version have no `printer` field.
 
 Every printer is polled each tick, and Spoolman is read once for all of
-them. The interval is the printing rate while any printer is busy. A printer
-that's off or failing is logged as an outage and skipped until it answers, and the
-others carry on. Log lines about a tool keep the `[location]` prefix;
-lines about a whole printer name it when there are several. A spool active
-in two tools at once, which happens when one printer misses an unload across
-a reboot, is logged once and flagged on the spool naming both locations.
+them. When no printer answers, the tick ends there. The interval is the
+printing rate while any printer is busy. A printer that's off is logged as an
+outage, once and then hourly; one that answers with an error is logged once
+per distinct error. Either way it's skipped until it answers, its flags in
+Spoolman stay as they were, and the others carry on. Log lines about a tool
+keep the `[location]` prefix; lines about a whole printer name it when there
+are several. A spool active in two tools at once, which happens when one
+printer misses an unload across a reboot, is logged once and flagged on the
+spool naming both locations.
+
+With `printer_notices = true`, a new flag is shown on the printer whose tool
+location holds the spool. A flag on a spool in no tool's location is shown on
+the printer that raised it, or, for the bridge's own flags such as a claim on
+a spool that's nowhere, on whichever printer is idle first.
 
 ### Run from source
 
@@ -386,7 +399,7 @@ The `/data` volume holds two files:
   open swaps. Run only one bridge per state file, printer and Spoolman.
 - `ledger.jsonl` stores one JSON object per line for every charge, and every
   event, such as a reboot or swap. Every record has `dry_run`, `printer` (the
-  printer's name, `default` in the single-printer form) and `tool`. A charge also
+  printer's name; `default` when `[printer]` sets none) and `tool`. A charge also
   has, when it was sent, `applied` (the time Spoolman accepted it) or
   `failed` (the HTTP status that rejected it; a charge held for a deleted
   spool also has `held` and is charged again later as part of a new charge).

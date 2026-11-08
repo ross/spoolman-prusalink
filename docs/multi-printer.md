@@ -2,8 +2,9 @@
 
 This is the plan for one bridge instance that charges several printers'
 usage to one Spoolman. It lands as a stack of PRs that stay unmerged until
-the direction is settled, and each PR before the last leaves a single-printer
-bridge working as it does today, so the stack can stop at any point.
+the direction is settled, and each PR before the loop PR leaves a
+single-printer bridge working as it does today, so the stack can stop at any
+point before that one.
 
 ## Goal and non-goals
 
@@ -27,13 +28,18 @@ Not in scope:
 
 ## Why one process
 
-One container per printer works today, except where two printers touch one
-spool. Flags, claims, runouts, and evictions are keyed by spool, and a spool
-moves between printers in normal use: a swap on one printer evicts it, and
-the next print on another printer loads it. Two containers then write the
-same flag field with no coordination, and the second container's view of
-the spool is what Spoolman shows. One process computes every printer's
-desired flags, and writes each spool's flag once.
+One container per printer breaks down wherever two printers touch one
+spool, and that's normal use: a swap on one printer evicts the spool, and the
+next print on another printer loads it. Flags, claims, and runouts are keyed
+by spool, and each tool's pending evictions name spools. Two containers then
+want different text in one flag field and each rewrites it every poll, so
+neither view holds. A claim on a spool in the other printer's location looks
+unplaced to each container, which flags and logs it, and shows it on the
+wrong printer. The other printer's charges look like weight edits, which
+clear a runout flag early. And two checks need to see every tool at once: a
+spool active in two tools, and an eviction racing the user's move. One
+process computes every printer's desired flags and writes each spool's flag
+once.
 
 The other gains are smaller: one Spoolman read per poll instead of one per
 printer, one state file, and one deploy.
@@ -67,9 +73,16 @@ location = "MK4S"
 
 The name keys the printer's state and appears in ledger records, so it must
 be stable. Changing it leaves the old name's state in the file: the bridge
-warns once and starts the new name from a baseline (B1). The old entry is
-kept, not deleted, because it can hold usage for a deleted spool or spools
-waiting for eviction.
+warns at each start and starts the new name from a baseline (B1). The old
+entry is kept, not deleted, so nothing is lost by a typo, but it's inert: its
+pending evictions never run, and a queued charge of its that Spoolman
+rejects is dropped rather than held.
+
+Rules the loader applies that the examples don't show: a name matches
+`[A-Za-z0-9_.-]{1,64}`; `api_key` and `api_key_env` are exclusive; mixing
+`[printer]` or `[[tools]]` with `[[printers]]` is an error, as is
+`SPOOLMAN_PRUSALINK_LOCATION`; URLs are compared ignoring case, the default
+port, and a trailing slash.
 
 Today's `[printer]` table and top-level `[[tools]]` keep working as a
 one-printer list named `default`, or the `name` set in `[printer]`, and the
@@ -111,22 +124,34 @@ drift, and color don't change.
 
 One tick serves every printer:
 
-1. `flush()` the shared outbox.
-2. Read Spoolman once.
-3. For each printer: read status and filament, `check_missing()`,
-   `process()`, and, when idle, `sync_printer()`. A printer that's off or
-   failing is skipped for this tick and logged through its own `Outage`, and
-   the others carry on. Today a printer read failure returns from `poll()`
-   before the Spoolman-wide steps, which must not happen with several
-   printers.
-4. `evict()`, `sync_claims()`, and `sync_flags()` once, over every printer's
+1. `flush()` the shared outbox. If that fails, the tick ends, as today.
+2. Read every printer's status and filament. A printer that's off is logged
+   through its own `Outage`; one that answers with an error is logged once
+   per distinct error. Either is skipped for this tick, and the others carry
+   on. If no printer answers, the tick ends here, as today with one.
+3. Read Spoolman once.
+4. For each printer that answered: `check_missing()` and `process()`. A
+   printer that didn't answer contributes the flag texts from its last
+   `process()`, kept in its state, so an outage doesn't clear its flags.
+5. The active-in-two-tools check, then the runout flags, then the ` | `
+   join of each spool's texts.
+6. `flush()` again, then `evict()` and `sync_claims()` over every printer's
    tools.
+7. `sync_printer()` for each idle printer that answered. It runs after every
+   `process()` because notices need the finished flags.
+8. `sync_flags()`.
 
 The interval is the shortest any printer asks for: `poll_printing` while any
-printer is busy. Idle printers get two cheap GETs each at that rate, which
-keeps the Spoolman read shared. Per-printer tasks with their own intervals
-would need either a Spoolman read per printer or a cached list, and several
-writers to one state file, so they're left for the SQLite change if ever.
+reachable printer is busy or hasn't reported a state yet. The state comes
+from the status read, so a printer whose filament endpoint is missing still
+counts as idle or busy. Idle printers get two cheap GETs each at that rate,
+which keeps the Spoolman read shared. Per-printer tasks with their own
+intervals would need either a Spoolman read per printer or a cached list,
+and several writers to one state file, so they're left for the SQLite change
+if ever.
+
+Printer-level log lines carry no location, so they're prefixed with the
+printer's name when several are configured, and are unchanged with one.
 
 When Spoolman is unreachable, every printer skips accounting, as today.
 
@@ -154,27 +179,37 @@ charge surviving, since the outbox and every printer's tools are written
 together.
 
 A version 2 file loads only when exactly one printer is configured: its tools
-move under that printer's name. With several printers configured, the bridge
-refuses to start and says so, because it can't tell which printer the tools
-belong to.
+move under that printer's name, and its outbox records are stamped with it.
+With several printers configured, the bridge refuses to start and says so,
+because it can't tell which printer the tools belong to. The migrated file
+reaches disk only when a live poll saves, so the message says to poll once
+with dry run off.
+
+Each printer's state also keeps the flag texts its tools last asked for, and
+a runout flag records the printer it ran out on, for notices.
 
 Outbox and ledger records gain a `printer` field with the name. The
 held-for-deleted lookup in `flush()` (M3), which finds a tool by the record's
 `tool`, keys on `printer` and `tool`. Both fields are what a later SQLite
-schema needs for its keys, so the history imports without back-filling.
+schema needs for its keys. Ledger lines from before this change have no
+`printer`, so an import assigns them to the migrated printer's name.
 
 Log lines keep the `[location]` prefix. Locations are unique across printers,
 so the prefix already says which printer a line is about.
 
 ### Flags, notices, claims, and evictions
 
-- **Flags.** `process()` already joins several texts for one spool with
-  ` | `, each prefixed with its location. A spool that two printers have
-  something to say about gets both texts. No conflict policy is needed.
+- **Flags.** Each tool's texts are prefixed with its location, and the
+  bridge joins a spool's texts with ` | `. A spool that two printers have
+  something to say about gets both texts. No conflict policy is needed. A
+  printer that can't be read keeps its last texts, so an outage changes
+  nothing in Spoolman.
 - **Notices.** A flag shown with `M117` goes to the printer whose tool
-  location holds the spool. A flag on a spool in no tool's location, such as
-  an unplaced claim, is shown on no printer. `noticed` stays one list, keyed
-  by text.
+  location holds the spool. A spool in no tool's location has no holder, so
+  the printer that raised the flag shows it, and the bridge's own flags, such
+  as an unplaced claim, go to whichever printer is idle first. With one
+  printer, every flag shows on it, as before. `noticed` stays one list, keyed
+  by text, so each text is shown once.
 - **Claims.** The location says which printer and tool. The rest is
   unchanged.
 - **Evictions.** `evict()` moves a spool out of a tool's location based on
@@ -219,8 +254,9 @@ and each of those PRs could merge on its own or be dropped.
    "Several printers", the live checks are session 5 in `live-checks.md`,
    and the out-of-scope row about shared locations names the config error.
 
-The eviction re-read and the active-in-two-tools check are useful on one
-printer too. If the stack stalls, they can be pulled out and merged alone.
+The eviction re-read narrows the race to the instant between the re-read and
+the write; it doesn't close it. It and the active-in-two-tools check are
+useful on one printer too. If the stack stalls, they can be pulled out and merged alone.
 
 ## Cross-printer scenarios
 
