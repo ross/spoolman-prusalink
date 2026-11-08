@@ -165,6 +165,9 @@ class Bridge:
     _provisional_shown: dict[int, tuple[tuple[int, int | None], int]] = field(default_factory=dict)
     # Dry run: the UUID each spool would be given, reused so the job stays the same.
     _dry_uuids: dict[int, str] = field(default_factory=dict)
+    clock: Callable[[], float] = time.monotonic
+    # When the printer was first seen idle since it was last busy or unreachable.
+    _idle_since: float | None = None
 
     @classmethod
     def from_config(cls, config: Config) -> Bridge:
@@ -201,6 +204,7 @@ class Bridge:
     async def poll(self) -> None:
         # Send charges left over from a failed poll or a restart before reading anything.
         if not await self.flush():
+            self._idle_since = None  # The printer wasn't read; restart the idle wait.
             return
         try:
             status = await self.printer.status()
@@ -209,9 +213,11 @@ class Bridge:
         except httpx.TransportError as e:
             # Connection refused, timeouts and the like: most often the printer is off.
             self._printer_outage.failed(e)
+            self._idle_since = None
             return
         except NoFilamentEndpoint as e:
             self._printer_outage.ok()
+            self._idle_since = None
             if not self._unsupported:
                 self._unsupported = True
                 log.error(
@@ -223,9 +229,11 @@ class Bridge:
         except (httpx.HTTPError, ValueError, KeyError) as e:
             self._printer_outage.ok()  # It answered, even if badly.
             self._problems.fail("printer read", e, "printer read failed, skipping poll: %s", e)
+            self._idle_since = None
             return
         self._printer_outage.ok()
         self._problems.clear("printer read", "printer reads working again")
+        self._note_state(status.state)
         if self._unsupported:
             self._unsupported = False
             log.info("printer now reports filament; resuming")
@@ -253,6 +261,13 @@ class Bridge:
             await self.sync_printer(spools)
         if not self.config.dry_run and self.config.flag_field:
             await self.sync_flags(spools)
+
+    def _note_state(self, state: str) -> None:
+        """Track how long the printer has been idle, for `sync_delay`."""
+        if state not in IDLE_STATES:
+            self._idle_since = None
+        elif self._idle_since is None:
+            self._idle_since = self.clock()
 
     async def check_missing(self, spools: list[Spool]) -> None:
         """Find out why an active spool is missing from Spoolman's list.
@@ -989,7 +1004,22 @@ class Bridge:
             self._problems.clear("dry-run job")
             self._problems.clear("sync busy")
             self._problems.clear("sync failed")
+            self._problems.clear("sync delay")
             return
+        delay = self.config.sync_delay
+        idle_for = 0.0 if self._idle_since is None else self.clock() - self._idle_since
+        if idle_for < delay:
+            # The printer may have only just become idle, with someone at it about to
+            # start a print. Give them time before taking it over.
+            self._problems.fail(
+                "sync delay",
+                "waiting",
+                "sync job waits until the printer has been idle for %gs",
+                delay,
+                level=logging.INFO,
+            )
+            return
+        self._problems.clear("sync delay")
         gcode, shown = printer_sync.build_job(
             self._preamble(), writes, notices, multi_tool=len(self.config.printer.tools) > 1
         )
@@ -1005,6 +1035,19 @@ class Bridge:
             )
             return
         try:
+            # The state this poll acted on was read a few requests ago. Check it again
+            # right before taking over the printer, in case a print started since.
+            state = (await self.printer.status()).state
+            self._note_state(state)
+            if state not in IDLE_STATES:
+                self._problems.fail(
+                    "sync busy",
+                    state,
+                    "printer became %s; sync job waits for the next idle poll",
+                    state,
+                    level=logging.INFO,
+                )
+                return
             await self.printer.upload_and_print(
                 self.config.printer.sync_storage, self.config.printer.sync_file, gcode
             )
@@ -1025,7 +1068,7 @@ class Bridge:
                     e.response.text[:200],
                 )
             return
-        except httpx.HTTPError as e:
+        except (httpx.HTTPError, ValueError, KeyError) as e:
             self._problems.fail("sync failed", e, "printer sync job failed: %s", e)
             return
         self._problems.clear("sync busy")
