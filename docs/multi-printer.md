@@ -36,10 +36,9 @@ want different text in one flag field and each rewrites it every poll, so
 neither view holds. A claim on a spool in the other printer's location looks
 unplaced to each container, which flags and logs it, and shows it on the
 wrong printer. The other printer's charges look like weight edits, which
-clear a runout flag early. And two checks need to see every tool at once: a
-spool active in two tools, and an eviction racing the user's move. One
-process computes every printer's desired flags and writes each spool's flag
-once.
+clear a runout flag early. And only a process that sees every tool can
+notice a spool active in two of them. One process computes every printer's
+desired flags and writes each spool's flag once.
 
 The other gains are smaller: one Spoolman read per poll instead of one per
 printer, one state file, and one deploy.
@@ -81,8 +80,9 @@ rejects is dropped rather than held.
 Rules the loader applies that the examples don't show: a name matches
 `[A-Za-z0-9_.-]{1,64}`; `api_key` and `api_key_env` are exclusive; mixing
 `[printer]` or `[[tools]]` with `[[printers]]` is an error, as is
-`SPOOLMAN_PRUSALINK_LOCATION`; URLs are compared ignoring case, the default
-port, and a trailing slash.
+`SPOOLMAN_PRUSALINK_LOCATION`; a URL that doesn't parse is a config error;
+URLs are compared ignoring the case of the scheme and host, the default port,
+and a trailing slash, with IPv6 brackets kept.
 
 Today's `[printer]` table and top-level `[[tools]]` keep working as a
 one-printer list named `default`, or the `name` set in `[printer]`, and the
@@ -179,7 +179,8 @@ charge surviving, since the outbox and every printer's tools are written
 together.
 
 A version 2 file loads only when exactly one printer is configured: its tools
-move under that printer's name, and its outbox records are stamped with it.
+move under that printer's name, and its outbox records and runouts are
+stamped with it.
 With several printers configured, the bridge refuses to start and says so,
 because it can't tell which printer the tools belong to. The migrated file
 reaches disk only when a live poll saves, so the message says to poll once
@@ -207,9 +208,10 @@ so the prefix already says which printer a line is about.
 - **Notices.** A flag shown with `M117` goes to the printer whose tool
   location holds the spool. A spool in no tool's location has no holder, so
   the printer that raised the flag shows it, and the bridge's own flags, such
-  as an unplaced claim, go to whichever printer is idle first. With one
-  printer, every flag shows on it, as before. `noticed` stays one list, keyed
-  by text, so each text is shown once.
+  as an unplaced claim, go to whichever printer is idle first, and so does a
+  runout flag whose printer isn't configured (from before names, or after a
+  rename). With one printer, every flag shows on it, as before. `noticed`
+  stays one list, keyed by text, so each text is shown once.
 - **Claims.** The location says which printer and tool. The rest is
   unchanged.
 - **Evictions.** `evict()` moves a spool out of a tool's location based on
