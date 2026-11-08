@@ -270,7 +270,9 @@ With the behaviors traced, the integration suite becomes the record and
 scenario rows move to End to end. The order, by the damage a wrong answer
 does and how often it happens, as the old live-check ranks had it:
 
-1. **Claims and print starts**: S5, S13, P8, P9, P11, S9, P10.
+1. **Claims and print starts**: S5, S13, P8, P9, P11, S9, P10, and P12 with
+   the power-panic resume the simulator has now. Done: all eight are End to
+   end.
 2. **Writes**: W2 to W5, W9, W11, W12, W14, and the blip drop above.
 3. **Multi-tool**: an INDX print with tool changes, a swap on one tool
    while another prints, and the per-tool write. Checked by hand once
@@ -288,8 +290,7 @@ does and how often it happens, as the old live-check ranks had it:
 5. **Several printers**: X1 to X16 with a two-printer `world`. The
    simulator already runs any number.
 6. **`sync_delay` above 0**, unit-tested only so far.
-7. **Counters and boots**: C1 to C9, B1 to B6, P12 with the power-panic
-   resume the simulator has now.
+7. **Counters and boots**: C1 to C9, B1 to B6.
 
 Findings from the first live run of the suite that belong in scenario rows:
 M5a needs the print to have started (two polls with the counter moving);

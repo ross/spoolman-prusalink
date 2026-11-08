@@ -1,12 +1,17 @@
-"""Filament changes during a print: docs/scenarios.md row P2."""
+"""Prints and what happens during them: docs/scenarios.md rows P2 and P8 to P12."""
 
 from __future__ import annotations
 
-from integration.conftest import PETG, World, charges, events
+import logging
+
+import pytest
+
+from integration.conftest import LOAD_MM, PETG, World, charged, charges, events, logged, print_spec
 from simulator.model import PrintSpec, Segment, State
 
 
 async def test_p2_runout_with_spoolman_updated_during_pause(world: World):
+    """Runout mid-print, Spoolman fixed during the pause: the rest goes to the new spool."""
     w = world
     a, b = w.spools["A"], w.spools["B"]
     records = await w.poll()
@@ -65,3 +70,215 @@ async def test_p2_runout_with_spoolman_updated_during_pause(world: World):
     records = await w.poll()
     assert len(w.requests("PUT")) == puts
     assert events(records) == []
+
+
+def warnings(caplog: pytest.LogCaptureFixture) -> list[str]:
+    return [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+
+
+async def baseline(w: World) -> None:
+    records = await w.poll()
+    assert len(events(records, "baseline")) == 1
+    assert charges(records) == []
+
+
+async def stage_b(w: World) -> None:
+    """Spoolman says B is in the tool with no unload: B is staged, A still charged."""
+    await w.move("A", w.shelf)
+    await w.move("B", w.tool_location)
+    records = await w.poll()
+    assert len(events(records, "swap_staged")) == 1
+
+
+async def finish(w: World, state: State = State.FINISHED) -> list[dict]:
+    """Run the print to its end, polling every second, and return what the polls wrote."""
+    return await w.run_until(
+        lambda: w.printer.state is state and w.printer.job is None, poll_every=1.0
+    )
+
+
+async def test_p8_cancelled_during_preheat_is_not_a_print_start(
+    world: World, caplog: pytest.LogCaptureFixture
+):
+    """Print cancelled in preheat: not a print start, so the open swap is still confirmed."""
+    caplog.set_level(logging.INFO, logger="spoolman_prusalink")
+    w = world
+    a, b = w.spools["A"], w.spools["B"]
+    await baseline(w)
+
+    w.printer.extrude(0, 30)
+    await w.unload()
+    records = await w.poll()
+    assert len(events(records, "swap_unconfirmed")) == 1
+    await w.swap_cycle(source="tag", name=PETG[0], color=PETG[1])
+    records = await w.poll()
+    assert w.charged(records, "A") == LOAD_MM
+    # A is still active and the printer shows B's tag, so that poll wrote A back.
+    await w.run_until(lambda: w.printer.job is None)
+
+    # Scan and blip take 0.4 s, so at 0.5 s the printer is preheating with a job.
+    start = w.tool.extruded
+    w.printer.start_print(print_spec())
+    w.advance(0.5)
+    assert w.printer.state is State.PRINTING and w.printer.job is not None
+    records = await w.poll()
+    assert events(records) == []
+    w.advance(0.2)
+    records = await w.poll()
+    assert events(records) == []
+    assert w.tool.extruded == start
+
+    # Spoolman is fixed during the preheat: the swap is still open, so this confirms it.
+    await w.move("A", w.shelf)
+    await w.move("B", w.tool_location)
+    records = await w.poll()
+    assert [e["message"] for e in events(records, "swap_confirmed")] == [
+        f"swap confirmed: {LOAD_MM} mm moved from spool {a} to {b}"
+    ]
+    assert w.charged(records, "B") == LOAD_MM
+    assert w.charged(records, "A") == -LOAD_MM
+
+    w.printer.cancel()
+    records = await finish(w, State.STOPPED)
+    assert w.tool.extruded == start
+    assert charges(records) == []
+    assert events(w.since(0), "swap_assumed") == []
+    assert not any("provisionally" in m for m in warnings(caplog))
+    assert await w.flag("A") is None
+
+
+async def test_p9_restart_after_a_failure_is_a_new_print_start(
+    world: World, caplog: pytest.LogCaptureFixture
+):
+    """A print cancelled and started again under a new job ID is a second print start."""
+    caplog.set_level(logging.INFO, logger="spoolman_prusalink")
+    w = world
+    a, b = w.spools["A"], w.spools["B"]
+    await baseline(w)
+    await stage_b(w)
+    msg = f"print started while spool {b} is staged but not loaded; charging spool {a}"
+
+    start = w.counter
+    mark = w.mark()
+    records = await w.start_print(print_spec())
+    assert [e["message"] for e in events(records, "staged_at_print")] == [msg]
+    first = w.printer.job.id
+
+    # The print fails part way and is cancelled.
+    w.advance(0.5)
+    w.printer.cancel()
+    await finish(w, State.STOPPED)
+    w.printer.dismiss()
+
+    records = await w.start_print(print_spec())
+    assert w.printer.job.id != first
+    assert [e["message"] for e in events(records, "staged_at_print")] == [msg]
+    await finish(w)
+    records = w.since(mark) + await w.poll()
+
+    assert len(events(w.since(0), "staged_at_print")) == 2
+    starts = [r for r in caplog.records if r.levelno == logging.WARNING and msg in r.getMessage()]
+    assert len(starts) == 2
+    assert w.charged(records, "A") == w.counter - start
+    assert w.charged(records, "B") == 0
+
+
+async def test_p11_pause_and_resume_changes_nothing(world: World, caplog: pytest.LogCaptureFixture):
+    """Pause and resume with no filament change: no events, and the counter carries on."""
+    caplog.set_level(logging.INFO, logger="spoolman_prusalink")
+    w = world
+    await baseline(w)
+    start = w.counter
+
+    mark = w.mark()
+    await w.start_print(print_spec())
+    w.printer.pause()
+    await w.poll()
+    paused = w.mark()
+    w.advance(2.0)
+    assert w.printer.state is State.PAUSED
+    assert await w.poll() == []
+    assert w.since(paused) == []
+
+    w.printer.resume()
+    await finish(w)
+    records = w.since(mark) + await w.poll()
+    assert [e["event"] for e in events(records)] == []
+    assert w.charged(records, "A") == w.counter - start
+    assert {r["spool_id"] for r in charges(records)} == {w.spools["A"]}
+    assert warnings(caplog) == []
+
+
+async def test_p10_spoolman_changed_mid_print_is_staged(world: World):
+    """Spoolman changed mid-print with no unload: staged, the old spool charged until unload."""
+    w = world
+    a, b = w.spools["A"], w.spools["B"]
+    await baseline(w)
+    start = w.counter
+
+    mark = w.mark()
+    await w.start_print(print_spec())
+    await w.move("A", w.shelf)
+    await w.move("B", w.tool_location)
+    records = await w.poll()
+    assert len(events(records, "swap_staged")) == 1
+
+    await finish(w)
+    records = w.since(mark) + await w.poll()
+    assert w.charged(records, "A") == w.counter - start
+    assert w.charged(records, "B") == 0
+    w.printer.dismiss()
+
+    w.printer.extrude(0, 10)
+    await w.unload()
+    records = await w.poll()
+    assert [e["message"] for e in events(records, "swap_committed")] == [
+        f"swap done: spool {a} -> {b}"
+    ]
+    assert w.charged(records, "A") == 10
+
+    records = await w.swap_cycle(poll_every=0.3, source="tag", name=PETG[0], color=PETG[1])
+    records += await w.poll()
+    assert w.charged(records, "B") == LOAD_MM
+    assert w.charged(records, "A") == 0
+
+
+async def test_p12_power_panic_resume_keeps_the_job(world: World, caplog: pytest.LogCaptureFixture):
+    """Power loss mid-print and resume: a reboot with the same job, so no new print start."""
+    caplog.set_level(logging.INFO, logger="spoolman_prusalink")
+    w = world
+    a, b = w.spools["A"], w.spools["B"]
+    await baseline(w)
+    await stage_b(w)
+
+    mark = w.mark()
+    records = await w.start_print(print_spec())
+    assert len(events(records, "staged_at_print")) == 1
+    job = w.printer.job.id
+    before_cut = charged(w.since(mark), a)
+
+    # Some printing the bridge never sees, then the power goes.
+    w.advance(0.2)
+    w.printer.set_power("off")
+    assert await w.poll() == []
+    assert logged(caplog, logging.WARNING, "unreachable")
+    w.advance(3.0)
+
+    w.printer.set_power("on", resume=True)
+    records = await w.run_until(lambda: w.printer.state is State.PRINTING, poll_every=0.5)
+    assert w.printer.job.id == job
+    reboots = events(records, "reboot")
+    assert len(reboots) == 1 and "counters restart at 0" in reboots[0]["message"]
+    assert logged(caplog, logging.INFO, "reachable again")
+    assert events(records, "staged_at_print") == []
+    # The reboot flags the staged spool, as row S9 says.
+    assert len(events(records, "staged_at_reboot")) == 1
+    assert f"spool {b} is staged" in events(records, "staged_at_reboot")[0]["message"]
+
+    # After the reboot A is charged the counter from 0, the nozzle clean's purge included.
+    await finish(w)
+    records = w.since(mark) + await w.poll()
+    assert len(events(records, "staged_at_print")) == 1
+    assert w.charged(records, "B") == 0
+    assert w.charged(records, "A") == before_cut + w.counter
+    assert w.counter > 25

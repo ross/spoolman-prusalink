@@ -19,7 +19,17 @@ import httpx
 import pytest
 from aiohttp.test_utils import TestServer
 
-from simulator.model import MODELS, Material, Settings, SimPrinter, SimTool, Simulation
+from simulator.model import (
+    MODELS,
+    Material,
+    PrintSpec,
+    Segment,
+    Settings,
+    SimPrinter,
+    SimTool,
+    Simulation,
+    State,
+)
 from simulator.prusalink import make_app
 from spoolman_prusalink.app import Bridge
 from spoolman_prusalink.config import Config, PrinterConfig
@@ -41,6 +51,10 @@ STEP = 0.1
 KEY = "it-key"
 FLAG_FIELD = "bridge_flag"
 UUID_FIELD = "instance_uuid"
+CLAIM_FIELD = "bridge_claim"
+
+# A load counts the feed after the gap, then the purge under the new material.
+LOAD_MM = 36 + 40
 
 PLA = ("PLA", "#73737b")
 PETG = ("PETG", "#1f6fb2")
@@ -78,8 +92,8 @@ class SpoolmanHelper:
         resp.raise_for_status()
         return resp.json()
 
-    async def ensure_text_field(self, key: str, name: str) -> None:
-        """Register a text extra field if it's missing, as the bridge would on first use.
+    async def ensure_field(self, key: str, name: str, field_type: str) -> None:
+        """Register an extra field if it's missing, as the bridge would on first use.
 
         Spoolman refuses an extra value for a field it doesn't know, and spool A is
         created with an instance UUID before the bridge has run.
@@ -88,7 +102,10 @@ class SpoolmanHelper:
         resp.raise_for_status()
         if any(f.get("key") == key for f in resp.json()):
             return
-        await self._post(f"/api/v1/field/spool/{key}", {"name": name, "field_type": "text"})
+        await self._post(f"/api/v1/field/spool/{key}", {"name": name, "field_type": field_type})
+
+    async def ensure_text_field(self, key: str, name: str) -> None:
+        await self.ensure_field(key, name, "text")
 
     async def vendor(self) -> int:
         data = await self._post("/api/v1/vendor", {"name": f"{self.prefix} vendor"})
@@ -135,11 +152,19 @@ class SpoolmanHelper:
         resp = await self.client.patch(f"/api/v1/spool/{spool_id}", json={"location": location})
         resp.raise_for_status()
 
+    async def claim(self, spool_id: int) -> None:
+        """Tick the spool's Claim held usage box, as the user would in Spoolman."""
+        await self.ensure_field(CLAIM_FIELD, "Claim held usage", "boolean")
+        resp = await self.client.patch(
+            f"/api/v1/spool/{spool_id}", json={"extra": {CLAIM_FIELD: "true"}}
+        )
+        resp.raise_for_status()
+
     async def used(self, spool_id: int) -> float:
         return float((await self.get(spool_id)).get("used_weight") or 0.0)
 
-    async def extra(self, spool_id: int, key: str) -> str | None:
-        """Decode a text extra field; None if it's unset or empty."""
+    async def extra(self, spool_id: int, key: str) -> str | bool | None:
+        """Decode an extra field; None if it's unset, empty or false."""
         raw = (await self.get(spool_id)).get("extra", {}).get(key)
         value = json.loads(raw) if raw else None
         return value or None
@@ -192,6 +217,16 @@ def advance(sim: Simulation, seconds: float) -> None:
         t += STEP
 
 
+def print_spec() -> PrintSpec:
+    """A 400 mm print that takes 4 s after a 0.5 s preheat."""
+    return PrintSpec([Segment(0, 400)], duration_s=4, preheat_s=0.5)
+
+
+def logged(caplog: pytest.LogCaptureFixture, level: int, text: str) -> bool:
+    """Whether the bridge logged `text` at `level`."""
+    return any(r.levelno == level and text in r.getMessage() for r in caplog.records)
+
+
 def ledger(cfg: Config) -> list[dict]:
     path = Path(cfg.ledger_file)
     if not path.exists():
@@ -235,6 +270,11 @@ class World:
     @property
     def tool(self) -> SimTool:
         return self.printer.tools[0]
+
+    @property
+    def counter(self) -> int:
+        """Tool 0's extrusion counter as the printer reports it, in whole millimetres."""
+        return int(self.tool.extruded)
 
     def advance(self, seconds: float) -> None:
         advance(self.sim, seconds)
@@ -280,8 +320,26 @@ class World:
         self.printer.load(0, **load)
         return await self.run_until(lambda: self.tool.process is None, poll_every=poll_every)
 
+    async def start_print(self, spec: PrintSpec) -> list[dict]:
+        """Start a print and poll until the bridge counts it as started.
+
+        Scan, blip and a 0.5 s preheat take 0.9 s. The bridge sees a print start when the
+        counter moves between two polls of the same job, so this polls twice once the
+        printer is extruding.
+        """
+        start = self.tool.extruded
+        self.printer.start_print(spec)
+        self.advance(1.2)
+        assert self.printer.state is State.PRINTING and self.tool.extruded > start
+        records = await self.poll()
+        self.advance(0.3)
+        return records + await self.poll()
+
     async def move(self, name: str, location: str | None) -> None:
         await self.spoolman.move(self.spools[name], location)
+
+    async def claim(self, name: str) -> None:
+        await self.spoolman.claim(self.spools[name])
 
     async def used(self, name: str) -> float:
         return await self.spoolman.used(self.spools[name])

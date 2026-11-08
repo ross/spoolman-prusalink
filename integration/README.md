@@ -50,15 +50,29 @@ Without `SPOOLMAN_URL`, every test is skipped. The `dev` extra
 
 ## The scenarios
 
-Each test is named after its row in `docs/scenarios.md`.
+Each test is named after its row in `docs/scenarios.md`. The table below is
+generated from the tests: the row comes from the name and the description from
+the first line of the docstring. Update it with
+`python -m integration.table --write`. A unit test checks that the table is
+current and that the scenario rows name their tests.
 
-| Test | Row |
-| --- | --- |
-| `test_swaps.py::test_s1_spoolman_first_swap` | S1 |
-| `test_swaps.py::test_s2_filament_first_swap` | S2 |
-| `test_swaps.py::test_s14_several_swaps_between_polls` | S14 |
-| `test_prints.py::test_p2_runout_with_spoolman_updated_during_pause` | P2 |
-| `test_writes.py::test_w1_write_after_swap` | W1 |
+<!-- table:begin -->
+| Row | Test | What it checks |
+| --- | --- | --- |
+| S1 | `test_swaps.py::test_s1_spoolman_first_swap` | Spoolman updated before the unload: the swap commits there, the load is the new spool's. |
+| S2 | `test_swaps.py::test_s2_filament_first_swap` | Filament swapped first: the charge is held, then moves once Spoolman is updated. |
+| S5 | `test_swaps.py::test_s5_claim_after_printing_on_the_wrong_spool` | Print charged provisionally to the old spool: claiming the loaded one moves it there. |
+| S9 | `test_swaps.py::test_s9_staged_spool_never_unloaded` | Staged and never unloaded: print starts and reboots flag it, and a claim makes it active. |
+| S13 | `test_swaps.py::test_s13_staged_spool_claimed` | Staged spool, no unload: a claim moves the usage since the reboot and makes it active. |
+| S14 | `test_swaps.py::test_s14_several_swaps_between_polls` | Two swaps between polls: two unloads seen, the middle spool is charged nothing. |
+| P2 | `test_prints.py::test_p2_runout_with_spoolman_updated_during_pause` | Runout mid-print, Spoolman fixed during the pause: the rest goes to the new spool. |
+| P8 | `test_prints.py::test_p8_cancelled_during_preheat_is_not_a_print_start` | Print cancelled in preheat: not a print start, so the open swap is still confirmed. |
+| P9 | `test_prints.py::test_p9_restart_after_a_failure_is_a_new_print_start` | A print cancelled and started again under a new job ID is a second print start. |
+| P10 | `test_prints.py::test_p10_spoolman_changed_mid_print_is_staged` | Spoolman changed mid-print with no unload: staged, the old spool charged until unload. |
+| P11 | `test_prints.py::test_p11_pause_and_resume_changes_nothing` | Pause and resume with no filament change: no events, and the counter carries on. |
+| P12 | `test_prints.py::test_p12_power_panic_resume_keeps_the_job` | Power loss mid-print and resume: a reboot with the same job, so no new print start. |
+| W1 | `test_writes.py::test_w1_write_after_swap` | Menu load after a Spoolman-first swap: the bridge writes name, color and UUID. |
+<!-- table:end -->
 
 ## Add a scenario
 
@@ -68,7 +82,8 @@ Each test is named after its row in `docs/scenarios.md`.
    stands on the firmware source until it does.
 2. Add `test_<row id>_<short name>` to the file for its group, taking the
    `world` fixture. `world` holds the simulator (`sim`, `printer`), the bridge
-   and its config, and the Spoolman helper with this test's spool IDs.
+   and its config, and the Spoolman helper with this test's spool IDs. Give
+   the test a docstring whose first line says what it checks.
 3. Act as the user would: `w.printer` for the printer (`unload`, `load`,
    `extrude`, `start_print`, `runout`, and the rest in `simulator/model.py`),
    `w.move()` for Spoolman, then `w.advance()` or `w.run_until()` to let time
@@ -81,3 +96,6 @@ Each test is named after its row in `docs/scenarios.md`.
 Poll where a real bridge would have polled. Some behaviour depends on what two
 polls in a row see: the bridge counts a print as started only when the counter
 moves between two polls of the same job, for example.
+5. Set the row's Status in `docs/scenarios.md` to end to end, naming the test,
+   and run `python -m integration.table --write`.
+   `pytest tests/test_integration_table.py` checks all three.
