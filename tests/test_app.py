@@ -276,6 +276,7 @@ def test_config_load(tmp_path):
     # P1 and C2: poll every 30 s while printing and every 60 s otherwise.
     assert cfg.poll_printing == 30
     assert cfg.poll_idle == 60
+    assert cfg.sync_delay == 0
 
     with pytest.raises(ConfigError, match="PRUSALINK_API_KEY"):
         load(p, env={})
@@ -312,6 +313,8 @@ CONFIG_BASE = (
         ('[printer]\ngcode_preamble = "M862.3"\n', "gcode_preamble must be a list of strings"),
         ('[printer]\ngcode_preamble = ["M862.3", 1]\n', "gcode_preamble must be a list of strings"),
         ("[bridge]\npoll_idle = 0\n", "bridge.poll_idle must be a number greater than 0"),
+        ("[bridge]\nsync_delay = -1\n", "bridge.sync_delay must be a number of seconds"),
+        ('[bridge]\nsync_delay = "5m"\n', "bridge.sync_delay must be a number of seconds"),
         ("[bridge]\npoll_printing = -5\n", "bridge.poll_printing must be a number greater than 0"),
         ('[bridge]\npoll_idle = "soon"\n', "bridge.poll_idle must be a number greater than 0"),
         ('[bridge]\nlength_factor = "x"\n', "bridge.length_factor must be a number"),
