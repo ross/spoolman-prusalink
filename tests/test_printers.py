@@ -407,6 +407,23 @@ async def test_x12_notices_go_to_the_printer_whose_tool_holds_the_spool(tmp_path
     await bridge.aclose()
 
 
+async def test_x12_a_flag_on_a_spool_in_no_tool_location_shows_on_its_raiser(tmp_path):
+    bridge, fake, printers = await baseline(
+        tmp_path, [spool(19, A), spool(20, B)], printer_notices=True
+    )
+    a, b = printers["a"], printers["b"]
+    unload(a)
+    await bridge.poll()  # a shows its open swap while 19 is still in Tool a.
+    fake.spools[19]["location"] = "shelf"  # No printer holds it now.
+    a_jobs, b_jobs = len(jobs(a)), len(jobs(b))
+    await bridge.poll()
+    await bridge.poll()
+    assert "moved out" in fake.flag(19)
+    assert (len(jobs(a)), len(jobs(b))) == (a_jobs + 1, b_jobs)
+    assert "M117 Spoolman: Tool a: filament was unloaded," in jobs(a)[-1]
+    await bridge.aclose()
+
+
 async def test_x13_two_printers_refuse_a_single_printer_state(tmp_path):
     bridge, fake, printers = two_printers(tmp_path, [spool(19, A)])
     await bridge.poll()
