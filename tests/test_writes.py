@@ -137,6 +137,7 @@ class Printer:
         self.error = None  # Status code for every request, such as 401.
         self.upload_error = None  # Status code for sync job uploads.
         self.counters = True  # MINI and MK3.5 firmware report only the material.
+        self.states = []  # States the next status reads report, before the usual one.
 
     def handle(self, request: httpx.Request) -> httpx.Response:
         if self.down:
@@ -180,7 +181,8 @@ class Printer:
             self.run_job(gcode)
             return httpx.Response(201)
         if request.url.path == "/api/v1/status":
-            data = {"printer": {"state": "PRINTING" if self.job else "IDLE"}}
+            state = self.states.pop(0) if self.states else "PRINTING" if self.job else "IDLE"
+            data = {"printer": {"state": state}}
             if self.job:
                 data["job"] = {"id": self.job}
             return httpx.Response(200, json=data)
@@ -1173,6 +1175,80 @@ async def test_spoolman_edit_is_not_drift_while_its_job_runs(tmp_path):
         bridge.printers[0].tools[0].needs_sync is False
         and bridge.printers[0].tools[0].sync_attempts == 0
     )
+    await bridge.aclose()
+
+
+async def test_print_started_during_the_poll_holds_the_sync_job(tmp_path, caplog):
+    # The poll reads IDLE, but a print starts before the upload. The re-check right
+    # before the upload sees it, and the job waits for the next idle poll.
+    caplog.set_level("INFO")
+    bridge, fake, printer = make(tmp_path, [spool(19)], uuid_field="instance_uuid")
+    printer.states = ["IDLE"] * 4 + ["PRINTING"]  # The fifth read is the re-check.
+    await swap_to_spool_20(bridge, fake, printer)
+    assert jobs(printer) == [] and printer.refused == 0
+    assert "printer became PRINTING; sync job waits" in caplog.text
+    assert bridge.printers[0].tools[0].sync_attempts == 0  # Nothing counted as written.
+    await bridge.poll()
+    assert len(jobs(printer)) == 1
+    await bridge.aclose()
+
+
+async def test_sync_delay_waits_for_the_printer_to_stay_idle(tmp_path, caplog):
+    caplog.set_level("INFO")
+    bridge, fake, printer = make(tmp_path, [spool(19)], uuid_field="instance_uuid", sync_delay=300)
+    now = [1000.0]
+    bridge.clock = lambda: now[0]
+    await swap_to_spool_20(bridge, fake, printer)  # Idle since the first poll.
+    assert jobs(printer) == []
+    now[0] += 240
+    await bridge.poll()
+    assert jobs(printer) == []
+    assert caplog.text.count("sync job waits until the printer has been idle for 300s") == 1
+    printer.job = 140  # The user starts a print: the wait starts over after it.
+    await bridge.poll()
+    printer.job = None
+    await bridge.poll()  # Idle again: the wait starts here.
+    now[0] += 299
+    await bridge.poll()
+    assert jobs(printer) == []
+    now[0] += 1
+    await bridge.poll()
+    assert len(jobs(printer)) == 1
+    await bridge.aclose()
+
+
+async def test_sync_delay_logs_a_fractional_delay(tmp_path, caplog):
+    caplog.set_level("INFO")
+    bridge, fake, printer = make(tmp_path, [spool(19)], uuid_field="instance_uuid", sync_delay=2.5)
+    bridge.clock = lambda: 1000.0
+    await swap_to_spool_20(bridge, fake, printer)
+    assert "until the printer has been idle for 2.5s" in caplog.text
+    await bridge.aclose()
+
+
+@pytest.mark.parametrize("failure", ["printer", "spoolman"])
+async def test_sync_delay_restarts_after_polls_that_miss_the_printer(tmp_path, failure):
+    # A print the bridge never saw, because the printer read failed or a queued
+    # charge kept failing, mustn't count as idle time.
+    bridge, fake, printer = make(tmp_path, [spool(19)], uuid_field="instance_uuid", sync_delay=300)
+    now = [1000.0]
+    bridge.clock = lambda: now[0]
+    await bridge.poll()  # Idle from t=1000.
+    if failure == "printer":
+        printer.error = 503
+    else:
+        fake.fail_use = [503] * 5
+        printer.extruded = 1100
+        await bridge.poll()  # The charge fails and is queued.
+    await bridge.poll()  # No printer read: the read or the queued charge fails.
+    now[0] += 4000
+    printer.error = None
+    fake.fail_use = []
+    await swap_to_spool_20(bridge, fake, printer)
+    assert jobs(printer) == []  # The wait started over when reads came back.
+    now[0] += 300
+    await bridge.poll()
+    assert len(jobs(printer)) == 1
     await bridge.aclose()
 
 
