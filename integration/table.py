@@ -17,7 +17,7 @@ HERE = Path(__file__).resolve().parent
 README = HERE / "README.md"
 BEGIN = "<!-- table:begin -->"
 END = "<!-- table:end -->"
-GROUPS = "SPWMXCB"
+GROUPS = "SPWMXTCB"
 ROW_ID = re.compile(r"^([a-z]+)(\d+)([a-z]?)$")
 
 
