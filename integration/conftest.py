@@ -59,6 +59,12 @@ LOAD_MM = 36 + 40
 PLA = ("PLA", "#73737b")
 PETG = ("PETG", "#1f6fb2")
 ASA = ("ASA", "#d9342b")
+# Spool D's, in tool 1 of a multi-tool world: PETG in a color B doesn't share.
+PETG_GREEN = ("PETG", "#2a9d4a")
+
+# The printer `world` simulates, by how many tools it has: a Core One L, or a Core One L
+# INDX (no tag reader, no UUIDs, a 27 mm gap) with tools 0 and 1 docked.
+WORLD_MODELS = {1: "8.1.0", 2: "8.10.0"}
 
 
 @pytest.fixture(scope="session")
@@ -272,17 +278,26 @@ class World:
     shelf: str
     spools: dict[str, int] = field(default_factory=dict)
     uuids: dict[str, str] = field(default_factory=dict)
+    # Tool index -> Spoolman location, as the bridge is configured. Tool 0's is `tool_location`.
+    locations: dict[int, str] = field(default_factory=dict)
     # Runs before the simulator serves each request, with its method and path.
     before_request: Callable[[str, str], None] | None = None
 
     @property
     def tool(self) -> SimTool:
-        return self.printer.tools[0]
+        return self.tool_at(0)
 
     @property
     def counter(self) -> int:
         """Tool 0's extrusion counter as the printer reports it, in whole millimetres."""
-        return int(self.tool.extruded)
+        return self.counter_at(0)
+
+    def tool_at(self, tool: int) -> SimTool:
+        return self.printer.tools[tool]
+
+    def counter_at(self, tool: int) -> int:
+        """A tool's extrusion counter as the printer reports it, in whole millimetres."""
+        return int(self.tool_at(tool).extruded)
 
     def advance(self, seconds: float) -> None:
         advance(self.sim, seconds)
@@ -319,14 +334,18 @@ class World:
                 since_poll = 0.0
         return self.since(mark)
 
-    async def unload(self) -> None:
-        self.printer.unload(0)
-        await self.run_until(lambda: self.tool.process is None)
+    async def unload(self, tool: int = 0) -> None:
+        self.printer.unload(tool)
+        await self.run_until(lambda: self.tool_at(tool).process is None)
 
-    async def swap_cycle(self, poll_every: float | None = None, **load) -> list[dict]:
-        """Load tool 0 and tick until the load is done; `load` goes to `SimPrinter.load`."""
-        self.printer.load(0, **load)
-        return await self.run_until(lambda: self.tool.process is None, poll_every=poll_every)
+    async def swap_cycle(
+        self, poll_every: float | None = None, *, tool: int = 0, **load
+    ) -> list[dict]:
+        """Load a tool and tick until the load is done; `load` goes to `SimPrinter.load`."""
+        self.printer.load(tool, **load)
+        return await self.run_until(
+            lambda: self.tool_at(tool).process is None, poll_every=poll_every
+        )
 
     async def start_print(self, spec: PrintSpec) -> list[dict]:
         """Start a print and poll until the bridge counts it as started.
@@ -335,10 +354,11 @@ class World:
         counter moves between two polls of the same job, so this polls twice once the
         printer is extruding.
         """
-        start = self.tool.extruded
+        first = self.tool_at(spec.segments[0].tool)
+        start = first.extruded
         self.printer.start_print(spec)
         self.advance(1.2)
-        assert self.printer.state is State.PRINTING and self.tool.extruded > start
+        assert self.printer.state is State.PRINTING and first.extruded > start
         records = await self.poll()
         self.advance(0.3)
         return records + await self.poll()
@@ -361,8 +381,8 @@ class World:
     def requests(self, method: str = "PUT") -> list:
         return [e for e in self.sim.events if e.kind == "request" and e.text.startswith(method)]
 
-    def material(self) -> tuple[str | None, str | None, str | None]:
-        m = self.tool.material
+    def material(self, tool: int = 0) -> tuple[str | None, str | None, str | None]:
+        m = self.tool_at(tool).material
         return (None, None, None) if m is None else (m.name, m.color, m.instance_uuid)
 
 
@@ -377,7 +397,25 @@ def world_config(request: pytest.FixtureRequest) -> dict:
 
 
 @pytest.fixture
-async def world(spoolman: SpoolmanHelper, prefix: str, tmp_path: Path, world_config: dict):
+def world_tools(request: pytest.FixtureRequest) -> int:
+    """How many tools `world`'s printer has: 1 by default, or 2 for a multi-tool world.
+
+    A test asks for two with
+    `@pytest.mark.parametrize("world_tools", [2], indirect=True)`.
+    """
+    tools = getattr(request, "param", 1)
+    assert tools in WORLD_MODELS, f"world_tools must be one of {sorted(WORLD_MODELS)}"
+    return tools
+
+
+@pytest.fixture
+async def world(
+    spoolman: SpoolmanHelper,
+    prefix: str,
+    tmp_path: Path,
+    world_config: dict,
+    world_tools: int,
+):
     """The starting point every scenario shares.
 
     A Core One L whose tool 0 is loaded with spool A's PLA, A's instance UUID and some
@@ -385,17 +423,24 @@ async def world(spoolman: SpoolmanHelper, prefix: str, tmp_path: Path, world_con
     this test's shelf. Each filament weighs 1000 g and no spool has used any, so a
     runout always leaves plenty and trips the mid-print flag. The bridge's clock is the
     simulator's, so `sync_delay` counts simulated seconds.
+
+    With `world_tools` at 2 the printer is a Core One L INDX instead, which shows no
+    UUIDs, and tool 1 is loaded with spool D's green PETG, with D in `<prefix> T1`. The
+    bridge's config is the same apart from the second tool, `uuids` included: the
+    bridge decides from the model.
     """
     tool_location, shelf = f"{prefix} T", f"{prefix} shelf"
+    locations = {0: tool_location}
+    if world_tools == 2:
+        locations[1] = f"{prefix} T1"
     await spoolman.ensure_text_field(UUID_FIELD, "Instance UUID")
     vendor = await spoolman.vendor()
     uuid_a = str(uuid.uuid4())
     spools = {}
-    for name, (material, color), location in (
-        ("A", PLA, tool_location),
-        ("B", PETG, shelf),
-        ("C", ASA, shelf),
-    ):
+    setup = [("A", PLA, tool_location), ("B", PETG, shelf), ("C", ASA, shelf)]
+    if world_tools == 2:
+        setup.append(("D", PETG_GREEN, locations[1]))
+    for name, (material, color), location in setup:
         filament = await spoolman.filament(vendor, material, color)
         spools[name] = await spoolman.spool(
             filament, location, name, uuid_a if name == "A" else None
@@ -403,8 +448,11 @@ async def world(spoolman: SpoolmanHelper, prefix: str, tmp_path: Path, world_con
 
     sim = Simulation(Settings(**SETTINGS))
     a = Material(PLA[0], PLA[1], uuid_a)
-    tool = SimTool(0, loaded=True, material=replace(a), previous=replace(a), extruded=1000.0)
-    printer = SimPrinter("it", 0, KEY, MODELS["8.1.0"], tools={0: tool})
+    tools = {0: SimTool(0, loaded=True, material=replace(a), previous=replace(a), extruded=1000.0)}
+    if world_tools == 2:
+        d = Material(*PETG_GREEN)
+        tools[1] = SimTool(1, loaded=True, material=replace(d), previous=replace(d), extruded=500.0)
+    printer = SimPrinter("it", 0, KEY, MODELS[WORLD_MODELS[world_tools]], tools=tools)
     sim.add(printer)
     w: World
 
@@ -421,7 +469,7 @@ async def world(spoolman: SpoolmanHelper, prefix: str, tmp_path: Path, world_con
                 name="it",
                 url=f"http://{server.host}:{server.port}",
                 api_key=KEY,
-                tools={0: tool_location},
+                tools=dict(locations),
                 uuids=True,
             ),
         ),
@@ -432,7 +480,18 @@ async def world(spoolman: SpoolmanHelper, prefix: str, tmp_path: Path, world_con
     )
     bridge = Bridge.from_config(cfg)
     bridge.clock = lambda: sim.now
-    w = World(sim, printer, bridge, cfg, spoolman, tool_location, shelf, spools, {"A": uuid_a})
+    w = World(
+        sim,
+        printer,
+        bridge,
+        cfg,
+        spoolman,
+        tool_location,
+        shelf,
+        spools,
+        {"A": uuid_a},
+        locations=locations,
+    )
     try:
         yield w
     finally:

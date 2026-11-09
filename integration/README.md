@@ -44,6 +44,11 @@ Without `SPOOLMAN_URL`, every test is skipped. The `dev` extra
   (`8.1.0`): tool 0 loaded with spool A's PLA and instance UUID, 1000 mm on the
   counter, spool A in the tool's location, and spools B (PETG) and C (ASA) on
   the shelf. Each filament weighs 1000 g, so a runout always leaves plenty.
+  A test that takes `world_tools` at 2
+  (`@pytest.mark.parametrize("world_tools", [2], indirect=True)`) gets a
+  Core One L INDX (`8.10.0`) instead, with no UUIDs on the printer and tool 1
+  loaded with spool D's green PETG in `<prefix> T1`. The `World` helpers that
+  act on a tool take a `tool` argument, 0 by default.
 - **Short phases.** The simulator's settings in `conftest.py` make unloads,
   loads, prints and sync jobs take a second or so. A load counts 36 mm of feed
   and 40 mm of purge.
@@ -81,6 +86,13 @@ current and that the scenario rows name their tests.
 | W11 | `test_writes.py::test_w11_unconfirmed_swap_writes_the_assigned_spool` | Unload with no Spoolman change, then a menu load: the printer gets A written back. |
 | W12 | `test_writes.py::test_w12_staged_spool_waits_for_the_unload` | Write of B due, then C staged: nothing is written until C is unloaded and loaded. |
 | W14 | `test_writes.py::test_w14_spoolman_edit_is_written` | A color edit in Spoolman is written to the printer; a name-only edit isn't. |
+| T1 | `test_tools.py::test_t1_tool_changes_charge_each_tool` | Tool change: each tool's spool gets its own moves; the pickup purge goes to the new tool. |
+| T2 | `test_tools.py::test_t2_tool_change_is_not_an_unload` | A tool change isn't an unload: no swap opens on either tool, and nothing is flagged. |
+| T3 | `test_tools.py::test_t3_swap_on_one_tool_leaves_the_other` | Swap on tool 1 between prints: tool 1's spool changes, tool 0's state is untouched. |
+| T4 | `test_tools.py::test_t4_idle_sensor_clear_on_a_picked_tool` | Picking a tool whose sensor sees no filament counts an unload on that tool only. |
+| T5 | `test_tools.py::test_t5_tool_the_printer_does_not_report` | A configured tool the printer doesn't report: noted once, the other tool still charged. |
+| T6 | `test_tools.py::test_t6_writes_on_a_multi_tool_model_are_refused` | Writes on a multi-tool model: warned at boot, and a due write flags the spool instead. |
+| T7 | `test_tools.py::test_t7_reboot_restarts_every_tool` | Reboot on a multi-tool printer: each tool's counter restarts, and nothing is charged. |
 <!-- table:end -->
 
 ## Add a scenario

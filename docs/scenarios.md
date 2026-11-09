@@ -3,7 +3,8 @@
 This is the list of events and transitions the bridge has to handle, what it
 does for each, and how sure we are of it. It covers one single-tool printer,
 and [Several printers](#several-printers) covers what changes when one bridge
-serves two of them. Multi-tool (INDX, XL) is out of scope.
+serves two of them. [Multi-tool](#multi-tool) covers a printer with several
+tools (INDX, XL), so far against the simulator only.
 
 Status values:
 
@@ -219,6 +220,29 @@ there's no second printer yet (see "A second printer" in `live-checks.md`).
 | X14 | A printer is renamed in the config. | The old name's state stays in the file, with a warning at each start, but is inert: its pending evictions never run, and a queued charge of its that Spoolman rejects with 404 is dropped, not held. The new name starts from a baseline (B1). | Tested |
 | X15 | Two printers configured with one location, URL, or name. | Config error at start. | Tested |
 | X16 | A runout flag (M5a) set on A, then the spool becomes active in B after another spool was. | The flag clears, as it does within one tool: the rule is "another spool, then this one" in the tool where it becomes active. A weight edit clears it too. | Tested |
+
+## Multi-tool
+
+A multi-tool printer, such as an INDX or an XL, has several tools, each with
+its own filament path, sensor and counters. One location per tool is mapped
+in the config, and the bridge keeps each tool's state and charges apart, so
+every row above applies to each tool on its own, except the printer writes,
+which are off on these models (T6), and the rows that need an instance UUID,
+such as S12, since these models keep none (F21). These rows come from
+[printer-behaviors.md](printer-behaviors.md) F19 to F23. No multi-tool
+printer is at hand, so they run end to end against the simulator only, which
+follows the firmware source; each gets traced when the INDX arrives.
+
+| # | Scenario | What the bridge does | Status |
+| --- | --- | --- | --- |
+| T1 | A print with tool changes. | Charges each tool's spool the tool's own extrusion. The purge after a pickup counts on the new tool, so it's charged to that tool's spool (F20). | Simulator only; end to end (`test_t1_tool_changes_charge_each_tool`) |
+| T2 | A tool change mid-print. | Not an unload: `unload_count` holds on both tools, so no swap opens on either and nothing is flagged. | Simulator only; end to end (`test_t2_tool_change_is_not_an_unload`) |
+| T3 | A swap on one tool between prints, Spoolman first (S1). | S1 on that tool alone: the swap commits there and the new spool is charged the load. The other tool's state and spool aren't touched, and the next print charges each tool's spool. A swap can't happen on one tool while another prints: the printer refuses an unload during a print. | Simulator only; end to end (`test_t3_swap_on_one_tool_leaves_the_other`) |
+| T4 | Picking a tool whose sensor sees no filament while it has a type, as after filament is pulled out with the printer off (F23). | The firmware counts an unload on that tool only, so the bridge opens an unconfirmed swap there and flags its spool (S2, C7). The other tools aren't touched. | Simulator only; end to end (`test_t4_idle_sensor_clear_on_a_picked_tool`) |
+| T5 | A configured tool the printer doesn't report: disabled, or its dock not calibrated (F19). | Logs `printer doesn't report tool index N` once and skips that tool. The other tools are charged as normal. When the tool comes back, it carries on from its counter. | Simulator only; end to end (`test_t5_tool_the_printer_does_not_report`) |
+| T6 | A write due on a multi-tool printer. | Writes are off for every multi-tool model: the bridge logs the model once per boot ("multi-tool printers aren't supported yet; printer writes are off"), and when a write would be due on a tool, flags the spool "can't write to the printer" and uploads nothing. Charging is unaffected (W10). This is the current behavior; writing per tool with `M865 L<n>` and no `M865.1` (F21, F22) is a pending decision. | Simulator only; end to end (`test_t6_writes_on_a_multi_tool_model_are_refused`) |
+| T7 | A multi-tool printer reboots between prints. | A reboot (C1) on every tool: each tool logs it and its counter restarts at 0, nothing is charged for the restart, and each tool's spool is then charged from 0. | Simulator only; end to end (`test_t7_reboot_restarts_every_tool`) |
+| T8 | One location mapped to two tools of one printer. | Config error at start (X15 covers two printers). | Tested (`test_config_rejects_bad_printer_lists`) |
 
 ## Out of scope
 

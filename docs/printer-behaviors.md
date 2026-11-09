@@ -86,7 +86,7 @@ behavior is least covered by what the Core One L+ can show.
 | --- | --- | --- | --- | --- | --- |
 | F19 | Several tools | One `tools` entry per enabled tool, in index order, with gaps for tools whose dock isn't calibrated. Each has its own `extruded`, `unload_count`, `extruded_at_unload` and `material`. Nothing else in PrusaLink says how many tools there are or which is selected. | `filament_renderer.cpp`; the tracker is per tool. | `SimTool`, `set_tool_enabled()` | Other hardware. |
 | F20 | Tool change during a print | Not an unload: `unload_count` holds on both tools and the state stays `PRINTING`. Ramming or retract before `T<n>` counts on the old tool (a retract only grows its gap); the purge after pickup counts on the new one. | Planner-time counting per active tool (`planner.cpp:2206-2219`); INDX service moves excluded (`:2194`). | `Segment(tool, mm)`, `toolchange_purge_mm` | Other hardware. |
-| F21 | No tags | `material` has a name and maybe a color, never `instance_uuid`. `M865.1` does nothing. | `M865.1` is built with `HAS_ANFC`, Core One and Core One L only (`ProjectOptions.cmake:814`). | `ModelInfo.uuids` | Other hardware. The bridge still writes `M865.1` there; see "From here". |
+| F21 | No tags | `material` has a name and maybe a color, never `instance_uuid`. `M865.1` does nothing. | `M865.1` is built with `HAS_ANFC`, Core One and Core One L only (`ProjectOptions.cmake:814`). | `ModelInfo.uuids` | Other hardware. The bridge doesn't write `M865.1` there: it writes UUIDs only on models that keep them. |
 | F22 | `M865 L<n>` on another tool | Sets tool `n`'s type with no motion. `M865` with an empty tool's type copied into `n` counts as an unload of `n`. | `M865.cpp:194-195`. | `gcode.py` honors `L` | Other hardware. |
 | F23 | Idle sensor clear on a picked tool | Picking a tool whose sensor sees no filament while it has a type counts an unload on it (F14 per tool). | `filament_sensors_handler.cpp:303-312`. | `select_tool()` | Other hardware. |
 
@@ -316,14 +316,13 @@ does and how often it happens, as the old live-check ranks had it:
    this may never happen on the printer. Record what a real overwrite
    upload does there, with F10.
 3. **Multi-tool**: an INDX print with tool changes, a swap on one tool
-   while another prints, and the per-tool write. Checked by hand once
+   between prints while the other keeps its spool, and the per-tool write. Checked by hand once
    (three segments: tool 0 charged 505 = 475 + 30 purge, tool 1 charged
    315) with no test. INDX and XL store no UUIDs, so `M865.1` does nothing
-   there and the bridge doesn't yet skip it. scenarios.md has no multi-tool
-   rows yet and says INDX and XL are out of scope; these tests bring a
-   "Multi-tool" section with them, written from F19 to F23, since the
-   hardware is months away and the bridge's code for several tools exists
-   now.
+   there, and the bridge doesn't write it on those models. Done:
+   scenarios.md has a "Multi-tool" section, T1 to T8, written from F19 to
+   F23, and T1 to T7 are End to end against the simulator. The per-tool
+   write stays refused (T6) pending a decision.
 4. **Spoolman faults**: M1, M2 and X9 need a Spoolman that fails on demand.
    A small in-process proxy between the bridge and Spoolman, toggled by the
    test to refuse connections or return 4xx, covers them on a shared
