@@ -86,7 +86,7 @@ current and that the scenario rows name their tests.
 | W11 | `test_writes.py::test_w11_unconfirmed_swap_writes_the_assigned_spool` | Unload with no Spoolman change, then a menu load: the printer gets A written back. |
 | W12 | `test_writes.py::test_w12_staged_spool_waits_for_the_unload` | Write of B due, then C staged: nothing is written until C is unloaded and loaded. |
 | W14 | `test_writes.py::test_w14_spoolman_edit_is_written` | A color edit in Spoolman is written to the printer; a name-only edit isn't. |
-| T1 | `test_tools.py::test_t1_tool_changes_charge_each_tool` | Print with tool changes: each tool's spool gets its own use and its pickup purges. |
+| T1 | `test_tools.py::test_t1_tool_changes_charge_each_tool` | Tool change: each tool's spool gets its own moves; the pickup purge goes to the new tool. |
 | T2 | `test_tools.py::test_t2_tool_change_is_not_an_unload` | A tool change isn't an unload: no swap opens on either tool, and nothing is flagged. |
 | T3 | `test_tools.py::test_t3_swap_on_one_tool_leaves_the_other` | Swap on tool 1 between prints: tool 1's spool changes, tool 0's state is untouched. |
 | T4 | `test_tools.py::test_t4_idle_sensor_clear_on_a_picked_tool` | Picking a tool whose sensor sees no filament counts an unload on that tool only. |
