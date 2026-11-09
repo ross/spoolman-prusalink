@@ -432,7 +432,8 @@ class PrinterBridge:
                 )
 
             for c in result.charges:
-                spool = by_id.get(c.spool_id)
+                # An archived spool is still charged until the next unload, but isn't listed.
+                spool = by_id.get(c.spool_id) or self.bridge._archived.get(c.spool_id)
                 length = round(c.mm * self.bridge.config.length_factor, 1)
                 grams = spool.mm_to_grams(length) if spool else None
                 log.info(

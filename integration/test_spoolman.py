@@ -195,6 +195,7 @@ async def test_m3a_archived_active_spool(world: World, caplog: pytest.LogCapture
         await w.poll()
     records = w.since(mark)
     assert w.charged(records, "A") == 30
+    assert all(r["grams"] for r in charges(records, a))  # From the archived spool (#56).
     assert await w.used("A") > 0
     assert w.bridge.printers[0].tools[0].active == a
     found = f"[{w.tool_location}] spool {a} is archived but still loaded; charging it until"

@@ -1772,6 +1772,10 @@ async def test_archived_spool_is_charged_and_flagged_once(tmp_path, caplog):
         printer.extruded = extruded
         await bridge.poll()
     assert fake.used == {19: [100.0, 100.0, 100.0]}
+    # The charges carry the spool's filament data though it's no longer listed (#56).
+    charged = [r for r in ledger(tmp_path) if r.get("spool_id") == 19 and "use_length" in r]
+    assert [r["grams"] for r in charged] == [0.298] * 3
+    assert "spool 19 (Grey): +100 mm" in caplog.text
     assert fake.lookups == [19]
     assert fake.flag(19) == f"{LOC}: spool is archived but still loaded"
     assert fake.writes.count(("patch", 19)) == 1
