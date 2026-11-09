@@ -21,6 +21,7 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import os
+import signal
 import subprocess
 import sys
 import threading
@@ -146,7 +147,10 @@ def record(args: argparse.Namespace) -> int:
         return 2
 
     client = httpx.Client(base_url=args.url.rstrip("/"), headers={"X-Api-Key": key}, timeout=5.0)
+    # What the printer is: a trace and a reading of the source may disagree because of
+    # the firmware version, the model or a setting, so the header keeps what the API says.
     version, err = _get(client, "/api/version")
+    info, err_i = _get(client, "/api/v1/info")
     head = trace.header(
         out.stem,
         url=args.url,
@@ -154,12 +158,17 @@ def record(args: argparse.Namespace) -> int:
         interval=args.interval,
         heartbeat=args.heartbeat,
         tool=args.tool,
+        firmware=(version or {}).get("firmware"),
         version=version,
+        info=info,
         bridge_commit=_git_commit(),
         note=args.note,
     )
-    if err:
-        print(f"warning: {err}", file=sys.stderr)
+    for e in (err, err_i):
+        if e:
+            print(f"warning: {e}", file=sys.stderr)
+    if head["firmware"] is None:
+        print("warning: the printer didn't report its firmware version", file=sys.stderr)
 
     marks: list[tuple[float, str]] = []
     lock = threading.Lock()
@@ -176,6 +185,9 @@ def record(args: argparse.Namespace) -> int:
 
     written = 0
     keeper = Keeper(args.heartbeat, args.tool)
+    # A plain `kill`, or a `timeout`, stops the probe as Ctrl-C does: the last poll and
+    # any marks are still written.
+    signal.signal(signal.SIGTERM, lambda *_: (_ for _ in ()).throw(KeyboardInterrupt()))
     print(
         f"recording {out}; type a note and press Enter to mark it; Ctrl-C to stop",
         file=sys.stderr,

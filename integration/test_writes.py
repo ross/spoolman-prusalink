@@ -220,6 +220,9 @@ async def test_w6_sync_job_is_not_a_print_start(world: World):
     w.advance(0.5)
     assert w.printer.job.phase is JobPhase.RUN and w.printer.state is State.PRINTING
     assert w.requests("GET /api/v1/job") == []
+    await w.poll()
+    # The counter moving under the sync job mustn't make it a print start: the name does.
+    w.tool.extruded += 5.0
     await w.run_until(lambda: w.printer.job is None, poll_every=0.2)
     records = w.since(mark) + await w.poll()
     assert len(w.requests("GET /api/v1/job")) == 1

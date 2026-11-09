@@ -1108,7 +1108,7 @@ class SimPrinter:
 
     def _park(self, job: SimJob, end: State) -> None:
         job.phase, job.remaining, job.end_state = JobPhase.PARKING, self.settings.park_seconds, end
-        job.wait_tool = job.attention = job.paused_from = job.clean_at = None
+        job.wait_tool = job.attention = job.paused_from = None
         self._set_state(State.PRINTING)
 
     def _print_step(self, job: SimJob, dt: float) -> float:
