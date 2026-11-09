@@ -96,6 +96,13 @@ current and that the scenario rows name their tests.
 | W11 | `test_writes.py::test_w11_unconfirmed_swap_writes_the_assigned_spool` | Unload with no Spoolman change, then a menu load: the printer gets A written back. |
 | W12 | `test_writes.py::test_w12_staged_spool_waits_for_the_unload` | Write of B due, then C staged: nothing is written until C is unloaded and loaded. |
 | W14 | `test_writes.py::test_w14_spoolman_edit_is_written` | A color edit in Spoolman is written to the printer; a name-only edit isn't. |
+| M1 | `test_spoolman.py::test_m1_spoolman_unreachable` | Spoolman unreachable: polls skip and log once; queued charges go in order when back. |
+| M2 | `test_spoolman.py::test_m2_rejected_charge_is_dropped` | A charge Spoolman rejects with a 4xx is dropped with an error; later ones go through. |
+| M3 | `test_spoolman.py::test_m3_charge_to_deleted_spool_is_held` | A charge that 404s because the spool was deleted is held for the next spool. |
+| M3 | `test_spoolman.py::test_m3_deleted_active_spool_holds_usage` | Active spool deleted: its usage is held, then charged to the next spool made active. |
+| M3a | `test_spoolman.py::test_m3a_archived_active_spool` | Active spool archived: still charged and flagged until the next unload. |
+| M4 | `test_spoolman.py::test_m4_location_renamed` | Location renamed: the spool stays active until the next unload, then usage is held. |
+| M6 | `test_spoolman.py::test_m6_flags_by_others_left_alone` | A flag someone else wrote stays while the bridge sets and clears its own elsewhere. |
 | X1 | `test_printers.py::test_x1_spoolman_first_across_printers` | Spool moved LA to LB first: A charges it until its unload, B stages it until its own. |
 | X2 | `test_printers.py::test_x2_filament_first_across_printers` | Unload at A, load at B, then move the spool: B's swap confirms, A's stays open and holds. |
 | X3 | `test_printers.py::test_x3_spool_moved_but_never_loaded_elsewhere` | Spool moved LA to LB with no unload: A charges it, B stages it and flags it at a print. |
@@ -118,6 +125,19 @@ current and that the scenario rows name their tests.
 | T5 | `test_tools.py::test_t5_tool_the_printer_does_not_report` | A configured tool the printer doesn't report: noted once, the other tool still charged. |
 | T6 | `test_tools.py::test_t6_writes_on_a_multi_tool_model_are_refused` | Writes on a multi-tool model: warned at boot, and a due write flags the spool instead. |
 | T7 | `test_tools.py::test_t7_reboot_restarts_every_tool` | Reboot on a multi-tool printer: each tool's counter restarts, and nothing is charged. |
+| C1 | `test_counters.py::test_c1_reboot_keeps_usage_held_at_the_reboot` | Reboot between prints: usage held then is kept, and goes to the next active spool. |
+| C2 | `test_counters.py::test_c2_printer_off_for_hours` | Printer off for hours: logged going, hourly and back, idle polls, nothing charged. |
+| C3 | `test_counters.py::test_c3_reboot_and_unload_in_one_poll` | Reboot and an unload in the same poll: the reboot is handled first, then the unload. |
+| C4 | `test_counters.py::test_c4_counter_goes_backward` | Counter goes backward within one boot: an anomaly, no charge, and later use charged. |
+| C5 | `test_counters.py::test_c5_extruded_at_unload_out_of_range` | `extruded_at_unload` past the counter: clamped to it, an anomaly, the unload charged. |
+| C6 | `test_counters.py::test_c6_manual_extrude_and_retract` | Extrude and retract from the menu: extrusion charged, a retraction charges nothing. |
+| C7 | `test_counters.py::test_c7_tool_reports_no_filament` | Tool reports no filament after a sensor fault: usage held until filament is back. |
+| C8 | `test_counters.py::test_c8_firmware_update` | Firmware update: a reboot, the model checked again, an unsupported version logged once. |
+| C9 | `test_counters.py::test_c9_printer_answers_with_an_error` | Printer answers 401 then 500: each logged once, nothing charged, then caught up. |
+| B1 | `test_bridge.py::test_b1_first_start` | First start: the counter is the baseline, and use before it isn't charged. |
+| B2 | `test_bridge.py::test_b2_restart_mid_print` | Restart mid-print: one catch-up charge, with no double charge and no loss. |
+| B4 | `test_bridge.py::test_b4_state_file_lost` | `state.json` lost: a new baseline, use since the last poll lost, the swap forgotten. |
+| B6 | `test_bridge.py::test_b6_dry_run_then_live` | Dry run: charges only logged and recorded, then a live run catches up from its state. |
 <!-- table:end -->
 
 ## Add a scenario
@@ -141,6 +161,15 @@ current and that the scenario rows name their tests.
 5. Set the row's Status in `docs/scenarios.md` to end to end, naming the test,
    and run `python -m integration.table --write`.
    `pytest tests/test_integration_table.py` checks all three.
+
+To make Spoolman fail, use `w.spoolman_faults`, a transport in front of the
+bridge's Spoolman client (`integration/faults.py`). It passes requests through
+until the test asks for a fault: `cut()` makes every request fail to connect,
+`answer("PUT", "/api/v1/spool/7/use", 503)` replies 503 to the next matching
+request without sending it (`times=None` keeps replying), and `restore()` ends
+both. Its `requests` list says what each of the bridge's requests got. The same
+module has the Spoolman edits the `world` helpers don't cover: deleting and
+archiving a spool, writing a text field, and renaming a location.
 
 Poll where a real bridge would have polled. Some behaviour depends on what two
 polls in a row see: the bridge counts a print as started only when the counter

@@ -79,15 +79,15 @@ archived active spool (M3, M3a) is logged once when the bridge finds it.
 
 | # | Scenario | What the bridge does | Status |
 | --- | --- | --- | --- |
-| C1 | Printer reboots or is power-cycled between prints. | New boot ID: counters restart from 0. Metadata stays on the printer. Usage held at the reboot, because the tool reported no filament, no spool was assigned or the location was ambiguous, is kept. It goes to the active spool as soon as there is one, and is logged then. An unload with no spool active first reports it lost, as in S6. | Seen live; held usage tested |
-| C2 | Printer switched off for hours. | Logs once when it goes away, hourly while it's away, and once when it's back. Polls every 60 s. | Tested |
-| C3 | Reboot and an unload in the same poll. | Handled in order: reboot, then unload. | Tested |
-| C4 | Counter goes backward within one boot. | Logs a counter anomaly and resyncs without charging. | Tested |
-| C5 | `extruded_at_unload` out of range. | Clamped, and logged as an anomaly. | Tested |
-| C6 | Manual extrusion or retraction from the printer menu. | Extrusion is charged to the active spool. The counter only counts filament fed. | Implemented |
-| C7 | Tool reports no filament (after an unload, or a sensor problem). | Holds usage until a filament is reported. | Tested |
-| C8 | Firmware update. | A reboot (C1). The model is checked again. | Implemented |
-| C9 | Printer answers with an error (wrong API key, 500). | Logs the error once, until it changes or clears. Charges nothing. | Tested |
+| C1 | Printer reboots or is power-cycled between prints. | New boot ID: counters restart from 0. Metadata stays on the printer. Usage held at the reboot, because the tool reported no filament, no spool was assigned or the location was ambiguous, is kept. It goes to the active spool as soon as there is one, and is logged then. An unload with no spool active first reports it lost, as in S6. | Seen live; held usage tested; end to end (`test_c1_reboot_keeps_usage_held_at_the_reboot`) |
+| C2 | Printer switched off for hours. | Logs once when it goes away, hourly while it's away, and once when it's back. Polls every 60 s. | Tested; end to end (`test_c2_printer_off_for_hours`) |
+| C3 | Reboot and an unload in the same poll. | Handled in order: reboot, then unload. | Tested; end to end (`test_c3_reboot_and_unload_in_one_poll`) |
+| C4 | Counter goes backward within one boot. | Logs a counter anomaly and resyncs without charging. | Tested; end to end (`test_c4_counter_goes_backward`) |
+| C5 | `extruded_at_unload` out of range. | Clamped, and logged as an anomaly. | Tested; end to end (`test_c5_extruded_at_unload_out_of_range`) |
+| C6 | Manual extrusion or retraction from the printer menu. | Extrusion is charged to the active spool. The counter only counts filament fed. | Implemented; end to end (`test_c6_manual_extrude_and_retract`) |
+| C7 | Tool reports no filament (after an unload, or a sensor problem). | Holds usage until a filament is reported. | Tested; end to end (`test_c7_tool_reports_no_filament`) |
+| C8 | Firmware update. | A reboot (C1). The model is checked again. | Implemented; end to end (`test_c8_firmware_update`) |
+| C9 | Printer answers with an error (wrong API key, 500). | Logs the error once, until it changes or clears. Charges nothing. | Tested; end to end (`test_c9_printer_answers_with_an_error`) |
 
 ## Writing to the printer
 
@@ -112,25 +112,25 @@ archived active spool (M3, M3a) is logged once when the bridge finds it.
 
 | # | Scenario | What the bridge does | Status |
 | --- | --- | --- | --- |
-| M1 | Spoolman unreachable. | Skips accounting. Queued charges stay in the outbox and are retried in order. | Tested |
-| M2 | Spoolman rejects a charge (4xx). | Drops it with an error, so it doesn't block later charges. | Tested |
-| M3 | Active spool deleted in Spoolman. | Found when the spool drops out of Spoolman's list and a lookup returns 404, or when a charge to it returns 404. The tool is left with no active spool, and the rejected charge, any usage since an open unconfirmed swap's unload, and later usage are held, through reboots and unloads. The held usage is charged to the next spool that becomes active in the tool. A spool already staged is flagged and takes it at the next unload or print start, or when it's claimed. Logged once when found and once when charged (see Q7). | Tested |
-| M3a | Active spool archived in Spoolman. | Looks moved out of the location (S10): stays active and charged until the next unload. Flagged "archived but still loaded" until then (see Q7). | Tested |
-| M4 | Location renamed in Spoolman. | The location looks empty: the spool stays active until the next unload, then usage is held. There's no websocket event for renames. | Implemented |
+| M1 | Spoolman unreachable. | Skips accounting. Queued charges stay in the outbox and are retried in order. | Tested; end to end (`test_m1_spoolman_unreachable`) |
+| M2 | Spoolman rejects a charge (4xx). | Drops it with an error, so it doesn't block later charges. | Tested; end to end (`test_m2_rejected_charge_is_dropped`) |
+| M3 | Active spool deleted in Spoolman. | Found when the spool drops out of Spoolman's list and a lookup returns 404, or when a charge to it returns 404. The tool is left with no active spool, and the rejected charge, any usage since an open unconfirmed swap's unload, and later usage are held, through reboots and unloads. The held usage is charged to the next spool that becomes active in the tool. A spool already staged is flagged and takes it at the next unload or print start, or when it's claimed. Logged once when found and once when charged (see Q7). | Tested; end to end (`test_m3_deleted_active_spool_holds_usage`); a 404 on a charge end to end (`test_m3_charge_to_deleted_spool_is_held`) |
+| M3a | Active spool archived in Spoolman. | Looks moved out of the location (S10): stays active and charged until the next unload. Flagged "archived but still loaded" until then (see Q7). | Tested; end to end (`test_m3a_archived_active_spool`) |
+| M4 | Location renamed in Spoolman. | The location looks empty: the spool stays active until the next unload, then usage is held. There's no websocket event for renames. | Implemented; end to end (`test_m4_location_renamed`) |
 | M5 | Spool runs past empty in Spoolman. | Keeps charging, and logs once that the spool shows a negative remaining weight. No flag: spool weights are inexact, so slightly negative is normal (see Q8). | Tested |
 | M5a | Runout mid-print while Spoolman shows plenty left. | Flags the spool when it unloads during a started print with more than 5% of its net weight left. The flag clears when the user edits the spool's weight in Spoolman, or when another spool becomes active and then this one does. Reloading the same spool with no Spoolman change keeps it (see Q8). A jam or tangle looks the same. | Tested |
-| M6 | Flag set by someone else on a spool. | Left alone: the bridge only clears flags it set. | Tested |
+| M6 | Flag set by someone else on a spool. | Left alone: the bridge only clears flags it set. A spool the bridge flags itself loses the other text: the bridge's flag replaces it, and clearing that leaves the field empty. | Tested; end to end (`test_m6_flags_by_others_left_alone`) |
 | M7 | Spoolman's filament density is wrong. | Charges use the density at the time of each charge. Earlier charges aren't recalculated. | Implemented (Spoolman behavior) |
 
 ## The bridge itself
 
 | # | Scenario | What the bridge does | Status |
 | --- | --- | --- | --- |
-| B1 | First start. | Takes the current counter as a baseline. Earlier usage isn't charged. | Seen live |
-| B2 | Restart mid-print. | Catches up in one charge, with no double charge and no loss. | Seen live (job 131) |
+| B1 | First start. | Takes the current counter as a baseline. Earlier usage isn't charged. | Seen live; end to end (`test_b1_first_start`) |
+| B2 | Restart mid-print. | Catches up in one charge, with no double charge and no loss. | Seen live (job 131); end to end (`test_b2_restart_mid_print`) |
 | B3 | Killed between a charge being accepted and the outbox being saved. | That charge is sent again: up to one poll's worth, double-charged. | Implemented; known limit |
-| B4 | `state.json` lost. | Starts again from a baseline (B1). Usage since the last poll is lost, and swap state is forgotten. | Implemented; a lost state file is a deployment problem (see Out of scope) |
-| B6 | Dry run. | Logs what it would charge and write, and records the charges in the ledger. Changes nothing in Spoolman, on the printer or in `state.json`. The next live run charges everything since the last live run, as after an outage (B2), so several spool changes during the dry run count as one unload (S14). Dry-run ledger records, events included, carry `dry_run`. The next run charges the same usage again from the last live state, with its own events and charges, which can differ from the dry run's. | Tested |
+| B4 | `state.json` lost. | Starts again from a baseline (B1). Usage since the last poll is lost, and swap state is forgotten. | Implemented; a lost state file is a deployment problem (see Out of scope); end to end (`test_b4_state_file_lost`) |
+| B6 | Dry run. | Logs what it would charge and write, and records the charges in the ledger. Changes nothing in Spoolman, on the printer or in `state.json`. The next live run charges everything since the last live run, as after an outage (B2), so several spool changes during the dry run count as one unload (S14). Dry-run ledger records, events included, carry `dry_run`. The next run charges the same usage again from the last live state, with its own events and charges, which can differ from the dry run's. | Tested; end to end (`test_b6_dry_run_then_live`) |
 
 ## Claims
 
