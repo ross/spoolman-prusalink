@@ -2480,3 +2480,68 @@ async def test_old_spools_tag_after_a_restart_is_not_adopted(tmp_path):
     assert minted is not None and minted != TAG_K
     assert printer.material["instance_uuid"] == minted
     await restarted.aclose()
+
+
+def other_tag(uuid=TAG_K):
+    """A tag whose name, color and temperatures all differ from spool 20's in Spoolman."""
+    return {
+        **tagged(uuid),
+        "name": "PETG",
+        "color": "#ff0000",
+        "nozzle_temperature": 250,
+        "bed_temperature": 80,
+    }
+
+
+@pytest.mark.parametrize("sync_drift", [False, True])
+async def test_tag_with_other_values_is_not_written(tmp_path, caplog, sync_drift):
+    """A tool loaded from a tag is left alone, whatever Spoolman says (Q11)."""
+    bridge, fake, printer = make(
+        tmp_path, [spool(20)], uuid_field="instance_uuid", sync_drift=sync_drift
+    )
+    await bridge.poll()  # baseline
+    st = bridge.printers[0].tools[0]
+    bridge.printers[0].tools[0] = replace(st, needs_sync=True, sync_attempts=1)
+    printer.material = other_tag()
+    for _ in range(3):
+        await bridge.poll()
+    assert jobs(printer) == []
+    assert stored_uuid(fake, 20) == TAG_K  # Still adopted.
+    st = bridge.printers[0].tools[0]
+    assert (st.needs_sync, st.sync_attempts) == (False, 0)
+    assert not fake.flag(20)
+    assert "differs" not in caplog.text
+    await bridge.aclose()
+
+
+@pytest.mark.parametrize("from_tag", [False, True])
+async def test_unconfirmed_swap_writes_back_only_over_a_menu_load(tmp_path, from_tag):
+    """W11 writes the assigned spool over a menu load, but not over a newly loaded tag."""
+    bridge, fake, printer = make(tmp_path, [spool(20)], uuid_field="instance_uuid")
+    await bridge.poll()  # baseline
+    printer.unloads, printer.at_unload, printer.material = 1, printer.extruded, None
+    await bridge.poll()
+    assert bridge.printers[0].tools[0].swap is not None
+    printer.material = other_tag() if from_tag else {"name": "PETG"}
+    for _ in range(2):
+        await bridge.poll()
+    assert len(jobs(printer)) == (0 if from_tag else 1)
+    assert (stored_uuid(fake, 20) is None) is from_tag  # A write-back mints a UUID.
+    await bridge.aclose()
+
+
+async def test_tag_of_another_spool_is_drift_not_a_write(tmp_path, caplog):
+    """The loaded tag's UUID is spool 21's in Spoolman: reported once, never written."""
+    other = spool(21, location="Shelf")
+    other["extra"]["instance_uuid"] = json.dumps(TAG_K)
+    bridge, fake, printer = make(tmp_path, [spool(20), other], uuid_field="instance_uuid")
+    await bridge.poll()  # baseline
+    printer.material = other_tag()
+    for _ in range(3):
+        await bridge.poll()
+    assert jobs(printer) == []
+    detail = f"the loaded tag is spool 21's ({TAG_K})"
+    assert caplog.text.count(f"printer differs from spool 20: {detail}") == 1
+    assert fake.flag(20) == f"{LOC}: printer filament differs: {detail}"
+    assert stored_uuid(fake, 20) is None
+    await bridge.aclose()

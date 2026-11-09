@@ -110,6 +110,18 @@ behavior is least covered by what the Core One L+ can show.
   firmware's `time_printing` grows during the recovery, the trace will say.
 - **F10's `M865 R`** wipes the UUID too, so a sync job that doesn't carry
   `M865.1` leaves the tool with no UUID. The bridge always writes both.
+- **F10 ends F4's tag tracking.** `M865 X` edits the pending ad-hoc slot,
+  which never carries a tag hash, and `L0` saves it to the tool with the
+  hash cleared (`M865.cpp:67-68`, `filament.cpp:373, 394`). The printer's
+  usage tracker then stops reading and writing the tag, and usage not yet
+  flushed to it is lost (`filament_usage_tracker.cpp:127-139`). Neither a
+  reboot nor a runout reload restores it (`tool_tag_buddy.cpp:52-54`,
+  `M70X_preheat.cpp:48-51`); only a load from the tag does. The `tag`
+  object and the material and package UUIDs leave `/api/v1/filament`
+  (`filament_renderer.cpp:66-67`). G-code can't set the hash
+  (`M865.cpp:183`). So the bridge never writes a tool loaded from a tag
+  (Q11 in scenarios.md). From source at `ff61540d4`, not yet seen on the
+  printer.
 
 ## Recording a trace
 

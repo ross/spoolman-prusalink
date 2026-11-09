@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import uuid
 from dataclasses import replace
 
 import pytest
@@ -12,6 +13,7 @@ from integration.conftest import (
     LOAD_MM,
     PETG,
     PLA,
+    UUID_FIELD,
     World,
     count,
     events,
@@ -425,6 +427,53 @@ async def test_w11_unconfirmed_swap_writes_the_assigned_spool(world: World):
     await w.run_until(lambda: w.printer.job is None)
     assert w.material() == (PLA[0], PLA[1], w.uuids["A"])
     assert await w.spoolman.location(w.spools["A"]) == w.tool_location
+
+
+async def test_w11_tag_is_not_written_back(world: World):
+    """Unload with no Spoolman change, then a tag load: A isn't written back over it (Q11).
+
+    The tag's UUID isn't A's, which is drift on A. Moving B in confirms the swap, and B
+    takes the tag's UUID with nothing written.
+    """
+    w = world
+    a, b = w.spools["A"], w.spools["B"]
+    records = await w.poll()
+    assert len(events(records, "baseline")) == 1
+    await w.unload()
+    records = await w.poll()
+    assert len(events(records, "swap_unconfirmed")) == 1
+    tag = str(uuid.uuid4())
+    await w.swap_cycle(
+        poll_every=0.3,
+        source="tag",
+        name=PETG[0],
+        color="#ff0000",
+        uuid=tag,
+        temperatures=(250, 170, 80),
+    )
+    for _ in range(3):
+        await w.poll()
+        w.advance(2.0)
+    assert w.requests("PUT") == []
+    assert w.material() == (PETG[0], "#ff0000", tag)
+    flag = await w.flag("A") or ""
+    assert f"printer filament differs: uuid printer={tag} spoolman={w.uuids['A']}" in flag
+    assert await w.spoolman.extra(b, UUID_FIELD) is None
+
+    await w.move("A", w.shelf)
+    await w.move("B", w.tool_location)
+    records = await w.poll()
+    assert [e["message"] for e in events(records, "swap_confirmed")] == [
+        f"swap confirmed: {LOAD_MM} mm moved from spool {a} to {b}"
+    ]
+    for _ in range(2):
+        await w.poll()
+        w.advance(2.0)
+    assert w.requests("PUT") == []
+    assert w.material() == (PETG[0], "#ff0000", tag)
+    assert await w.spoolman.extra(b, UUID_FIELD) == tag
+    assert await w.flag("A") is None
+    assert await w.flag("B") is None
 
 
 async def test_w12_staged_spool_waits_for_the_unload(

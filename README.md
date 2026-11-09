@@ -238,11 +238,9 @@ or bed temperature, or instance UUID differs from the loaded spool. A menu load
 replaces the color and UUID with the preset's, so expect this after every menu
 load. Colors are compared after the printer's rounding to 5 bits per channel.
 The temperatures compared are the ones the bridge would write (see
-[Writing to the printer](#writing-to-the-printer)). A tag load sets the nozzle and bed
-temperatures to the middle of the tag's ranges and the preheat to the tag's own
-value, or the preset's when the tag has none. A tagged spool matches only if
-Spoolman's extruder and bed temperatures agree with the tag and the tag's
-preheat equals the one the bridge writes. The UUID is read from the spool
+[Writing to the printer](#writing-to-the-printer)). A spool loaded from its tag
+is compared only by instance UUID: the bridge never writes it, so its name,
+color and temperatures stay the tag's. The UUID is read from the spool
 extra field named by `uuid_field`, `instance_uuid` by default, which must be a
 text field.
 
@@ -347,6 +345,15 @@ is staged and while the tool is empty. During an unconfirmed swap it writes
 the spool Spoolman still assigns, so the printer shows what Spoolman
 thinks is loaded; confirming a different spool rewrites the printer. If the printer still
 differs after two jobs, it stops and flags the spool.
+
+The bridge never writes a tool loaded from an NFC tag, whatever Spoolman says
+about its name, color or temperatures. The job's `M865` would clear the
+tool's link to the tag, and the printer would stop tracking usage on the tag
+until the spool is loaded from it again. A spool with no instance UUID in
+Spoolman still takes the tag's, which writes only to Spoolman. One exception:
+a runout reload keeps the old spool's tag data while a different spool may be
+loaded. When the printer shows the UUID it showed with another spool, the
+bridge writes the loaded spool over it.
 
 The bridge remembers the `M865` line it last wrote for each tool. If the
 printer still shows that write but the spool has changed in Spoolman (color,
