@@ -45,18 +45,28 @@ class PrinterState:
     # The flag texts this printer's tools last asked for, by spool. They stand in while
     # the printer can't be read, so an outage doesn't clear its flags in Spoolman.
     flags: dict[int, list[str]] = field(default_factory=dict)
+    # By tool: the instance UUID the printer last reported while the active spool was
+    # certain, and that spool. Kept so a runout reload of one spool's tag isn't taken for
+    # the next spool's after a restart.
+    seen_uuids: dict[int, tuple[str, int]] = field(default_factory=dict)
 
     def to_json(self) -> dict:
-        return {
+        data = {
             "tools": {str(k): v.to_json() for k, v in sorted(self.tools.items())},
             "flags": {str(k): list(v) for k, v in sorted(self.flags.items())},
         }
+        if self.seen_uuids:
+            data["seen_uuids"] = {str(k): list(v) for k, v in sorted(self.seen_uuids.items())}
+        return data
 
     @classmethod
     def from_json(cls, data: dict) -> PrinterState:
         return cls(
             tools={int(k): ToolState.from_json(v) for k, v in data.get("tools", {}).items()},
             flags={int(k): [str(t) for t in v] for k, v in data.get("flags", {}).items()},
+            seen_uuids={
+                int(k): (str(v[0]), int(v[1])) for k, v in data.get("seen_uuids", {}).items()
+            },
         )
 
 

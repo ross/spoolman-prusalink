@@ -157,8 +157,9 @@ async def test_s1_tag_uuid_is_adopted(world: World):
 async def test_s1_untrusted_tag_uuid_is_kept(world: World):
     """A tag the bridge didn't see load is kept on the printer, not minted over (#66).
 
-    The tag is loaded while the bridge restarts, so it didn't watch the tag appear.
-    The tag's temperatures differ from Spoolman's, so a write is due anyway.
+    The tag is loaded while the bridge restarts on a state file from before #66, with
+    no UUID seen saved, so it didn't watch the tag appear. The tag's temperatures differ
+    from Spoolman's, so a write is due anyway.
     """
     w = world
     b = w.spools["B"]
@@ -166,6 +167,9 @@ async def test_s1_untrusted_tag_uuid_is_kept(world: World):
     tag = str(uuid.uuid4())
     load = {"source": "tag", "name": PETG[0], "color": PETG[1], "uuid": tag}
     await w.swap_cycle(temperatures=(250, 170, 80), **load)
+    for kept in w.bridge.state.printers.values():
+        kept.seen_uuids.clear()
+    w.bridge._save()
     await w.restart()
     await w.poll()
     puts = w.requests("PUT")

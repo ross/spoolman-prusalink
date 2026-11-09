@@ -929,3 +929,11 @@ async def test_kept_uuid_is_checked_against_archived_spools_once(tmp_path):
         assert await bridge._adopt_uuid(7, TAG, store=False) is True
     assert reads == ["true"]  # Read once, and nothing written.
     await bridge.aclose()
+
+
+async def test_written_uuid_seen_with_another_spool_is_not_kept(printer):
+    """A UUID the bridge wrote for spool 6 isn't kept for spool 7 after a runout reload."""
+    printer._seen_uuid[0] = (TAG, 6, False)
+    st = replace(SETTLED, written=f'M865 X R N"PLA" L0\nM865.1 I0 C"{TAG}"')
+    material = tag_material(from_tag=False)
+    assert printer._tag_uuid(0, st, material, spool(7), [spool(7)]) is None

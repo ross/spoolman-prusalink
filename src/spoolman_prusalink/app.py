@@ -182,9 +182,11 @@ class PrinterBridge:
     _idle_since: float | None = None
     # Per tool: the instance UUID the printer last reported while the active spool was
     # certain, that spool, and whether the bridge saw the UUID appear: the printer showed
-    # another one before. A runout reload keeps the old filament's UUID, so a UUID seen
-    # with one spool isn't adopted by the next. In memory only, so after a restart a tag
-    # already loaded isn't trusted until the next load.
+    # another one, an empty tool or a type with no UUID before. A runout reload keeps the
+    # old filament's UUID, so a UUID seen with one spool isn't adopted by the next. The
+    # UUID and spool are saved in the state file (`PrinterState.seen_uuids`), restored as
+    # not appeared: a different UUID after a restart counts as appearing, but with
+    # nothing saved, a tag already loaded isn't trusted.
     _seen_uuid: dict[int, tuple[str, int, bool]] = field(default_factory=dict)
     # Tools the bridge saw with no material or no instance UUID since `_seen_uuid` was
     # last set: a UUID shown next appeared while the bridge watched.
@@ -195,6 +197,9 @@ class PrinterBridge:
 
     def __post_init__(self) -> None:
         self._printer_outage = Outage(self.label)
+        kept = self.bridge.state.printers.get(self.name)
+        if kept is not None:
+            self._seen_uuid = {t: (u, s, False) for t, (u, s) in kept.seen_uuids.items()}
 
     @property
     def name(self) -> str:
@@ -627,6 +632,8 @@ class PrinterBridge:
             appeared = seen is not None or tool in self._uuid_gap
             seen = self._seen_uuid[tool] = (value, active.id, appeared)
             self._uuid_gap.discard(tool)
+            kept = self.bridge.state.printers.setdefault(self.name, PrinterState())
+            kept.seen_uuids[tool] = (value, active.id)
         # While the active spool isn't certain, such as a reload with no Spoolman change,
         # a tag is only kept: it may be another spool's.
         trusted = certain and material.from_tag and seen is not None and seen[2]
