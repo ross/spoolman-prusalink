@@ -198,3 +198,55 @@ def test_without_create_an_existing_database_loads(path):
     db = Database.open(path, create=False)
     assert db.load() == full_state()
     db.close()
+
+
+def empty_files(path):
+    """A zero-byte file, and an SQLite file with no tables, as a killed first start leaves."""
+    path.parent.mkdir()
+    path.write_bytes(b"")
+    other = path.with_name("other.db")
+    conn = sqlite3.connect(other)
+    conn.execute("PRAGMA user_version = 0")
+    conn.execute("CREATE TABLE t (x)")
+    conn.execute("DROP TABLE t")
+    conn.close()
+    assert other.stat().st_size > 0
+    return [path, other]
+
+
+def test_without_create_a_database_with_no_schema_is_left_alone(path):
+    for f in empty_files(path):
+        before = f.read_bytes()
+        db = Database.open(f, create=False)
+        assert db.load() == State()
+        with pytest.raises(DatabaseError, match="can't be saved"):
+            db.save(full_state())
+        db.close()
+        assert f.read_bytes() == before
+        assert read_state(f) == State()
+
+
+def test_with_create_a_database_with_no_schema_gets_it(path):
+    for f in empty_files(path):
+        db = Database.open(f)
+        assert db.save(full_state())
+        db.close()
+        assert read_state(f) == full_state()
+
+
+def test_a_load_failure_lets_go_of_the_lock(path):
+    db = Database.open(path)
+    db.save(full_state())
+    db.close()
+    conn = sqlite3.connect(path)
+    with conn:
+        conn.execute("UPDATE tools SET data = 'not json' WHERE tool = 1")
+    with pytest.raises(DatabaseError, match=str(path)):
+        Database.open(path)
+    with conn:
+        conn.execute("DROP TABLE runouts")
+    with pytest.raises(DatabaseError, match="no such table: runouts"):
+        Database.open(path, create=False)
+    conn.close()
+    path.unlink()
+    Database.open(path).close()  # Not locked by the failed opens.

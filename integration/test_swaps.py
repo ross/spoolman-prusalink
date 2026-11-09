@@ -171,8 +171,8 @@ async def test_s1_tag_uuid_is_adopted(world: World):
 async def test_s1_untrusted_tag_is_left_alone(world: World):
     """A tag the bridge didn't see load isn't adopted, written or minted over (#66, Q11).
 
-    The tag is loaded while the bridge restarts on a state file from before #66, with
-    no UUID seen saved, so it didn't watch the tag appear. Its temperatures differ from
+    The tag is loaded while the bridge restarts with no UUID seen saved, so it didn't
+    watch the tag appear. Its temperatures differ from
     Spoolman's, which would make a write due for a menu load.
     """
     w = world

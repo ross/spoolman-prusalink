@@ -96,9 +96,10 @@ class Database:
     def open(cls, path: Path, *, create: bool = True) -> Database:
         """Lock and open the database at `path`.
 
-        With `create` false, as in dry run, a missing database isn't created: it loads as
-        an empty state and can't be saved. Raise DatabaseError if another process holds
-        the lock or the file isn't a database of a version this bridge reads.
+        With `create` false, as in dry run, a missing database isn't created, and neither
+        is the schema of an empty one: it loads as an empty state, can't be saved, and
+        the file is left as it was. Raise DatabaseError if another process holds the lock
+        or the file isn't a database of a version this bridge reads.
         """
         path = Path(path)
         lock_fd = _lock(lock_path(path))
@@ -108,7 +109,11 @@ class Database:
             os.close(lock_fd)
             raise
         db = cls(path, conn, lock_fd)
-        db.load()
+        try:
+            db.load()
+        except BaseException:
+            db.close()
+            raise
         return db
 
     def close(self) -> None:
@@ -126,7 +131,10 @@ class Database:
             self._rows = {name: {} for name in _KEYED}
             self._outbox = []
             return State()
-        state, self._rows, self._outbox = _read(self._conn)
+        try:
+            state, self._rows, self._outbox = _read(self._conn)
+        except (sqlite3.Error, ValueError) as e:
+            raise DatabaseError(f"{self.path}: {e}") from e
         return state
 
     def save(self, state: State) -> bool:
@@ -190,14 +198,18 @@ class Database:
 
 def read_state(path: Path) -> State:
     """Read the state from the database at `path` without locking it, as a reader beside
-    a running bridge does. A missing database reads as an empty state."""
+    a running bridge does. A missing database, or one with no schema, reads as an empty
+    state."""
     path = Path(path)
     if not path.exists():
         return State()
     conn = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True)
     try:
-        _check(conn, path)
+        if not _check(conn, path):
+            return State()
         return _read(conn)[0]
+    except (sqlite3.Error, ValueError) as e:
+        raise DatabaseError(f"{path}: {e}") from e
     finally:
         conn.close()
 
@@ -224,13 +236,22 @@ def _lock(path: Path) -> int:
     return fd
 
 
-def _connect(path: Path, create: bool) -> sqlite3.Connection:
+def _connect(path: Path, create: bool) -> sqlite3.Connection | None:
+    """Open the database, creating the schema if it has none and `create` is true.
+
+    Without `create`, a database with no schema is closed untouched and None returned:
+    the journal mode pragma alone would write to it.
+    """
     # Autocommit: `save` opens and commits its transactions itself.
     conn = sqlite3.connect(path, isolation_level=None)
     try:
+        ready = _check(conn, path)
+        if not ready and not create:
+            conn.close()
+            return None
         conn.execute("PRAGMA journal_mode = WAL")
         conn.execute("PRAGMA synchronous = FULL")
-        if not _check(conn, path) and create:
+        if not ready:
             # One transaction, so a crash can't leave tables without the version.
             conn.executescript(
                 f"BEGIN IMMEDIATE;\n{_SCHEMA}\n"
