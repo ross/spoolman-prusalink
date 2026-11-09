@@ -12,6 +12,7 @@ probe would to check that a correct simulator passes at any polling interval.
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -34,12 +35,11 @@ SYNC_JOB = (
 # samples, as it does on the printer. Each replay starts with `LEAD` seconds at rest,
 # longer than any probe interval the plumbing tests try, so a trace polled from any
 # offset begins at rest, as docs/printer-behaviors.md asks of a recording. The scan
-# lasts longer than any probe interval too, so a job is always seen before the sync
-# job's G-code applies, as on the printer where the scan takes a few seconds.
+# keeps the model's default: how long the printer takes to scan the sync job's four
+# lines isn't recorded yet, and the comparison lets a poll miss it either way.
 SETTINGS = dict(
     unload_seconds=2.0,
     load_rate_mm_s=20.0,
-    scan_seconds=2.5,
     blip_seconds=0.3,
     park_seconds=1.0,
     sync_job_seconds=2.0,
@@ -89,6 +89,13 @@ class Recorder:
         """Until the job is over."""
         self.until(lambda: self.printer.job is None)
 
+    def reset(self) -> None:
+        """Start the recording over from the printer's current state, for a replay that
+        begins somewhere other than idle with the default spool."""
+        self.samples.clear()
+        self.t = 0.0
+        self.look()
+
     def steps(self) -> list[trace.Step]:
         return trace.signature(self.samples)
 
@@ -101,7 +108,7 @@ def check(name: str, rec: Recorder) -> None:
     recorded = trace.read(path)
     live = trace.signature(recorded.samples, recorded.header.get("tool", 0))
     sim = rec.steps()
-    problems = trace.compare(live, sim)
+    problems = trace.compare(live, sim, recorded.header.get("interval"))
     assert not problems, "\n".join(
         problems + ["", "live:", trace.describe(live), "", "simulator:", trace.describe(sim)]
     )
@@ -217,6 +224,20 @@ def f10_sync_job(rec: Recorder) -> None:
     rec.advance(2.0)
 
 
+def f10b_sync_job_rewrite(rec: Recorder) -> None:
+    """The bridge's job written by hand with the spool already loaded, from the FINISHED
+    screen after a print: the slot's values don't change, so no material event."""
+    tool = rec.printer.tools[0]
+    tool.material = tool.previous = replace(TAGGED)
+    tool.extruded = 44060.0
+    rec.printer._set_state(State.FINISHED)
+    rec.reset()
+    rec.advance(LEAD)
+    rec.printer.upload("spoolman-sync.gcode", SYNC_JOB, print_after=True, overwrite=True)
+    rec.ended()
+    rec.advance(2.0)
+
+
 def f11_manual_extrude(rec: Recorder) -> None:
     rec.advance(LEAD)
     rec.printer.extrude(0, 50)
@@ -264,6 +285,7 @@ REPLAYS: dict[str, Callable[[Recorder], None]] = {
     "F8-change-filament": f8_change_filament,
     "F9-m600": f9_m600,
     "F10-sync-job": f10_sync_job,
+    "F10b-sync-job-rewrite": f10b_sync_job_rewrite,
     "F11-manual-extrude": f11_manual_extrude,
     "F12-power-panic": f12_power_panic,
     "F13-power-panic-cold": f13_power_panic_cold,
