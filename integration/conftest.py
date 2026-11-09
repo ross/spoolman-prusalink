@@ -19,6 +19,7 @@ import httpx
 import pytest
 from aiohttp.test_utils import TestServer
 
+from integration.printers import Station, add_printers
 from simulator.model import (
     MODELS,
     Material,
@@ -282,6 +283,17 @@ class World:
     locations: dict[int, str] = field(default_factory=dict)
     # Runs before the simulator serves each request, with its method and path.
     before_request: Callable[[str, str], None] | None = None
+    # --- Several printers (world_printers; see integration/printers.py) ---
+    # Printers other than "it", by name.
+    others: dict[str, Station] = field(default_factory=dict)
+
+    def at(self, name: str) -> Station:
+        """One printer by name, "it" included, with its tool 0."""
+        if name == self.printer.name:
+            return Station(self, name, self.printer, self.tool_location)
+        return self.others[name]
+
+    # --- End of several printers ---
 
     @property
     def tool(self) -> SimTool:
@@ -408,6 +420,22 @@ def world_tools(request: pytest.FixtureRequest) -> int:
     return tools
 
 
+# --- Several printers (docs/scenarios.md X rows; see integration/printers.py) ---
+@pytest.fixture
+def world_printers(request: pytest.FixtureRequest) -> int:
+    """How many printers `world` has: 1 by default, or 2 to add printer "b".
+
+    A test asks for two with
+    `@pytest.mark.parametrize("world_printers", [2], indirect=True)`.
+    """
+    printers = getattr(request, "param", 1)
+    assert printers in (1, 2), "world_printers must be 1 or 2"
+    return printers
+
+
+# --- End of several printers ---
+
+
 @pytest.fixture
 async def world(
     spoolman: SpoolmanHelper,
@@ -415,6 +443,7 @@ async def world(
     tmp_path: Path,
     world_config: dict,
     world_tools: int,
+    world_printers: int,
 ):
     """The starting point every scenario shares.
 
@@ -428,6 +457,10 @@ async def world(
     UUIDs, and tool 1 is loaded with spool D's green PETG, with D in `<prefix> T1`. The
     bridge's config is the same apart from the second tool, `uuids` included: the
     bridge decides from the model.
+
+    With `world_printers` at 2 a second Core One L, printer "b", shares the simulation:
+    tool 0 loaded with spool E's white PLA and UUID, E in `<prefix> LB`. See
+    integration/printers.py.
     """
     tool_location, shelf = f"{prefix} T", f"{prefix} shelf"
     locations = {0: tool_location}
@@ -462,6 +495,8 @@ async def world(
 
     server = TestServer(make_app(sim, printer.name, before_request))
     await server.start_server()
+    uuids = {"A": uuid_a}
+    others = await add_printers(world_printers, sim, spoolman, vendor, prefix, KEY, spools, uuids)
     cfg = Config(
         spoolman_url=str(spoolman.client.base_url).rstrip("/"),
         printers=(
@@ -472,6 +507,7 @@ async def world(
                 tools=dict(locations),
                 uuids=True,
             ),
+            *(other[-1] for other in others),
         ),
         state_file=tmp_path / "state.json",
         ledger_file=tmp_path / "ledger.jsonl",
@@ -489,11 +525,16 @@ async def world(
         tool_location,
         shelf,
         spools,
-        {"A": uuid_a},
+        uuids,
         locations=locations,
     )
+    for name, sim_printer, location, other_server, _ in others:
+        w.others[name] = Station(w, name, sim_printer, location, other_server)
     try:
         yield w
     finally:
         await bridge.aclose()
         await server.close()
+        for other in w.others.values():
+            assert other.server is not None
+            await other.server.close()
