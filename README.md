@@ -239,8 +239,10 @@ replaces the color and UUID with the preset's, so expect this after every menu
 load. Colors are compared after the printer's rounding to 5 bits per channel.
 The temperatures compared are the ones the bridge would write (see
 [Writing to the printer](#writing-to-the-printer)). A tag load sets the nozzle and bed
-temperatures to the middle of the tag's ranges, so a tagged spool matches only
-if Spoolman's temperatures agree with its tag. The UUID is read from the spool
+temperatures to the middle of the tag's ranges and the preheat to the tag's own
+value, or the preset's when the tag has none. A tagged spool matches only if
+Spoolman's extruder and bed temperatures agree with the tag and the tag's
+preheat equals the one the bridge writes. The UUID is read from the spool
 extra field named by `uuid_field`, `instance_uuid` by default, which must be a
 text field.
 
