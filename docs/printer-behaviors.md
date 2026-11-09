@@ -322,16 +322,18 @@ does and how often it happens, as the old live-check ranks had it:
    there, and the bridge doesn't write it on those models. Done:
    scenarios.md has a "Multi-tool" section, T1 to T8, written from F19 to
    F23, and T1 to T7 are End to end against the simulator. The per-tool
-   write stays refused (T6) pending a decision.
+   write (T6) stays refused until the bridge supports multi-tool printers;
+   it's `M865 L<n>` per tool with no `M865.1`, and gets its tests then.
 4. **Spoolman faults**: M1, M2 and X9 need a Spoolman that fails on demand.
-   A small in-process proxy between the bridge and Spoolman, toggled by the
-   test to refuse connections or return 4xx, covers them on a shared
-   Spoolman. Then M3, M3a, M4, M6.
-5. **Several printers**: X1 to X16 with a two-printer `world`. The
-   simulator already runs any number.
+   Done: a fault transport in front of the bridge's Spoolman client
+   (`integration/faults.py`) covers M1 to M4 and M6, and X9.
+5. **Several printers**: X1 to X16 with a two-printer `world`. Done: all
+   but X12 (removed) and X15 (a config check, unit-tested).
 6. **`sync_delay` above 0**: W4's test runs it end to end; the rest of the
    rows that mention it are unit-tested only so far.
-7. **Counters and boots**: C1 to C9, B1 to B6.
+7. **Counters and boots**: C1 to C9, B1 to B6. Done, except B3, a kill
+   between a charge and the save, which nothing outside the bridge can
+   produce; it stays a known limit.
 
 Findings from the first live run of the suite that belong in scenario rows:
 M5a needs the print to have started (two polls with the counter moving);

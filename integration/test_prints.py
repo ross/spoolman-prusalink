@@ -209,7 +209,8 @@ async def test_p11_pause_and_resume_changes_nothing(world: World, caplog: pytest
     assert [e["event"] for e in events(records)] == ["staged_at_print"]
     assert w.charged(records, "A") == w.counter - start
     assert {r["spool_id"] for r in charges(records)} == {w.spools["A"]}
-    assert len(warnings(caplog)) == 1 and "print started" in warnings(caplog)[0]
+    # Counted by text: a bridge on a shared Spoolman also warns about other suites' claims.
+    assert len([m for m in warnings(caplog) if "print started" in m]) == 1
 
 
 async def test_p10_spoolman_changed_mid_print_is_staged(world: World):

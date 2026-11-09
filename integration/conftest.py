@@ -295,6 +295,21 @@ class World:
 
     # --- End of several printers ---
 
+    # Every bridge this world started, the current one last; the fixture closes them all.
+    bridges: list[Bridge] = field(default_factory=list)
+
+    async def restart(self, **config) -> None:
+        """Stop the bridge and start a new one on the same state file, with `config` changed.
+
+        The bridge's restart (B2), a lost state file (B4) and a dry run (B6) are tested
+        this way; the new bridge runs on the simulator's clock like the first.
+        """
+        await self.bridge.aclose()
+        self.cfg = replace(self.cfg, **config)
+        self.bridge = Bridge.from_config(self.cfg)
+        self.bridge.clock = lambda: self.sim.now
+        self.bridges.append(self.bridge)
+
     @property
     def tool(self) -> SimTool:
         return self.tool_at(0)
@@ -540,10 +555,12 @@ async def world(
     )
     for name, sim_printer, location, other_server, _ in others:
         w.others[name] = Station(w, name, sim_printer, location, other_server)
+    w.bridges.append(bridge)
     try:
         yield w
     finally:
-        await bridge.aclose()
+        for started in w.bridges:
+            await started.aclose()
         await server.close()
         for other in w.others.values():
             assert other.server is not None
