@@ -22,7 +22,7 @@ TOOL1 = 1
 
 
 def two_tool_print() -> PrintSpec:
-    """T0 200 mm, TOOL1 100 mm, T0 100 mm: two tool changes, each with a pickup purge."""
+    """T0 200 mm, T1 100 mm, T0 100 mm: two tool changes, each with a pickup purge."""
     return PrintSpec(
         [Segment(0, 200), Segment(1, 100), Segment(0, 100)], duration_s=4, preheat_s=0.5
     )
@@ -65,10 +65,10 @@ async def test_t1_tool_changes_charge_each_tool(world: World):
 
     records = await print_both(w)
     changes = [e.text for e in w.sim.events if e.text.startswith("tool change")]
-    assert changes == ["tool change T0 -> TOOL1", "tool change TOOL1 -> T0"]
+    assert changes == ["tool change T0 -> T1", "tool change T1 -> T0"]
 
-    # Each pickup purges toolchange_purge_mm on the tool picked up: TOOL1 once, T0 once.
-    # 300 mm of T0 moves count 285 and 100 mm of TOOL1 count 95, at the feed ratio.
+    # Each pickup purges toolchange_purge_mm on the tool picked up: T1 once, T0 once.
+    # 300 mm of T0 moves count 285 and 100 mm of T1 count 95, at the feed ratio.
     purge = w.sim.settings.toolchange_purge_mm
     assert (counted(w, 300), counted(w, 100), purge) == (285, 95, 30)
     assert w.charged(records, "A") == 285 + 30 == w.counter_at(0) - start0
@@ -104,7 +104,7 @@ async def test_t3_swap_on_one_tool_leaves_the_other(world: World):
     await baseline(w)
     tool0 = w.bridge.printers[0].tools[0]
 
-    # Spoolman first (S1), on tool 1: C moves into TOOL1's location, D onto the shelf.
+    # Spoolman first (S1), on tool 1: C moves into T1's location, D onto the shelf.
     await w.move("D", w.shelf)
     await w.move("C", w.locations[TOOL1])
     records = await w.poll()
