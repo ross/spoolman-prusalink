@@ -132,8 +132,8 @@ cheap filament.
    show how it got there. A trace may begin later than the replay does, as
    long as it begins at rest, for longer than the polling interval: the
    replay tests assume it. A trace is reduced to steps, each either an
-   event (a new job, a new boot, a material change or an unload, always one
-   sample) or a run of samples with the same state, job presence and kind
+   event (a new job, a new boot, a material change, temperatures included,
+   or an unload, always one sample) or a run of samples with the same state, job presence and kind
    of material. The comparison requires that every step the printer showed
    appears in the simulator's steps, in order. The simulator may show runs
    the probe missed, but no event the printer didn't, and none after the

@@ -123,8 +123,9 @@ class Step:
     `job` is "none", "same" (a job ID seen before) or "new" (an ID not seen before in the
     trace). `boot` is "same" or "new". `material` is "none", "name", "color" (name and
     color) or "tagged" (name, color and UUID); `changed` says the identity differs from the
-    sample before. `unloads` is the change in `unload_count`. A step with a new job, a new
-    boot, a material change or an unload is one sample long, since those are events.
+    sample before: the name, color, UUID or any of the temperatures. `unloads` is the
+    change in `unload_count`. A step with a new job, a new boot, a material change or an
+    unload is one sample long, since those are events.
 
     `extruded` is "+", "-", "±" or "0" for how the counter moved over the step's samples.
     The fields that don't take part in equality describe that movement more closely, for
@@ -184,7 +185,14 @@ def _material_kind(material: dict | None) -> str:
 def _identity(material: dict | None) -> tuple | None:
     if not material or not material.get("name"):
         return None
-    return (material.get("name"), material.get("color"), material.get("instance_uuid"))
+    return (
+        material.get("name"),
+        material.get("color"),
+        material.get("instance_uuid"),
+        material.get("nozzle_temperature"),
+        material.get("preheat_temperature"),
+        material.get("bed_temperature"),
+    )
 
 
 def _tool(filament: dict | None, index: int) -> dict | None:

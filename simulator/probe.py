@@ -231,6 +231,11 @@ def _summary(s: trace.Sample, tool: int) -> str:
             f" material={m.get('name')}/{m.get('color')}"
             f"/{'uuid' if m.get('instance_uuid') else '-'}"
         )
+        if "nozzle_temperature" in m:
+            text += (
+                f" temps={m['nozzle_temperature']}/{m.get('preheat_temperature')}"
+                f"/{m.get('bed_temperature')}"
+            )
     if s.error:
         text += f"  ({s.error})"
     return text
