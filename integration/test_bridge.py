@@ -143,6 +143,8 @@ async def test_b6_dry_run_then_live(bridges: World, caplog: pytest.LogCaptureFix
     mark = w.mark()
     w.printer.extrude(0, 30)
     await w.unload()
+    # A poll while A's unconfirmed-swap flag is due: a dry run doesn't write it either.
+    await w.poll()
     await w.swap_cycle(source="tag", name=PETG[0], color=PETG[1])
     await w.unload()
     # Loaded from the menu, so a write of C is due once the bridge sees the swap.
@@ -154,10 +156,17 @@ async def test_b6_dry_run_then_live(bridges: World, caplog: pytest.LogCaptureFix
     await w.poll()
     records = w.since(mark)
     assert records != [] and all(r["dry_run"] is True for r in records)
-    assert [e["event"] for e in events(records)] == ["unload", "swap_committed"]
+    assert [e["event"] for e in events(records)] == [
+        "unload",
+        "swap_unconfirmed",
+        "unload",
+        "swap_committed",
+    ]
     assert charges(records) == []
+    # Two polls saw the swaps: the B load is charged to A while its swap is unconfirmed.
     assert [(r["spool_id"], r["use_length"]) for r in dry(records)] == [
-        (a, 30 + LOAD_MM),
+        (a, 30),
+        (a, LOAD_MM),
         (c, LOAD_MM),
         (c, 5),
     ]
