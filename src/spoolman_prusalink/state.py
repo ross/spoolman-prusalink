@@ -46,7 +46,8 @@ class PrinterState:
     # the printer can't be read, so an outage doesn't clear its flags in Spoolman.
     flags: dict[int, list[str]] = field(default_factory=dict)
     # By tool: the instance UUID the printer last reported while the active spool was
-    # certain, that spool (None once an unload outside a print makes it unknown), and
+    # certain, that spool (None once an unload other than a runout in a print the
+    # bridge saw start makes it unknown), and
     # whether the tool had a runout since. Kept so a runout reload of one spool's tag
     # isn't taken for the next spool's after a restart. A state file from before the
     # runout was saved loads as no runout.

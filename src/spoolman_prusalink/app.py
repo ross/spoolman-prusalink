@@ -185,9 +185,11 @@ class PrinterBridge:
     # another one, an empty tool or a type with no UUID before), and whether the tool
     # had a runout since. A runout reload keeps the old filament's UUID, so a UUID seen
     # with one spool isn't adopted by the next, and a tag seen with one spool is written
-    # over once another is loaded. Any other unload ends with a fresh type or none, so
-    # the spool becomes None, unknown: the same UUID shown next is the loaded spool's
-    # tag, but the spool recorded may have been wrong, so it isn't trusted. Recorded
+    # over once another is loaded. Only a runout in a print the bridge saw start counts.
+    # Any other unload makes the spool None, unknown, and the same UUID shown next is
+    # left alone and not trusted. After an idle unload it's the loaded spool's tag, and
+    # the spool recorded may have been wrong. After a runout in a print the bridge
+    # didn't see start, it's still the old spool's, left on the tool. Recorded
     # whenever the model reports UUIDs, whatever the UUID settings. The UUID, spool and
     # runout are saved in the state file (`PrinterState.seen_uuids`), restored as not
     # appeared: a different UUID after a restart counts as appearing, but with nothing
@@ -635,10 +637,11 @@ class PrinterBridge:
     def _seen_unload(self, tool: int, runout: bool) -> None:
         """Record an unload since the tool's UUID was last seen.
 
-        Only a runout, an unload during a print the bridge saw start, reloads the type
-        from before the unload (M600). After any other unload, the type is a fresh
-        one or none, so a tag shown next was loaded from the tag: it's not a leftover,
-        but whose tag it is is unknown, since the spool recorded may have been wrong.
+        Only M600, during a print, reloads the type from before the unload. The bridge
+        counts a runout only in a print it saw start. After an idle unload, a tag shown
+        next was loaded from the tag, but the spool recorded may have been wrong. A
+        runout in a print the bridge didn't see start looks the same. Either way the
+        spool becomes unknown: the tag isn't a leftover, so it's left alone.
         """
         seen = self._seen_uuid.get(tool)
         if seen is None:
@@ -746,7 +749,8 @@ class PrinterBridge:
             seen is None or seen[0] != value or seen[1] != active.id or tool in self._uuid_gap
         ):
             # Seen with another spool and not a leftover: a claim or correction made this
-            # spool active. Or seen with no known spool after an unload outside a print.
+            # spool active. Or seen with no known spool after an unload that wasn't a
+            # runout the bridge saw.
             # Either way the UUID didn't appear, so it isn't trusted yet.
             unknown = seen is not None and seen[0] == value and seen[1] is None
             appeared = not unknown and (
