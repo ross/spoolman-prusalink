@@ -74,8 +74,18 @@ current and that the scenario rows name their tests.
 | --- | --- | --- |
 | S1 | `test_swaps.py::test_s1_spoolman_first_swap` | Spoolman updated before the unload: the swap commits there, the load is the new spool's. |
 | S2 | `test_swaps.py::test_s2_filament_first_swap` | Filament swapped first: the charge is held, then moves once Spoolman is updated. |
+| S3 | `test_swaps.py::test_s3_old_spool_moved_back` | Old spool moved out and back: the swap stays open, or closes as of a print start. |
+| S3 | `test_swaps.py::test_s3_spoolman_changed_during_the_load` | Filament first, Spoolman changed in two steps mid-load: the new spool takes it all. |
+| S3 | `test_swaps.py::test_s3_unload_while_the_location_is_empty` | Unload while the swap's location is empty: closed on the old spool, held usage lost. |
+| S4 | `test_swaps.py::test_s4_same_spool_reloaded_then_print` | Same spool unloaded and reloaded, then a print: provisional charge, kept at the unload. |
 | S5 | `test_swaps.py::test_s5_claim_after_printing_on_the_wrong_spool` | Print charged provisionally to the old spool: claiming the loaded one moves it there. |
+| S6 | `test_swaps.py::test_s6_unload_with_nothing_assigned` | Unload with nothing assigned: the usage before it is lost, the usage after it held. |
+| S7 | `test_swaps.py::test_s7_old_spool_out_new_in_then_unload` | Old spool out, new one in, then unload: the old one charged until the unload, new staged. |
+| S8 | `test_swaps.py::test_s8_staged_spool_moved_back_out` | Staged spool moved back out before an unload: staging cancelled, old spool charged. |
 | S9 | `test_swaps.py::test_s9_staged_spool_never_unloaded` | Staged and never unloaded: print starts and reboots flag it, and a claim makes it active. |
+| S10 | `test_swaps.py::test_s10_spool_moved_out_with_no_replacement` | Spool moved out with no replacement: charged until the unload, then usage is held. |
+| S11 | `test_swaps.py::test_s11_two_spools_neither_active` | Two spools in the location, neither active: skipped and warned once until one leaves. |
+| S12 | `test_swaps.py::test_s12_spoolman_corrected_to_the_loaded_uuid` | Spoolman changed to the spool whose UUID the printer reports: switched at once. |
 | S13 | `test_swaps.py::test_s13_staged_spool_claimed` | Staged spool, no unload: a claim moves the usage since the reboot and makes it active. |
 | S14 | `test_swaps.py::test_s14_several_swaps_between_polls` | Two swaps between polls: two unloads seen, the middle spool is charged nothing. |
 | P2 | `test_prints.py::test_p2_runout_with_spoolman_updated_during_pause` | Runout mid-print, Spoolman fixed during the pause: the rest goes to the new spool. |

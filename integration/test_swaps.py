@@ -15,6 +15,7 @@ from integration.conftest import (
     World,
     charged,
     charges,
+    count,
     events,
     logged,
     print_spec,
@@ -185,12 +186,8 @@ async def test_s5_claim_after_printing_on_the_wrong_spool(
     puts = len(w.requests("PUT"))
 
     # The rest of the print is B's.
-    mark = w.mark()
     at_claim = w.counter
-    await w.run_until(
-        lambda: w.printer.state is State.FINISHED and w.printer.job is None, poll_every=1.0
-    )
-    records = w.since(mark) + await w.poll()
+    records = await w.finish_print()
     assert w.charged(records, "A") == 0
     assert w.charged(records, "B") == w.counter - at_claim
 
@@ -285,20 +282,6 @@ async def test_s9_staged_spool_never_unloaded(world: World, caplog: pytest.LogCa
     assert w.charged(records, "A") == 0
 
 
-async def finish_print(w: World) -> list[dict]:
-    """Poll every second until the print ends, then once more idle; return the records."""
-    mark = w.mark()
-    await w.run_until(
-        lambda: w.printer.state is State.FINISHED and w.printer.job is None, poll_every=1.0
-    )
-    return w.since(mark) + await w.poll()
-
-
-def warned(caplog: pytest.LogCaptureFixture, text: str) -> int:
-    """How many warnings the bridge logged containing `text`."""
-    return sum(1 for r in caplog.records if r.levelno == logging.WARNING and text in r.getMessage())
-
-
 async def unconfirmed_swap(w: World) -> int:
     """Charge A 30 mm and unload with no Spoolman change; return the ledger mark after."""
     w.printer.extrude(0, 30)
@@ -352,7 +335,7 @@ async def test_s3_spoolman_changed_during_the_load(world: World):
     assert [e["message"] for e in events(records, "swap_confirmed")] == [
         f"swap confirmed: {on_a:g} mm moved from spool {a} to {b}"
     ]
-    records += await finish_print(w)
+    records += await w.finish_print()
     since_unload = w.since(unloaded)
     assert charged(since_unload, a) == 0
     assert charged(since_unload, b) == w.counter - at_unload
@@ -403,7 +386,7 @@ async def test_s3_old_spool_moved_back(world: World):
         f"print {job} started with no Spoolman change since the unload; assuming "
         f"spool {a} was reloaded and charging it provisionally"
     ]
-    await finish_print(w)
+    await w.finish_print()
     assert charged(w.since(unloaded), a) == w.counter - at_unload
     flag = await w.flag("A")
     assert flag is not None
@@ -433,7 +416,7 @@ async def test_s3_unload_while_the_location_is_empty(
     records = await w.poll()
     msg = "25 mm before unload had no spool"
     assert [e["message"] for e in events(records, "lost_unassigned")] == [msg]
-    assert warned(caplog, f"[{w.tool_location}] {msg}") == 1
+    assert count(caplog, logging.WARNING, f"[{w.tool_location}] {msg}") == 1
     assert events(records, "swap_confirmed") == [] and charges(records) == []
     assert charged(w.since(unloaded), a) == LOAD_MM  # The swap's usage stays on A.
     assert await w.flag("A") is None
@@ -469,7 +452,7 @@ async def test_s4_same_spool_reloaded_then_print(world: World):
     assert flag is not None and "charged to it provisionally" in flag
 
     # Between prints the flag shows the whole amount since the unload.
-    await finish_print(w)
+    await w.finish_print()
     provisional = w.counter - at_unload
     flag = await w.flag("A")
     assert flag is not None and f" {provisional} mm (≈ " in flag
@@ -505,7 +488,7 @@ async def test_s6_unload_with_nothing_assigned(world: World, caplog: pytest.LogC
     records = await w.poll()
     msg = f"{LOAD_MM} mm before unload had no spool"
     assert [e["message"] for e in events(records, "lost_unassigned")] == [msg]
-    assert warned(caplog, f"[{w.tool_location}] {msg}") == 1
+    assert count(caplog, logging.WARNING, f"[{w.tool_location}] {msg}") == 1
     assert charges(records) == []
 
     # C's load is held until C is assigned, then charged to it.
@@ -616,7 +599,8 @@ async def test_s10_spool_moved_out_with_no_replacement(
     records = await w.swap_cycle(poll_every=0.3, source="tag", name=PETG[0], color=PETG[1])
     records += await w.poll()
     assert charges(records) == []
-    assert warned(caplog, f"[{w.tool_location}] holding usage: no spool assigned") == 1
+    holding = f"[{w.tool_location}] holding usage: no spool assigned"
+    assert count(caplog, logging.WARNING, holding) == 1
 
     await w.move("B", w.tool_location)
     records = await w.poll()
@@ -642,7 +626,7 @@ async def test_s11_two_spools_neither_active(world: World, caplog: pytest.LogCap
     assert charges(records) == []
     ids = ", ".join(str(i) for i in sorted((b, c)))
     msg = f"[{w.tool_location}] location holds spools {ids}; skipping until it's clear"
-    assert warned(caplog, msg) == 1
+    assert count(caplog, logging.WARNING, msg) == 1
     assert await w.spoolman.location(b) == await w.spoolman.location(c) == w.tool_location
 
     # C is removed: A, still loaded, takes the usage skipped meanwhile, and B is staged.

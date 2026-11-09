@@ -337,7 +337,4 @@ does and how often it happens, as the old live-check ranks had it:
    produce; it stays a known limit.
 
 Findings from the first live run of the suite that belong in scenario rows:
-M5a needs the print to have started (two polls with the counter moving);
-load usage is held until the printer reports a material even when the new
-spool is already active; S1 with a tag that already matches produces no
-write.
+M5a needs the print to have started (two polls with the counter moving).

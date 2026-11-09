@@ -6,13 +6,8 @@ import logging
 
 import pytest
 
-from integration.conftest import FLAG_FIELD, LOAD_MM, PETG, World, charges, events, logged
+from integration.conftest import FLAG_FIELD, LOAD_MM, PETG, World, charges, count, events, logged
 from integration.faults import archive_spool, delete_spool, rename_location, set_extra_text
-
-
-def count(caplog: pytest.LogCaptureFixture, level: int, text: str) -> int:
-    """How many times the bridge logged `text` at `level`."""
-    return sum(1 for r in caplog.records if r.levelno == level and text in r.getMessage())
 
 
 def use_path(spool_id: int) -> str:

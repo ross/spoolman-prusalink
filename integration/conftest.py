@@ -240,6 +240,11 @@ def logged(caplog: pytest.LogCaptureFixture, level: int, text: str) -> bool:
     return any(r.levelno == level and text in r.getMessage() for r in caplog.records)
 
 
+def count(caplog: pytest.LogCaptureFixture, level: int, text: str) -> int:
+    """How many times the bridge logged `text` at `level`."""
+    return sum(1 for r in caplog.records if r.levelno == level and text in r.getMessage())
+
+
 def ledger(cfg: Config) -> list[dict]:
     path = Path(cfg.ledger_file)
     if not path.exists():
@@ -360,6 +365,15 @@ class World:
                 await self.bridge.poll()
                 since_poll = 0.0
         return self.since(mark)
+
+    async def finish_print(self) -> list[dict]:
+        """Poll every second until the print ends, then once more idle; return the records."""
+        mark = self.mark()
+        await self.run_until(
+            lambda: self.printer.state is State.FINISHED and self.printer.job is None,
+            poll_every=1.0,
+        )
+        return self.since(mark) + await self.poll()
 
     async def unload(self, tool: int = 0) -> None:
         self.printer.unload(tool)
