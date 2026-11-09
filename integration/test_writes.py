@@ -3,11 +3,22 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import replace
 
 import pytest
 
-from integration.conftest import ASA, PETG, PLA, World, events, logged, print_spec
-from simulator.model import JobPhase, Material, State
+from integration.conftest import (
+    ASA,
+    LOAD_MM,
+    PETG,
+    PLA,
+    World,
+    events,
+    logged,
+    print_spec,
+)
+from simulator.model import MODELS, JobPhase, Material, ModelInfo, State
+from spoolman_prusalink.printer_sync import COREONEL_PREAMBLE
 
 SYNC_FILE = "spoolman-sync.gcode"
 
@@ -37,6 +48,11 @@ async def wrote_b(w: World) -> None:
 
 def gcode(w: World) -> list[str]:
     return [e.text for e in w.sim.events if e.kind == "gcode"]
+
+
+def count(caplog: pytest.LogCaptureFixture, level: int, text: str) -> int:
+    """How many times the bridge logged `text` at `level`."""
+    return sum(1 for r in caplog.records if r.levelno == level and text in r.getMessage())
 
 
 async def test_w1_write_after_swap(world: World):
@@ -237,6 +253,86 @@ async def test_w6_sync_job_is_not_a_print_start(world: World):
     assert len(events(records, "swap_assumed")) == 1
 
 
+async def test_w7_non_preset_without_temperatures_is_flagged(
+    world: World, caplog: pytest.LogCaptureFixture
+):
+    """Material that isn't a preset, no temperatures: flagged, not written until they're set."""
+    caplog.set_level(logging.INFO, logger="spoolman_prusalink")
+    w = world
+    b = w.spools["B"]
+    await w.spoolman.edit_filament(
+        b, material="PLA-CF", settings_extruder_temp=None, settings_bed_temp=None
+    )
+    # The printer's menu has no PLA-CF, so the user loads B under another preset.
+    await write_due(w)
+
+    for _ in range(3):
+        await w.poll()
+        w.advance(1.0)
+    assert w.requests("PUT") == []
+    flag = await w.flag("B")
+    assert flag is not None and "isn't a printer preset; set its extruder and bed" in flag
+    assert count(caplog, logging.WARNING, f"can't write spool {b} to the printer") == 1
+    assert not logged(caplog, logging.WARNING, f"printer will be set to spool {b}")
+
+    # The flag stays through a print, which is still charged to B.
+    records = await w.start_print(print_spec())
+    records += await w.run_until(lambda: w.printer.job is None, poll_every=1.0)
+    assert w.charged(records, "B") > 0
+    assert w.requests("PUT") == []
+    assert "set its extruder and bed" in (await w.flag("B") or "")
+
+    # Temperatures set in Spoolman: the next idle poll writes them.
+    await w.spoolman.edit_filament(b, settings_extruder_temp=250, settings_bed_temp=80)
+    await w.poll()
+    puts = w.requests("PUT")
+    assert len(puts) == 1 and SYNC_FILE in puts[0].text
+    assert f'M865 X R N"PLA-CF" T250 B80 O"{PETG[1]}" L0' in w.printer.files[SYNC_FILE]
+    await w.run_until(lambda: w.printer.job is None)
+    minted = await w.spoolman.extra(b, "instance_uuid")
+    assert w.material() == ("PLA-CF", PETG[1], minted)
+    await w.poll()
+    assert await w.flag("B") is None
+    assert count(caplog, logging.WARNING, f"can't write spool {b} to the printer") == 1
+
+
+async def test_w8_pps_is_flagged_until_loaded_from_the_menu(
+    world: World, caplog: pytest.LogCaptureFixture
+):
+    """PPS isn't written but flagged; loaded from the printer's menu, the flag clears."""
+    caplog.set_level(logging.INFO, logger="spoolman_prusalink")
+    w = world
+    b = w.spools["B"]
+    await w.spoolman.edit_filament(b, material="PPS")
+    # B is loaded from the menu under the wrong preset.
+    await write_due(w)
+
+    for _ in range(3):
+        await w.poll()
+        w.advance(1.0)
+    assert w.requests("PUT") == []
+    flag = await w.flag("B")
+    assert flag is not None and "needs the printer's HT idler-door setting" in flag
+    assert count(caplog, logging.WARNING, f"can't write spool {b} to the printer") == 1
+
+    # The user reloads it from the menu as PPS, as the flag asks. The unload with no
+    # Spoolman change opens a swap (W11), but the menu load is what the bridge would
+    # have written: no job, and the missing color and UUID aren't drift.
+    await w.unload()
+    records = await w.poll()
+    assert len(events(records, "swap_unconfirmed")) == 1
+    await w.swap_cycle(source="preset", name="PPS")
+    assert w.material() == ("PPS", None, None)
+    for _ in range(3):
+        await w.poll()
+        w.advance(1.0)
+    assert w.requests("PUT") == []
+    unloaded = "filament was unloaded with no Spoolman change"
+    assert unloaded in (flag := await w.flag("B") or "") and "HT idler-door" not in flag
+    assert not logged(caplog, logging.WARNING, f"printer differs from spool {b}")
+    assert count(caplog, logging.WARNING, f"can't write spool {b} to the printer") == 1
+
+
 @pytest.mark.parametrize("world_config", [{}, dict(sync_drift=True)], indirect=True)
 async def test_w9_drift_is_flagged_unless_sync_drift(
     world: World, caplog: pytest.LogCaptureFixture
@@ -263,6 +359,57 @@ async def test_w9_drift_is_flagged_unless_sync_drift(
     assert w.material() == (PLA[0], PLA[1], w.uuids["A"])
     await w.poll()
     assert await w.flag("A") is None
+
+
+@pytest.mark.parametrize(
+    "model, preamble, problem",
+    [
+        (ModelInfo("99.1.0", "FUTURE"), None, "printer type '99.1.0' isn't one the bridge knows"),
+        (MODELS["3.1.0"], None, "XL isn't supported: multi-tool printers aren't supported yet"),
+        (
+            MODELS["1.4.0"],
+            COREONEL_PREAMBLE,
+            "gcode_preamble is for COREONEL but the printer is MK4",
+        ),
+    ],
+    ids=["unknown", "unsupported", "mismatched"],
+)
+async def test_w10_model_the_bridge_cannot_write(
+    world: World,
+    caplog: pytest.LogCaptureFixture,
+    model: ModelInfo,
+    preamble: tuple[str, ...] | None,
+    problem: str,
+):
+    """Unknown, unsupported or mismatched model: logged once, spool flagged, still charged."""
+    caplog.set_level(logging.INFO, logger="spoolman_prusalink")
+    w = world
+    b = w.spools["B"]
+    w.printer.model = model
+    if preamble is not None:
+        # The preamble is per printer, so it's set by starting the bridge with it.
+        await w.restart(printers=(replace(w.cfg.printers[0], gcode_preamble=preamble),))
+    records = await w.poll()
+    assert len(events(records, "baseline")) == 1
+    assert count(caplog, logging.WARNING, f"{problem}; printer writes are off") == 1
+
+    # A Spoolman-first swap to B, loaded from the menu: a write is due but can't run.
+    await w.move("B", w.tool_location)
+    await w.poll()
+    await w.unload()
+    records = await w.poll()
+    assert len(events(records, "swap_committed")) == 1
+    records = await w.swap_cycle(poll_every=0.3, source="preset", name=PETG[0])
+    for _ in range(3):
+        w.advance(1.0)
+        w.printer.extrude(0, 10)
+        records += await w.poll()
+    assert w.requests("PUT") == []
+    assert w.charged(records, "B") == LOAD_MM + 30
+    flag = await w.flag("B")
+    assert flag == f"{w.tool_location}: can't write to the printer: {problem}"
+    assert count(caplog, logging.WARNING, f"can't write spool {b} to the printer") == 1
+    assert count(caplog, logging.WARNING, "printer writes are off") == 1
 
 
 async def test_w11_unconfirmed_swap_writes_the_assigned_spool(world: World):
@@ -317,6 +464,32 @@ async def test_w12_staged_spool_waits_for_the_unload(
     minted = await w.spoolman.extra(c, "instance_uuid")
     assert minted is not None
     assert w.material() == (ASA[0], ASA[1], minted)
+
+
+async def test_w13_sync_job_homes_an_unhomed_printer(world: World):
+    """Unhomed after a boot: the sync job homes with G28 O before it writes and ends."""
+    w = world
+    w.printer.home()
+    w.printer.reboot()
+    assert not w.printer.homed
+    await write_due(w)
+    assert not w.printer.homed  # Loading doesn't home.
+
+    await w.poll()
+    puts = w.requests("PUT")
+    assert len(puts) == 1 and SYNC_FILE in puts[0].text
+    lines = w.printer.files[SYNC_FILE].splitlines()
+    home = next(i for i, line in enumerate(lines) if line.startswith("G28 O"))
+    assert home < next(i for i, line in enumerate(lines) if line.startswith("M865"))
+    await wrote_b(w)
+    assert w.printer.homed
+    texts = [e.text for e in w.sim.events]
+    assert texts.index("G28: homed") < next(
+        i for i, t in enumerate(texts) if t.startswith("M865 T0 set to")
+    )
+    assert texts.index("G28: homed") < next(
+        i for i, t in enumerate(texts) if t.startswith("job ") and t.endswith(" finished")
+    )
 
 
 async def test_w14_spoolman_edit_is_written(world: World, caplog: pytest.LogCaptureFixture):

@@ -1,4 +1,4 @@
-"""Spoolman faults and edits made in Spoolman: docs/scenarios.md rows M1 to M6."""
+"""Spoolman faults and edits made in Spoolman: docs/scenarios.md rows M1 to M7."""
 
 from __future__ import annotations
 
@@ -6,8 +6,19 @@ import logging
 
 import pytest
 
-from integration.conftest import FLAG_FIELD, LOAD_MM, PETG, World, charges, count, events, logged
+from integration.conftest import (
+    FLAG_FIELD,
+    LOAD_MM,
+    PETG,
+    World,
+    charges,
+    count,
+    events,
+    logged,
+    print_spec,
+)
 from integration.faults import archive_spool, delete_spool, rename_location, set_extra_text
+from simulator.model import State
 
 
 def use_path(spool_id: int) -> str:
@@ -17,6 +28,14 @@ def use_path(spool_id: int) -> str:
 async def baseline(w: World) -> None:
     records = await w.poll()
     assert len(events(records, "baseline")) == 1
+
+
+async def set_used(w: World, name: str, grams: float) -> None:
+    """Set a spool's used weight, as the user would correct it in Spoolman."""
+    resp = await w.spoolman.client.patch(
+        f"/api/v1/spool/{w.spools[name]}", json={"used_weight": grams}
+    )
+    resp.raise_for_status()
 
 
 async def test_m1_spoolman_unreachable(world: World, caplog: pytest.LogCaptureFixture):
@@ -259,6 +278,67 @@ async def test_m4_location_renamed(world: World, caplog: pytest.LogCaptureFixtur
     assert await w.spoolman.location(a) == renamed
 
 
+async def test_m5_spool_used_past_empty(world: World, caplog: pytest.LogCaptureFixture):
+    """Spool used past empty: still charged, a negative weight logged once, no flag."""
+    caplog.set_level(logging.INFO, logger="spoolman_prusalink")
+    w = world
+    a = w.spools["A"]
+    await baseline(w)
+    # 1 g left of 1000 g; each metre of 1.75 mm PLA at 1.24 g/cm³ is about 3 g.
+    await set_used(w, "A", 999.0)
+
+    mark = w.mark()
+    for _ in range(4):
+        w.printer.extrude(0, 1000)
+        await w.poll()
+    records = w.since(mark)
+    assert [r["use_length"] for r in charges(records, a)] == [1000.0] * 4
+    assert await w.used("A") > 1010
+    negative = f"spool {a} shows -"
+    assert count(caplog, logging.INFO, negative) == 1
+    assert logged(caplog, logging.INFO, "g remaining in Spoolman but is still loaded")
+    assert await w.flag("A") is None
+
+
+@pytest.mark.parametrize("used, flagged", [(0.0, True), (960.0, False)], ids=["plenty", "nearly"])
+async def test_m5a_runout_with_plenty_left_is_flagged(world: World, used: float, flagged: bool):
+    """Runout in a started print with over 5% left flags the spool; a weight edit clears it."""
+    w = world
+    a = w.spools["A"]
+    await baseline(w)
+    await set_used(w, "A", used)
+    await w.poll()
+
+    # The print is started (two polls with the counter moving), then A runs out.
+    await w.start_print(print_spec())
+    w.printer.runout(0)
+    records = await w.poll()
+    assert len(events(records, "unload")) == 1
+    mid_print = f"{w.tool_location}: unloaded mid-print with"
+    if not flagged:
+        # 40 g of 1000 g is under 5%: it really ran out.
+        assert mid_print not in (await w.flag("A") or "")
+        assert w.bridge.state.runouts == {}
+        return
+    assert mid_print in (await w.flag("A") or "")
+    assert a in w.bridge.state.runouts
+
+    # The same spool reloaded with no Spoolman change, and the print finished: kept.
+    w.printer.load(0)
+    await w.run_until(lambda: w.printer.state is State.PAUSED, poll_every=1.0)
+    w.printer.resume()
+    records = await w.run_until(lambda: w.printer.job is None, poll_every=1.0)
+    records += await w.poll()
+    assert w.charged(records, "A") > 0
+    assert mid_print in (await w.flag("A") or "")
+
+    # The user corrects A's weight in Spoolman: the flag clears.
+    await set_used(w, "A", 995.0)
+    await w.poll()
+    assert mid_print not in (await w.flag("A") or "")
+    assert w.bridge.state.runouts == {}
+
+
 async def test_m6_flags_by_others_left_alone(world: World, caplog: pytest.LogCaptureFixture):
     """A flag someone else wrote stays while the bridge sets and clears its own elsewhere."""
     caplog.set_level(logging.INFO, logger="spoolman_prusalink")
@@ -292,3 +372,25 @@ async def test_m6_flags_by_others_left_alone(world: World, caplog: pytest.LogCap
     assert logged(caplog, logging.INFO, f"cleared flag on spool {a}")
     for spool_id in (b, c):
         assert not logged(caplog, logging.INFO, f"flag on spool {spool_id}")
+
+
+async def test_m7_density_edit_applies_to_later_charges(world: World):
+    """Density edited in Spoolman: later charges use the new one, earlier aren't recalculated."""
+    w = world
+    a = w.spools["A"]
+    await baseline(w)
+
+    w.printer.extrude(0, 1000)
+    first = charges(await w.poll(), a)
+    before = await w.used("A")
+    assert [r["use_length"] for r in first] == [1000.0]
+    assert before == pytest.approx(first[0]["grams"], abs=0.01)
+
+    # Twice the density: the next metre weighs twice as much, and the first stays as it was.
+    await w.spoolman.edit_filament(a, density=2.48)
+    assert await w.used("A") == pytest.approx(before)
+    w.printer.extrude(0, 1000)
+    second = charges(await w.poll(), a)
+    assert [r["use_length"] for r in second] == [1000.0]
+    assert second[0]["grams"] == pytest.approx(2 * first[0]["grams"], abs=0.01)
+    assert await w.used("A") == pytest.approx(3 * before, abs=0.01)
