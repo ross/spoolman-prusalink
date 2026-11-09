@@ -6,6 +6,7 @@ from integration.conftest import PETG, World, events
 
 
 async def test_w1_write_after_swap(world: World):
+    """Menu load after a Spoolman-first swap: the bridge writes name, color and UUID."""
     w = world
     b = w.spools["B"]
     records = await w.poll()
