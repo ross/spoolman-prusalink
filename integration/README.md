@@ -86,6 +86,13 @@ current and that the scenario rows name their tests.
 | W11 | `test_writes.py::test_w11_unconfirmed_swap_writes_the_assigned_spool` | Unload with no Spoolman change, then a menu load: the printer gets A written back. |
 | W12 | `test_writes.py::test_w12_staged_spool_waits_for_the_unload` | Write of B due, then C staged: nothing is written until C is unloaded and loaded. |
 | W14 | `test_writes.py::test_w14_spoolman_edit_is_written` | A color edit in Spoolman is written to the printer; a name-only edit isn't. |
+| M1 | `test_spoolman.py::test_m1_spoolman_unreachable` | Spoolman unreachable: polls skip and log once; queued charges go in order when back. |
+| M2 | `test_spoolman.py::test_m2_rejected_charge_is_dropped` | A charge Spoolman rejects with a 4xx is dropped with an error; later ones go through. |
+| M3 | `test_spoolman.py::test_m3_charge_to_deleted_spool_is_held` | A charge that 404s because the spool was deleted is held for the next spool. |
+| M3 | `test_spoolman.py::test_m3_deleted_active_spool_holds_usage` | Active spool deleted: its usage is held, then charged to the next spool made active. |
+| M3a | `test_spoolman.py::test_m3a_archived_active_spool` | Active spool archived: still charged and flagged until the next unload. |
+| M4 | `test_spoolman.py::test_m4_location_renamed` | Location renamed: the spool stays active until the next unload, then usage is held. |
+| M6 | `test_spoolman.py::test_m6_flags_by_others_left_alone` | A flag someone else wrote stays while the bridge sets and clears its own elsewhere. |
 | T1 | `test_tools.py::test_t1_tool_changes_charge_each_tool` | Print with tool changes: each tool's spool gets its own use and its pickup purges. |
 | T2 | `test_tools.py::test_t2_tool_change_is_not_an_unload` | A tool change isn't an unload: no swap opens on either tool, and nothing is flagged. |
 | T3 | `test_tools.py::test_t3_swap_on_one_tool_leaves_the_other` | Swap on tool 1 between prints: tool 1's spool changes, tool 0's state is untouched. |
@@ -116,6 +123,15 @@ current and that the scenario rows name their tests.
 5. Set the row's Status in `docs/scenarios.md` to end to end, naming the test,
    and run `python -m integration.table --write`.
    `pytest tests/test_integration_table.py` checks all three.
+
+To make Spoolman fail, use `w.spoolman_faults`, a transport in front of the
+bridge's Spoolman client (`integration/faults.py`). It passes requests through
+until the test asks for a fault: `cut()` makes every request fail to connect,
+`answer("PUT", "/api/v1/spool/7/use", 503)` replies 503 to the next matching
+request without sending it (`times=None` keeps replying), and `restore()` ends
+both. Its `requests` list says what each of the bridge's requests got. The same
+module has the Spoolman edits the `world` helpers don't cover: deleting and
+archiving a spool, writing a text field, and renaming a location.
 
 Poll where a real bridge would have polled. Some behaviour depends on what two
 polls in a row see: the bridge counts a print as started only when the counter

@@ -385,6 +385,16 @@ class World:
         m = self.tool_at(tool).material
         return (None, None, None) if m is None else (m.name, m.color, m.instance_uuid)
 
+    @property
+    def spoolman_faults(self):
+        """The bridge's Spoolman transport, which a test can cut or make refuse requests.
+
+        Installed on first use; see `integration/faults.py`.
+        """
+        from integration.faults import install
+
+        return install(self.bridge)
+
 
 @pytest.fixture
 def world_config(request: pytest.FixtureRequest) -> dict:
