@@ -106,9 +106,13 @@ current and that the scenario rows name their tests.
 | W4 | `test_writes.py::test_w4_print_soon_after_loading_runs_first` | With sync_delay, a print started right after a menu load runs before the write. |
 | W5 | `test_writes.py::test_w5_write_that_does_not_take_is_flagged` | Two sync jobs dropped in a print's start blip: the spool is flagged, no third job. |
 | W6 | `test_writes.py::test_w6_sync_job_is_not_a_print_start` | The bridge's sync job, polled while it runs, isn't taken for a print start. |
+| W7 | `test_writes.py::test_w7_non_preset_without_temperatures_is_flagged` | Material that isn't a preset, no temperatures: flagged, not written until they're set. |
+| W8 | `test_writes.py::test_w8_pps_is_flagged_until_loaded_from_the_menu` | PPS isn't written but flagged; loaded from the printer's menu, the flag clears. |
 | W9 | `test_writes.py::test_w9_drift_is_flagged_unless_sync_drift` | Printer changed with no unload: flagged and left alone, or rewritten with sync_drift. |
+| W10 | `test_writes.py::test_w10_model_the_bridge_cannot_write` | Unknown, unsupported or mismatched model: logged once, spool flagged, still charged. |
 | W11 | `test_writes.py::test_w11_unconfirmed_swap_writes_the_assigned_spool` | Unload with no Spoolman change, then a menu load: the printer gets A written back. |
 | W12 | `test_writes.py::test_w12_staged_spool_waits_for_the_unload` | Write of B due, then C staged: nothing is written until C is unloaded and loaded. |
+| W13 | `test_writes.py::test_w13_sync_job_homes_an_unhomed_printer` | Unhomed after a boot: the sync job homes with G28 O before it writes and ends. |
 | W14 | `test_writes.py::test_w14_spoolman_edit_is_written` | A color edit in Spoolman is written to the printer; a name-only edit isn't. |
 | M1 | `test_spoolman.py::test_m1_spoolman_unreachable` | Spoolman unreachable: polls skip and log once; queued charges go in order when back. |
 | M2 | `test_spoolman.py::test_m2_rejected_charge_is_dropped` | A charge Spoolman rejects with a 4xx is dropped with an error; later ones go through. |
@@ -116,7 +120,10 @@ current and that the scenario rows name their tests.
 | M3 | `test_spoolman.py::test_m3_deleted_active_spool_holds_usage` | Active spool deleted: its usage is held, then charged to the next spool made active. |
 | M3a | `test_spoolman.py::test_m3a_archived_active_spool` | Active spool archived: still charged and flagged until the next unload. |
 | M4 | `test_spoolman.py::test_m4_location_renamed` | Location renamed: the spool stays active until the next unload, then usage is held. |
+| M5 | `test_spoolman.py::test_m5_spool_used_past_empty` | Spool used past empty: still charged, a negative weight logged once, no flag. |
+| M5a | `test_spoolman.py::test_m5a_runout_with_plenty_left_is_flagged` | Runout in a started print with over 5% left flags the spool; a weight edit clears it. |
 | M6 | `test_spoolman.py::test_m6_flags_by_others_left_alone` | A flag someone else wrote stays while the bridge sets and clears its own elsewhere. |
+| M7 | `test_spoolman.py::test_m7_density_edit_applies_to_later_charges` | Density edited in Spoolman: later charges use the new one, earlier aren't recalculated. |
 | X1 | `test_printers.py::test_x1_spoolman_first_across_printers` | Spool moved LA to LB first: A charges it until its unload, B stages it until its own. |
 | X2 | `test_printers.py::test_x2_filament_first_across_printers` | Unload at A, load at B, then move the spool: B's swap confirms, A's stays open and holds. |
 | X3 | `test_printers.py::test_x3_spool_moved_but_never_loaded_elsewhere` | Spool moved LA to LB with no unload: A charges it, B stages it and flags it at a print. |

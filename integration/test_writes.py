@@ -13,6 +13,7 @@ from integration.conftest import (
     PETG,
     PLA,
     World,
+    count,
     events,
     logged,
     print_spec,
@@ -48,11 +49,6 @@ async def wrote_b(w: World) -> None:
 
 def gcode(w: World) -> list[str]:
     return [e.text for e in w.sim.events if e.kind == "gcode"]
-
-
-def count(caplog: pytest.LogCaptureFixture, level: int, text: str) -> int:
-    """How many times the bridge logged `text` at `level`."""
-    return sum(1 for r in caplog.records if r.levelno == level and text in r.getMessage())
 
 
 async def test_w1_write_after_swap(world: World):

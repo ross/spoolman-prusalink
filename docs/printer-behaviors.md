@@ -330,11 +330,8 @@ does and how often it happens, as the old live-check ranks had it:
    file cover M3, M3a, M4 and M6.
 5. **Several printers**: X1 to X16 with a two-printer `world`. Done: all
    but X12 (removed) and X15 (a config check, unit-tested).
-6. **`sync_delay` above 0**: W4's test runs it end to end; the rest of the
-   rows that mention it are unit-tested only so far.
+6. **`sync_delay` above 0**: W4. Done: W4's test runs it end to end, and no
+   other row depends on it.
 7. **Counters and boots**: C1 to C9, B1 to B6. Done, except B3, a kill
    between a charge and the save, which nothing outside the bridge can
    produce; it stays a known limit.
-
-Findings from the first live run of the suite that belong in scenario rows:
-M5a needs the print to have started (two polls with the counter moving).
