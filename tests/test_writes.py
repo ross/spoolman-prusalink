@@ -323,6 +323,21 @@ async def test_rejected_charge_is_dropped_not_blocking(tmp_path):
     await bridge.aclose()
 
 
+async def test_flush_counts_queued_charges_by_outcome(tmp_path, caplog):
+    bridge, fake, printer = make(tmp_path, [spool(19)])
+    caplog.set_level("INFO")
+    await bridge.poll()
+    printer.extruded = 1500
+    fake.fail_use = [503]
+    await bridge.poll()  # The charge stays queued.
+    printer.extruded = 1600
+    fake.fail_use = [422]
+    await bridge.poll()  # The queued charge is dropped, then the new one goes.
+    assert fake.used == {19: [100.0]}
+    assert caplog.text.count("sent 0 queued charge(s); dropped 1") == 1
+    await bridge.aclose()
+
+
 async def test_confirmed_swap_charges_new_before_refunding_old(tmp_path):
     bridge, fake, printer = make(tmp_path, [spool(19)])
     await bridge.poll()
@@ -1736,6 +1751,7 @@ async def test_404_in_flush_holds_the_charge(tmp_path, caplog):
     assert [(r["spool_id"], r["failed"]) for r in held] == [(19, "404")]
     assert caplog.text.count("spool 19 was deleted in Spoolman") == 1
     assert "dropping it" not in caplog.text
+    assert caplog.text.count("sent 0 queued charge(s); held 1 for the next spool") == 1
 
     fake.spools[21] = spool(21)
     await bridge.poll()

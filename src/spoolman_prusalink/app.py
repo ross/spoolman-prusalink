@@ -131,6 +131,16 @@ WEIGHT_EPSILON = 0.01
 MAX_SYNC_ATTEMPTS = 2
 
 
+def _outbox_outcome(sent: int, held: int, dropped: int) -> str:
+    """Word what a flush did with the queued charges, e.g. "sent 2 queued charge(s)"."""
+    parts = [f"sent {sent} queued charge(s)"]
+    if held:
+        parts.append(f"held {held} for the next spool")
+    if dropped:
+        parts.append(f"dropped {dropped}")
+    return "; ".join(parts)
+
+
 def _now() -> str:
     return datetime.now(UTC).isoformat(timespec="seconds")
 
@@ -1164,13 +1174,14 @@ class Bridge:
             )
             return True
         self._problems.clear("dry-run outbox")
-        sent = 0
+        sent = held = dropped = 0
         while outbox:
             rec = outbox[0]
             try:
                 used = await self.spoolman.use_length(rec["spool_id"], rec["use_length"])
                 rec = {**rec, "applied": _now()}
                 self._follow_runout_charge(rec, used)
+                sent += 1
             except httpx.HTTPStatusError as e:
                 code = e.response.status_code
                 if code >= 500:
@@ -1192,6 +1203,7 @@ class Bridge:
                     and printer._hold_deleted(rec.get("tool", -1), rec["spool_id"], mm)
                 ):
                     rec = {**rec, "failed": f"{code}", "held": True}
+                    held += 1
                 else:
                     log.error(
                         "Spoolman rejected a %+g mm charge to spool %d (%d %s); dropping it",
@@ -1201,6 +1213,7 @@ class Bridge:
                         e.response.text[:200],
                     )
                     rec = {**rec, "failed": f"{code}"}
+                    dropped += 1
             except httpx.HTTPError as e:
                 self._problems.fail(
                     "charge",
@@ -1212,10 +1225,9 @@ class Bridge:
                 )
                 return False
             outbox.pop(0)
-            sent += 1
             self._save()
             append_ledger(self.config.ledger_file, [rec])
-        self._problems.clear("charge", "sent %d queued charge(s)", sent)
+        self._problems.clear("charge", "%s", _outbox_outcome(sent, held, dropped))
         return True
 
     async def evict(self, spools: list[Spool]) -> None:
