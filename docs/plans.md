@@ -380,8 +380,16 @@ These aren't simulator work, but the simulator makes each one testable.
   204 then, and the bridge's job-name cache keeps the last ID; nothing
   depends on it today.
 - On INDX and XL there are no UUIDs, so S12 and UUID drift can't happen, and
-  the per-tool write has name and color only. Drift and sync comparisons
-  need a per-model "has UUIDs" rule, which `PrinterModel.uuids` already is.
+  the per-tool write has name, color and temperatures only. Drift and sync
+  comparisons need a per-model "has UUIDs" rule, which `PrinterModel.uuids`
+  already is.
+- To investigate before the per-tool write: some firmware presets differ by
+  model. On INDX the PC preheat is 230 and the FLEX preheat 170
+  (`src/common/filament_presets.cpp` in the firmware), while
+  `printer_sync.PRESETS` holds the single-tool values, 250 and 210. The
+  bridge would write the wrong preheat and report preheat drift on every
+  menu load of those presets. Check every preset value per model, and the
+  simulator's `PRESET_TEMPERATURES`, which has the same values.
 
 ## Running it
 
