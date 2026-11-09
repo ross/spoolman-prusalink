@@ -20,6 +20,8 @@ import pytest
 from simulator import trace
 from simulator.model import Material, Power, PrintSpec, Segment, SimPrinter, Simulation, State
 from simulator.tests.util import make
+from spoolman_prusalink import printer_sync
+from spoolman_prusalink.models import Spool
 
 TRACES = Path(__file__).parent / "traces"
 STEP = 0.1
@@ -28,10 +30,17 @@ PETG = Material("PETG", None, None)
 TAGGED = Material(
     "PETG", "#1f6fb2", "7b3d2d5e-1f7a-4d8c-9a1e-2c3b4d5e6f70", nozzle=230, preheat=170, bed=85
 )
-# What the bridge writes for TAGGED with no temperatures in Spoolman: the PETG preset's.
-SYNC_JOB = (
-    'M862.3 P "COREONEL"\nG28 O\nM865 X R N"PETG" T230 B85 P170 C30 D15 E45 O"#1f6fb2" L0\n'
-    f'M865.1 I0 C"{TAGGED.instance_uuid}"\n'
+# The bridge's job for TAGGED's spool with no temperatures in Spoolman, which writes the
+# PETG preset's, built by the bridge so a change to its job shows up here.
+SYNC_JOB = printer_sync.build_job(
+    printer_sync.COREONEL_PREAMBLE,
+    [
+        printer_sync.ToolWrite(
+            0,
+            Spool(2, "Core One L+", "PETG", "PETG", TAGGED.color[1:], 1.75, 1.27),
+            TAGGED.instance_uuid,
+        )
+    ],
 )
 
 # Timing that keeps a replay to a few hundred ticks while every phase still lasts several
