@@ -62,8 +62,10 @@ Each test is named after its row in `docs/scenarios.md`.
 
 ## Add a scenario
 
-1. Find the row in `docs/scenarios.md`, and the "Seen live" notes in
-   `docs/live-checks.md` if it has any. They say what the bridge should do.
+1. Find the row in `docs/scenarios.md`. It says what the bridge should do.
+   The printer behaviors the scenario leans on are rows in
+   `docs/printer-behaviors.md`; if one of them has no trace yet, the test
+   stands on the firmware source until it does.
 2. Add `test_<row id>_<short name>` to the file for its group, taking the
    `world` fixture. `world` holds the simulator (`sim`, `printer`), the bridge
    and its config, and the Spoolman helper with this test's spool IDs.

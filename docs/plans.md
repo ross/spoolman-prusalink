@@ -31,6 +31,12 @@ per test, with no wall-clock timing. The simulator gained `POST
 /api/advance` for scripts that want the same control from outside. See
 [integration/README.md](../integration/README.md).
 
+The "Firmware behavior to copy" table below was the first list of what the
+simulator copies. [printer-behaviors.md](printer-behaviors.md) has replaced
+it as the record: one row per behavior, with its source, its trace from the
+printer, and the replay test that checks the simulator against it. The table
+here is kept as the plan it was.
+
 ## Goal and non-goals
 
 The goal is to reproduce every printer-side event in

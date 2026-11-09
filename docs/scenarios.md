@@ -7,10 +7,15 @@ serves two of them. Multi-tool (INDX, XL) is out of scope.
 
 Status values:
 
-- **Seen live**: the behavior has been observed on the Core One L+.
 - **End to end**: a test in `integration/` runs the bridge, the simulator and
-  a real Spoolman through it, in lockstep. Named after the "Seen live" or
-  "Tested" status where both apply.
+  a real Spoolman through it, in lockstep. This is the status every row is
+  heading for: it runs on every CI turn, and the simulator's printer
+  behavior is checked against the printer itself by
+  [printer-behaviors.md](printer-behaviors.md). Named after the "Seen live"
+  or "Tested" status where both apply.
+- **Seen live**: the behavior has been observed on the Core One L+. Kept as
+  history on rows that have it. New live work goes into the printer
+  behaviors, not into scenario rows.
 - **Tested**: a unit test covers it, but it hasn't been seen live.
 - **Implemented**: code handles it, with no test.
 - **Decided**: the behavior is settled. Unless the row also says
@@ -193,7 +198,7 @@ location `LA`; printer B has location `LB`. Each row says what happens from
 both sides. Most are the single-printer rows above seen from two printers at
 once, and the row names which. Everything here is tested with two fake
 printers against one fake Spoolman; none of it has been seen live, because
-there's no second printer yet (see session 5 in `live-checks.md`).
+there's no second printer yet (see "A second printer" in `live-checks.md`).
 
 | # | Scenario | What the bridge does | Status |
 | --- | --- | --- | --- |
@@ -228,6 +233,7 @@ configured. Each of these needs fixing in the deployment, not the code.
 | `state.json` lost, for example with no persistent volume | The bridge starts again from a baseline (B1) and forgets swaps in progress (B4). |
 | A wrong location name in the config | The location looks empty, so usage is held as unassigned. |
 | The bridge pointed at the wrong printer or Spoolman | Charges go to the wrong place. |
+| A sync job uploaded while the user is on the print preview screen | The preview reads `IDLE` with no job, so the bridge sees an idle printer, and the firmware replaces the pending print with the sync job (F15 in [printer-behaviors.md](printer-behaviors.md)). The user starts the print again afterwards. `sync_delay` narrows the window; the API can't show the preview, so nothing closes it. Accepted 2026-11-08. |
 
 ## Questions
 

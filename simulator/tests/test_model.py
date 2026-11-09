@@ -420,9 +420,15 @@ def test_power_loss_resume_keeps_the_job():
     p.start_print(one_segment(100, preheat_s=0))
     sim.tick(0.8 + 2)
     p.reboot(keep_job=True)
-    assert p.job.id == 1 and p.state is State.PRINTING and tool0(p).extruded == 0
+    assert p.job.id == 1 and p.state is State.BUSY and tool0(p).extruded == 0
+    sim.tick(1)  # halfway through the recovery the nozzle clean purges
+    assert p.state is State.BUSY and tool0(p).extruded == 25
+    sim.tick(1)  # recovered: the head unparks
+    assert p.state is State.PAUSED and tool0(p).extruded == 25
+    sim.tick(1)  # unparked: the print goes on
+    assert p.state is State.PRINTING and tool0(p).extruded == 25
     sim.tick(1)
-    assert tool0(p).extruded > 0
+    assert tool0(p).extruded > 25
     p.reboot()
     assert p.job is None and p.state is State.IDLE and p.job_counter == 1
 
@@ -891,3 +897,70 @@ def test_home_sets_the_flag_only_when_idle():
     assert p.homed  # a print starts by homing
     with pytest.raises(Busy):
         p.home()
+
+
+def test_power_loss_with_a_cold_bed_waits_for_the_user():
+    sim, p = make()
+    p.start_print(one_segment(100, preheat_s=0))
+    sim.tick(0.8 + 2)
+    p.set_power("off")
+    sim.tick(600)
+    p.set_power("on", resume=True, cold_bed=True)
+    assert p.job.id == 1 and p.state is State.BUSY
+    sim.tick(2)
+    assert p.state is State.ATTENTION and p.job_json()["state"] == "PAUSED"
+    assert tool0(p).extruded == 0  # no nozzle clean before the user answers
+    sim.tick(60)
+    assert p.state is State.ATTENTION  # nothing happens until the user resumes
+    p.resume()
+    assert p.state is State.BUSY
+    sim.tick(2)
+    assert p.state is State.PAUSED and tool0(p).extruded == 25
+    sim.tick(1)
+    assert p.state is State.PRINTING
+
+
+def test_cancel_during_the_power_panic_recovery_cleans_nothing():
+    sim, p = make()
+    p.start_print(one_segment(100, preheat_s=0))
+    sim.tick(0.8 + 2)
+    p.reboot(keep_job=True)
+    assert p.state is State.BUSY and tool0(p).extruded == 0
+    p.cancel()
+    sim.tick(5)
+    assert p.job is None and p.state is State.STOPPED and tool0(p).extruded == 0
+
+
+def test_power_loss_resume_skips_the_idle_sensor_clear():
+    sim, p = make()
+    p.start_print(one_segment(100, preheat_s=0))
+    sim.tick(0.8 + 2)
+    p.set_power("off")
+    p.unload(0)  # pulled out by hand while off
+    p.set_power("on", resume=True)
+    assert p.job.id == 1 and p.state is State.BUSY
+    assert tool0(p).unload_count == 0 and tool0(p).material == PLA
+    sim.tick(2 + 1)  # recovered and unparked: the empty tool stops the print
+    assert p.state is State.ATTENTION and tool0(p).extruded == 0
+
+
+def test_power_loss_while_paused_comes_back_paused():
+    sim, p = make()
+    p.start_print(one_segment(100, preheat_s=0))
+    sim.tick(0.8 + 2)
+    p.pause()
+    p.reboot(keep_job=True)
+    assert p.job.id == 1 and p.state is State.PAUSED and tool0(p).extruded == 0
+    p.resume()
+    assert p.state is State.PRINTING
+
+
+def test_upload_during_the_start_blip_is_dropped():
+    sim, p = make()
+    p.start_print(one_segment(100, preheat_s=0))
+    sim.tick(0.5)
+    assert p.job.phase is JobPhase.BLIP
+    p.upload("spoolman.gcode", JOB, print_after=True, overwrite=True)  # no Busy
+    assert p.job.id == 1 and p.job.kind == "user" and "spoolman.gcode" in p.files
+    sim.tick(0.3 + 1)
+    assert p.state is State.PRINTING and p.job.kind == "user"
