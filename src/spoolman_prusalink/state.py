@@ -46,10 +46,11 @@ class PrinterState:
     # the printer can't be read, so an outage doesn't clear its flags in Spoolman.
     flags: dict[int, list[str]] = field(default_factory=dict)
     # By tool: the instance UUID the printer last reported while the active spool was
-    # certain, that spool, and whether the tool unloaded since. Kept so a runout reload
-    # of one spool's tag isn't taken for the next spool's after a restart. A state file
-    # from before the unload was saved loads as not unloaded.
-    seen_uuids: dict[int, tuple[str, int, bool]] = field(default_factory=dict)
+    # certain, that spool (None once an unload outside a print makes it unknown), and
+    # whether the tool had a runout since. Kept so a runout reload of one spool's tag
+    # isn't taken for the next spool's after a restart. A state file from before the
+    # runout was saved loads as no runout.
+    seen_uuids: dict[int, tuple[str, int | None, bool]] = field(default_factory=dict)
 
     def to_json(self) -> dict:
         data = {
@@ -66,7 +67,7 @@ class PrinterState:
             tools={int(k): ToolState.from_json(v) for k, v in data.get("tools", {}).items()},
             flags={int(k): [str(t) for t in v] for k, v in data.get("flags", {}).items()},
             seen_uuids={
-                int(k): (str(v[0]), int(v[1]), len(v) > 2 and bool(v[2]))
+                int(k): (str(v[0]), None if v[1] is None else int(v[1]), len(v) > 2 and bool(v[2]))
                 for k, v in data.get("seen_uuids", {}).items()
             },
         )

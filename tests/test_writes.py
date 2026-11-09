@@ -2421,6 +2421,14 @@ def tagged(uuid=TAG_K):
     }
 
 
+async def start_print(bridge, printer):
+    """Start a print the bridge sees start: a new job, then extrusion in it."""
+    printer.job = 7
+    await bridge.poll()
+    printer.extruded += 100
+    await bridge.poll()
+
+
 def stored_uuid(fake, spool_id):
     raw = fake.spools[spool_id]["extra"].get("instance_uuid")
     return json.loads(raw) if raw else None
@@ -2457,9 +2465,11 @@ async def test_old_spools_tag_after_a_restart_is_not_adopted(tmp_path):
     await bridge.poll()
     assert stored_uuid(fake, 19) is None
 
-    # Spoolman first: 20 in, 19 out at the unload. The tool reads empty.
+    # Spoolman first: 20 in, then a runout mid-print, so 19 goes out at the unload. The
+    # tool reads empty until the reload.
     fake.spools[20] = spool(20)
     await bridge.poll()
+    await start_print(bridge, printer)
     printer.unloads, printer.at_unload, printer.material = 1, printer.extruded, None
     await bridge.poll()
     assert bridge.printers[0].tools[0].active == 20
@@ -2474,6 +2484,8 @@ async def test_old_spools_tag_after_a_restart_is_not_adopted(tmp_path):
     )
     await restarted.poll()
     printer.material = tagged()
+    await restarted.poll()
+    printer.job = None  # The print ends; the write runs once the printer is idle.
     await restarted.poll()
     await restarted.poll()
     minted = stored_uuid(fake, 20)
@@ -2654,10 +2666,53 @@ async def test_runout_leftover_is_written_over_with_uuids_off(tmp_path, cfg):
     await bridge.poll()  # baseline: 19's tag, seen with 19
     fake.spools[20] = spool_x(20)
     await bridge.poll()
-    printer.unloads, printer.at_unload = 1, printer.extruded  # the reload keeps 19's tag
+    await start_print(bridge, printer)
+    printer.unloads, printer.at_unload = 1, printer.extruded  # runout; the reload keeps it
+    await bridge.poll()
+    printer.job = None
     for _ in range(2):
         await bridge.poll()
     assert bridge.printers[0].tools[0].active == 20
     assert len(jobs(printer)) == 1 and "M865.1" not in jobs(printer)[0]
     assert "material_uuid" not in printer.material
+    await bridge.aclose()
+
+
+async def test_idle_reload_of_the_tag_after_a_spoolman_first_swap_writes_nothing(tmp_path):
+    """20's tag is loaded while Spoolman has 19. S1: 20 moved in, unloaded, reloaded from
+    its tag. An unload outside a print never keeps the type, so it's not a leftover."""
+    bridge, fake, printer = make(tmp_path, [spool(19)], uuid_field="instance_uuid")
+    printer.material = other_tag()
+    await bridge.poll()  # baseline: the tag is seen with 19
+    fake.spools[20] = spool(20)
+    await bridge.poll()
+    printer.unloads, printer.at_unload, printer.material = 1, printer.extruded, None
+    await bridge.poll()
+    assert bridge.printers[0].tools[0].active == 20
+    printer.material = other_tag()
+    for _ in range(3):
+        await bridge.poll()
+    assert jobs(printer) == []
+    assert stored_uuid(fake, 20) is None  # Whose tag it is stays unknown: not adopted.
+    await bridge.aclose()
+
+
+async def test_idle_reload_of_the_tag_then_a_claim_writes_nothing(tmp_path):
+    """20's tag is loaded while Spoolman has 19, unloaded and reloaded with no Spoolman
+    change, then 20 is claimed: not a leftover, so nothing is written."""
+    bridge, fake, printer = make(tmp_path, [spool(19)], uuid_field="instance_uuid")
+    printer.material = other_tag()
+    await bridge.poll()  # baseline: the tag is seen with 19
+    printer.unloads, printer.at_unload, printer.material = 1, printer.extruded, None
+    await bridge.poll()
+    printer.material = other_tag()
+    await bridge.poll()
+    assert bridge.printers[0].tools[0].swap is not None
+    fake.spools[20] = spool(20)
+    fake.spools[20]["extra"].update(CLAIMED)
+    for _ in range(3):
+        await bridge.poll()
+    assert bridge.printers[0].tools[0].active == 20
+    assert jobs(printer) == []
+    assert stored_uuid(fake, 20) is None
     await bridge.aclose()

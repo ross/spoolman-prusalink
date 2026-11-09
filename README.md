@@ -353,7 +353,9 @@ until the spool is loaded from it again. A spool with no instance UUID in
 Spoolman still takes the tag's, which writes only to Spoolman. One exception:
 a runout reload keeps the old spool's tag data while a different spool may be
 loaded. When the printer shows the UUID it showed with another spool, and the
-tool has unloaded since, the bridge writes the loaded spool over it. This
+tool has unloaded during a print since, the bridge writes the loaded spool over
+it. An unload outside a print always ends with a fresh type, so a tag loaded
+after one is left alone. This
 holds whatever the UUID settings: with `uuid_field = ""` or `uuids = false`,
 the bridge still leaves a tagged tool alone.
 

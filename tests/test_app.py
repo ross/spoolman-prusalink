@@ -846,7 +846,7 @@ async def test_tag_uuid_seen_with_another_spool_is_not_adopted(printer):
         TAG,
     )
     # A runout, a swap to 7 and a reload: the printer still shows 6's tag.
-    printer._seen_unload(0)
+    printer._seen_unload(0, runout=True)
     assert printer._tag_uuid(0, SETTLED, tag_material(), new, [new]) is None
     # Still not on later polls.
     assert printer._tag_uuid(0, SETTLED, tag_material(), new, [new]) is None
@@ -960,7 +960,7 @@ async def test_runout_leftover_is_not_a_loaded_tag(printer):
     printer._seen_uuid[0] = (TAG, 6, True, False)
     # With no unload since 6, a claim or correction made 7 active: the tag is 7's.
     assert printer._loaded_tag(0, tag_material(), spool(7)) is True
-    printer._seen_unload(0)
+    printer._seen_unload(0, runout=True)
     assert printer._loaded_tag(0, tag_material(TAG.upper()), spool(7)) is False
     # Spoolman gives 7 the tag's UUID: its own tag, never a leftover.
     assert printer._loaded_tag(0, tag_material(), spool(7, TAG)) is True
@@ -1000,3 +1000,31 @@ def test_seen_uuids_keep_the_unload_and_load_old_files_as_not_unloaded():
     assert PrinterState.from_json(kept.to_json()).seen_uuids == {0: (TAG, 7, True)}
     old = {"tools": {}, "flags": {}, "seen_uuids": {"0": [TAG, 7]}}
     assert PrinterState.from_json(old).seen_uuids == {0: (TAG, 7, False)}
+
+
+async def test_unload_outside_a_print_makes_the_tags_spool_unknown(printer):
+    """Only a runout reload keeps a type: after any other unload the tag isn't a leftover,
+    and it isn't trusted either, since the spool it was seen with may have been wrong."""
+    printer._seen_uuid[0] = (TAG, 6, True, False)
+    printer._seen_unload(0, runout=False)
+    assert printer._seen_uuid[0] == (TAG, None, False, False)
+    assert printer.bridge.state.printers[printer.name].seen_uuids[0] == (TAG, None, False)
+    assert printer._loaded_tag(0, tag_material(), spool(7)) is True
+    printer._uuid_gap.add(0)  # The tool read empty in between.
+    assert printer._tag_uuid(0, SETTLED, tag_material(), spool(7), [spool(7)]) is None
+    assert printer._seen_uuid[0] == (TAG, 7, False, False)
+    # A runout after that doesn't make the unknown spool's tag a leftover.
+    printer._seen_uuid[0] = (TAG, None, False, False)
+    printer._seen_unload(0, runout=True)
+    assert printer._loaded_tag(0, tag_material(), spool(7)) is True
+    # A different tag after the unload appears as usual.
+    other = "1f0e7d2a-3f6c-4d7b-9a43-6c1f0e7d2a11"
+    assert printer._tag_uuid(0, SETTLED, tag_material(other), spool(7), [spool(7)]) == (
+        "adopt",
+        other,
+    )
+
+
+def test_seen_uuids_keep_an_unknown_spool():
+    kept = PrinterState(seen_uuids={0: (TAG, None, False)})
+    assert PrinterState.from_json(kept.to_json()).seen_uuids == {0: (TAG, None, False)}
