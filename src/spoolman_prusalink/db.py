@@ -381,6 +381,8 @@ def _insert_ledger(conn: sqlite3.Connection, ledger: Sequence[dict]) -> None:
             else:
                 columns.append(None)
         rows.append((kind, *columns, _canonical(extra)))
+    if not rows:
+        return
     names = ("kind", *_LEDGER_COLUMNS, "extra")
     conn.executemany(
         f"INSERT INTO ledger ({', '.join(names)}) VALUES ({', '.join('?' * len(names))})", rows

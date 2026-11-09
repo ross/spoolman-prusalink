@@ -328,21 +328,34 @@ async def test_queued_charge_survives_restart(tmp_path):
 
 
 class FailingCommit:
-    """A database connection whose commits fail while their transaction writes the ledger."""
+    """A database connection whose commits fail while their transaction writes ledger rows.
+
+    `failed` holds the failed transaction's writes, as (statement start, row count).
+    """
 
     def __init__(self, conn):
-        self.conn, self.ledger = conn, False
+        self.conn, self.writes, self.failed = conn, [], None
 
     def execute(self, sql, *args):
         if sql == "BEGIN IMMEDIATE":
-            self.ledger = False
-        elif sql == "COMMIT" and self.ledger:
+            self.writes = []
+        elif sql == "COMMIT" and self.wrote("INSERT INTO ledger"):
+            self.failed = self.writes
             raise sqlite3.OperationalError("disk I/O error")
+        elif sql != "ROLLBACK":
+            self.writes.append((sql, 1))
         return self.conn.execute(sql, *args)
 
-    def executemany(self, sql, *args):
-        self.ledger |= sql.startswith("INSERT INTO ledger")
-        return self.conn.executemany(sql, *args)
+    def executemany(self, sql, rows):
+        rows = list(rows)
+        self.writes.append((sql, len(rows)))
+        return self.conn.executemany(sql, rows)
+
+    def wrote(self, start, writes=None):
+        """How many rows a statement starting with `start` wrote."""
+        return sum(
+            n for sql, n in (self.writes if writes is None else writes) if sql.startswith(start)
+        )
 
 
 async def test_a_failed_save_in_process_saves_nothing(tmp_path):
@@ -356,6 +369,11 @@ async def test_a_failed_save_in_process_saves_nothing(tmp_path):
     printer.unloads, printer.at_unload, printer.extruded = 1, 1400, 1500
     with pytest.raises(sqlite3.OperationalError):
         await bridge.poll()
+    # One transaction held the events, the queued charges and the tool's counters.
+    failed = bridge.db._conn.failed
+    assert bridge.db._conn.wrote("INSERT INTO ledger", failed) == 2
+    assert bridge.db._conn.wrote("INSERT INTO outbox", failed) == 2
+    assert bridge.db._conn.wrote("INSERT OR REPLACE INTO tools", failed) == 1
     assert read_state(db) == state
     assert ledger(tmp_path) == records
     assert fake.used == {}
@@ -388,6 +406,10 @@ async def test_a_failed_save_in_flush_keeps_the_charge_queued(tmp_path):
     bridge.db._conn = FailingCommit(conn)
     with pytest.raises(sqlite3.OperationalError):
         await bridge.flush()
+    # One transaction held the record and the charge leaving the outbox.
+    failed = bridge.db._conn.failed
+    assert bridge.db._conn.wrote("INSERT INTO ledger", failed) == 1
+    assert bridge.db._conn.wrote("DELETE FROM outbox", failed) == 1
     assert fake.used == {19: [500.0]}  # Spoolman took it,
     assert read_state(db) == state  # but it's still queued,
     assert ledger(tmp_path) == records  # with no record of it.
