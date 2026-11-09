@@ -325,8 +325,9 @@ does and how often it happens, as the old live-check ranks had it:
    write (T6) stays refused until the bridge supports multi-tool printers;
    it's `M865 L<n>` per tool with no `M865.1`, and gets its tests then.
 4. **Spoolman faults**: M1, M2 and X9 need a Spoolman that fails on demand.
-   Done: a fault transport in front of the bridge's Spoolman client
-   (`integration/faults.py`) covers M1 to M4 and M6, and X9.
+   Done: the fault transport in `integration/faults.py` covers M1, M2 and
+   X9 and holds back a charge for one M3 test; Spoolman edits in the same
+   file cover M3, M3a, M4 and M6.
 5. **Several printers**: X1 to X16 with a two-printer `world`. Done: all
    but X12 (removed) and X15 (a config check, unit-tested).
 6. **`sync_delay` above 0**: W4's test runs it end to end; the rest of the
