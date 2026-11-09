@@ -80,6 +80,11 @@ the same transaction:
   state in one transaction per charge.
 - Dry run writes ledger rows only, as today.
 
+Sending a charge stays at-least-once. If the bridge crashes after Spoolman
+accepts a charge but before the transaction commits, the outbox row
+survives and the charge is sent again at restart. Today's code has the same
+window.
+
 Settings: WAL journal mode with `synchronous=FULL`. Writes are rare, so the
 cost of a sync per commit doesn't matter, and these are charge records. WAL
 also lets the `sqlite3` CLI read the database while the bridge runs.
@@ -88,11 +93,13 @@ also lets the `sqlite3` CLI read the database while the bridge runs.
 
 At startup the bridge takes `fcntl.flock(LOCK_EX | LOCK_NB)` on
 `bridge.db.lock`, next to the database, and holds it until exit. If the lock
-is taken, it refuses to start and names the file. The lock is a separate
-file, not the database: SQLite's own locks are POSIX locks, which the
-process loses when it closes any descriptor on the database file, and
-`locking_mode=EXCLUSIVE` would also lock out readers such as the `sqlite3`
-CLI.
+is taken, it refuses to start and names the file. SQLite can't do this on
+its own: it locks only for the length of a transaction, so two bridges on
+one WAL database both write without an error. `locking_mode=EXCLUSIVE` would
+hold the lock, but it also locks out readers such as the `sqlite3` CLI.
+
+Open the database only through `sqlite3`. Closing any other descriptor on
+the file, such as `open(db_file).close()`, drops SQLite's POSIX locks.
 
 ### Config
 
@@ -115,19 +122,22 @@ hours per tool, not with printers or tools that sit idle.
 
 The 185 KB a day seen on the test deployment is about 600 JSONL records, or
 about 5 hours of printing. A JSONL charge record is about 300 bytes. In
-SQLite, with the keys as columns, expect 120 to 150 bytes per row, plus
-indexes. Estimates per tool that prints:
+SQLite the row is about the same size: about 220 bytes in the table, since
+`extra` still repeats its JSON keys and `time` and `applied` are ISO
+strings, plus about 75 bytes for the two indexes. Estimates per tool that
+prints:
 
 | Printing per day | Rows per year | Size per year |
 |---|---|---|
-| 5 hours | 220,000 | 30 to 40 MB |
-| 24 hours | 1,050,000 | 150 to 200 MB |
+| 5 hours | 220,000 | about 65 MB |
+| 24 hours | 1,050,000 | about 305 MB |
 
-A farm of 20 printers printing around the clock is 3 to 4 GB a year. SQLite
+A farm of 20 printers printing around the clock is about 6 GB a year. SQLite
 handles that size, but it's more than many small hosts want. The ledger
 keeps one row per charge for now, at full fidelity. If size becomes a
-problem, there are two fixes: merge consecutive charges to the same spool
-into one row, or prune old rows on a retention setting.
+problem, the fixes are: merge consecutive charges to the same spool into
+one row, prune old rows on a retention setting, or shrink the row with
+integer epoch times and a smaller `extra`.
 
 ## Stack
 
