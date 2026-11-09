@@ -72,10 +72,12 @@ current and that the scenario rows name their tests.
 <!-- table:begin -->
 | Row | Test | What it checks |
 | --- | --- | --- |
+| S1 | `test_swaps.py::test_s1_matching_tag_writes_nothing` | Spoolman first, and the new spool's tag already matches: nothing is written. |
 | S1 | `test_swaps.py::test_s1_spoolman_first_swap` | Spoolman updated before the unload: the swap commits there, the load is the new spool's. |
 | S2 | `test_swaps.py::test_s2_filament_first_swap` | Filament swapped first: the charge is held, then moves once Spoolman is updated. |
+| S3 | `test_swaps.py::test_s3_moved_after_the_write_back` | Spoolman updated after the old spool was written back: confirmed, then B is written. |
 | S3 | `test_swaps.py::test_s3_old_spool_moved_back` | Old spool moved out and back: the swap stays open, or closes as of a print start. |
-| S3 | `test_swaps.py::test_s3_spoolman_changed_during_the_load` | Filament first, Spoolman changed in two steps mid-load: the new spool takes it all. |
+| S3 | `test_swaps.py::test_s3_spoolman_changed_during_the_load` | Filament first, old spool out mid-load, new one in mid-print: the new spool takes it all. |
 | S3 | `test_swaps.py::test_s3_unload_while_the_location_is_empty` | Unload while the swap's location is empty: closed on the old spool, held usage lost. |
 | S4 | `test_swaps.py::test_s4_same_spool_reloaded_then_print` | Same spool unloaded and reloaded, then a print: provisional charge, kept at the unload. |
 | S5 | `test_swaps.py::test_s5_claim_after_printing_on_the_wrong_spool` | Print charged provisionally to the old spool: claiming the loaded one moves it there. |

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import uuid
 
 import pytest
 
@@ -59,6 +60,30 @@ async def test_s1_spoolman_first_swap(world: World):
     assert w.charged(records, "B") == LOAD_MM
     assert w.charged(records, "A") == 0
     assert await w.used("B") > 0
+
+
+async def test_s1_matching_tag_writes_nothing(world: World):
+    """Spoolman first, and the new spool's tag already matches: nothing is written."""
+    w = world
+    b = w.spools["B"]
+    await baseline(w)
+    uuid_b = str(uuid.uuid4())
+    await set_extra_text(w.spoolman.client, b, UUID_FIELD, uuid_b)
+    await w.move("B", w.tool_location)
+    await w.poll()
+    await w.unload()
+    records = await w.poll()
+    assert len(events(records, "swap_committed")) == 1
+
+    records = await w.swap_cycle(
+        poll_every=0.3, source="tag", name=PETG[0], color=PETG[1], uuid=uuid_b
+    )
+    records += await w.poll()
+    w.advance(2.0)
+    records += await w.poll()
+    assert w.charged(records, "B") == LOAD_MM
+    assert w.requests("PUT") == []
+    assert w.material() == (PETG[0], PETG[1], uuid_b)
 
 
 async def test_s2_filament_first_swap(world: World):
@@ -293,7 +318,7 @@ async def unconfirmed_swap(w: World) -> int:
 
 
 async def test_s3_spoolman_changed_during_the_load(world: World):
-    """Filament first, Spoolman changed in two steps mid-load: the new spool takes it all."""
+    """Filament first, old spool out mid-load, new one in mid-print: the new spool takes it all."""
     w = world
     a, b = w.spools["A"], w.spools["B"]
     await baseline(w)
@@ -408,6 +433,8 @@ async def test_s3_unload_while_the_location_is_empty(
     assert on_a == LOAD_MM
     # The bridge writes A back over B's tag, as it does during an unconfirmed swap (W11).
     await w.run_until(lambda: w.printer.job is None)
+    assert len(w.requests("PUT")) == 1
+    assert w.material() == (PLA[0], PLA[1], w.uuids["A"])
 
     await w.move("A", w.shelf)
     await w.poll()
@@ -428,6 +455,33 @@ async def test_s3_unload_while_the_location_is_empty(
     records = await w.poll()
     assert w.charged(records, "C") == w.counter - after == LOAD_MM
     assert w.charged(records, "A") == 0
+
+
+async def test_s3_moved_after_the_write_back(world: World):
+    """Spoolman updated after the old spool was written back: confirmed, then B is written."""
+    w = world
+    a, b = w.spools["A"], w.spools["B"]
+    await baseline(w)
+    unloaded = await unconfirmed_swap(w)
+    await w.swap_cycle(poll_every=0.3, source="tag", name=PETG[0], color=PETG[1])
+    await w.poll()
+    await w.run_until(lambda: w.printer.job is None)
+    assert len(w.requests("PUT")) == 1
+    assert w.material() == (PLA[0], PLA[1], w.uuids["A"])
+
+    # The move after the write-back still confirms the swap, and B is written over A.
+    await w.move("A", w.shelf)
+    await w.move("B", w.tool_location)
+    records = await w.poll()
+    assert [e["message"] for e in events(records, "swap_confirmed")] == [
+        f"swap confirmed: {LOAD_MM} mm moved from spool {a} to {b}"
+    ]
+    assert len(w.requests("PUT")) == 2  # Written in the poll that confirms the swap.
+    await w.run_until(lambda: w.printer.job is None)
+    name, color, uuid = w.material()
+    assert (name, color) == PETG and uuid not in (None, w.uuids["A"])
+    assert charged(w.since(unloaded), b) == LOAD_MM
+    assert charged(w.since(unloaded), a) == 0
 
 
 async def test_s4_same_spool_reloaded_then_print(world: World):
