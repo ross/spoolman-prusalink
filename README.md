@@ -7,7 +7,7 @@ to their tools. It reads the per-tool `extruded` counter from PrusaLink's
 
 The bridge starts in dry-run mode, which logs what it would do and records
 what it would charge in the ledger, but changes nothing in Spoolman, on the
-printer or in `state.json`. With `dry_run = false`, it charges usage to
+printer or in its database. With `dry_run = false`, it charges usage to
 Spoolman, writes flags such as an unconfirmed swap to a text extra field on
 the spool, moves the old spool out of the tool's location when a swap takes
 effect, and writes the loaded spool's name, color, temperatures and UUID to
@@ -74,7 +74,7 @@ Spoolman's location filter, because that filter matches partial text.
 | `SPOOLMAN_PRUSALINK_CONFIG` | Optional path to a TOML config file. `/config/config.toml` is read if it exists. |
 | `LOG_LEVEL` | `INFO` by default. `DEBUG` also logs every HTTP request. |
 
-Keep `/data` on a persistent volume: it holds the state file, which the
+Keep `/data` on a persistent volume: it holds the database, which the
 bridge needs to avoid dropping or repeating charges across restarts. The
 container runs as UID 1000, so a bind-mounted directory must be writable by
 that user. Run only one bridge per printer: two would charge the same usage
@@ -136,21 +136,10 @@ for them to apply to. Each location must name exactly one tool across all
 printers, and two entries can't share a URL: the bridge refuses to start
 otherwise.
 
-The name keys the printer's state in `state.json` and appears in every
+The name keys the printer's state in the database and appears in every
 ledger record, so keep it stable. Renaming a printer leaves the old name's
-state in the file, which the bridge keeps and warns about at each start, and
+state in the database, which the bridge keeps and warns about at each start, and
 starts the new name from a baseline.
-
-A `state.json` from a single-printer bridge loads only while one printer is
-configured: its tools become that printer's. With several printers
-configured, the bridge refuses to start, because it can't tell which printer
-the file belongs to. To migrate, configure the original printer alone under
-the name it's going to keep (`name` in `[printer]`, or a one-entry
-`[[printers]]` list; `default` otherwise), set `dry_run = false`, and let the
-bridge complete one poll with the printer and Spoolman reachable. That poll
-rewrites the file as version 3. Dry run saves nothing, so a dry-run start
-doesn't migrate. Then add the other printers. Ledger lines from before this
-version have no `printer` field.
 
 Every printer is polled each tick, and Spoolman is read once for all of
 them. When no printer can be read, whether it's off, answers with an error,
@@ -169,7 +158,7 @@ spool naming both locations.
 
 The example config is set up for the container. After copying it, edit
 `config.toml`: point `[printer] url` and `[spoolman] url` at your printer and
-Spoolman, and set `state_file` and `ledger_file` to a directory you can write
+Spoolman, and set `db_file` and `ledger_file` to a directory you can write
 to, such as `./data`.
 
 ```sh
@@ -267,8 +256,8 @@ Claiming the spool that's already active confirms it, and nothing moves.
 
 ## Charging and flags
 
-With `dry_run = false`, each charge is saved to `state.json` before it's sent
-to Spoolman, in the same write as the counters it came from, and removed once
+With `dry_run = false`, each charge is saved to the database before it's sent
+to Spoolman, in the same transaction as the counters it came from, and removed once
 Spoolman accepts it. If Spoolman is unreachable or returns a server error,
 charges stay queued and are retried in order on the next poll, including
 after a restart. If Spoolman rejects a charge with a client error (4xx), the
@@ -415,13 +404,19 @@ The bridge's own job doesn't count as a print start: it's recognized by
 
 ## Files
 
-The `/data` volume holds two files:
+The `/data` volume holds these files:
 
-- `state.json` stores each printer's tools, by printer name, with their
-  counters and swap state, the queue of charges not yet accepted by Spoolman,
-  and the spools the bridge has flagged. Keep it across restarts: without it,
-  the bridge takes a new baseline, drops queued charges, and loses track of
-  open swaps. Run only one bridge per state file, printer and Spoolman.
+- `bridge.db` is an SQLite database that stores each printer's tools, by
+  printer name, with their counters and swap state, the queue of charges not
+  yet accepted by Spoolman, and the spools the bridge has flagged. Keep it
+  across restarts: without it, the bridge takes a new baseline, drops queued
+  charges, and loses track of open swaps. SQLite keeps `bridge.db-wal` and
+  `bridge.db-shm` beside it while it's open; keep them with it. You can read
+  it with the `sqlite3` command-line tool while the bridge runs. A database
+  with a schema version this bridge doesn't know stops it at startup.
+- `bridge.db.lock` is held by the running bridge. A second bridge on the same
+  database refuses to start and names the lock file. Run only one bridge per
+  printer and Spoolman, too.
 - `ledger.jsonl` stores one JSON object per line for every charge, and every
   event, such as a reboot or swap. Every record has `dry_run`, `printer` (the
   printer's name; `default` when `[printer]` sets none) and `tool`. A charge also

@@ -45,7 +45,8 @@ location = "Core One L+"
 # location = "Core One L+ T2"
 
 [bridge]
-state_file = "/data/state.json"
+# The SQLite database that holds the bridge's state. Run one bridge per database.
+db_file = "/data/bridge.db"
 # Every charge the bridge would make or made, one JSON object per line.
 ledger_file = "/data/ledger.jsonl"
 # Seconds between polls while printing or paused, and otherwise.
