@@ -25,9 +25,12 @@ TRACES = Path(__file__).parent / "traces"
 STEP = 0.1
 LEAD = 2.5
 PETG = Material("PETG", None, None)
-TAGGED = Material("PETG", "#1f6fb2", "7b3d2d5e-1f7a-4d8c-9a1e-2c3b4d5e6f70")
+TAGGED = Material(
+    "PETG", "#1f6fb2", "7b3d2d5e-1f7a-4d8c-9a1e-2c3b4d5e6f70", nozzle=230, preheat=170, bed=85
+)
+# What the bridge writes for TAGGED with no temperatures in Spoolman: the PETG preset's.
 SYNC_JOB = (
-    'M862.3 P "COREONEL"\nG28 O\nM865 X R N"PETG" O"#1f6fb2" L0\n'
+    'M862.3 P "COREONEL"\nG28 O\nM865 X R N"PETG" T230 B85 P170 C30 D15 E45 O"#1f6fb2" L0\n'
     f'M865.1 I0 C"{TAGGED.instance_uuid}"\n'
 )
 
@@ -226,11 +229,23 @@ def f10_sync_job(rec: Recorder) -> None:
 
 def f10b_sync_job_rewrite(rec: Recorder) -> None:
     """The bridge's job written by hand with the spool already loaded, from the FINISHED
-    screen after a print: the slot's values don't change, so no material event."""
+    screen: the slot's values don't change, so no material event."""
     tool = rec.printer.tools[0]
     tool.material = tool.previous = replace(TAGGED)
-    tool.extruded = 44060.0
     rec.printer._set_state(State.FINISHED)
+    rec.reset()
+    rec.advance(LEAD)
+    rec.printer.upload("spoolman-sync.gcode", SYNC_JOB, print_after=True, overwrite=True)
+    rec.ended()
+    rec.advance(2.0)
+
+
+def f10c_sync_job_rewrite_idle(rec: Recorder) -> None:
+    """As F10b, but from IDLE after a boot, with Z not homed: `G28 O` homes first, so the
+    job runs much longer on the printer, which the comparison doesn't time."""
+    tool = rec.printer.tools[0]
+    tool.material = tool.previous = replace(TAGGED)
+    rec.printer.homed = False
     rec.reset()
     rec.advance(LEAD)
     rec.printer.upload("spoolman-sync.gcode", SYNC_JOB, print_after=True, overwrite=True)
@@ -286,6 +301,7 @@ REPLAYS: dict[str, Callable[[Recorder], None]] = {
     "F9-m600": f9_m600,
     "F10-sync-job": f10_sync_job,
     "F10b-sync-job-rewrite": f10b_sync_job_rewrite,
+    "F10c-sync-job-rewrite-idle": f10c_sync_job_rewrite_idle,
     "F11-manual-extrude": f11_manual_extrude,
     "F12-power-panic": f12_power_panic,
     "F13-power-panic-cold": f13_power_panic_cold,
