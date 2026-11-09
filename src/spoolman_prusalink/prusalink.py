@@ -29,6 +29,9 @@ def parse_filament(data: dict) -> FilamentReading:
                 name=mat.get("name", ""),
                 color=mat.get("color"),
                 instance_uuid=mat.get("instance_uuid"),
+                nozzle_temperature=int(mat["nozzle_temperature"]),
+                preheat_temperature=int(mat["preheat_temperature"]),
+                bed_temperature=int(mat["bed_temperature"]),
             )
         )
         index = int(raw["index"])

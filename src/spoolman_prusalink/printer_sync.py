@@ -135,6 +135,8 @@ PRESET_ALIASES = {"TPU": "FLEX", "TPE": "FLEX"}
 HT_IDLER_DOOR = frozenset({"PPS", "PPA"})
 
 NAME_LIMIT = 7  # The firmware's filament name holds at most 7 characters.
+# The preheat temperature `M865 X R` leaves when the line has no `P`.
+DEFAULT_PREHEAT = 170
 
 
 class CannotSync(ValueError):
@@ -173,6 +175,34 @@ def preset_for(spool: Spool) -> str | None:
     return material if material in PRESETS else None
 
 
+@dataclass(frozen=True)
+class Temperatures:
+    nozzle: int
+    preheat: int
+    bed: int
+
+
+def temperatures(spool: Spool) -> Temperatures:
+    """Return the temperatures `filament_lines` writes for `spool`.
+
+    Spoolman's extruder and bed temperatures take priority over the material's firmware
+    preset. Raises CannotSync for a material that isn't a preset and lacks either one.
+    """
+    key = preset_for(spool)
+    preset = PRESETS.get(key) if key else None
+    nozzle = int(spool.extruder_temp) if spool.extruder_temp else None
+    bed = int(spool.bed_temp) if spool.bed_temp else None
+    if preset is None:
+        if not (nozzle and bed):
+            raise CannotSync(
+                f"spool {spool.id}'s material {spool.material!r} isn't a printer preset; set "
+                "its extruder and bed temperatures in Spoolman"
+            )
+        return Temperatures(nozzle, DEFAULT_PREHEAT, bed)
+    nozzle = nozzle or preset.nozzle
+    return Temperatures(nozzle, min(preset.preheat, nozzle), bed or preset.bed)
+
+
 def _color(spool: Spool) -> str | None:
     if not spool.color_hex:
         return None
@@ -205,18 +235,12 @@ def filament_lines(write: ToolWrite) -> list[str]:
             f"spool {spool.id}'s material {material} needs the printer's HT idler-door "
             "setting, which the bridge can't write; load it from the printer's menu"
         )
+    temps = temperatures(spool)
     key = preset_for(spool)
     preset = PRESETS.get(key) if key else None
-    nozzle = int(spool.extruder_temp) if spool.extruder_temp else None
-    bed = int(spool.bed_temp) if spool.bed_temp else None
-    if preset is None and not (nozzle and bed):
-        raise CannotSync(
-            f"spool {spool.id}'s material {spool.material!r} isn't a printer preset; set its "
-            "extruder and bed temperatures in Spoolman"
-        )
-    parts = ["M865 X R", f'N"{name}"', f"T{nozzle or preset.nozzle}", f"B{bed or preset.bed}"]
+    parts = ["M865 X R", f'N"{name}"', f"T{temps.nozzle}", f"B{temps.bed}"]
     if preset:
-        parts.append(f"P{min(preset.preheat, nozzle or preset.nozzle)}")
+        parts.append(f"P{temps.preheat}")
         if preset.chamber:
             target, low, high = preset.chamber
             parts.append(f"C{target} D{low} E{high}")
@@ -254,7 +278,7 @@ def _uuid(spool: Spool, value: str) -> str:
 def printer_matches_write(material: Material, written: str, uuids: bool) -> bool:
     """Whether the printer still reports what `written` (from `filament_lines`) set.
 
-    The printer reports only name, color and UUID, so those are what's compared.
+    Compares what the printer reports: name, color, temperatures and UUID.
     """
     name = re.search(r'\bN"([^"]*)"', written)
     color = re.search(r'\bO"(#[0-9a-f]{6})"', written)
@@ -263,11 +287,33 @@ def printer_matches_write(material: Material, written: str, uuids: bool) -> bool
         return False
     if not same_color(material.color, color.group(1) if color else None):
         return False
+    if _written_temperatures(written) != _reported_temperatures(material):
+        return False
     if uuids:
         want = uuid.group(1).lower() if uuid else ""
         if (material.instance_uuid or "").lower() != want:
             return False
     return True
+
+
+def _written_temperatures(written: str) -> Temperatures | None:
+    line = written.splitlines()[0] if written else ""
+    nozzle = re.search(r"\sT(\d+)\b", line)
+    bed = re.search(r"\sB(\d+)\b", line)
+    preheat = re.search(r"\sP(\d+)\b", line)
+    if nozzle is None or bed is None:
+        return None
+    return Temperatures(
+        int(nozzle.group(1)),
+        int(preheat.group(1)) if preheat else DEFAULT_PREHEAT,
+        int(bed.group(1)),
+    )
+
+
+def _reported_temperatures(material: Material) -> Temperatures:
+    return Temperatures(
+        material.nozzle_temperature, material.preheat_temperature, material.bed_temperature
+    )
 
 
 # Every print job ends with the firmware lowering the bed. With Z unhomed, as after a

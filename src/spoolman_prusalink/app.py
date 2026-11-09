@@ -648,8 +648,7 @@ class PrinterBridge:
 
         That's when the printer still shows the bridge's last write, but the write the
         bridge would make now differs: someone changed the spool in Spoolman, not the
-        printer. Comparing whole `M865` lines catches temperature edits, which the
-        printer doesn't report back.
+        printer.
         """
         if st.written is None:
             return None

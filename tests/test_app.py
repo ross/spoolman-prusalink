@@ -23,6 +23,9 @@ FILAMENT = {
                 "name": "PLA",
                 "color": "#73737b",
                 "instance_uuid": "44c406a5-c6f5-4440-bfba-e8060564b717",
+                "nozzle_temperature": 215,
+                "preheat_temperature": 170,
+                "bed_temperature": 60,
             },
         }
     ],
@@ -66,10 +69,23 @@ def test_parse_filament_unload_fields():
         "extruded": 900,
         "unload_count": 2,
         "extruded_at_unload": 600,
-        "material": {"name": "PLA"},
+        "material": {
+            "name": "PLA",
+            "nozzle_temperature": 215,
+            "preheat_temperature": 170,
+            "bed_temperature": 60,
+        },
     }
     r = parse_filament({"boot_id": 5, "tools": [tool]}).tools[0]
     assert (r.extruded, r.unload_count, r.extruded_at_unload) == (900, 2, 600)
+
+
+def test_parse_filament_requires_temperatures():
+    tool = {"index": 0, "extruded": 0, "material": {"name": "PLA"}}
+    with pytest.raises(KeyError):
+        parse_filament({"boot_id": 5, "tools": [tool]})
+    r = parse_filament(FILAMENT).tools[0].material
+    assert (r.nozzle_temperature, r.preheat_temperature, r.bed_temperature) == (215, 170, 60)
 
 
 def test_parse_spool_remaining_weight_is_not_clamped():

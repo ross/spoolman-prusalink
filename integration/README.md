@@ -74,6 +74,7 @@ current and that the scenario rows name their tests.
 | --- | --- | --- |
 | S1 | `test_swaps.py::test_s1_matching_tag_writes_nothing` | Spoolman first, and the new spool's tag already matches: nothing is written. |
 | S1 | `test_swaps.py::test_s1_spoolman_first_swap` | Spoolman updated before the unload: the swap commits there, the load is the new spool's. |
+| S1 | `test_swaps.py::test_s1_tag_with_other_temperatures_is_written` | Spoolman first, and the tag matches but for its temperatures: Spoolman's are written. |
 | S2 | `test_swaps.py::test_s2_filament_first_swap` | Filament swapped first: the charge is held, then moves once Spoolman is updated. |
 | S3 | `test_swaps.py::test_s3_moved_after_the_write_back` | Spoolman updated after the old spool was written back: confirmed, then B is written. |
 | S3 | `test_swaps.py::test_s3_old_spool_moved_back` | Old spool moved out and back: the swap stays open, or closes as of a print start. |

@@ -128,7 +128,10 @@ Each tool has:
   `material`, so a sensor fault can report no material with filament in.
 - `gap`: retracted filament, 0 up to the model's clamp. Retraction grows it
   without changing `extruded`; the next feed fills it before counting.
-- The temperatures the last `M865` set, shown on the page only.
+- The temperatures the last `M865` set. The nozzle, preheat and bed
+  temperatures belong to the material and are reported by the filament
+  endpoint; the chamber, filtration and flexible values are shown on the
+  page only.
 
 `extruded` is the commanded E times a feed ratio, about 0.95 on a stock
 Nextruder, which is why the printer runs about 5% under slicer estimates.
@@ -229,7 +232,9 @@ bridge starts sending is visible at once. Lines it honors:
 - `G28 O`: no effect; the page notes "homed".
 - `M865 X R N"<name>" T<n> B<n> P<n> C<n> D<n> E<n> F1 G1 O"#rrggbb" L<tool>`:
   writes tool `L`'s ad-hoc slot: name (1 to 7 characters from
-  `a-zA-Z0-9_-`, else the job fails), color, temperatures for display. `R`
+  `a-zA-Z0-9_-`, else the job fails), color, and temperatures: the
+  filament endpoint reports nozzle, preheat and bed, and the rest are for
+  display. `R`
   clears everything first, including the UUID, as the firmware does.
   Parameters on a preset type are ignored silently, as in the firmware; the
   bridge always writes with `X`, so this only matters for hand-written jobs.

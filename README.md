@@ -10,7 +10,8 @@ what it would charge in the ledger, but changes nothing in Spoolman, on the
 printer or in `state.json`. With `dry_run = false`, it charges usage to
 Spoolman, writes flags such as an unconfirmed swap to a text extra field on
 the spool, moves the old spool out of the tool's location when a swap takes
-effect, and writes the loaded spool's name, color and UUID to the printer.
+effect, and writes the loaded spool's name, color, temperatures and UUID to
+the printer.
 
 Dry run is like a stopped bridge that shows what it would do. When it next
 runs live, the bridge starts from the state its last live run saved and
@@ -232,10 +233,16 @@ Other rules:
   switches at the next poll, after charging usage so far to the outgoing
   spool.
 
-The bridge also logs when the printer's filament name, color, or instance UUID
-differs from the loaded spool. A menu load replaces the color and UUID with
-the preset's, so expect this after every menu load. Colors are compared after
-the printer's rounding to 5 bits per channel. The UUID is read from the spool
+The bridge also logs when the printer's filament name, color, nozzle, preheat
+or bed temperature, or instance UUID differs from the loaded spool. A menu load
+replaces the color and UUID with the preset's, so expect this after every menu
+load. Colors are compared after the printer's rounding to 5 bits per channel.
+The temperatures compared are the ones the bridge would write (see
+[Writing to the printer](#writing-to-the-printer)). A tag load sets the nozzle and bed
+temperatures to the middle of the tag's ranges and the preheat to the tag's own
+value, or the preset's when the tag has none. A tagged spool matches only if
+Spoolman's extruder and bed temperatures agree with the tag and the tag's
+preheat equals the one the bridge writes. The UUID is read from the spool
 extra field named by `uuid_field`, `instance_uuid` by default, which must be a
 text field.
 
@@ -344,8 +351,7 @@ differs after two jobs, it stops and flags the spool.
 The bridge remembers the `M865` line it last wrote for each tool. If the
 printer still shows that write but the spool has changed in Spoolman (color,
 name, material, temperatures or UUID), the bridge writes the change when
-idle. Temperature edits are caught this way even though the printer doesn't
-report temperatures back.
+idle.
 
 Any other mismatch, with no swap, unload or Spoolman edit behind it, is drift:
 something changed on the printer. The bridge flags it and leaves the printer
