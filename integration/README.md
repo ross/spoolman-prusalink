@@ -88,7 +88,13 @@ current and that the scenario rows name their tests.
 | S12 | `test_swaps.py::test_s12_spoolman_corrected_to_the_loaded_uuid` | Spoolman changed to the spool whose UUID the printer reports: switched at once. |
 | S13 | `test_swaps.py::test_s13_staged_spool_claimed` | Staged spool, no unload: a claim moves the usage since the reboot and makes it active. |
 | S14 | `test_swaps.py::test_s14_several_swaps_between_polls` | Two swaps between polls: two unloads seen, the middle spool is charged nothing. |
+| P1 | `test_prints.py::test_p1_normal_print` | Normal print: each poll charges the active spool the counter's change since the last. |
 | P2 | `test_prints.py::test_p2_runout_with_spoolman_updated_during_pause` | Runout mid-print, Spoolman fixed during the pause: the rest goes to the new spool. |
+| P3 | `test_prints.py::test_p3_runout_with_spoolman_updated_after_the_print` | Runout, Spoolman fixed after the print: the swap stays open, then moves the rest. |
+| P4 | `test_prints.py::test_p4_runout_reloaded_with_no_spoolman_change` | Runout reloaded, Spoolman never changed: assumed at the next print, kept at the unload. |
+| P5 | `test_prints.py::test_p5_planned_color_changes_are_unloads` | Two `M600` color changes: each an unload, one confirmed in Spoolman, one left open. |
+| P6 | `test_prints.py::test_p6_jam_is_an_unconfirmed_swap_and_its_purge_is_charged` | Jam with an unload: an unconfirmed swap, and the reload's longer purge is charged. |
+| P7 | `test_prints.py::test_p7_cancel_partway_charges_what_was_extruded` | Print cancelled partway: what was extruded is charged, and nothing else happens. |
 | P8 | `test_prints.py::test_p8_cancelled_during_preheat_is_not_a_print_start` | Print cancelled in preheat: not a print start, so the open swap is still confirmed. |
 | P9 | `test_prints.py::test_p9_restart_after_a_failure_is_a_new_print_start` | A print cancelled and started again under a new job ID is a second print start. |
 | P10 | `test_prints.py::test_p10_spoolman_changed_mid_print_is_staged` | Spoolman changed mid-print with no unload: staged, the old spool charged until unload. |

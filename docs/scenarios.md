@@ -62,13 +62,13 @@ archived active spool (M3, M3a) is logged once when the bridge finds it.
 
 | # | Scenario | What the bridge does | Status |
 | --- | --- | --- | --- |
-| P1 | Normal print. | Charges each poll's change in the counter, every 30 s. | Seen live |
+| P1 | Normal print. | Charges each poll's change in the counter, every 30 s. | Seen live; end to end (`test_p1_normal_print`) |
 | P2 | Runout mid-print, Spoolman updated during the pause. | The runout unload opens an unconfirmed swap. The Spoolman change confirms it. The reload keeps the old spool's metadata on the printer, so a write is queued for when the print ends. | Seen live (19 → 20); the write was missed before `4dffd99`; end to end (`test_p2_runout_with_spoolman_updated_during_pause`) |
-| P3 | Runout mid-print, Spoolman updated after the print ends. | The unconfirmed swap stays open: the running job isn't a new print start. The later Spoolman change confirms it and moves the usage since the unload. | Tested |
-| P4 | Runout, and the same spool type is reloaded with no Spoolman change ever. | Stays open until the next print start, which closes it as "assumed same spool", records a provisional charge (Q1) and flags the spool with the amount. The next unload keeps the usage there, or a claim moves it. | Tested |
-| P5 | Planned color change (`M600` in the G-code). | Same as a runout: each change is an unload. | Tested |
-| P6 | Filament jam: feeding stops, `ATTENTION`, unload and reload, purge more. | Treated as an unconfirmed swap. Purge is charged. | Seen live (job 124) |
-| P7 | Print cancelled partway. | Charges what was extruded. Nothing special happens. | Seen live (job 124) |
+| P3 | Runout mid-print, Spoolman updated after the print ends. | The unconfirmed swap stays open: the running job isn't a new print start. The later Spoolman change confirms it and moves the usage since the unload. | Tested; end to end (`test_p3_runout_with_spoolman_updated_after_the_print`) |
+| P4 | Runout, and the same spool type is reloaded with no Spoolman change ever. | Stays open until the next print start, which closes it as "assumed same spool", records a provisional charge (Q1) and flags the spool with the amount. The next unload keeps the usage there, or a claim moves it. | Tested; end to end (`test_p4_runout_reloaded_with_no_spoolman_change`) |
+| P5 | Planned color change (`M600` in the G-code). | Same as a runout: each change is an unload. | Tested; end to end (`test_p5_planned_color_changes_are_unloads`) |
+| P6 | Filament jam: feeding stops, `ATTENTION`, unload and reload, purge more. | Treated as an unconfirmed swap. Purge is charged. The reload after a jam purges more than a normal load (the simulator's `jam_purge_mm` adds 60 mm), and that extra purge is charged too. | Seen live (job 124); end to end (`test_p6_jam_is_an_unconfirmed_swap_and_its_purge_is_charged`) |
+| P7 | Print cancelled partway. | Charges what was extruded. Nothing special happens. | Seen live (job 124); end to end (`test_p7_cancel_partway_charges_what_was_extruded`) |
 | P8 | Print starts and is cancelled before extruding, during preheat or bed leveling. | Not a print start: a print starts at its first extrusion (see Q4). An unconfirmed swap stays open, so fixing Spoolman during preheat still confirms it. | Tested; end to end (`test_p8_cancelled_during_preheat_is_not_a_print_start`) |
 | P9 | Print restarted after a failure (new job ID). | A new print start. | Seen live (job 126); end to end (`test_p9_restart_after_a_failure_is_a_new_print_start`) |
 | P10 | Spoolman change mid-print with no unload (scanning the next spool early). | Staged. The old spool is charged until the next unload. | Tested; end to end (`test_p10_spoolman_changed_mid_print_is_staged`) |
