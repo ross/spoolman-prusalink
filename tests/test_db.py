@@ -330,3 +330,70 @@ def test_a_failed_save_writes_nothing(path, fail):
     db.close()
     assert read_state(path) == state
     assert read_ledger(path) == LEDGER[:2]
+
+
+def empty_files(path):
+    """A zero-byte file, and an SQLite file with no tables, as a killed first start leaves."""
+    path.parent.mkdir()
+    path.write_bytes(b"")
+    other = path.with_name("other.db")
+    conn = sqlite3.connect(other)
+    conn.execute("PRAGMA user_version = 0")
+    conn.execute("CREATE TABLE t (x)")
+    conn.execute("DROP TABLE t")
+    conn.close()
+    assert other.stat().st_size > 0
+    return [path, other]
+
+
+def test_readers_leave_a_database_with_no_schema_alone(path):
+    for f in empty_files(path):
+        before = f.read_bytes()
+        assert read_state(f) == State()
+        assert read_ledger(f) == []
+        assert f.read_bytes() == before
+
+
+def test_a_database_with_no_schema_gets_it(path):
+    for f in empty_files(path):
+        db = Database.open(f)
+        assert db.save(full_state(), LEDGER[:1])
+        db.close()
+        assert read_state(f) == full_state()
+        assert read_ledger(f) == LEDGER[:1]
+
+
+def test_a_load_failure_lets_go_of_the_lock(path):
+    db = Database.open(path)
+    db.save(full_state())
+    db.close()
+    conn = sqlite3.connect(path)
+    with conn:
+        conn.execute("UPDATE tools SET data = 'not json' WHERE tool = 1")
+    with pytest.raises(DatabaseError, match=str(path)):
+        Database.open(path)
+    with pytest.raises(DatabaseError, match=str(path)):
+        read_state(path)
+    with conn:
+        conn.execute("DROP TABLE runouts")
+    with pytest.raises(DatabaseError, match="no such table: runouts"):
+        Database.open(path)
+    conn.close()
+    path.unlink()
+    Database.open(path).close()  # Not locked by the failed opens.
+
+
+def test_a_bad_ledger_read_is_a_database_error(path):
+    db = Database.open(path)
+    db.save_ledger(LEDGER[:1])
+    db.close()
+    conn = sqlite3.connect(path)
+    with conn:
+        conn.execute("UPDATE ledger SET extra = 'not json'")
+    with pytest.raises(DatabaseError, match=str(path)):
+        read_ledger(path)
+    with conn:
+        conn.execute("DROP TABLE ledger")
+    with pytest.raises(DatabaseError, match="no such table: ledger"):
+        read_ledger(path)
+    conn.close()

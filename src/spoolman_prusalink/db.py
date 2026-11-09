@@ -128,7 +128,7 @@ class Database:
 
     @classmethod
     def open(cls, path: Path) -> Database:
-        """Lock and open the database at `path`, creating it if it's missing.
+        """Lock and open the database at `path`, creating it, or its schema, if missing.
 
         Raise DatabaseError if another process holds the lock or the file isn't a
         database of a version this bridge reads.
@@ -141,7 +141,11 @@ class Database:
             os.close(lock_fd)
             raise
         db = cls(path, conn, lock_fd)
-        db.load()
+        try:
+            db.load()
+        except BaseException:
+            db.close()
+            raise
         return db
 
     def close(self) -> None:
@@ -155,7 +159,10 @@ class Database:
 
     def load(self) -> State:
         """Read the state, and take it as what `save` compares against."""
-        state, self._rows, self._outbox = _read(self._conn)
+        try:
+            state, self._rows, self._outbox = _read(self._conn)
+        except (sqlite3.Error, ValueError) as e:
+            raise DatabaseError(f"{self.path}: {e}") from e
         return state
 
     def save(self, state: State, ledger: Sequence[dict] = ()) -> bool:
@@ -238,41 +245,55 @@ class Database:
 
 def read_state(path: Path) -> State:
     """Read the state from the database at `path` without locking it, as a reader beside
-    a running bridge does. A missing database reads as an empty state."""
-    conn = _reader(Path(path))
+    a running bridge does. A missing database, or one with no schema, reads as an empty
+    state."""
+    path = Path(path)
+    conn = _reader(path)
     if conn is None:
         return State()
     try:
         return _read(conn)[0]
+    except (sqlite3.Error, ValueError) as e:
+        raise DatabaseError(f"{path}: {e}") from e
     finally:
         conn.close()
 
 
 def read_ledger(path: Path) -> list[dict]:
     """Read every ledger record from the database at `path`, oldest first, without
-    locking it. Each is the dict the bridge saved. A missing database reads as none."""
-    conn = _reader(Path(path))
+    locking it. Each is the dict the bridge saved. A missing database, or one with no
+    schema, reads as none."""
+    path = Path(path)
+    conn = _reader(path)
     if conn is None:
         return []
     try:
         names = ("kind", *_LEDGER_COLUMNS, "extra")
         cursor = conn.execute(f"SELECT {', '.join(names)} FROM ledger ORDER BY id")
         return [_ledger_record(dict(zip(names, row, strict=True))) for row in cursor]
+    except (sqlite3.Error, ValueError) as e:
+        raise DatabaseError(f"{path}: {e}") from e
     finally:
         conn.close()
 
 
 def _reader(path: Path) -> sqlite3.Connection | None:
-    """A read-only connection to the database at `path`, or None if it's missing."""
+    """A read-only connection to the database at `path`, or None if it's missing or has
+    no schema."""
     if not path.exists():
         return None
-    conn = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True)
     try:
-        _check(conn, path)
+        conn = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True)
+    except sqlite3.Error as e:
+        raise DatabaseError(f"{path}: {e}") from e
+    try:
+        if _check(conn, path):
+            return conn
     except BaseException:
         conn.close()
         raise
-    return conn
+    conn.close()
+    return None
 
 
 def _lock(path: Path) -> int:
@@ -298,12 +319,14 @@ def _lock(path: Path) -> int:
 
 
 def _connect(path: Path) -> sqlite3.Connection:
+    """Open the database, creating the schema if it has none."""
     # Autocommit: `save` opens and commits its transactions itself.
     conn = sqlite3.connect(path, isolation_level=None)
     try:
+        ready = _check(conn, path)
         conn.execute("PRAGMA journal_mode = WAL")
         conn.execute("PRAGMA synchronous = FULL")
-        if not _check(conn, path):
+        if not ready:
             # One transaction, so a crash can't leave tables without the version.
             conn.executescript(
                 f"BEGIN IMMEDIATE;\n{_SCHEMA}\n"
