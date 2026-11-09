@@ -1,4 +1,4 @@
-"""Prints and what happens during them: docs/scenarios.md rows P2 and P8 to P12."""
+"""Prints and what happens during them: docs/scenarios.md rows P1 to P12."""
 
 from __future__ import annotations
 
@@ -288,3 +288,241 @@ async def test_p12_power_panic_resume_keeps_the_job(world: World, caplog: pytest
     assert len(events(records, "staged_at_print")) == 1
     assert w.charged(records, "B") == 0
     assert w.charged(records, "A") == before_cut + w.counter
+
+
+async def to_mid_print(w: World) -> tuple[int, list[dict]]:
+    """Baseline, then start a print and poll until it's counted: the counter at baseline."""
+    await baseline(w)
+    start = w.counter
+    records = await w.start_print(print_spec())
+    assert events(records) == []
+    return start, records
+
+
+async def reload_and_resume(w: World) -> list[dict]:
+    """Reload the type the unload left, as a runout's reload does, then resume.
+
+    Polls every second, as during a real pause, and returns what the polls wrote.
+    """
+    w.printer.load(0)
+    records = await w.run_until(lambda: w.printer.state is State.PAUSED, poll_every=1.0)
+    assert w.material() == ("PLA", "#73737b", w.uuids["A"])
+    w.printer.resume()
+    return records
+
+
+async def test_p1_normal_print(world: World):
+    """Normal print: each poll charges the active spool the counter's change since the last."""
+    w = world
+    a = w.spools["A"]
+    start, records = await to_mid_print(w)
+    assert w.charged(records, "A") == w.counter - start
+
+    mark = w.mark()
+    last = w.counter
+    while w.printer.state is not State.FINISHED:
+        w.advance(1.0)
+        records = await w.poll()
+        assert w.charged(records, "A") == w.counter - last
+        assert events(records) == []
+        last = w.counter
+    assert w.printer.job is None
+
+    assert w.charged(w.since(mark), "A") > 0
+    assert {r["spool_id"] for r in charges(w.since(0))} == {a}
+    assert w.charged(w.since(0), "A") == w.counter - start
+    assert await w.used("A") > 0
+    assert await w.flag("A") is None
+    assert w.requests("PUT") == []
+
+
+async def test_p3_runout_with_spoolman_updated_after_the_print(world: World):
+    """Runout, Spoolman fixed after the print: the swap stays open, then moves the rest."""
+    w = world
+    a, b = w.spools["A"], w.spools["B"]
+    start, _ = await to_mid_print(w)
+
+    w.printer.runout(0)
+    records = await w.poll()
+    assert len(events(records, "unload")) == 1
+    assert len(events(records, "swap_unconfirmed")) == 1
+    flag = await w.flag("A")
+    assert flag is not None and "mid-print with" in flag
+    at_runout = w.tool.extruded_at_unload
+
+    # The reload and the rest of the print, with Spoolman left alone: the same job carries
+    # on, so it isn't a print start and the swap stays open.
+    mark = w.mark()
+    await reload_and_resume(w)
+    await finish(w)
+    records = w.since(mark) + await w.poll()
+    assert events(records) == []
+    assert events(w.since(0), "swap_assumed") == []
+    assert w.charged(w.since(0), "A") == w.counter - start
+    assert w.charged(w.since(0), "B") == 0
+
+    # Spoolman is updated after the print: the usage since the runout moves to B.
+    await w.move("A", w.shelf)
+    await w.move("B", w.tool_location)
+    records = await w.poll()
+    since_runout = w.counter - at_runout
+    assert [e["message"] for e in events(records, "swap_confirmed")] == [
+        f"swap confirmed: {since_runout} mm moved from spool {a} to {b}"
+    ]
+    assert w.charged(records, "B") == since_runout
+    assert w.charged(records, "A") == -since_runout
+    assert w.charged(w.since(0), "A") == at_runout - start
+
+    # Idle with the printer still showing A: the bridge writes B.
+    w.advance(1.5)
+    assert w.printer.job is None
+    minted = await w.spoolman.extra(b, "instance_uuid")
+    assert minted is not None
+    assert w.material() == (PETG[0], PETG[1], minted)
+
+
+async def test_p4_runout_reloaded_with_no_spoolman_change(
+    world: World, caplog: pytest.LogCaptureFixture
+):
+    """Runout reloaded, Spoolman never changed: assumed at the next print, kept at the unload."""
+    caplog.set_level(logging.INFO, logger="spoolman_prusalink")
+    w = world
+    a = w.spools["A"]
+    start, _ = await to_mid_print(w)
+
+    w.printer.runout(0)
+    records = await w.poll()
+    assert len(events(records, "swap_unconfirmed")) == 1
+    at_runout = w.tool.extruded_at_unload
+    await reload_and_resume(w)
+    await finish(w)
+    await w.poll()
+    w.printer.dismiss()
+    assert events(w.since(0), "swap_assumed") == []
+
+    # The next print's first extrusion closes the swap as the same spool, provisionally.
+    records = await w.start_print(print_spec())
+    msg = (
+        "print started with no Spoolman change since the unload; assuming "
+        f"spool {a} was reloaded and charging it provisionally"
+    )
+    assert [e["message"] for e in events(records, "swap_assumed")] == [msg]
+    assert logged(caplog, logging.WARNING, f"[{w.tool_location}] {msg}")
+    provisional = w.counter - at_runout
+    flag = await w.flag("A")
+    assert flag is not None
+    assert f"{provisional} mm" in flag and "charged to it provisionally" in flag
+
+    # The next unload keeps the usage on A and clears the provisional flag.
+    await finish(w)
+    w.printer.dismiss()
+    w.printer.extrude(0, 10)
+    await w.unload()
+    records = await w.poll()
+    kept = events(records, "provisional_kept")
+    assert len(kept) == 1 and f"provisionally to spool {a}" in kept[0]["message"]
+    assert len(events(records, "swap_unconfirmed")) == 1
+    flag = await w.flag("A") or ""
+    assert "provisionally" not in flag
+    assert {r["spool_id"] for r in charges(w.since(0))} == {a}
+    assert w.charged(w.since(0), "A") == w.tool.extruded_at_unload - start
+
+
+async def test_p5_planned_color_changes_are_unloads(world: World):
+    """Two `M600` color changes: each an unload, one confirmed in Spoolman, one left open."""
+    w = world
+    a, b = w.spools["A"], w.spools["B"]
+    await baseline(w)
+    start = w.counter
+    spec = PrintSpec([Segment(0, 400)], duration_s=4, preheat_s=0.5, color_changes_mm=[150, 300])
+
+    mark = w.mark()
+    records = await w.start_print(spec)
+    assert events(records) == []
+    await w.run_until(lambda: w.printer.state is State.ATTENTION, poll_every=1.0)
+    records = await w.poll()
+    assert len(events(w.since(mark), "unload")) == 1
+    assert len(events(w.since(mark), "swap_unconfirmed")) == 1
+    first = w.tool.extruded_at_unload
+    assert w.charged(w.since(0), "A") == first - start
+
+    # The first change is a new spool, and Spoolman is updated during the pause.
+    await w.move("A", w.shelf)
+    await w.move("B", w.tool_location)
+    records = await w.poll()
+    assert len(events(records, "swap_confirmed")) == 1
+
+    # The second change isn't recorded in Spoolman, and stays open past the print.
+    mark = w.mark()
+    await reload_and_resume(w)
+    await w.run_until(lambda: w.printer.state is State.ATTENTION, poll_every=1.0)
+    await w.poll()
+    assert len(events(w.since(mark), "unload")) == 1
+    assert len(events(w.since(mark), "swap_unconfirmed")) == 1
+    flag = await w.flag("B")
+    assert flag is not None and "mid-print with" in flag
+    await reload_and_resume(w)
+    await finish(w)
+    await w.poll()
+
+    records = w.since(0)
+    assert len(events(records, "unload")) == 2
+    assert len(events(records, "swap_unconfirmed")) == 2
+    assert len(events(records, "swap_confirmed")) == 1
+    # The same job carrying on is never a print start.
+    assert events(records, "swap_assumed") == []
+    assert events(records, "staged_at_print") == []
+    assert w.charged(records, "A") == first - start
+    assert w.charged(records, "B") == w.counter - first
+    assert {r["spool_id"] for r in charges(records)} == {a, b}
+
+
+async def test_p6_jam_is_an_unconfirmed_swap_and_its_purge_is_charged(world: World):
+    """Jam with an unload: an unconfirmed swap, and the reload's longer purge is charged."""
+    w = world
+    a = w.spools["A"]
+    start, _ = await to_mid_print(w)
+
+    w.printer.jam(0)
+    assert w.printer.state is State.ATTENTION
+    records = await w.poll()
+    assert len(events(records, "unload")) == 1
+    assert len(events(records, "swap_unconfirmed")) == 1
+    at_jam = w.tool.extruded_at_unload
+
+    # The reload after a jam purges 60 mm more than a load.
+    mark = w.mark()
+    await reload_and_resume(w)
+    assert w.counter - at_jam == LOAD_MM + 60
+    records = w.since(mark) + await w.poll()
+    assert w.charged(records, "A") == LOAD_MM + 60
+
+    await finish(w)
+    records = w.since(0) + await w.poll()
+    assert events(records, "swap_assumed") == []
+    assert {r["spool_id"] for r in charges(records)} == {a}
+    assert w.charged(records, "A") == w.counter - start
+
+
+async def test_p7_cancel_partway_charges_what_was_extruded(world: World):
+    """Print cancelled partway: what was extruded is charged, and nothing else happens."""
+    w = world
+    a = w.spools["A"]
+    start, _ = await to_mid_print(w)
+
+    w.advance(1.0)
+    w.printer.cancel()
+    await finish(w, State.STOPPED)
+    stopped = w.counter
+    assert start < stopped < start + 400
+    records = w.since(0) + await w.poll()
+    assert [e["event"] for e in events(records)] == ["baseline"]
+    assert {r["spool_id"] for r in charges(records)} == {a}
+    assert w.charged(records, "A") == stopped - start
+    assert await w.flag("A") is None
+    assert w.requests("PUT") == []
+
+    # Dismissed and idle, nothing more is charged.
+    w.printer.dismiss()
+    w.advance(2.0)
+    assert charges(await w.poll()) == []
