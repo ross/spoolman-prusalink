@@ -7,35 +7,12 @@ with no way in from outside the bridge, so it has no test here.
 from __future__ import annotations
 
 import logging
-from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
 from integration.conftest import ASA, LOAD_MM, PETG, World, charges, events, print_spec
 from simulator.model import State
-from spoolman_prusalink.app import Bridge
-
-
-@pytest.fixture
-async def bridges(world: World):
-    """`world`, closing every bridge `restart()` starts as well as the first."""
-    started: list[Bridge] = []
-    world.restarted = started  # type: ignore[attr-defined]
-    try:
-        yield world
-    finally:
-        for bridge in started:
-            await bridge.aclose()
-
-
-async def restart(w: World, **config) -> None:
-    """Stop the bridge and start a new one on the same state file, with `config` changed."""
-    await w.bridge.aclose()
-    w.cfg = replace(w.cfg, **config)
-    w.bridge = Bridge.from_config(w.cfg)
-    w.bridge.clock = lambda: w.sim.now
-    w.restarted.append(w.bridge)  # type: ignore[attr-defined]
 
 
 def dry(records: list[dict]) -> list[dict]:
@@ -59,9 +36,9 @@ async def test_b1_first_start(world: World):
     assert w.charged(w.since(0), "A") == 10
 
 
-async def test_b2_restart_mid_print(bridges: World):
+async def test_b2_restart_mid_print(world: World):
     """Restart mid-print: one catch-up charge, with no double charge and no loss."""
-    w = bridges
+    w = world
     await w.poll()
     start = w.counter
     await w.start_print(print_spec())
@@ -71,7 +48,7 @@ async def test_b2_restart_mid_print(bridges: World):
 
     # The bridge stops for a second of printing, then starts again on the same state.
     w.advance(1.0)
-    await restart(w)
+    await w.restart()
     assert w.printer.state is State.PRINTING
     records = await w.poll()
     assert events(records) == []
@@ -90,9 +67,9 @@ async def test_b2_restart_mid_print(bridges: World):
     assert round(await w.used("A"), 2) == grams
 
 
-async def test_b4_state_file_lost(bridges: World):
+async def test_b4_state_file_lost(world: World):
     """`state.json` lost: a new baseline, use since the last poll lost, the swap forgotten."""
-    w = bridges
+    w = world
     a = w.spools["A"]
     await w.poll()
     w.printer.extrude(0, 20)
@@ -106,7 +83,7 @@ async def test_b4_state_file_lost(bridges: World):
     # The load after the unload isn't polled before the state file goes.
     await w.swap_cycle(source="tag", name=PETG[0], color=PETG[1])
     Path(w.cfg.state_file).unlink()
-    await restart(w)
+    await w.restart()
     records = await w.poll()
     assert [e["message"] for e in events(records)] == [f"baseline extruded={w.counter} spool={a}"]
     assert charges(records) == []
@@ -125,10 +102,10 @@ async def test_b4_state_file_lost(bridges: World):
     assert drift is not None and "printer filament differs" in drift
 
 
-async def test_b6_dry_run_then_live(bridges: World, caplog: pytest.LogCaptureFixture):
+async def test_b6_dry_run_then_live(world: World, caplog: pytest.LogCaptureFixture):
     """Dry run: charges only logged and recorded, then a live run catches up from its state."""
     caplog.set_level(logging.INFO, logger="spoolman_prusalink")
-    w = bridges
+    w = world
     a, c = w.spools["A"], w.spools["C"]
     await w.poll()
     w.printer.extrude(0, 10)
@@ -139,7 +116,7 @@ async def test_b6_dry_run_then_live(bridges: World, caplog: pytest.LogCaptureFix
     puts = len(w.requests("PUT"))
 
     # Dry run, with two swaps at the printer (A -> B -> C) and Spoolman updated to C.
-    await restart(w, dry_run=True)
+    await w.restart(dry_run=True)
     mark = w.mark()
     w.printer.extrude(0, 30)
     await w.unload()
@@ -182,7 +159,7 @@ async def test_b6_dry_run_then_live(bridges: World, caplog: pytest.LogCaptureFix
     assert Path(w.cfg.state_file).read_bytes() == state
 
     # Live again: everything since the last live state, as after an outage, in one poll.
-    await restart(w, dry_run=False)
+    await w.restart(dry_run=False)
     mark = w.mark()
     records = await w.poll()
     assert all(r["dry_run"] is False for r in records)

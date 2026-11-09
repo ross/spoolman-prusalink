@@ -1301,8 +1301,9 @@ class Bridge:
     async def sync_flags(self, spools: list[Spool]) -> None:
         """Make the flag field match the desired flags, on spools the bridge manages.
 
-        The bridge only clears flags on spools it flagged itself (`State.flagged`), so it
-        never touches a value someone else wrote.
+        The field is the bridge's own: on a spool it flags, whatever the field held is
+        replaced, and clearing the flag empties it. On spools it has no flag for and
+        didn't flag itself (`State.flagged`), the field is left as it is.
         """
         key = self.config.flag_field
         assert key
