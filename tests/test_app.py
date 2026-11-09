@@ -5,10 +5,12 @@ from dataclasses import replace
 import httpx
 import pytest
 
+from spoolman_prusalink import printer_sync
 from spoolman_prusalink.__main__ import main
-from spoolman_prusalink.accounting import ToolState
+from spoolman_prusalink.accounting import Provisional, SwapFlag, ToolState
 from spoolman_prusalink.app import Bridge
 from spoolman_prusalink.config import Config, ConfigError, PrinterConfig, load
+from spoolman_prusalink.models import Material
 from spoolman_prusalink.prusalink import PrusaLink, parse_filament
 from spoolman_prusalink.spoolman import Spoolman, parse_spool
 from spoolman_prusalink.state import PrinterState, State, load_state, save_state
@@ -48,6 +50,17 @@ def spool_json(id, location, material="PLA", color="73767d", uuid=None):
             "vendor": {"name": "Prusament"},
         },
     }
+
+
+def test_parse_filament_reads_tag_uuids():
+    tool = json.loads(json.dumps(FILAMENT["tools"][0]))
+    r = parse_filament({"boot_id": 5, "tools": [tool]})
+    assert r.tools[0].material.from_tag is False
+    tool["material"]["material_uuid"] = "0b1c6b8e-8d0f-4f8e-9a63-2b1f0d6c7e11"
+    tool["material"]["package_uuid"] = "5d6e7f80-1a2b-4c3d-8e9f-0a1b2c3d4e5f"
+    m = parse_filament({"boot_id": 5, "tools": [tool]}).tools[0].material
+    assert m.material_uuid.startswith("0b1c") and m.package_uuid.startswith("5d6e")
+    assert m.from_tag is True
 
 
 def test_parse_filament_with_and_without_material():
@@ -729,3 +742,198 @@ def test_bridge_keeps_and_warns_about_an_unconfigured_printer(tmp_path, caplog):
     assert "printer 'old' that isn't configured; keeping its state" in caplog.text
     assert bridge.printers[0].tools == {}
     assert bridge.state.printers["old"] == old
+
+
+TAG = "8b6a3e3e-3f6c-4d7b-9a43-6c1f0e7d2a11"
+MATERIAL_UUID = "0b1c6b8e-8d0f-4f8e-9a63-2b1f0d6c7e11"
+
+
+def tag_material(instance=TAG, from_tag=True):
+    return Material(
+        "PLA",
+        "#73767d",
+        instance,
+        MATERIAL_UUID if from_tag else None,
+        nozzle_temperature=215,
+        preheat_temperature=170,
+        bed_temperature=60,
+    )
+
+
+@pytest.fixture
+async def printer(tmp_path):
+    bridge = make_bridge(tmp_path, lambda: FILAMENT, lambda: [])
+    p = bridge.printers[0]
+    p._model = printer_sync.PRINTER_MODELS["8.1.0"]
+    yield p
+    await bridge.aclose()
+
+
+def spool(id, uuid=None):
+    return parse_spool(spool_json(id, "Core One L+", uuid=uuid), "instance_uuid")
+
+
+SETTLED = ToolState(active=7, assigned=7)
+
+
+@pytest.mark.parametrize(
+    ("st", "material", "spools", "want"),
+    [
+        # A tag on a spool with no UUID: adopt it.
+        (SETTLED, tag_material(), [spool(7)], ("adopt", TAG)),
+        # The case doesn't matter.
+        (SETTLED, tag_material(TAG.upper()), [spool(7)], ("adopt", TAG)),
+        # Not a tag: the bridge mints a UUID of its own.
+        (SETTLED, tag_material(from_tag=False), [spool(7)], None),
+        # Not a tag, but the bridge's last write kept it.
+        (
+            replace(SETTLED, written=f'M865 X R N"PLA" L0\nM865.1 I0 C"{TAG}"'),
+            tag_material(from_tag=False),
+            [spool(7)],
+            ("keep", TAG),
+        ),
+        # A tag with no instance UUID.
+        (SETTLED, tag_material(None), [spool(7)], None),
+        # The active spool isn't certain: staged, unconfirmed, or provisional. The tag
+        # is kept rather than minted over, but not adopted.
+        (replace(SETTLED, assigned=8), tag_material(), [spool(7), spool(8)], ("keep", TAG)),
+        (replace(SETTLED, swap=SwapFlag(7)), tag_material(), [spool(7)], ("keep", TAG)),
+        (
+            replace(SETTLED, provisional=Provisional(7, 10)),
+            tag_material(),
+            [spool(7)],
+            ("keep", TAG),
+        ),
+        # Not certain and a different UUID in Spoolman: drift, not a conflict.
+        (replace(SETTLED, swap=SwapFlag(7)), tag_material(), [spool(7, "other")], None),
+        # Another spool has the UUID: S12 or drift, not this spool's.
+        (SETTLED, tag_material(), [spool(7), spool(8, TAG.upper())], None),
+        # The spool has it already, or a different one.
+        (SETTLED, tag_material(), [spool(7, TAG)], None),
+        (SETTLED, tag_material(), [spool(7, "other")], ("conflict", TAG)),
+    ],
+)
+async def test_tag_uuid(printer, st, material, spools, want):
+    active = next(s for s in spools if s.id == 7)
+    printer._seen_uuid[0] = ("before", 7, False)  # The bridge saw the tag appear.
+    assert printer._tag_uuid(0, st, material, active, spools) == want
+
+
+async def test_tag_uuid_already_loaded_at_start_is_not_trusted(printer):
+    """The bridge didn't see the tag load: the spool assigned may not be the tag's."""
+    for _ in range(2):
+        # Kept on the printer rather than minted over, but not stored.
+        want = ("keep", TAG)
+        assert printer._tag_uuid(0, SETTLED, tag_material(), spool(7), [spool(7)]) == want
+        assert printer._tag_uuid(0, SETTLED, tag_material(), spool(7, "x"), [spool(7)]) is None
+    # A reload of the same tag that the bridge watched: adopted.
+    printer._uuid_gap.add(0)
+    assert printer._tag_uuid(0, SETTLED, tag_material(), spool(7), [spool(7)]) == ("adopt", TAG)
+    # So is a different tag.
+    printer._tag_uuid(
+        0, SETTLED, tag_material("1f0e7d2a-3f6c-4d7b-9a43-6c1f0e7d2a11"), spool(7), [spool(7)]
+    )
+    assert printer._tag_uuid(0, SETTLED, tag_material(), spool(7), [spool(7)]) == ("adopt", TAG)
+
+
+async def test_tag_uuid_not_on_tool_1_or_without_uuids(printer):
+    assert printer._tag_uuid(1, SETTLED, tag_material(), spool(7), [spool(7)]) is None
+    printer._model = printer_sync.PRINTER_MODELS["1.4.1"]
+    assert printer._tag_uuid(0, SETTLED, tag_material(), spool(7), [spool(7)]) is None
+
+
+async def test_tag_uuid_seen_with_another_spool_is_not_adopted(printer):
+    """A runout reload keeps the old spool's tag: the next spool doesn't take its UUID."""
+    old, new = spool(6), spool(7)
+    printer._seen_uuid[0] = ("before", 6, False)
+    # Spool 6's tag, seen while 6 was certainly loaded; its UUID isn't in Spoolman.
+    assert printer._tag_uuid(0, ToolState(active=6, assigned=6), tag_material(), old, [old]) == (
+        "adopt",
+        TAG,
+    )
+    # A runout, a swap to 7 and a reload: the printer still shows 6's tag.
+    assert printer._tag_uuid(0, SETTLED, tag_material(), new, [new]) is None
+    # Still not on later polls.
+    assert printer._tag_uuid(0, SETTLED, tag_material(), new, [new]) is None
+    # A different tag on 7 is adopted.
+    other = "1f0e7d2a-3f6c-4d7b-9a43-6c1f0e7d2a11"
+    assert printer._tag_uuid(0, SETTLED, tag_material(other), new, [new]) == ("adopt", other)
+
+
+async def test_tag_uuid_refused_for_an_archived_spool_is_not_proposed_again(printer):
+    printer._seen_uuid[0] = ("before", 7, False)
+    printer.bridge._refused_uuids.add((7, TAG))
+    assert printer._tag_uuid(0, SETTLED, tag_material(), spool(7), [spool(7)]) is None
+
+
+async def test_adopt_uuid_checks_archived_spools(tmp_path, caplog):
+    """An archived spool with the tag's UUID keeps it; Spoolman is read once for it."""
+    reads, writes = [], []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/v1/spool" and request.method == "GET":
+            reads.append(request.url.params.get("allow_archived"))
+            archived = spool_json(6, None, uuid=TAG.upper())
+            archived["archived"] = True
+            return httpx.Response(200, json=[archived, spool_json(7, "Core One L+")])
+        writes.append(request)
+        return httpx.Response(200, json={})
+
+    cfg = make_config(tmp_path, dry_run=False)
+    transport = httpx.MockTransport(handler)
+    bridge = Bridge(
+        config=cfg,
+        spoolman=Spoolman(cfg.spoolman_url, uuid_field="instance_uuid", transport=transport),
+        clients={"default": PrusaLink(cfg.printers[0].url, "k", transport=transport)},
+    )
+    caplog.set_level("INFO")
+    assert await bridge._adopt_uuid(7, TAG) is False
+    assert await bridge._adopt_uuid(7, TAG) is False
+    assert reads == ["true"] and writes == []
+    assert caplog.text.count("archived spool 6 has it") == 1
+    await bridge.aclose()
+
+
+@pytest.mark.parametrize("refused", [False, True])
+async def test_failed_adoption_holds_the_write(printer, monkeypatch, refused):
+    """A failed store waits for the next poll; a refusal lets the write mint instead."""
+
+    async def fail(spool_id, value, store=True):
+        if refused:
+            printer.bridge._refused_uuids.add((spool_id, value))
+        return False
+
+    monkeypatch.setattr(printer.bridge, "_adopt_uuid", fail)
+    printer._adopts = {0: (7, TAG, True)}
+    printer._pending_writes = [0]
+    await printer.adopt_uuids()
+    assert printer._adopts == {}
+    assert printer._pending_writes == ([0] if refused else [])
+
+
+async def test_kept_uuid_is_checked_against_archived_spools_once(tmp_path):
+    reads = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        reads.append(request.url.params.get("allow_archived"))
+        return httpx.Response(200, json=[spool_json(7, "Core One L+")])
+
+    cfg = make_config(tmp_path, dry_run=False)
+    transport = httpx.MockTransport(handler)
+    bridge = Bridge(
+        config=cfg,
+        spoolman=Spoolman(cfg.spoolman_url, uuid_field="instance_uuid", transport=transport),
+        clients={"default": PrusaLink(cfg.printers[0].url, "k", transport=transport)},
+    )
+    for _ in range(2):
+        assert await bridge._adopt_uuid(7, TAG, store=False) is True
+    assert reads == ["true"]  # Read once, and nothing written.
+    await bridge.aclose()
+
+
+async def test_written_uuid_seen_with_another_spool_is_not_kept(printer):
+    """A UUID the bridge wrote for spool 6 isn't kept for spool 7 after a runout reload."""
+    printer._seen_uuid[0] = (TAG, 6, False)
+    st = replace(SETTLED, written=f'M865 X R N"PLA" L0\nM865.1 I0 C"{TAG}"')
+    material = tag_material(from_tag=False)
+    assert printer._tag_uuid(0, st, material, spool(7), [spool(7)]) is None

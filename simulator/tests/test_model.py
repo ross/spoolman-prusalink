@@ -162,6 +162,12 @@ def test_tag_load_sets_uuid_on_uuids_model_only():
     sim.tick(3)
     p.load(0, source="tag", name="PETG", color="#1F6FB2", uuid=uuid.upper())
     sim.tick(20)
+    tag = shown(p)
+    assert tag.pop("material_uuid") and tag.pop("package_uuid")
+    assert tag == {"name": "PETG", "color": "#1f6fb2", "instance_uuid": uuid}
+
+    # The bridge's write starts the type afresh: only its own instance UUID is left.
+    p.apply(gcode.parse(f'M865 X R N"PETG" O"#1f6fb2" L0\nM865.1 I0 C"{uuid}"'))
     assert shown(p) == {"name": "PETG", "color": "#1f6fb2", "instance_uuid": uuid}
 
     sim, mk4 = make("1.4.1", [SimTool(0)])

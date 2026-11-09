@@ -2405,3 +2405,78 @@ async def test_404_in_flush_holds_the_charge_for_the_records_printer(tmp_path, c
     assert "Spoolman rejected a +50 mm charge to spool 19 (404" in caplog.text
     assert fake.used == {}
     await bridge.aclose()
+
+
+TAG_K = "8b6a3e3e-3f6c-4d7b-9a43-6c1f0e7d2a11"
+
+
+def tagged(uuid=TAG_K):
+    """PLA loaded from a tag: the firmware reports its material and package UUIDs."""
+    return {
+        "name": "PLA",
+        "color": "#73737b",
+        "instance_uuid": uuid,
+        "material_uuid": "0b1c6b8e-8d0f-4f8e-9a63-2b1f0d6c7e11",
+        "package_uuid": "5d6e7f80-1a2b-4c3d-8e9f-0a1b2c3d4e5f",
+    }
+
+
+def stored_uuid(fake, spool_id):
+    raw = fake.spools[spool_id]["extra"].get("instance_uuid")
+    return json.loads(raw) if raw else None
+
+
+@pytest.mark.parametrize("before", [None, {"name": "PLA", "color": "#73737b"}])
+async def test_watched_tag_load_is_adopted(tmp_path, before):
+    """An empty tool or a menu type, then a tag: the bridge saw it appear and adopts it."""
+    bridge, fake, printer = make(tmp_path, [spool(20)], uuid_field="instance_uuid")
+    printer.material = before
+    await bridge.poll()  # baseline
+    printer.material = tagged()
+    await bridge.poll()
+    assert stored_uuid(fake, 20) == TAG_K
+    await bridge.poll()
+    assert jobs(printer) == []
+    await bridge.aclose()
+
+
+async def test_tag_loaded_before_start_is_kept_not_adopted(tmp_path):
+    bridge, fake, printer = make(tmp_path, [spool(20)], uuid_field="instance_uuid")
+    printer.material = tagged()
+    for _ in range(2):
+        await bridge.poll()
+    assert stored_uuid(fake, 20) is None
+    assert jobs(printer) == []
+    await bridge.aclose()
+
+
+async def test_old_spools_tag_after_a_restart_is_not_adopted(tmp_path):
+    """Spool 19's tag comes back after a restart with spool 20 in the tool: 20 is minted."""
+    bridge, fake, printer = make(tmp_path, [spool(19)], uuid_field="instance_uuid")
+    printer.material = tagged()  # 19's tag, loaded before the bridge started.
+    await bridge.poll()
+    assert stored_uuid(fake, 19) is None
+
+    # Spoolman first: 20 in, 19 out at the unload. The tool reads empty.
+    fake.spools[20] = spool(20)
+    await bridge.poll()
+    printer.unloads, printer.at_unload, printer.material = 1, printer.extruded, None
+    await bridge.poll()
+    assert bridge.printers[0].tools[0].active == 20
+
+    # The bridge restarts, then the printer shows 19's tag again, as a runout reload does.
+    # The clients are reused: the restarted bridge closes them.
+    restarted = Bridge(
+        config=bridge.config,
+        clients=bridge.clients,
+        spoolman=bridge.spoolman,
+        state=load_state(tmp_path / "state.json", ["default"]),
+    )
+    await restarted.poll()
+    printer.material = tagged()
+    await restarted.poll()
+    await restarted.poll()
+    minted = stored_uuid(fake, 20)
+    assert minted is not None and minted != TAG_K
+    assert printer.material["instance_uuid"] == minted
+    await restarted.aclose()

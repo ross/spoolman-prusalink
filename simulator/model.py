@@ -150,6 +150,10 @@ class Material:
     nozzle: int | None = None
     preheat: int | None = None
     bed: int | None = None
+    # Set by a tag load only. M865 X R starts afresh without them; edits and runout
+    # reloads keep them.
+    material_uuid: str | None = None
+    package_uuid: str | None = None
 
     def temperatures(self) -> tuple[int, int, int]:
         """Return the nozzle, preheat and bed temperatures the printer reports."""
@@ -551,8 +555,10 @@ class SimPrinter:
         }
         if m.color:
             out["color"] = m.color
-        if self.model.uuids and tool.index == 0 and m.instance_uuid:
-            out["instance_uuid"] = m.instance_uuid
+        if self.model.uuids and tool.index == 0:
+            for key in ("material_uuid", "package_uuid", "instance_uuid"):
+                if value := getattr(m, key):
+                    out[key] = value
         return out
 
     def filament_json(self) -> dict | None:
@@ -687,7 +693,17 @@ class SimPrinter:
         tag_temps = preset_temperatures(name)
         if temps is not None:
             tag_temps = dict(zip(tag_temps, _check_temperatures(temps), strict=True))
-        return Material(name, color, value if t.index == 0 else None, **tag_temps)
+        if t.index != 0:
+            return Material(name, color, **tag_temps)
+        # A real tag carries its product's UUIDs; derive stable ones from the name and color.
+        return Material(
+            name,
+            color,
+            value,
+            material_uuid=str(uuidlib.uuid5(uuidlib.NAMESPACE_URL, f"material/{name}")),
+            package_uuid=str(uuidlib.uuid5(uuidlib.NAMESPACE_URL, f"package/{name}/{color}")),
+            **tag_temps,
+        )
 
     def _hand_load(self, t: SimTool, material: Material | None) -> None:
         if t.process is not None:
@@ -1349,7 +1365,7 @@ class SimPrinter:
             return
         material = replace(source.material)
         if not (self.model.uuids and t.index == 0):
-            material.instance_uuid = None
+            material.instance_uuid = material.material_uuid = material.package_uuid = None
         self._set_material(t, material)
         self._log("gcode", f"M865 T{t.index} copied from T{source.index}: {_describe(material)}")
 

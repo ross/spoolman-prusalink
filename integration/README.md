@@ -74,7 +74,10 @@ current and that the scenario rows name their tests.
 | --- | --- | --- |
 | S1 | `test_swaps.py::test_s1_matching_tag_writes_nothing` | Spoolman first, and the new spool's tag already matches: nothing is written. |
 | S1 | `test_swaps.py::test_s1_spoolman_first_swap` | Spoolman updated before the unload: the swap commits there, the load is the new spool's. |
+| S1 | `test_swaps.py::test_s1_tag_uuid_conflict_is_flagged` | The new spool has a different UUID in Spoolman: flagged, neither overwritten (#66). |
+| S1 | `test_swaps.py::test_s1_tag_uuid_is_adopted` | The new spool has no UUID: it takes the tag's, and nothing is written (#66). |
 | S1 | `test_swaps.py::test_s1_tag_with_other_temperatures_is_written` | Spoolman first, and the tag matches but for its temperatures: Spoolman's are written. |
+| S1 | `test_swaps.py::test_s1_untrusted_tag_uuid_is_kept` | A tag the bridge didn't see load is kept on the printer, not minted over (#66). |
 | S2 | `test_swaps.py::test_s2_filament_first_swap` | Filament swapped first: the charge is held, then moves once Spoolman is updated. |
 | S3 | `test_swaps.py::test_s3_moved_after_the_write_back` | Spoolman updated after the old spool was written back: confirmed, then B is written. |
 | S3 | `test_swaps.py::test_s3_old_spool_moved_back` | Old spool moved out and back: the swap stays open, or closes as of a print start. |
@@ -92,6 +95,7 @@ current and that the scenario rows name their tests.
 | S13 | `test_swaps.py::test_s13_staged_spool_claimed` | Staged spool, no unload: a claim moves the usage since the reboot and makes it active. |
 | S14 | `test_swaps.py::test_s14_several_swaps_between_polls` | Two swaps between polls: two unloads seen, the middle spool is charged nothing. |
 | P1 | `test_prints.py::test_p1_normal_print` | Normal print: each poll charges the active spool the counter's change since the last. |
+| P2 | `test_prints.py::test_p2_runout_reload_keeps_the_old_tag` | A runout reload shows the old spool's tag: the new spool doesn't take its UUID (#66). |
 | P2 | `test_prints.py::test_p2_runout_with_spoolman_updated_during_pause` | Runout mid-print, Spoolman fixed during the pause: the rest goes to the new spool. |
 | P3 | `test_prints.py::test_p3_runout_with_spoolman_updated_after_the_print` | Runout, Spoolman fixed after the print: the swap stays open, then moves the rest. |
 | P4 | `test_prints.py::test_p4_runout_reloaded_with_no_spoolman_change` | Runout reloaded, Spoolman never changed: assumed at the next print, kept at the unload. |

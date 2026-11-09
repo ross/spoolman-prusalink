@@ -16,6 +16,15 @@ class Material:
     nozzle_temperature: int = field(kw_only=True)
     preheat_temperature: int = field(kw_only=True)
     bed_temperature: int = field(kw_only=True)
+    # Set only by a load from an NFC tag. The bridge's own write (`M865 X R`) clears them,
+    # and a runout reload keeps them from the filament before.
+    material_uuid: str | None = None
+    package_uuid: str | None = None
+
+    @property
+    def from_tag(self) -> bool:
+        """Whether the type came from a tag rather than a menu pick or the bridge's write."""
+        return bool(self.material_uuid or self.package_uuid)
 
 
 @dataclass(frozen=True)
