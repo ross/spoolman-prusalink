@@ -24,8 +24,10 @@ change, so it behaves as 8.0.0. The `/api/v1/filament` endpoint and its
 counters are the branch's addition; stock firmware has neither.
 
 Paths and line numbers below are in that checkout at that commit. The probe
-records `GET /api/version` in every trace header, so a trace says which
-firmware it saw.
+records `GET /api/version` and `GET /api/v1/info` in every trace header, so
+a trace says which firmware and printer it saw. On 2026-11-08 the printer
+reported firmware `9.0.0+17074.LOCAL`, printer type `8.1.0` (Core One L),
+hostname `prusa-core-one-l`, a 0.4 mm nozzle and no MMU.
 
 ## Status values
 
@@ -57,7 +59,7 @@ Each row says what the probe should see for tool 0. "Counted" means
 | F7 | Cancel partway | `PRINTING` while parking, then `STOPPED` with no `job`. | `Aborting_*` reads `PRINTING`, `Aborted` reads `STOPPED` and the job object goes (`printer_state.cpp:387-394, 425-436, 611-622`). | `cancel()` | Seen live (P7). Trace `F7-cancel`. |
 | F8 | Filament change during a print: Tune > Change filament, a runout, or a jam with an unload | `unload_count` up by one at the unload; `ATTENTION` while the screen waits, `PAUSED` once handled; the reload brings back the same `material` as before (name, color, UUID); the purge is counted; then `PRINTING`. | A runout injects `M600` (`src/common/filament_sensors_handler.cpp:237`), so every change is the `M600` path: unload, count, reload (`pause.cpp:1291, 1363-1365`). The reload takes the previous type (`src/marlin_stubs/M600.cpp:284-285`, `filament_tools.cpp:39-42`). | `runout()`, `jam()`, `load()` with no source | Seen live (P2 runout, P6 jam). Trace `F8-change-filament` from the Tune menu. |
 | F9 | Planned color change, `M600` in the G-code | As F8, at the point the file asks for it. | Same path as F8. | `PrintSpec(color_changes_mm=...)` | From source (P5 unit-tested). Trace `F9-m600`. |
-| F10 | The bridge's sync job | Upload accepted when `IDLE`, `FINISHED` or `STOPPED` (409 "Can't print right now" otherwise, with the file kept); a `job` with its own ID and the file's name in `/api/v1/job`; `PRINTING` with the F5 blip; `M865 R` clears the slot including UUIDs, then sets name, color and temperatures; `M865.1` sets the UUID; `FINISHED` with no `job`. `extruded` held throughout. | Accepted states (`printer_state.cpp:592-608`); 409 after the file is saved (`lib/WUI/nhttp/gcode_upload.cpp:286-295`). `M865 R` resets every parameter (`src/marlin_stubs/M865.cpp:83-85`); parameters on a preset are ignored but `L` still loads it, and `N` on a preset is an error (`:133-137, 189-191`). `M865.1` is built for Core One and Core One L only (`:145-171`). Names are 1 to 7 of `a-zA-Z0-9_-` (`filament_common.cpp:27-42`). | `upload()` and `gcode.py` | Seen live (W1, W6, W13, W14). Trace `F10-sync-job`. |
+| F10 | The bridge's sync job | Upload accepted when `IDLE`, `FINISHED` or `STOPPED` (409 "Can't print right now" otherwise, with the file kept); a `job` with its own ID and the file's name in `/api/v1/job`; `PRINTING` with the F5 blip; `M865 R` clears the slot including UUIDs, then sets name, color and temperatures; `M865.1` sets the UUID; `FINISHED` with no `job`. `extruded` held throughout. | Accepted states (`printer_state.cpp:592-608`); 409 after the file is saved (`lib/WUI/nhttp/gcode_upload.cpp:286-295`). `M865 R` resets every parameter (`src/marlin_stubs/M865.cpp:83-85`); parameters on a preset are ignored but `L` still loads it, and `N` on a preset is an error (`:133-137, 189-191`). `M865.1` is built for Core One and Core One L only (`:145-171`). Names are 1 to 7 of `a-zA-Z0-9_-` (`filament_common.cpp:27-42`). | `upload()` and `gcode.py` | Seen live (W1, W6, W13, W14). Traced 2026-11-08 as `F10b-sync-job-rewrite`: the job written by hand with the loaded spool's own values, from the FINISHED screen; `PRINTING` for 17 s with no `IDLE` blip at 1 s polls, no material event, `FINISHED` with no `job`. The write that changes the slot is still to trace as `F10-sync-job` in sitting A. |
 | F11 | Manual moves from the menu: Move E, retract, Purge filament | Move E forward is counted once past the gap; a retract never lowers `extruded`; Purge filament is counted and leaves `material` as it was, with no unload. | Move E goes through the planner (`src/gui/screen_menu_move.cpp:201-212`), where every positive move past the gap counts and the gap is clamped at 40 mm (`filament_tracker.cpp:22-27`). Purge filament is `M701 L0 W2` (`MItem_filament.cpp:168`, `M701_2.cpp:123`): a purge that re-sets the chosen type without an unload. | `extrude()`, `retract()` | From source (C6 has no test). Trace `F11-manual-extrude`. |
 | F12 | Power cut during a print, bed still warm | Unreachable; then a new `boot_id`, counters at 0, the same `job` ID; `BUSY`, during which about 25 mm is counted (the nozzle clean); briefly `PAUSED`; then `PRINTING`. The trace settles where the 25 mm shows. | No new ID: the resume skips the preview (`marlin_server.cpp:2081-2094`) and loads the saved ID (`:1393`). Warm bed resumes on its own (`src/common/power_panic.cpp:294-315`): `PowerPanic_Resume` reads `BUSY`, the unpark reads `PAUSED` (`marlin_server.cpp:2105`, `printer_state.cpp:399-424`). XY are homed, Z restored (`power_panic.cpp:400, 450-456`). Core One and Core One L run `G12 S21`, which includes `G750 E25` through the planner (`power_panic.cpp:484-488`, `nozzle_cleaner.cpp:96-106`, `G750.cpp:40`). The counters aren't in the power-panic data. Resume needs the USB drive present and not the reset button (`print_utils.cpp:45-50`). | `set_power("on", resume=True)` | From source (P12). Trace `F12-power-panic`. |
 | F13 | Power cut during a print, bed gone cold | As F12, but `ATTENTION` after the first `BUSY` until the user taps resume; the nozzle clean comes after that. The threshold and whether the job's `state` in `/api/v1/job` reads `PAUSED` throughout are for the trace. | `PowerPanic_AwaitingResume` with the `HeatbedColdAfterPP` warning (`marlin_server.cpp:2089-2094, 2053-2055`) reads `ATTENTION` (`printer_state.cpp:343`). A print that was paused when power failed comes back `PAUSED` (`marlin_server.cpp:2108-2116`). | `set_power("on", resume=True, cold_bed=True)` | From source. Trace `F13-power-panic-cold`, optional. |
@@ -137,17 +139,41 @@ cheap filament.
    the probe missed, but no event the printer didn't, and none after the
    printer's last step. One poll can see several changes at once, such as an
    unload and a material change, so a live event may stand for up to four
-   consecutive simulator events; runs never combine. Whether `extruded`
-   moved is checked separately for each step, over the simulator steps from
-   where it matched to where the next one did: the simulator states the
-   probe skipped belong to the step before them. Movement the printer showed
-   must appear there, and movement the simulator sustains must have been
-   seen: between the step's samples, or in the poll that crossed into the
-   next step when the movement filled less than half the stretch, unless
-   that poll found the printer unreachable.
+   consecutive simulator events, with runs between them that together last
+   less than one poll; longer runs never combine. A run the printer showed
+   may also pass over a simulator event whose poll the probe missed, such
+   as a job's first sighting before the start blip, as long as a later live
+   event accounts for it. Whether `extruded` moved
+   is checked separately for each step, over the simulator steps from where
+   it matched to where the next one did: the simulator states the probe
+   skipped belong to the step before them. Each of the printer's polls is
+   placed at a simulator sample in that stretch, in order, so that the
+   movement between two consecutive polls is exactly what the simulator
+   shows between their places: a poll that saw no movement means the
+   simulator was still there, and a poll that saw movement means the
+   simulator moved the same way somewhere in between. An event's poll can
+   come up to a poll after the event and carry movement from what follows,
+   so it may sit anywhere up to the end of the next step's stretch. A poll
+   that brought no counter (the printer unreachable, or the filament read
+   failed) takes no place of its own: the next poll that saw the counter is
+   measured from the last that did. Before a reboot the counters restart,
+   so there the blind poll accepts anything, which is how movement in the
+   last poll before a power cut is lost; without time, movement earlier in
+   a still run before the cut can hide the same way, a known limit. The
+   simulator may not move before the first poll or after the last, since a
+   recording starts and ends at rest. Durations enter in one place:
+   simulator states the probe never sampled must together fit within one
+   poll, or the printer would have shown them. Otherwise a replay may run
+   its states faster or slower than the printer did, as long as each
+   stretch has at least as many simulator samples (ten a second) as the
+   trace kept polls there: the probe keeps a still sample every heartbeat,
+   so a long wait on the printer needs a few seconds in the replay.
 2. **Mark each step** by typing what you're about to do and pressing Enter,
    then do it at the printer: `unload from the menu`, `pulled the plug`.
-   Marks carry their time and show up in the review.
+   Marks carry their time and show up in the review. Stop the probe with
+   Ctrl-C, or `kill` it when it runs in the background, where a shell
+   ignores Ctrl-C for it; either way the last poll is written. Don't edit
+   a trace while the probe still writes it.
 3. **Let it settle.** When the printer is back to `IDLE` (or `FINISHED`,
    for a print) and a heartbeat has passed, stop the probe with Ctrl-C.
 4. **Review the steps:**
@@ -171,15 +197,21 @@ cheap filament.
    Passing means the simulator reproduces every step the printer showed and
    adds no event of its own. A failure prints both step lists. The printer
    is right: when the trace and a reading of the firmware source disagree,
-   the simulator follows the trace, and the source is re-read to explain
-   it. So the fix is usually in `simulator/model.py`, with the row updated
-   to say what the printer did; sometimes it's the replay's choreography in
-   the test.
+   the simulator follows the trace. The source is then re-read to explain
+   the difference, but the two may never agree: the printer may run a
+   different firmware version from the one read, or a setting or a detail
+   of the model may change the path taken. The trace's header records what
+   the printer said it was (`firmware`, and the `/api/version` and
+   `/api/v1/info` bodies: model, hostname, serial, nozzle), so a
+   disagreement can be tied to a printer and a version. So the fix is
+   usually in `simulator/model.py`, with the row updated to say what the
+   printer did; sometimes it's the replay's choreography in the test.
 6. **Record it.** Set the row's status to Traced with the date, and commit
    the trace with the model or test change. If the printer did anything
    the row's firmware column didn't predict, add a line to
-   [Disagreements](#disagreements-between-the-source-and-the-printer),
-   even when the difference turned out to be harmless.
+   [Disagreements](#disagreements-between-the-source-and-the-printer) with
+   the firmware version from the trace's header, even when the difference
+   turned out to be harmless or unexplained.
 
 ### Disagreements between the source and the printer
 
@@ -187,11 +219,12 @@ Each line is a place where a reading of the firmware source said one thing
 and a trace showed another. They're worth revisiting: a wrong reading may
 hide a second one nearby, a firmware update may change the behavior, and
 the bridge may be leaning on the reading somewhere else. Keep the line
-after the simulator is fixed.
+after the simulator is fixed. "Why" is the explanation found in the
+source, a version or setting mismatch, or "unexplained".
 
-| Date | Row | The source said | The printer showed | What changed |
-| --- | --- | --- | --- | --- |
-| | | | | |
+| Date | Row | Firmware | The source said | The printer showed | Why | What changed |
+| --- | --- | --- | --- | --- | --- | --- |
+| | | | | | | |
 
 Redo a spoiled trace with `--force`. Use `--interval 0.5` for the power
 cuts, where the states move fast once the printer is back. Each trace is a
