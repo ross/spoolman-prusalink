@@ -145,6 +145,7 @@ async def test_b6_dry_run_then_live(bridges: World, caplog: pytest.LogCaptureFix
     await w.unload()
     # A poll while A's unconfirmed-swap flag is due: a dry run doesn't write it either.
     await w.poll()
+    assert await w.flag("A") is None
     await w.swap_cycle(source="tag", name=PETG[0], color=PETG[1])
     await w.unload()
     # Loaded from the menu, so a write of C is due once the bridge sees the swap.
