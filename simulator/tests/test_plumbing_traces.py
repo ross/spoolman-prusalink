@@ -180,12 +180,34 @@ def test_compare_reports_a_difference_in_each_shape_field(index, change, field):
     assert trace.compare(sim, live) != [], field
 
 
-def test_compare_reports_movement_differences():
+NO_FIT = "no place in the simulator"
+
+
+def ticks(states, moves=None, start: float = 0.0, e: int = 100, job=None, rate: int = 0):
+    """Simulator-rate samples: `states` is a list of (seconds, state[, material]) runs.
+
+    `moves` adds millimetres to the counter in the tick at each of its seconds, and
+    `rate` adds that many every tick of a PRINTING or PAUSED run.
+    """
+    out, t = [], start
+    for run in states:
+        seconds, state, material = (*run, PLA)[:3]
+        for _ in range(round(seconds / 0.1)):
+            e += (moves or {}).get(round(t, 1), 0)
+            e += rate if state in ("PRINTING", "PAUSED") else 0
+            here = job if state not in ("IDLE", "FINISHED") else None
+            out.append(sample(round(t, 1), state, e, material, job=here))
+            t += 0.1
+    return out
+
+
+def test_compare_checks_movement_poll_by_poll():
+    # The printer prints, pauses still for six polls, and prints again.
     def pause(moving: bool):
         e = 150
         out = [sample(0, "IDLE", 100, PLA), sample(1, "PRINTING", 100, PLA, job=7)]
         out += [sample(2 + n, "PRINTING", 100 + 10 * (n + 1), PLA, job=7) for n in range(5)]
-        for n in range(6):  # six seconds paused
+        for n in range(6):
             e += 5 if moving else 0
             out.append(sample(7 + n, "PAUSED", e, PLA, job=7))
         out += [sample(13 + n, "PRINTING", e + 10 * (n + 1), PLA, job=7) for n in range(5)]
@@ -195,13 +217,22 @@ def test_compare_reports_movement_differences():
     still, moving = pause(False), pause(True)
     assert trace.compare(still, still) == [] and trace.compare(moving, moving) == []
     # A simulator that moves the counter through a pause, or one that holds it while the
-    # printer moved, is wrong either way.
-    assert "where the printer showed none" in trace.compare(still, moving)[0]
-    assert "moved '+' within it" in trace.compare(moving, still)[0]
+    # printer moved, is wrong either way: no still poll fits a moving stretch, and no
+    # moving poll fits a still one.
+    assert NO_FIT in trace.compare(still, moving)[0]
+    assert NO_FIT in trace.compare(moving, still)[0]
+    # The replays run their states faster than the printer: a 3 s simulated pause that
+    # extrudes 60 mm still has no still stretch for the printer's 30 s of still polls.
+    defect = [sample(0, "IDLE", 100, PLA)] + ticks(
+        [(5, "PRINTING"), (3, "PAUSED"), (5, "PRINTING"), (1, "FINISHED")],
+        start=0.1,
+        job=7,
+        rate=2,
+    )
+    assert NO_FIT in trace.compare(still, trace.signature(defect))[0]
 
     # Movement in a step's first sample straddles the change before it: a FINISHED poll
-    # that still carries the last second of printing is fine, while one in a step whose
-    # neighbors never moved is not.
+    # that still carries the last second of printing is fine.
     straddle = trace.signature(
         [
             sample(0, "IDLE", 100, PLA),
@@ -219,15 +250,97 @@ def test_compare_reports_movement_differences():
         + [sample(4 + n / 10, "FINISHED", 158, PLA) for n in range(20)]
     )
     assert trace.compare(straddle, fine) == []
-    quiet = trace.signature(
-        [sample(0, "IDLE", 100, PLA), sample(1, "IDLE", 100, PLA), sample(2, "BUSY", 130, PLA)]
-        + [sample(3, "BUSY", 130, PLA), sample(4, "IDLE", 130, PLA)]
+
+    # A purge as BUSY begins shows in the first BUSY poll on both sides. Against a printer
+    # that never moved, the same purge is caught, as is one tick's jump in the middle of
+    # the run or at its end, and a retraction.
+    live_still = trace.signature(
+        [sample(0, "IDLE", 100, PLA)]
+        + [sample(t, "BUSY", 100, PLA) for t in range(1, 22)]
+        + [sample(22, "IDLE", 100, PLA), sample(23, "IDLE", 100, PLA)]
     )
-    never = trace.signature(
-        [sample(0, "IDLE", 100, PLA), sample(1, "IDLE", 100, PLA), sample(2, "BUSY", 100, PLA)]
-        + [sample(3, "BUSY", 100, PLA), sample(4, "IDLE", 100, PLA)]
+    live_purge = trace.signature(
+        [sample(0, "IDLE", 100, PLA), sample(1, "BUSY", 140, PLA)]
+        + [sample(t, "BUSY", 140, PLA) for t in range(2, 22)]
+        + [sample(22, "IDLE", 140, PLA)]
     )
-    assert "neither there nor just before" in trace.compare(quiet, never)[0]
+
+    def busy(moves):
+        return trace.signature(
+            [sample(0, "IDLE", 100, PLA)] + ticks([(21.4, "BUSY"), (1.0, "IDLE")], moves, start=0.1)
+        )
+
+    assert trace.compare(live_purge, busy({0.2: 10, 0.3: 10, 0.4: 10, 0.5: 10})) == []
+    assert NO_FIT in trace.compare(live_still, busy({0.3: 40}))[0]
+    assert NO_FIT in trace.compare(live_still, busy({10.0: 50}))[0]
+    assert NO_FIT in trace.compare(live_still, busy({21.3: 50}))[0]
+    assert NO_FIT in trace.compare(live_still, busy({10.0: -50}))[0]
+
+    # A missed state may last any time, but not move when the polls around it were still:
+    # a load's material change, then a long BUSY that extrudes before the printer's IDLE.
+    load = trace.signature(
+        [sample(0, "IDLE", 100, PLA), sample(1, "IDLE", 140, PETG)]
+        + [sample(t, "IDLE", 140, PETG) for t in range(2, 30)]
+    )
+    hidden = trace.signature(
+        [sample(0, "IDLE", 100, PLA), sample(0.1, "IDLE", 140, PETG)]
+        + ticks([(20, "BUSY", PETG), (10, "IDLE", PETG)], {5.0: 400}, start=0.2, e=140)
+    )
+    assert "longer than a poll" in trace.compare(load, hidden)[0]
+    # Nor before the first poll, nor after the last: a recording starts and ends at rest.
+    early = trace.signature(ticks([(20, "BUSY"), (30, "IDLE")], {5.0: 400}))
+    rest = trace.signature([sample(t, "IDLE", 100, PLA) for t in range(0, 30)])
+    assert NO_FIT in trace.compare(rest, early)[0]
+    late = trace.signature(ticks([(30, "IDLE"), (60, "FINISHED")], {40.0: 50}))
+    ended = trace.signature(
+        [sample(t, "IDLE", 100, PLA) for t in range(0, 30)] + [sample(30, "FINISHED", 100, PLA)]
+    )
+    assert NO_FIT in trace.compare(ended, late)[0]
+
+
+def test_compare_accepts_movement_a_poll_could_not_see():
+    # The load's counted feed at the end of a long ATTENTION rest: a coarse probe saw
+    # rest, rest, then the type change carrying the movement.
+    live = trace.signature(
+        [
+            sample(0, "ATTENTION", 100, None, job=7),
+            sample(2, "ATTENTION", 100, None, job=7),
+            sample(4, "ATTENTION", 100, None, job=7),
+            sample(6, "ATTENTION", 120, PETG, job=7),
+        ]
+    )
+    rest = [sample(n / 2, "ATTENTION", 100, None, job=7) for n in range(10)]
+    tail = [sample(5, "ATTENTION", 110, None, job=7), sample(5.5, "ATTENTION", 120, None, job=7)]
+    change = [sample(6, "ATTENTION", 120, PETG, job=7)]
+    assert trace.compare(live, trace.signature(rest + tail + change)) == []
+    throughout = [sample(n / 2, "ATTENTION", 100 + 2 * n, None, job=7) for n in range(12)]
+    assert NO_FIT in trace.compare(live, trace.signature(throughout + change))[0]
+
+    # Movement in the last poll before a power cut is lost with the counters, so the
+    # unreachable poll accepts it: the printer printing up to the cut, or a jump just
+    # before it. Without time, the rule can't tell that jump from one earlier in the
+    # still run, so that passes too; it's the limit docs/printer-behaviors.md names.
+    live_cut = trace.signature(
+        [sample(t, "IDLE", 100, PLA) for t in range(0, 30)] + [down(30), down(31)]
+    )
+    for at in (29.5, 15.0):
+        cut = ticks([(30, "IDLE")], {at: 20})
+        assert trace.compare(live_cut, trace.signature(cut + [down(30), down(31)])) == []
+    printing = trace.signature(
+        [sample(0, "IDLE", 100, PLA)]
+        + [sample(t, "PRINTING", 100 + 20 * t, PLA, job=7) for t in range(1, 6)]
+        + [down(6), down(7)]
+    )
+    feed = [sample(0, "IDLE", 100, PLA)] + ticks([(5.5, "PRINTING")], start=0.1, job=7, rate=2)
+    assert trace.compare(printing, trace.signature(feed + [down(6), down(7)])) == []
+    # So does a poll whose filament read failed: the counter wasn't seen that time.
+    blind = trace.signature(
+        [sample(0, "IDLE", 100, PLA), sample(1, "IDLE", 100, PLA, filament=None)]
+        + [sample(2, "IDLE", 120, PLA), sample(3, "IDLE", 120, PLA)]
+    )
+    moved = trace.signature(ticks([(3.1, "IDLE")], {0.5: 20}))
+    assert trace.compare(blind, moved) == []
+    assert blind[0].blind[1] and not blind[0].blind[0]
 
 
 def test_compare_rejects_events_the_printer_did_not_show():
@@ -248,83 +361,10 @@ def test_compare_rejects_events_the_printer_did_not_show():
     assert trace.compare(live, trace.signature(extra_job)) != []
     trailing = BASE + [sample(7, "IDLE", 160, PETG, unloads=1, boot=2)]
     problems = trace.compare(live, trace.signature(trailing))
-    assert problems and "after the printer's last" in problems[0]
+    assert problems and "event the printer didn't show" in problems[0]
     # Extra non-event steps after the printer's last are fine, like extra idle time.
     longer = trace.signature(BASE + [sample(7, "IDLE", 160, PETG, unloads=1)])
     assert trace.compare(live, longer) == []
-
-
-def test_compare_lets_brief_movement_hide_in_the_poll_that_crossed_a_step():
-    # The load's counted feed at the end of a long ATTENTION rest: a coarse probe saw
-    # rest, rest, then the type change carrying the movement. That passes. A simulator
-    # that moved through the whole rest would have been seen between the live samples.
-    live = trace.signature(
-        [
-            sample(0, "ATTENTION", 100, None, job=7),
-            sample(2, "ATTENTION", 100, None, job=7),
-            sample(4, "ATTENTION", 100, None, job=7),
-            sample(6, "ATTENTION", 120, PETG, job=7),
-        ]
-    )
-    rest = [sample(n / 2, "ATTENTION", 100, None, job=7) for n in range(10)]
-    tail = [sample(5, "ATTENTION", 110, None, job=7), sample(5.5, "ATTENTION", 120, None, job=7)]
-    change = [sample(6, "ATTENTION", 120, PETG, job=7)]
-    assert trace.compare(live, trace.signature(rest + tail + change)) == []
-    throughout = [sample(n / 2, "ATTENTION", 100 + 2 * n, None, job=7) for n in range(12)]
-    problems = trace.compare(live, trace.signature(throughout + change))
-    assert "where the printer showed none" in problems[0]
-    # Movement right before a power cut is lost with the counters, so it isn't demanded.
-    live = trace.signature([sample(0, "PRINTING", 100, PLA, job=7), down(2), down(4)])
-    sim = trace.signature(
-        [sample(n / 2, "PRINTING", 100 + 5 * n, PLA, job=7) for n in range(4)] + [down(2), down(4)]
-    )
-    assert trace.compare(live, sim) == []
-
-
-def test_compare_places_simulator_movement_by_where_it_falls():
-    gap = 1.0
-    still = [sample(0, "IDLE", 100, PLA)] + [sample(t, "BUSY", 100, PLA) for t in range(1, 22)]
-    still += [sample(22, "IDLE", 100, PLA), sample(23, "IDLE", 100, PLA)]
-    live = trace.signature(still)
-
-    def busy(moves: dict[float, int]) -> list[trace.Step]:
-        """A BUSY run of 20 s that extrudes `mm` at each of `moves`' seconds in one tick."""
-        e, out = 100, [sample(0, "IDLE", 100, PLA)]
-        t = 0.1
-        while t < 22.0 - 1e-9:
-            e += moves.get(round(t, 1), 0)
-            out.append(sample(round(t, 1), "BUSY" if t < 21.5 else "IDLE", e, PLA))
-            t += 0.1
-        return trace.signature(out)
-
-    # A purge as BUSY begins shows in the live step's first sample on the printer too.
-    purge = [sample(0, "IDLE", 100, PLA), sample(1, "BUSY", 140, PLA)]
-    purge += [sample(t, "BUSY", 140, PLA) for t in range(2, 22)] + [sample(22, "IDLE", 140, PLA)]
-    assert (
-        trace.compare(trace.signature(purge), busy({0.2: 10, 0.3: 10, 0.4: 10, 0.5: 10}), gap) == []
-    )
-    # The same purge against a printer that never moved is caught, as is a single tick's
-    # jump in the middle of the run, or at its end, and a retraction.
-    assert "at the start of" in trace.compare(live, busy({0.3: 40}), gap)[0]
-    assert "in the middle of" in trace.compare(live, busy({10.0: 50}), gap)[0]
-    assert "at the end of" in trace.compare(live, busy({21.3: 50}), gap)[0]
-    assert "moved '-' in the middle" in trace.compare(live, busy({10.0: -50}), gap)[0]
-    # Movement in the last poll gap before a power cut is lost with the counters, but
-    # movement earlier in the stretch is not.
-    cut = [sample(0, "IDLE", 100, PLA)] + [sample(t, "IDLE", 100, PLA) for t in range(1, 30)]
-    cut += [down(30), down(31)]
-    live_cut = trace.signature(cut)
-
-    def idle_then_cut(moves: dict[float, int]) -> list[trace.Step]:
-        e, out, t = 100, [], 0.0
-        while t < 30.0 - 1e-9:
-            e += moves.get(round(t, 1), 0)
-            out.append(sample(round(t, 1), "IDLE", e, PLA))
-            t += 0.1
-        return trace.signature(out + [down(30), down(31)])
-
-    assert trace.compare(live_cut, idle_then_cut({29.5: 20}), gap) == []
-    assert "in the middle of" in trace.compare(live_cut, idle_then_cut({15.0: 20}), gap)[0]
 
 
 def test_compare_folds_consecutive_events_only():

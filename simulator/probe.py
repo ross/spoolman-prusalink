@@ -21,6 +21,7 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import os
+import signal
 import subprocess
 import sys
 import threading
@@ -184,6 +185,9 @@ def record(args: argparse.Namespace) -> int:
 
     written = 0
     keeper = Keeper(args.heartbeat, args.tool)
+    # A plain `kill`, or a `timeout`, stops the probe as Ctrl-C does: the last poll and
+    # any marks are still written.
+    signal.signal(signal.SIGTERM, lambda *_: (_ for _ in ()).throw(KeyboardInterrupt()))
     print(
         f"recording {out}; type a note and press Enter to mark it; Ctrl-C to stop",
         file=sys.stderr,

@@ -1,7 +1,10 @@
 # Traces from the printer
 
 One `<ID>.jsonl` per row of [docs/printer-behaviors.md](../../../docs/printer-behaviors.md),
-recorded with `python -m simulator.probe` and replayed by `test_traces.py`.
+recorded with `python -m simulator.probe` and replayed by `test_traces.py`. A row
+recorded under different conditions gets a variant, `<ID><letter>-<what>.jsonl`, with
+its own replay: `F10b-sync-job-rewrite` is the sync job writing the spool already
+loaded, from the FINISHED screen.
 
 The first line of each file is the header: the trace's name, the printer's URL,
 when it started, the probe's `interval`, `heartbeat` and `tool`, the printer's
