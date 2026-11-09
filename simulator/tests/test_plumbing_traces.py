@@ -480,6 +480,29 @@ def test_compare_takes_the_polling_interval_from_the_caller():
     )
     assert "longer than a poll" in trace.compare(live, sim, 1.0)[0]
     assert trace.compare(live, sim) == []
+    # The hint about too few samples speaks of the whole stretch, not the last poll's pin.
+    ended = trace.signature(
+        [sample(t, "IDLE", 100, PLA) for t in range(0, 30)]
+        + [sample(30, "FINISHED", 100, PLA), sample(31, "FINISHED", 100, PLA)]
+    )
+    late = trace.signature(ticks([(30, "IDLE"), (60, "FINISHED")], {40.0: 50}))
+    problem = trace.compare(ended, late)[0]
+    assert NO_FIT in problem and "needs at least as many samples" not in problem
+
+
+def test_cli_judges_missed_runs_by_the_headers_interval(tmp_path: Path):
+    # The same pair through the CLI: the live file's header says the probe polled every
+    # second, and its heartbeat-thinned samples alone would say every ten.
+    live = [sample(0, "IDLE", 100, PLA), sample(1, "IDLE", 100, PETG)]
+    live += [sample(t, "IDLE", 100, PETG) for t in (11, 21, 31, 41)]
+    sim = [sample(0, "IDLE", 100, PLA), sample(0.1, "IDLE", 100, PETG)]
+    sim += ticks([(5, "BUSY", PETG), (36, "IDLE", PETG)], start=0.2)
+    sim_path = tmp_path / "sim.jsonl"
+    trace.write(sim_path, trace.Trace(trace.header("sim"), sim))
+    for interval, code in ((1.0, 1), (10.0, 0)):
+        live_path = tmp_path / f"live-{interval}.jsonl"
+        trace.write(live_path, trace.Trace(trace.header("live", interval=interval), live))
+        assert trace.main([str(live_path), str(sim_path)]) == code
 
 
 def test_compare_folds_consecutive_events_only():

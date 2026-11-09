@@ -651,9 +651,10 @@ def _coarsening(live: list[Step], sim: list[Step], spans: list[tuple[int, int]])
                 f"that after where the earlier samples fit: {step}"
             )
             polls = sum(1 for f2 in placed if flat[f2][0] == i)
-            if hi - lo < polls:
+            places = starts[stretch[i][1]] - starts[stretch[i][0]]
+            if places < polls:
                 problem += (
-                    f" (those steps have {hi - lo} samples for the live step's {polls} polls:"
+                    f" (those steps have {places} samples for the live step's {polls} polls:"
                     " a replay's stretch needs at least as many samples as the trace has"
                     " polls there)"
                 )
