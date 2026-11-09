@@ -7,6 +7,7 @@ with no way in from outside the bridge, so it has no test here.
 from __future__ import annotations
 
 import logging
+import uuid
 from pathlib import Path
 
 import pytest
@@ -81,7 +82,7 @@ async def test_b4_state_file_lost(world: World):
     assert flag is not None and "unloaded" in flag
 
     # The load after the unload isn't polled before the state file goes.
-    await w.swap_cycle(source="tag", name=PETG[0], color=PETG[1])
+    await w.swap_cycle(source="tag", name=PETG[0], color=PETG[1], uuid=str(uuid.uuid4()))
     Path(w.cfg.state_file).unlink()
     await w.restart()
     records = await w.poll()
@@ -97,7 +98,8 @@ async def test_b4_state_file_lost(world: World):
     assert charges(records) == []
     assert w.charged(w.since(0), "A") == 20
     assert await w.used("B") == 0
-    # With the swap forgotten, the PETG on the printer is drift on A, the active spool.
+    # With the swap forgotten, B's tag on the printer is drift on A, the active spool: its
+    # UUID isn't A's. The tag's name and color aren't compared, since it isn't written.
     drift = await w.flag("A")
     assert drift is not None and "printer filament differs" in drift
 

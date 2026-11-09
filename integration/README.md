@@ -73,11 +73,12 @@ current and that the scenario rows name their tests.
 | Row | Test | What it checks |
 | --- | --- | --- |
 | S1 | `test_swaps.py::test_s1_matching_tag_writes_nothing` | Spoolman first, and the new spool's tag already matches: nothing is written. |
+| S1 | `test_swaps.py::test_s1_menu_load_with_other_values_is_written` | Spoolman first, and a menu load of another type: Spoolman's spool is written. |
 | S1 | `test_swaps.py::test_s1_spoolman_first_swap` | Spoolman updated before the unload: the swap commits there, the load is the new spool's. |
 | S1 | `test_swaps.py::test_s1_tag_uuid_conflict_is_flagged` | The new spool has a different UUID in Spoolman: flagged, neither overwritten (#66). |
 | S1 | `test_swaps.py::test_s1_tag_uuid_is_adopted` | The new spool has no UUID: it takes the tag's, and nothing is written (#66). |
-| S1 | `test_swaps.py::test_s1_tag_with_other_temperatures_is_written` | Spoolman first, and the tag matches but for its temperatures: Spoolman's are written. |
-| S1 | `test_swaps.py::test_s1_untrusted_tag_uuid_is_kept` | A tag the bridge didn't see load is kept on the printer, not minted over (#66). |
+| S1 | `test_swaps.py::test_s1_tag_with_other_values_is_left_alone` | Spoolman first, and the tag differs in name, color and temperatures: not written (Q11). |
+| S1 | `test_swaps.py::test_s1_untrusted_tag_is_left_alone` | A tag the bridge didn't see load isn't adopted, written or minted over (#66, Q11). |
 | S2 | `test_swaps.py::test_s2_filament_first_swap` | Filament swapped first: the charge is held, then moves once Spoolman is updated. |
 | S3 | `test_swaps.py::test_s3_moved_after_the_write_back` | Spoolman updated after the old spool was written back: confirmed, then B is written. |
 | S3 | `test_swaps.py::test_s3_old_spool_moved_back` | Old spool moved out and back: the swap stays open, or closes as of a print start. |
@@ -118,6 +119,7 @@ current and that the scenario rows name their tests.
 | W9 | `test_writes.py::test_w9_drift_is_flagged_unless_sync_drift` | Printer changed with no unload: flagged and left alone, or rewritten with sync_drift. |
 | W9 | `test_writes.py::test_w9_temperature_drift_is_flagged_unless_sync_drift` | A temperature changed on the printer is drift too: flagged, or rewritten. |
 | W10 | `test_writes.py::test_w10_model_the_bridge_cannot_write` | Unknown, unsupported or mismatched model: logged once, spool flagged, still charged. |
+| W11 | `test_writes.py::test_w11_tag_is_not_written_back` | Unload with no Spoolman change, then a tag load: A isn't written back over it (Q11). |
 | W11 | `test_writes.py::test_w11_unconfirmed_swap_writes_the_assigned_spool` | Unload with no Spoolman change, then a menu load: the printer gets A written back. |
 | W12 | `test_writes.py::test_w12_staged_spool_waits_for_the_unload` | Write of B due, then C staged: nothing is written until C is unloaded and loaded. |
 | W13 | `test_writes.py::test_w13_sync_job_homes_an_unhomed_printer` | Unhomed after a boot: the sync job homes with G28 O before it writes and ends. |

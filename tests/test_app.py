@@ -795,15 +795,10 @@ SETTLED = ToolState(active=7, assigned=7)
         # A tag with no instance UUID.
         (SETTLED, tag_material(None), [spool(7)], None),
         # The active spool isn't certain: staged, unconfirmed, or provisional. The tag
-        # is kept rather than minted over, but not adopted.
-        (replace(SETTLED, assigned=8), tag_material(), [spool(7), spool(8)], ("keep", TAG)),
-        (replace(SETTLED, swap=SwapFlag(7)), tag_material(), [spool(7)], ("keep", TAG)),
-        (
-            replace(SETTLED, provisional=Provisional(7, 10)),
-            tag_material(),
-            [spool(7)],
-            ("keep", TAG),
-        ),
+        # isn't adopted, and needn't be kept: a tool loaded from a tag isn't written.
+        (replace(SETTLED, assigned=8), tag_material(), [spool(7), spool(8)], None),
+        (replace(SETTLED, swap=SwapFlag(7)), tag_material(), [spool(7)], None),
+        (replace(SETTLED, provisional=Provisional(7, 10)), tag_material(), [spool(7)], None),
         # Not certain and a different UUID in Spoolman: drift, not a conflict.
         (replace(SETTLED, swap=SwapFlag(7)), tag_material(), [spool(7, "other")], None),
         # Another spool has the UUID: S12 or drift, not this spool's.
@@ -815,16 +810,15 @@ SETTLED = ToolState(active=7, assigned=7)
 )
 async def test_tag_uuid(printer, st, material, spools, want):
     active = next(s for s in spools if s.id == 7)
-    printer._seen_uuid[0] = ("before", 7, False)  # The bridge saw the tag appear.
+    printer._seen_uuid[0] = ("before", 7, False, False)  # The bridge saw the tag appear.
     assert printer._tag_uuid(0, st, material, active, spools) == want
 
 
 async def test_tag_uuid_already_loaded_at_start_is_not_trusted(printer):
     """The bridge didn't see the tag load: the spool assigned may not be the tag's."""
     for _ in range(2):
-        # Kept on the printer rather than minted over, but not stored.
-        want = ("keep", TAG)
-        assert printer._tag_uuid(0, SETTLED, tag_material(), spool(7), [spool(7)]) == want
+        # Not stored, and no conflict either.
+        assert printer._tag_uuid(0, SETTLED, tag_material(), spool(7), [spool(7)]) is None
         assert printer._tag_uuid(0, SETTLED, tag_material(), spool(7, "x"), [spool(7)]) is None
     # A reload of the same tag that the bridge watched: adopted.
     printer._uuid_gap.add(0)
@@ -845,13 +839,14 @@ async def test_tag_uuid_not_on_tool_1_or_without_uuids(printer):
 async def test_tag_uuid_seen_with_another_spool_is_not_adopted(printer):
     """A runout reload keeps the old spool's tag: the next spool doesn't take its UUID."""
     old, new = spool(6), spool(7)
-    printer._seen_uuid[0] = ("before", 6, False)
+    printer._seen_uuid[0] = ("before", 6, False, False)
     # Spool 6's tag, seen while 6 was certainly loaded; its UUID isn't in Spoolman.
     assert printer._tag_uuid(0, ToolState(active=6, assigned=6), tag_material(), old, [old]) == (
         "adopt",
         TAG,
     )
     # A runout, a swap to 7 and a reload: the printer still shows 6's tag.
+    printer._seen_unload(0, runout=True)
     assert printer._tag_uuid(0, SETTLED, tag_material(), new, [new]) is None
     # Still not on later polls.
     assert printer._tag_uuid(0, SETTLED, tag_material(), new, [new]) is None
@@ -861,7 +856,7 @@ async def test_tag_uuid_seen_with_another_spool_is_not_adopted(printer):
 
 
 async def test_tag_uuid_refused_for_an_archived_spool_is_not_proposed_again(printer):
-    printer._seen_uuid[0] = ("before", 7, False)
+    printer._seen_uuid[0] = ("before", 7, False, False)
     printer.bridge._refused_uuids.add((7, TAG))
     assert printer._tag_uuid(0, SETTLED, tag_material(), spool(7), [spool(7)]) is None
 
@@ -933,7 +928,103 @@ async def test_kept_uuid_is_checked_against_archived_spools_once(tmp_path):
 
 async def test_written_uuid_seen_with_another_spool_is_not_kept(printer):
     """A UUID the bridge wrote for spool 6 isn't kept for spool 7 after a runout reload."""
-    printer._seen_uuid[0] = (TAG, 6, False)
+    printer._seen_uuid[0] = (TAG, 6, False, True)  # Then the tool unloaded.
     st = replace(SETTLED, written=f'M865 X R N"PLA" L0\nM865.1 I0 C"{TAG}"')
     material = tag_material(from_tag=False)
     assert printer._tag_uuid(0, st, material, spool(7), [spool(7)]) is None
+
+
+@pytest.mark.parametrize(
+    ("tool", "material", "want"),
+    [
+        (0, tag_material(), True),
+        # A tag with no instance UUID is still a tag.
+        (0, tag_material(None), True),
+        # A menu pick or the bridge's own write.
+        (0, tag_material(from_tag=False), False),
+        # Only tool 0 holds a tag's data.
+        (1, tag_material(), False),
+    ],
+)
+async def test_loaded_tag(printer, tool, material, want):
+    assert printer._loaded_tag(tool, material, spool(7)) is want
+
+
+async def test_loaded_tag_needs_uuids(printer):
+    printer._model = printer_sync.PRINTER_MODELS["1.4.1"]
+    assert printer._loaded_tag(0, tag_material(), spool(7)) is False
+
+
+async def test_runout_leftover_is_not_a_loaded_tag(printer):
+    """A runout reload keeps spool 6's tag with spool 7 active: that tag isn't 7's."""
+    printer._seen_uuid[0] = (TAG, 6, True, False)
+    # With no unload since 6, a claim or correction made 7 active: the tag is 7's.
+    assert printer._loaded_tag(0, tag_material(), spool(7)) is True
+    printer._seen_unload(0, runout=True)
+    assert printer._loaded_tag(0, tag_material(TAG.upper()), spool(7)) is False
+    # Spoolman gives 7 the tag's UUID: its own tag, never a leftover.
+    assert printer._loaded_tag(0, tag_material(), spool(7, TAG)) is True
+    # Spool 6's own reload of it is its tag, as is another tag for spool 7.
+    assert printer._loaded_tag(0, tag_material(), spool(6)) is True
+    other = "1f0e7d2a-3f6c-4d7b-9a43-6c1f0e7d2a11"
+    assert printer._loaded_tag(0, tag_material(other), spool(7)) is True
+    # With no instance UUID, a leftover can't be told apart: it counts as loaded.
+    assert printer._loaded_tag(0, tag_material(None), spool(7)) is True
+
+
+@pytest.mark.parametrize(
+    ("material", "active", "spools", "want"),
+    [
+        # Another spool's tag, whether or not the active spool has a UUID.
+        (
+            tag_material(),
+            spool(7),
+            [spool(8, TAG.upper())],
+            [f"the loaded tag is spool 8's ({TAG})"],
+        ),
+        (tag_material(), spool(7, "x"), [spool(8, TAG)], [f"the loaded tag is spool 8's ({TAG})"]),
+        # The active spool has another UUID.
+        (tag_material(), spool(7, "x"), [], [f"uuid printer={TAG} spoolman=x"]),
+        # The spool's own tag, a spool with no UUID, or a tag with none.
+        (tag_material(), spool(7, TAG.upper()), [], []),
+        (tag_material(), spool(7), [], []),
+        (tag_material(None), spool(7, "x"), [spool(8, "y")], []),
+    ],
+)
+async def test_tag_differences(printer, material, active, spools, want):
+    assert printer._tag_differences(material, active, [active, *spools]) == want
+
+
+def test_seen_uuids_keep_the_unload_and_load_old_files_as_not_unloaded():
+    kept = PrinterState(seen_uuids={0: (TAG, 7, True)})
+    assert PrinterState.from_json(kept.to_json()).seen_uuids == {0: (TAG, 7, True)}
+    old = {"tools": {}, "flags": {}, "seen_uuids": {"0": [TAG, 7]}}
+    assert PrinterState.from_json(old).seen_uuids == {0: (TAG, 7, False)}
+
+
+async def test_unload_outside_a_print_makes_the_tags_spool_unknown(printer):
+    """Only a runout reload keeps a type: after any other unload the tag isn't a leftover,
+    and it isn't trusted either, since the spool it was seen with may have been wrong."""
+    printer._seen_uuid[0] = (TAG, 6, True, False)
+    printer._seen_unload(0, runout=False)
+    assert printer._seen_uuid[0] == (TAG, None, False, False)
+    assert printer.bridge.state.printers[printer.name].seen_uuids[0] == (TAG, None, False)
+    assert printer._loaded_tag(0, tag_material(), spool(7)) is True
+    printer._uuid_gap.add(0)  # The tool read empty in between.
+    assert printer._tag_uuid(0, SETTLED, tag_material(), spool(7), [spool(7)]) is None
+    assert printer._seen_uuid[0] == (TAG, 7, False, False)
+    # A runout after that doesn't make the unknown spool's tag a leftover.
+    printer._seen_uuid[0] = (TAG, None, False, False)
+    printer._seen_unload(0, runout=True)
+    assert printer._loaded_tag(0, tag_material(), spool(7)) is True
+    # A different tag after the unload appears as usual.
+    other = "1f0e7d2a-3f6c-4d7b-9a43-6c1f0e7d2a11"
+    assert printer._tag_uuid(0, SETTLED, tag_material(other), spool(7), [spool(7)]) == (
+        "adopt",
+        other,
+    )
+
+
+def test_seen_uuids_keep_an_unknown_spool():
+    kept = PrinterState(seen_uuids={0: (TAG, None, False)})
+    assert PrinterState.from_json(kept.to_json()).seen_uuids == {0: (TAG, None, False)}

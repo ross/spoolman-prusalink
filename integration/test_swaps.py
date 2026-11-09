@@ -87,34 +87,48 @@ async def test_s1_matching_tag_writes_nothing(world: World):
     assert w.material() == (PETG[0], PETG[1], uuid_b)
 
 
-async def test_s1_tag_with_other_temperatures_is_written(world: World):
-    """Spoolman first, and the tag matches but for its temperatures: Spoolman's are written."""
+async def test_s1_tag_with_other_values_is_left_alone(world: World):
+    """Spoolman first, and the tag differs in name, color and temperatures: not written (Q11).
+
+    A write would end the printer's usage tracking on the tag. The tag's UUID is still
+    adopted, since storing it writes only to Spoolman.
+    """
     w = world
     b = w.spools["B"]
-    await baseline(w)
-    uuid_b = str(uuid.uuid4())
-    await set_extra_text(w.spoolman.client, b, UUID_FIELD, uuid_b)
-    await w.move("B", w.tool_location)
-    await w.poll()
-    await w.unload()
-    await w.poll()
+    await s1_swap_to_b(w)
 
     # A tag gives the midpoint of its ranges, here 250 for the nozzle and 80 for the bed.
-    await w.swap_cycle(
-        poll_every=0.3,
-        source="tag",
-        name=PETG[0],
-        color=PETG[1],
-        uuid=uuid_b,
-        temperatures=(250, 170, 80),
-    )
+    tag = str(uuid.uuid4())
+    temperatures = (250, 170, 80)
+    load = {"source": "tag", "name": ASA[0], "color": ASA[1], "uuid": tag}
+    records = await w.swap_cycle(poll_every=0.3, temperatures=temperatures, **load)
+    for _ in range(3):
+        records += await w.poll()
+        w.advance(2.0)
+    assert w.charged(records, "B") == LOAD_MM
+    assert w.requests("PUT") == []
+    assert w.material() == (ASA[0], ASA[1], tag)
+    assert w.printer.tools[0].material.temperatures() == temperatures
+    assert w.printer.tools[0].material.material_uuid is not None  # Still linked to the tag.
+    assert await w.spoolman.extra(b, UUID_FIELD) == tag
+    assert await w.flag("B") is None
+
+
+async def test_s1_menu_load_with_other_values_is_written(world: World):
+    """Spoolman first, and a menu load of another type: Spoolman's spool is written."""
+    w = world
+    b = w.spools["B"]
+    await s1_swap_to_b(w)
+    await w.swap_cycle(poll_every=0.3, source="preset", name=ASA[0], color=ASA[1])
     await w.poll()
     puts = w.requests("PUT")
     assert len(puts) == 1 and " T220 B60 " in puts[0].data["body"]
     await w.run_until(lambda: w.printer.job is None)
     await w.poll()
+    minted = await w.spoolman.extra(b, UUID_FIELD)
+    assert minted is not None
+    assert w.material() == (PETG[0], PETG[1], minted)
     assert w.printer.tools[0].material.temperatures() == TEMPERATURES
-    assert w.material() == (PETG[0], PETG[1], uuid_b)
 
 
 async def s1_swap_to_b(w: World) -> None:
@@ -154,12 +168,12 @@ async def test_s1_tag_uuid_is_adopted(world: World):
     assert w.material() == (PETG[0], PETG[1], tag)
 
 
-async def test_s1_untrusted_tag_uuid_is_kept(world: World):
-    """A tag the bridge didn't see load is kept on the printer, not minted over (#66).
+async def test_s1_untrusted_tag_is_left_alone(world: World):
+    """A tag the bridge didn't see load isn't adopted, written or minted over (#66, Q11).
 
     The tag is loaded while the bridge restarts on a state file from before #66, with
-    no UUID seen saved, so it didn't watch the tag appear. The tag's temperatures differ
-    from Spoolman's, so a write is due anyway.
+    no UUID seen saved, so it didn't watch the tag appear. Its temperatures differ from
+    Spoolman's, which would make a write due for a menu load.
     """
     w = world
     b = w.spools["B"]
@@ -171,26 +185,22 @@ async def test_s1_untrusted_tag_uuid_is_kept(world: World):
         kept.seen_uuids.clear()
     w.bridge._save()
     await w.restart()
-    await w.poll()
-    puts = w.requests("PUT")
-    assert len(puts) == 1 and f'M865.1 I0 C"{tag}"' in puts[0].data["body"]
-    await w.run_until(lambda: w.printer.job is None)
-    for _ in range(2):
+    for _ in range(3):
         await w.poll()
         w.advance(2.0)
-    assert len(w.requests("PUT")) == 1
+    assert w.requests("PUT") == []
     assert w.material() == (PETG[0], PETG[1], tag)
-    assert await w.spoolman.extra(b, UUID_FIELD) is None  # Kept, not stored or minted.
+    assert await w.spoolman.extra(b, UUID_FIELD) is None  # Not stored or minted.
 
     # A reload of the same tag with no Spoolman change is an unconfirmed swap: the tag
-    # may be another spool's, so it's kept again, still not minted over or stored.
+    # may be another spool's, so it still isn't stored, and still isn't written.
     await w.unload()
     await w.poll()
     await w.swap_cycle(poll_every=0.3, temperatures=(250, 170, 80), **load)
-    await w.poll()
-    await w.run_until(lambda: w.printer.job is None)
-    await w.poll()
-    assert len(w.requests("PUT")) == 2
+    for _ in range(3):
+        await w.poll()
+        w.advance(2.0)
+    assert w.requests("PUT") == []
     assert w.material() == (PETG[0], PETG[1], tag)
     assert await w.spoolman.extra(b, UUID_FIELD) is None
 
@@ -311,11 +321,11 @@ async def test_s5_claim_after_printing_on_the_wrong_spool(
     assert w.charged(records, "A") == 30
     unloaded = w.mark()
 
-    # B goes in at the printer, Spoolman is forgotten, and a print starts.
-    await w.swap_cycle(source="tag", name=PETG[0], color=PETG[1])
+    # B goes in at the printer from the menu, Spoolman is forgotten, and a print starts.
+    await w.swap_cycle(source="preset", name=PETG[0])
     records = await w.poll()
     assert w.charged(records, "A") == LOAD_MM
-    # A is still active and the printer shows B's tag, so that poll wrote A back.
+    # A is still active and the printer shows B's type, so that poll wrote A back (W11).
     assert len(w.requests("PUT")) == 1
     await w.run_until(lambda: w.printer.job is None)
     records = await w.start_print(print_spec())
@@ -568,10 +578,10 @@ async def test_s3_unload_while_the_location_is_empty(
     records = w.since(unloaded) + await w.poll()
     on_a = w.charged(records, "A")
     assert on_a == LOAD_MM
-    # The bridge writes A back over B's tag, as it does during an unconfirmed swap (W11).
+    # B was loaded from its tag, so A isn't written back over it (Q11).
     await w.run_until(lambda: w.printer.job is None)
-    assert len(w.requests("PUT")) == 1
-    assert w.material() == (PLA[0], PLA[1], w.uuids["A"])
+    assert w.requests("PUT") == []
+    assert w.material() == (PETG[0], PETG[1], None)
 
     await w.move("A", w.shelf)
     await w.poll()
@@ -595,12 +605,15 @@ async def test_s3_unload_while_the_location_is_empty(
 
 
 async def test_s3_moved_after_the_write_back(world: World):
-    """Spoolman updated after the old spool was written back: confirmed, then B is written."""
+    """Spoolman updated after the old spool was written back: confirmed, then B is written.
+
+    B is loaded from the menu: a tag isn't written back over (Q11).
+    """
     w = world
     a, b = w.spools["A"], w.spools["B"]
     await baseline(w)
     unloaded = await unconfirmed_swap(w)
-    await w.swap_cycle(poll_every=0.3, source="tag", name=PETG[0], color=PETG[1])
+    await w.swap_cycle(poll_every=0.3, source="preset", name=PETG[0])
     await w.poll()
     await w.run_until(lambda: w.printer.job is None)
     assert len(w.requests("PUT")) == 1

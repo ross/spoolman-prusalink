@@ -68,6 +68,7 @@ Each row says what the probe should see for tool 0. "Counted" means
 | F16 | Other unload paths | Stuck filament counts an unload only if the user picks Unload. Pulling filament out during a load counts only after the type has been set (the purge). The color-wrong retry or eject doesn't count. Clearing a type that's already hidden counts nothing. | `pause.cpp:1213-1223, 1881-1888, 994-1012`; `store_definition.cpp:258-272`. Also counted: cold pull (`M1702.cpp:394`), XL multi-change (`multi_filament_change.cpp:199-205`), `M865 L` with a type that resolves to none (`M865.cpp:194-195`). | Not modeled beyond F2 and F8. | From source. Check when they happen. |
 | F17 | Stock firmware, MINI, MK3.5 | 404 on `/api/v1/filament`, or 200 with `material` and no counters. | Stock firmware has no endpoint. | `firmware` mode | Other hardware. |
 | F18 | API faults | 401 without the key; 500 on an internal error; connection refused while off; a hang on a stuck network. | nhttp. | `set_fault()`, `set_power()` | Seen live (401 and off, C1); the rest from source. |
+| F24 | The filament type across an unload | After an unload while idle, the next load sets a fresh type: a menu preset with no `material_uuid`, `package_uuid` or `tag` object, or a tag read with the tag's values and markers. Only a filament change during a print (a runout, a jam, or Tune > Change filament) reloads the type it had before the unload, tag markers included. | M600 reloads the tool's current type, or `for_tool_heuristic`'s guess, which falls back to the previously loaded type (`src/marlin_stubs/pause/M600.cpp:282-290`, `src/common/filament_tools.cpp:15-45`). An idle load takes the type from a preheat pick or a tag read (`M701_load`, `src/marlin_stubs/pause/M701_2.cpp:66-98`). An idle Change filament unloads, then asks for a new type (`M1600_change_filament`, `M701_2.cpp:240-323`). A menu unload and the idle sensor clear (F14) set the type to none. | `load()`: a load needs a source outside a runout reload | From source. The bridge relies on it: a runout leftover needs an unload during a print (Q11 in scenarios.md). Sitting A, steps 6 and 7; sitting B, step 2. |
 
 ### Multi-tool printers
 
@@ -110,6 +111,23 @@ behavior is least covered by what the Core One L+ can show.
   firmware's `time_printing` grows during the recovery, the trace will say.
 - **F10's `M865 R`** wipes the UUID too, so a sync job that doesn't carry
   `M865.1` leaves the tool with no UUID. The bridge always writes both.
+- **F10 ends F4's tag tracking.** `M865 X` edits the pending ad-hoc slot
+  (`M865.cpp:67-68`). `R` resets its parameters to the defaults, which
+  clears the tag hash and the material and package UUIDs (`M865.cpp:83-85`,
+  `filament.cpp:41-42`). `L0` saves that to the tool
+  (`store_definition.cpp:243-256`, `filament.cpp:394`). The printer's usage
+  tracker then stops reading and writing the tag, and usage not yet flushed
+  to it is lost (`filament_usage_tracker.cpp:127-139`). A reboot doesn't
+  restore it, since the stored hash stays cleared
+  (`tool_tag_buddy.cpp:52-54`). Neither does a runout reload, which keeps
+  the tool's current type (`M600.cpp:282-290`). Only a load from the tag
+  does. The `tag` object leaves `/api/v1/filament`
+  (`filament_renderer.cpp:66-67`), and so do the material and package
+  UUIDs, which it renders from the reset parameters
+  (`filament_renderer.cpp:59-60`). G-code can't set the hash
+  (`M865.cpp:183`). So the bridge never writes a tool loaded from a tag
+  (Q11 in scenarios.md). From source at `ff61540d4`, not yet seen on the
+  printer.
 
 ## Recording a trace
 
@@ -252,6 +270,13 @@ observations are notes.
 4. **F11.** With filament loaded: Move E forward 20 mm, retract 10 mm, Move E
    forward 20 mm, then Purge filament.
 5. **F4.** If a tagged spool is at hand: unload, then load it from its tag.
+6. **F24, a menu load.** With the tagged spool loaded from its tag, unload
+   from the menu, then load a preset from the menu. Check that
+   `/api/v1/filament` shows the preset with no `material_uuid`,
+   `package_uuid` or `tag` object.
+7. **F24, a tag load.** Unload from the menu again, then load from the tag.
+   Check that the tag's name, color, temperatures, UUIDs and `tag` object
+   come back fresh.
 
 **Sitting B, prints.** Three short prints of about ten minutes.
 
@@ -259,7 +284,10 @@ observations are notes.
    you dismiss `FINISHED`. Nothing else happens during it.
 2. During the second print, one row at a time, starting and stopping the
    probe for each: **F6** pause, wait half a minute, resume; **F8** Tune >
-   Change filament, reload the same spool, resume; **F7** cancel.
+   Change filament, reload the same spool, resume; **F7** cancel. Do F8
+   with the tagged spool loaded from its tag: for **F24**, check that the
+   reload keeps the type it had before, `material_uuid`, `package_uuid`
+   and `instance_uuid` included.
 3. **F9.** A print sliced with one color change (or the Tune change twice,
    if slicing is a bother). Reload the same spool at the change.
 
