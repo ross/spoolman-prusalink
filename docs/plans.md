@@ -387,9 +387,11 @@ These aren't simulator work, but the simulator makes each one testable.
   model. On INDX the PC preheat is 230 and the FLEX preheat 170
   (`src/common/filament_presets.cpp` in the firmware), while
   `printer_sync.PRESETS` holds the single-tool values, 250 and 210. The
-  bridge would write the wrong preheat and report preheat drift on every
-  menu load of those presets. Check every preset value per model, and the
-  simulator's `PRESET_TEMPERATURES`, which has the same values.
+  bridge would write the wrong preheat, and a menu load of those presets
+  that otherwise matches would still get a sync job. With printer sync off,
+  every such menu load reports preheat drift. Check every preset value per
+  model, and the simulator's `PRESET_TEMPERATURES`, which has the same
+  values.
 
 ## Running it
 
