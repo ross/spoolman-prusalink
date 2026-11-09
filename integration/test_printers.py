@@ -29,7 +29,7 @@ from integration.conftest import (
     logged,
     print_spec,
 )
-from integration.printers import SpoolmanHook, printer_of
+from integration.printers import printer_of
 from spoolman_prusalink.app import Bridge
 
 pytestmark = pytest.mark.parametrize("world_printers", [2], indirect=True)
@@ -64,18 +64,6 @@ async def load_a_at_b(w: World) -> list[dict]:
     b = w.at(B)
     await b.unload()
     return await b.swap_cycle(source="tag", name=PLA[0], color=PLA[1], uuid=w.uuids["A"])
-
-
-def refuse(*matches: tuple[str, str, bytes]):
-    """A `SpoolmanHook` hook that answers 503 to requests matching (method, path, body part)."""
-
-    async def hook(request: httpx.Request) -> httpx.Response | None:
-        for method, path, part in matches:
-            if (request.method, request.url.path) == (method, path) and part in request.content:
-                return httpx.Response(503, text="busy")
-        return None
-
-    return hook
 
 
 def bridge_for(w: World, cfg) -> Bridge:
@@ -287,13 +275,15 @@ async def test_x4a_eviction_rereads_the_spool(world: World):
             moved.append(request.url.path)
             await w.move("A", b.location)
 
-    hook = SpoolmanHook.install(w.bridge, race)
+    faults = w.spoolman_faults
+    faults.hook = race
     records = await w.poll()
     assert kinds(records) == [(IT, "unload"), (IT, "swap_committed")]
     assert it.state.active == c and it.state.evict == (a,)
     assert moved == [f"/api/v1/spool/{a}"]
-    assert hook.requests.index("GET /api/v1/spool") < hook.requests.index(f"GET /api/v1/spool/{a}")
-    assert f"PATCH /api/v1/spool/{a}" not in hook.requests
+    sent = [r.rsplit(" ", 1)[0] for r in faults.requests]
+    assert sent.index("GET /api/v1/spool") < sent.index(f"GET /api/v1/spool/{a}")
+    assert f"PATCH /api/v1/spool/{a}" not in sent
     assert await w.spoolman.location(a) == b.location
 
     # The next poll sees A in LB, staged on b, and drops the eviction.
@@ -437,13 +427,14 @@ async def test_x8_one_printer_off(world: World, caplog: pytest.LogCaptureFixture
     it.extrude(20)
     await it.unload()
     await it.swap_cycle(source="preset", name=ASA[0])
-    hook = SpoolmanHook.install(w.bridge, refuse(("PATCH", f"/api/v1/spool/{a}", b'"location"')))
+    faults = w.spoolman_faults
+    faults.answer("PATCH", f"/api/v1/spool/{a}", 503, "busy", times=None, containing=b'"location"')
     records = await w.poll()
     assert kinds(records) == [(IT, "unload"), (IT, "swap_committed")]
     assert it.state.evict == (a,)
     assert await w.spoolman.location(a) == it.location
     await settle(w)
-    hook.hook = None
+    faults.restore()
 
     # it goes off. Meanwhile B is moved into LA and claimed.
     it.printer.set_power("off")
@@ -468,9 +459,9 @@ async def test_x8_one_printer_off(world: World, caplog: pytest.LogCaptureFixture
 
     # Every printer off: the tick ends after the printer reads, with nothing from Spoolman.
     b.printer.set_power("off")
-    hook.requests.clear()
+    faults.requests.clear()
     assert await w.poll() == []
-    assert hook.requests == []
+    assert faults.requests == []
 
     # it comes back: the outage ends and the claim is handled.
     it.printer.set_power("on")
@@ -492,8 +483,8 @@ async def test_x9_spoolman_unreachable(world: World, caplog: pytest.LogCaptureFi
 
     # M1: no accounting. With the outbox empty the printers are still read, so b's
     # outage is logged on time.
-    hook = SpoolmanHook.install(w.bridge)
-    hook.down = True
+    faults = w.spoolman_faults
+    faults.cut()
     it.extrude(10)
     b.printer.set_power("off")
     assert await w.poll() == []
@@ -503,10 +494,9 @@ async def test_x9_spoolman_unreachable(world: World, caplog: pytest.LogCaptureFi
     b.extrude(20)
 
     # Spoolman answers but refuses charges: both printers' charges queue, it before b.
-    hook.down = False
-    hook.hook = refuse(
-        ("PUT", f"/api/v1/spool/{a}/use", b""), ("PUT", f"/api/v1/spool/{e}/use", b"")
-    )
+    faults.restore()
+    faults.answer("PUT", f"/api/v1/spool/{a}/use", 503, "busy", times=None)
+    faults.answer("PUT", f"/api/v1/spool/{e}/use", 503, "busy", times=None)
     records = await w.poll()
     assert kinds(records) == [(B, "reboot")]
     assert charges(records) == []
@@ -514,18 +504,20 @@ async def test_x9_spoolman_unreachable(world: World, caplog: pytest.LogCaptureFi
     assert queued == [(IT, a, 10), (B, e, 20)]
 
     # Down again with charges queued: the tick stops at the failed flush, before any read.
-    hook.down = True
+    faults.cut()
     mark = len(w.sim.events)
     assert await w.poll() == []
     assert [ev for ev in w.sim.events[mark:] if ev.kind == "request"] == []
 
     # Back: the queue is sent in order.
-    hook.down = False
-    hook.hook = None
-    hook.requests.clear()
+    faults.restore()
+    faults.requests.clear()
     records = await w.poll()
     assert [(r["printer"], r["spool_id"], r["use_length"]) for r in charges(records)] == queued
-    assert hook.requests[:2] == [f"PUT /api/v1/spool/{a}/use", f"PUT /api/v1/spool/{e}/use"]
+    assert faults.requests[:2] == [
+        f"PUT /api/v1/spool/{a}/use 200",
+        f"PUT /api/v1/spool/{e}/use 200",
+    ]
     assert w.bridge.state.outbox == []
     assert logged(caplog, logging.INFO, "sent 2 queued charge(s)")
 
@@ -591,10 +583,11 @@ async def test_x11_charge_rejected_with_404(world: World, caplog: pytest.LogCapt
             resp = await w.spoolman.client.delete(f"/api/v1/spool/{a}")
             resp.raise_for_status()
 
-    hook = SpoolmanHook.install(w.bridge, delete)
+    faults = w.spoolman_faults
+    faults.hook = delete
     it.extrude(25)
     records = await w.poll()
-    hook.hook = None
+    faults.hook = None
     failed = [r for r in records if "failed" in r]
     assert [(r["printer"], r["spool_id"], r["failed"], r.get("held")) for r in failed] == [
         (IT, a, "404", True)
@@ -671,13 +664,9 @@ async def test_x14_printer_renamed(world: World, caplog: pytest.LogCaptureFixtur
     it.extrude(20)
     await it.unload()
     await it.swap_cycle(source="preset", name=ASA[0])
-    SpoolmanHook.install(
-        w.bridge,
-        refuse(
-            ("PATCH", f"/api/v1/spool/{a}", b'"location"'),
-            ("PUT", f"/api/v1/spool/{c}/use", b""),
-        ),
-    )
+    faults = w.spoolman_faults
+    faults.answer("PATCH", f"/api/v1/spool/{a}", 503, "busy", times=None, containing=b'"location"')
+    faults.answer("PUT", f"/api/v1/spool/{c}/use", 503, "busy", times=None)
     records = await w.poll()
     assert kinds(records) == [(IT, "unload"), (IT, "swap_committed")]
     assert it.state.evict == (a,)

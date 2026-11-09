@@ -56,9 +56,7 @@ Without `SPOOLMAN_URL`, every test is skipped. The `dev` extra
   white PLA and UUID, and E is in `<prefix> LB`. `w.at("it")` and `w.at("b")`
   give each printer with its location, tool, counter and the bridge's state
   for the tool, and `printer_of(records, "b")` keeps one printer's ledger
-  records. `SpoolmanHook` sits in front of the bridge's Spoolman client, to
-  fail a request or change Spoolman between two of the bridge's requests.
-  These are in `integration/printers.py`.
+  records. These are in `integration/printers.py`.
 - **Short phases.** The simulator's settings in `conftest.py` make unloads,
   loads, prints and sync jobs take a second or so. A load counts 36 mm of feed
   and 40 mm of purge.
@@ -166,8 +164,12 @@ To make Spoolman fail, use `w.spoolman_faults`, a transport in front of the
 bridge's Spoolman client (`integration/faults.py`). It passes requests through
 until the test asks for a fault: `cut()` makes every request fail to connect,
 `answer("PUT", "/api/v1/spool/7/use", 503)` replies 503 to the next matching
-request without sending it (`times=None` keeps replying), and `restore()` ends
-both. Its `requests` list says what each of the bridge's requests got. The same
+request without sending it (`times=None` keeps replying, and `containing=`
+matches on the request body too). Its `hook`, an async function that gets each
+request first, can change Spoolman between two of the bridge's requests, such
+as move or delete a spool, and can return a response to use instead.
+`restore()` ends all three. Its `requests` list says what each of the bridge's
+requests got, as `"PUT /api/v1/spool/7/use 503"` or `"... unreachable"`. The same
 module has the Spoolman edits the `world` helpers don't cover: deleting and
 archiving a spool, writing a text field, and renaming a location.
 

@@ -1,4 +1,4 @@
-"""A second printer for `world`, and a hook on the bridge's Spoolman client.
+"""A second printer for `world`.
 
 `world` takes `world_printers` at 2 to add printer "b": a Core One L like printer "it",
 with its own PrusaLink server on the same `Simulation`, location `<prefix> LB`, and
@@ -9,11 +9,9 @@ as a `Station`. Ledger records name their printer, so `printer_of()` splits them
 from __future__ import annotations
 
 import uuid
-from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
-import httpx
 from aiohttp.test_utils import TestServer
 
 from simulator.model import MODELS, Material, PrintSpec, SimPrinter, SimTool, Simulation, State
@@ -124,39 +122,3 @@ async def add_printers(
         uuids=True,
     )
     return [(SECOND, printer, location, server, config)]
-
-
-Hook = Callable[[httpx.Request], Awaitable[httpx.Response | None]]
-
-
-class SpoolmanHook(httpx.AsyncBaseTransport):
-    """Runs `hook` before each request the bridge sends Spoolman.
-
-    The hook can change Spoolman first, such as move or delete a spool between two of
-    the bridge's requests, or return a response to send instead, such as a 503. With
-    `down` set every request fails to connect. `requests` records what was sent, as
-    `"METHOD /path"`.
-    """
-
-    def __init__(self, inner: httpx.AsyncBaseTransport, hook: Hook | None = None) -> None:
-        self.inner = inner
-        self.hook = hook
-        self.down = False
-        self.requests: list[str] = []
-
-    @classmethod
-    def install(cls, bridge, hook: Hook | None = None) -> SpoolmanHook:
-        client = bridge.spoolman._client
-        installed = cls(client._transport, hook)
-        client._transport = installed
-        return installed
-
-    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
-        self.requests.append(f"{request.method} {request.url.path}")
-        if self.down:
-            raise httpx.ConnectError("Spoolman is down", request=request)
-        if self.hook is not None:
-            response = await self.hook(request)
-            if response is not None:
-                return response
-        return await self.inner.handle_async_request(request)
