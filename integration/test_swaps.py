@@ -1,8 +1,9 @@
-"""Spool swaps and claims: docs/scenarios.md rows S1, S2, S5, S9, S13 and S14."""
+"""Spool swaps and claims: docs/scenarios.md rows S1 to S14."""
 
 from __future__ import annotations
 
 import logging
+import uuid
 
 import pytest
 
@@ -10,13 +11,17 @@ from integration.conftest import (
     ASA,
     LOAD_MM,
     PETG,
+    PLA,
+    UUID_FIELD,
     World,
     charged,
     charges,
+    count,
     events,
     logged,
     print_spec,
 )
+from integration.faults import set_extra_text
 from simulator.model import State
 
 
@@ -55,6 +60,30 @@ async def test_s1_spoolman_first_swap(world: World):
     assert w.charged(records, "B") == LOAD_MM
     assert w.charged(records, "A") == 0
     assert await w.used("B") > 0
+
+
+async def test_s1_matching_tag_writes_nothing(world: World):
+    """Spoolman first, and the new spool's tag already matches: nothing is written."""
+    w = world
+    b = w.spools["B"]
+    await baseline(w)
+    uuid_b = str(uuid.uuid4())
+    await set_extra_text(w.spoolman.client, b, UUID_FIELD, uuid_b)
+    await w.move("B", w.tool_location)
+    await w.poll()
+    await w.unload()
+    records = await w.poll()
+    assert len(events(records, "swap_committed")) == 1
+
+    records = await w.swap_cycle(
+        poll_every=0.3, source="tag", name=PETG[0], color=PETG[1], uuid=uuid_b
+    )
+    records += await w.poll()
+    w.advance(2.0)
+    records += await w.poll()
+    assert w.charged(records, "B") == LOAD_MM
+    assert w.requests("PUT") == []
+    assert w.material() == (PETG[0], PETG[1], uuid_b)
 
 
 async def test_s2_filament_first_swap(world: World):
@@ -182,12 +211,8 @@ async def test_s5_claim_after_printing_on_the_wrong_spool(
     puts = len(w.requests("PUT"))
 
     # The rest of the print is B's.
-    mark = w.mark()
     at_claim = w.counter
-    await w.run_until(
-        lambda: w.printer.state is State.FINISHED and w.printer.job is None, poll_every=1.0
-    )
-    records = w.since(mark) + await w.poll()
+    records = await w.finish_print()
     assert w.charged(records, "A") == 0
     assert w.charged(records, "B") == w.counter - at_claim
 
@@ -280,3 +305,425 @@ async def test_s9_staged_spool_never_unloaded(world: World, caplog: pytest.LogCa
     records = await w.poll()
     assert w.charged(records, "B") == 20
     assert w.charged(records, "A") == 0
+
+
+async def unconfirmed_swap(w: World) -> int:
+    """Charge A 30 mm and unload with no Spoolman change; return the ledger mark after."""
+    w.printer.extrude(0, 30)
+    await w.unload()
+    records = await w.poll()
+    assert len(events(records, "swap_unconfirmed")) == 1
+    assert w.charged(records, "A") == 30
+    return w.mark()
+
+
+async def test_s3_spoolman_changed_during_the_load(world: World):
+    """Filament first, old spool out mid-load, new one in mid-print: the new spool takes it all."""
+    w = world
+    a, b = w.spools["A"], w.spools["B"]
+    await baseline(w)
+    unloaded = await unconfirmed_swap(w)
+    at_unload = w.tool.extruded_at_unload
+
+    # B goes in at the printer. The counted feed is A's until Spoolman says otherwise.
+    w.printer.load(0, source="tag", name=PETG[0], color=PETG[1])
+    records = await w.run_until(
+        lambda: w.tool.process is not None and w.tool.process.phase == "PURGE", poll_every=0.3
+    )
+    records += await w.poll()
+    on_a = w.charged(records, "A")
+    assert on_a > 0
+
+    # Mid-load, A is moved out: usage is held from here and the swap stays open.
+    await w.move("A", w.shelf)
+    records = await w.poll()
+    assert [e["message"] for e in events(records, "active_unassigned")] == [
+        f"spool {a} is no longer in the location; holding usage until a spool is assigned, "
+        f"which also takes the {on_a:g} mm since the unload"
+    ]
+    records += await w.run_until(lambda: w.tool.process is None, poll_every=0.3)
+    records += await w.poll()
+    assert charges(records) == []
+    flag = await w.flag("A")
+    assert flag is not None and "this spool was moved out" in flag
+
+    # Even a print start leaves the swap open, and its usage is held too.
+    await w.run_until(lambda: w.printer.job is None)
+    records = await w.start_print(print_spec())
+    records += await w.poll()
+    assert charges(records) == []
+    assert events(records, "swap_assumed") == []
+
+    # B moved in mid-print confirms the swap and takes everything since the unload.
+    await w.move("B", w.tool_location)
+    records = await w.poll()
+    assert [e["message"] for e in events(records, "swap_confirmed")] == [
+        f"swap confirmed: {on_a:g} mm moved from spool {a} to {b}"
+    ]
+    records += await w.finish_print()
+    since_unload = w.since(unloaded)
+    assert charged(since_unload, a) == 0
+    assert charged(since_unload, b) == w.counter - at_unload
+    assert await w.flag("A") is None
+    assert await w.spoolman.location(a) == w.shelf
+
+
+async def test_s3_old_spool_moved_back(world: World):
+    """Old spool moved out and back: the swap stays open, or closes as of a print start."""
+    w = world
+    a = w.spools["A"]
+    await baseline(w)
+    unloaded = await unconfirmed_swap(w)
+    at_unload = w.tool.extruded_at_unload
+    records = await w.swap_cycle(
+        poll_every=0.3, source="tag", name=PLA[0], color=PLA[1], uuid=w.uuids["A"]
+    )
+    records += await w.poll()
+    assert w.charged(records, "A") == LOAD_MM
+
+    # Out and back between prints: as if A never left, the swap is still open.
+    await w.move("A", w.shelf)
+    await w.poll()
+    w.printer.extrude(0, 10)
+    records = await w.poll()
+    assert charges(records) == []
+    await w.move("A", w.tool_location)
+    records = await w.poll()
+    assert [e["message"] for e in events(records, "active_unassigned")] == [
+        f"spool {a} is back in the location"
+    ]
+    assert w.charged(records, "A") == 10
+    flag = await w.flag("A")
+    assert flag is not None and "unloaded with no Spoolman change" in flag
+
+    # Out again, and a print starts while the location is empty: held, swap still open.
+    await w.move("A", w.shelf)
+    await w.poll()
+    await w.run_until(lambda: w.printer.job is None)
+    records = await w.start_print(print_spec())
+    assert charges(records) == [] and events(records, "swap_assumed") == []
+    job = w.printer.job.id
+
+    # A back mid-print: the swap closes as of that print start, charged provisionally.
+    await w.move("A", w.tool_location)
+    records = await w.poll()
+    assert [e["message"] for e in events(records, "swap_assumed")] == [
+        f"print {job} started with no Spoolman change since the unload; assuming "
+        f"spool {a} was reloaded and charging it provisionally"
+    ]
+    await w.finish_print()
+    assert charged(w.since(unloaded), a) == w.counter - at_unload
+    flag = await w.flag("A")
+    assert flag is not None
+    assert f"{w.counter - at_unload} mm (≈" in flag and "charged to it provisionally" in flag
+
+
+async def test_s3_unload_while_the_location_is_empty(
+    world: World, caplog: pytest.LogCaptureFixture
+):
+    """Unload while the swap's location is empty: closed on the old spool, held usage lost."""
+    caplog.set_level(logging.INFO, logger="spoolman_prusalink")
+    w = world
+    a = w.spools["A"]
+    await baseline(w)
+    unloaded = await unconfirmed_swap(w)
+    await w.swap_cycle(poll_every=0.3, source="tag", name=PETG[0], color=PETG[1])
+    records = w.since(unloaded) + await w.poll()
+    on_a = w.charged(records, "A")
+    assert on_a == LOAD_MM
+    # The bridge writes A back over B's tag, as it does during an unconfirmed swap (W11).
+    await w.run_until(lambda: w.printer.job is None)
+    assert len(w.requests("PUT")) == 1
+    assert w.material() == (PLA[0], PLA[1], w.uuids["A"])
+
+    await w.move("A", w.shelf)
+    await w.poll()
+    w.printer.extrude(0, 25)
+    await w.unload()
+    records = await w.poll()
+    msg = "25 mm before unload had no spool"
+    assert [e["message"] for e in events(records, "lost_unassigned")] == [msg]
+    assert count(caplog, logging.WARNING, f"[{w.tool_location}] {msg}") == 1
+    assert events(records, "swap_confirmed") == [] and charges(records) == []
+    assert charged(w.since(unloaded), a) == LOAD_MM  # The swap's usage stays on A.
+    assert await w.flag("A") is None
+
+    # The next spool moved in takes only what came after the second unload.
+    after = w.tool.extruded_at_unload
+    await w.swap_cycle(poll_every=0.3, source="tag", name=ASA[0], color=ASA[1])
+    await w.move("C", w.tool_location)
+    records = await w.poll()
+    assert w.charged(records, "C") == w.counter - after == LOAD_MM
+    assert w.charged(records, "A") == 0
+
+
+async def test_s3_moved_after_the_write_back(world: World):
+    """Spoolman updated after the old spool was written back: confirmed, then B is written."""
+    w = world
+    a, b = w.spools["A"], w.spools["B"]
+    await baseline(w)
+    unloaded = await unconfirmed_swap(w)
+    await w.swap_cycle(poll_every=0.3, source="tag", name=PETG[0], color=PETG[1])
+    await w.poll()
+    await w.run_until(lambda: w.printer.job is None)
+    assert len(w.requests("PUT")) == 1
+    assert w.material() == (PLA[0], PLA[1], w.uuids["A"])
+    # A poll sees the write-back took, so the rewrite below comes from the move, not the unload.
+    await w.poll()
+    assert not w.bridge.printers[0].tools[0].needs_sync
+
+    # The move after the write-back still confirms the swap, and B is written over A.
+    await w.move("A", w.shelf)
+    await w.move("B", w.tool_location)
+    records = await w.poll()
+    assert [e["message"] for e in events(records, "swap_confirmed")] == [
+        f"swap confirmed: {LOAD_MM} mm moved from spool {a} to {b}"
+    ]
+    assert len(w.requests("PUT")) == 2  # Written in the poll that confirms the swap.
+    await w.run_until(lambda: w.printer.job is None)
+    name, color, uuid = w.material()
+    assert (name, color) == PETG and uuid not in (None, w.uuids["A"])
+    assert charged(w.since(unloaded), b) == LOAD_MM
+    assert charged(w.since(unloaded), a) == 0
+
+
+async def test_s4_same_spool_reloaded_then_print(world: World):
+    """Same spool unloaded and reloaded, then a print: provisional charge, kept at the unload."""
+    w = world
+    a = w.spools["A"]
+    await baseline(w)
+    unloaded = await unconfirmed_swap(w)
+    at_unload = w.tool.extruded_at_unload
+    flag = await w.flag("A")
+    assert flag is not None and "unloaded with no Spoolman change" in flag
+
+    await w.swap_cycle(poll_every=0.3, source="tag", name=PLA[0], color=PLA[1], uuid=w.uuids["A"])
+    await w.poll()
+    await w.run_until(lambda: w.printer.job is None)
+    records = await w.start_print(print_spec())
+    assert [e["message"] for e in events(records, "swap_assumed")] == [
+        "print started with no Spoolman change since the unload; assuming "
+        f"spool {a} was reloaded and charging it provisionally"
+    ]
+    flag = await w.flag("A")
+    assert flag is not None and "charged to it provisionally" in flag
+
+    # Between prints the flag shows the whole amount since the unload.
+    await w.finish_print()
+    provisional = w.counter - at_unload
+    flag = await w.flag("A")
+    assert flag is not None and f" {provisional} mm (≈ " in flag
+
+    w.printer.dismiss()
+    await w.unload()
+    records = await w.poll()
+    assert [e["message"] for e in events(records, "provisional_kept")] == [
+        f"unload keeps the {provisional} mm charged provisionally to spool {a}"
+    ]
+    since_unload = w.since(unloaded)
+    assert all(c["spool_id"] == a and c["use_length"] > 0 for c in charges(since_unload))
+    assert charged(since_unload, a) == provisional
+    flag = await w.flag("A")
+    assert flag is not None and "provisionally" not in flag  # Now the new unload's flag.
+    assert len(events(records, "swap_unconfirmed")) == 1
+
+
+async def test_s6_unload_with_nothing_assigned(world: World, caplog: pytest.LogCaptureFixture):
+    """Unload with nothing assigned: the usage before it is lost, the usage after it held."""
+    caplog.set_level(logging.INFO, logger="spoolman_prusalink")
+    w = world
+    await baseline(w)
+
+    # A leaves Spoolman and the tool (S10), then B is loaded and unloaded unassigned.
+    await w.move("A", w.shelf)
+    await w.unload()
+    records = await w.poll()
+    assert len(events(records, "active_unassigned")) == 1
+    await w.swap_cycle(poll_every=0.3, source="tag", name=PETG[0], color=PETG[1])
+    await w.poll()
+    await w.unload()
+    records = await w.poll()
+    msg = f"{LOAD_MM} mm before unload had no spool"
+    assert [e["message"] for e in events(records, "lost_unassigned")] == [msg]
+    assert count(caplog, logging.WARNING, f"[{w.tool_location}] {msg}") == 1
+    assert charges(records) == []
+
+    # C's load is held until C is assigned, then charged to it.
+    records = await w.swap_cycle(poll_every=0.3, source="tag", name=ASA[0], color=ASA[1])
+    records += await w.poll()
+    assert charges(records) == []
+    await w.move("C", w.tool_location)
+    records = await w.poll()
+    c = w.spools["C"]
+    assert [e["message"] for e in events(records, "assignment_changed")] == [f"spool {c} is active"]
+    assert {r["spool_id"] for r in charges(records)} == {c}
+    assert w.charged(records, "C") == LOAD_MM
+    assert await w.used("B") == 0
+
+
+async def test_s7_old_spool_out_new_in_then_unload(world: World):
+    """Old spool out, new one in, then unload: the old one charged until the unload, new staged."""
+    w = world
+    a, b = w.spools["A"], w.spools["B"]
+    await baseline(w)
+
+    await w.move("A", w.shelf)
+    w.printer.extrude(0, 10)
+    records = await w.poll()
+    assert [e["message"] for e in events(records, "active_unassigned")] == [
+        f"spool {a} is no longer in the location; still charging it until the printer "
+        "reports an unload"
+    ]
+    assert w.charged(records, "A") == 10
+
+    await w.move("B", w.tool_location)
+    w.printer.extrude(0, 20)
+    records = await w.poll()
+    assert [e["message"] for e in events(records, "swap_staged")] == [
+        f"spool {b} staged; still charging spool {a} until the printer reports an unload"
+    ]
+    assert w.charged(records, "A") == 20
+
+    w.printer.extrude(0, 30)
+    await w.unload()
+    records = await w.poll()
+    assert [e["message"] for e in events(records, "swap_committed")] == [
+        f"swap done: spool {a} -> {b}"
+    ]
+    assert w.charged(records, "A") == 30
+    assert await w.spoolman.location(a) == w.shelf  # Already out: nothing to evict.
+
+    records = await w.swap_cycle(poll_every=0.3, source="tag", name=PETG[0], color=PETG[1])
+    records += await w.poll()
+    assert w.charged(records, "B") == LOAD_MM
+    assert w.charged(records, "A") == 0
+
+
+async def test_s8_staged_spool_moved_back_out(world: World, caplog: pytest.LogCaptureFixture):
+    """Staged spool moved back out before an unload: staging cancelled, old spool charged."""
+    caplog.set_level(logging.INFO, logger="spoolman_prusalink")
+    w = world
+    a, b = w.spools["A"], w.spools["B"]
+    await baseline(w)
+
+    await w.move("B", w.tool_location)
+    records = await w.poll()
+    assert len(events(records, "swap_staged")) == 1
+
+    await w.move("B", w.shelf)
+    w.printer.extrude(0, 20)
+    records = await w.poll()
+    msg = f"spool {b} is no longer staged; still charging spool {a}"
+    assert [e["message"] for e in events(records, "staging_cancelled")] == [msg]
+    assert logged(caplog, logging.INFO, f"[{w.tool_location}] {msg}")
+    assert w.charged(records, "A") == 20
+
+    # B is forgotten: the next unload is an unconfirmed swap on A, not a swap to B.
+    await w.unload()
+    records = await w.poll()
+    assert len(events(records, "swap_unconfirmed")) == 1
+    assert events(records, "swap_committed") == []
+    assert await w.used("B") == 0
+    assert await w.spoolman.location(a) == w.tool_location
+
+
+async def test_s10_spool_moved_out_with_no_replacement(
+    world: World, caplog: pytest.LogCaptureFixture
+):
+    """Spool moved out with no replacement: charged until the unload, then usage is held."""
+    caplog.set_level(logging.INFO, logger="spoolman_prusalink")
+    w = world
+    a, b = w.spools["A"], w.spools["B"]
+    await baseline(w)
+
+    await w.move("A", w.shelf)
+    w.printer.extrude(0, 20)
+    records = await w.poll()
+    assert len(events(records, "active_unassigned")) == 1
+    assert w.charged(records, "A") == 20
+
+    w.printer.extrude(0, 30)
+    await w.unload()
+    records = await w.poll()
+    assert w.charged(records, "A") == 30
+    assert [e["message"] for e in events(records, "active_unassigned")] == [
+        f"spool {a} unloaded with no spool in the location; holding usage until one is assigned"
+    ]
+    assert events(records, "swap_unconfirmed") == []
+    assert await w.flag("A") is None
+
+    # The load is held, with one warning however many polls see it.
+    records = await w.swap_cycle(poll_every=0.3, source="tag", name=PETG[0], color=PETG[1])
+    records += await w.poll()
+    assert charges(records) == []
+    holding = f"[{w.tool_location}] holding usage: no spool assigned"
+    assert count(caplog, logging.WARNING, holding) == 1
+
+    await w.move("B", w.tool_location)
+    records = await w.poll()
+    assert [e["message"] for e in events(records, "assignment_changed")] == [f"spool {b} is active"]
+    assert w.charged(records, "B") == LOAD_MM
+    assert w.charged(records, "A") == 0
+
+
+async def test_s11_two_spools_neither_active(world: World, caplog: pytest.LogCaptureFixture):
+    """Two spools in the location, neither active: skipped and warned once until one leaves."""
+    caplog.set_level(logging.INFO, logger="spoolman_prusalink")
+    w = world
+    a, b, c = w.spools["A"], w.spools["B"], w.spools["C"]
+    await baseline(w)
+
+    await w.move("A", w.shelf)
+    await w.move("B", w.tool_location)
+    await w.move("C", w.tool_location)
+    records = []
+    for _ in range(3):
+        w.printer.extrude(0, 10)
+        records += await w.poll()
+    assert charges(records) == []
+    ids = ", ".join(str(i) for i in sorted((b, c)))
+    msg = f"[{w.tool_location}] location holds spools {ids}; skipping until it's clear"
+    assert count(caplog, logging.WARNING, msg) == 1
+    assert await w.spoolman.location(b) == await w.spoolman.location(c) == w.tool_location
+
+    # C is removed: A, still loaded, takes the usage skipped meanwhile, and B is staged.
+    await w.move("C", w.shelf)
+    records = await w.poll()
+    assert [e["message"] for e in events(records, "swap_staged")] == [
+        f"spool {b} staged; still charging spool {a} until the printer reports an unload"
+    ]
+    assert w.charged(records, "A") == 30
+    assert w.charged(records, "B") == w.charged(records, "C") == 0
+
+
+async def test_s12_spoolman_corrected_to_the_loaded_uuid(world: World):
+    """Spoolman changed to the spool whose UUID the printer reports: switched at once."""
+    w = world
+    a, b = w.spools["A"], w.spools["B"]
+    uuid_b = "0b7d4c6e-5f2a-4b8e-9c3d-2e1f0a9b8c7d"
+
+    # B went in before the bridge started, so its baseline wrongly takes A.
+    await w.unload()
+    await w.swap_cycle(source="tag", name=PETG[0], color=PETG[1], uuid=uuid_b)
+    await baseline(w)
+    flag = await w.flag("A")
+    assert flag is not None and "printer filament differs" in flag
+
+    # The user gives B its UUID and moves it into the location, with no unload.
+    await set_extra_text(w.spoolman.client, b, UUID_FIELD, uuid_b)
+    await w.move("B", w.tool_location)
+    w.printer.extrude(0, 20)
+    records = await w.poll()
+    assert [e["message"] for e in events(records, "correction")] == [
+        f"printer already has spool {b}'s filament; switching from spool {a} now"
+    ]
+    assert events(records, "swap_staged") == []
+    assert w.charged(records, "B") == 20
+    assert w.charged(records, "A") == 0
+    assert await w.spoolman.location(a) is None  # Evicted, as for a swap.
+    assert await w.flag("A") is None
+
+    w.printer.extrude(0, 15)
+    records = await w.poll()
+    assert w.charged(records, "B") == 15
+    assert w.requests("PUT") == []  # The printer already shows B.

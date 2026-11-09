@@ -72,13 +72,31 @@ current and that the scenario rows name their tests.
 <!-- table:begin -->
 | Row | Test | What it checks |
 | --- | --- | --- |
+| S1 | `test_swaps.py::test_s1_matching_tag_writes_nothing` | Spoolman first, and the new spool's tag already matches: nothing is written. |
 | S1 | `test_swaps.py::test_s1_spoolman_first_swap` | Spoolman updated before the unload: the swap commits there, the load is the new spool's. |
 | S2 | `test_swaps.py::test_s2_filament_first_swap` | Filament swapped first: the charge is held, then moves once Spoolman is updated. |
+| S3 | `test_swaps.py::test_s3_moved_after_the_write_back` | Spoolman updated after the old spool was written back: confirmed, then B is written. |
+| S3 | `test_swaps.py::test_s3_old_spool_moved_back` | Old spool moved out and back: the swap stays open, or closes as of a print start. |
+| S3 | `test_swaps.py::test_s3_spoolman_changed_during_the_load` | Filament first, old spool out mid-load, new one in mid-print: the new spool takes it all. |
+| S3 | `test_swaps.py::test_s3_unload_while_the_location_is_empty` | Unload while the swap's location is empty: closed on the old spool, held usage lost. |
+| S4 | `test_swaps.py::test_s4_same_spool_reloaded_then_print` | Same spool unloaded and reloaded, then a print: provisional charge, kept at the unload. |
 | S5 | `test_swaps.py::test_s5_claim_after_printing_on_the_wrong_spool` | Print charged provisionally to the old spool: claiming the loaded one moves it there. |
+| S6 | `test_swaps.py::test_s6_unload_with_nothing_assigned` | Unload with nothing assigned: the usage before it is lost, the usage after it held. |
+| S7 | `test_swaps.py::test_s7_old_spool_out_new_in_then_unload` | Old spool out, new one in, then unload: the old one charged until the unload, new staged. |
+| S8 | `test_swaps.py::test_s8_staged_spool_moved_back_out` | Staged spool moved back out before an unload: staging cancelled, old spool charged. |
 | S9 | `test_swaps.py::test_s9_staged_spool_never_unloaded` | Staged and never unloaded: print starts and reboots flag it, and a claim makes it active. |
+| S10 | `test_swaps.py::test_s10_spool_moved_out_with_no_replacement` | Spool moved out with no replacement: charged until the unload, then usage is held. |
+| S11 | `test_swaps.py::test_s11_two_spools_neither_active` | Two spools in the location, neither active: skipped and warned once until one leaves. |
+| S12 | `test_swaps.py::test_s12_spoolman_corrected_to_the_loaded_uuid` | Spoolman changed to the spool whose UUID the printer reports: switched at once. |
 | S13 | `test_swaps.py::test_s13_staged_spool_claimed` | Staged spool, no unload: a claim moves the usage since the reboot and makes it active. |
 | S14 | `test_swaps.py::test_s14_several_swaps_between_polls` | Two swaps between polls: two unloads seen, the middle spool is charged nothing. |
+| P1 | `test_prints.py::test_p1_normal_print` | Normal print: each poll charges the active spool the counter's change since the last. |
 | P2 | `test_prints.py::test_p2_runout_with_spoolman_updated_during_pause` | Runout mid-print, Spoolman fixed during the pause: the rest goes to the new spool. |
+| P3 | `test_prints.py::test_p3_runout_with_spoolman_updated_after_the_print` | Runout, Spoolman fixed after the print: the swap stays open, then moves the rest. |
+| P4 | `test_prints.py::test_p4_runout_reloaded_with_no_spoolman_change` | Runout reloaded, Spoolman never changed: assumed at the next print, kept at the unload. |
+| P5 | `test_prints.py::test_p5_planned_color_changes_are_unloads` | Two `M600` color changes: each an unload, one confirmed in Spoolman, one left open. |
+| P6 | `test_prints.py::test_p6_jam_is_an_unconfirmed_swap_and_its_purge_is_charged` | Jam with an unload: an unconfirmed swap, and the reload's longer purge is charged. |
+| P7 | `test_prints.py::test_p7_cancel_partway_charges_what_was_extruded` | Print cancelled partway: what was extruded is charged, and nothing else happens. |
 | P8 | `test_prints.py::test_p8_cancelled_during_preheat_is_not_a_print_start` | Print cancelled in preheat: not a print start, so the open swap is still confirmed. |
 | P9 | `test_prints.py::test_p9_restart_after_a_failure_is_a_new_print_start` | A print cancelled and started again under a new job ID is a second print start. |
 | P10 | `test_prints.py::test_p10_spoolman_changed_mid_print_is_staged` | Spoolman changed mid-print with no unload: staged, the old spool charged until unload. |
@@ -90,9 +108,13 @@ current and that the scenario rows name their tests.
 | W4 | `test_writes.py::test_w4_print_soon_after_loading_runs_first` | With sync_delay, a print started right after a menu load runs before the write. |
 | W5 | `test_writes.py::test_w5_write_that_does_not_take_is_flagged` | Two sync jobs dropped in a print's start blip: the spool is flagged, no third job. |
 | W6 | `test_writes.py::test_w6_sync_job_is_not_a_print_start` | The bridge's sync job, polled while it runs, isn't taken for a print start. |
+| W7 | `test_writes.py::test_w7_non_preset_without_temperatures_is_flagged` | Material that isn't a preset, no temperatures: flagged, not written until they're set. |
+| W8 | `test_writes.py::test_w8_pps_is_flagged_until_loaded_from_the_menu` | PPS isn't written but flagged; loaded from the printer's menu, the flag clears. |
 | W9 | `test_writes.py::test_w9_drift_is_flagged_unless_sync_drift` | Printer changed with no unload: flagged and left alone, or rewritten with sync_drift. |
+| W10 | `test_writes.py::test_w10_model_the_bridge_cannot_write` | Unknown, unsupported or mismatched model: logged once, spool flagged, still charged. |
 | W11 | `test_writes.py::test_w11_unconfirmed_swap_writes_the_assigned_spool` | Unload with no Spoolman change, then a menu load: the printer gets A written back. |
 | W12 | `test_writes.py::test_w12_staged_spool_waits_for_the_unload` | Write of B due, then C staged: nothing is written until C is unloaded and loaded. |
+| W13 | `test_writes.py::test_w13_sync_job_homes_an_unhomed_printer` | Unhomed after a boot: the sync job homes with G28 O before it writes and ends. |
 | W14 | `test_writes.py::test_w14_spoolman_edit_is_written` | A color edit in Spoolman is written to the printer; a name-only edit isn't. |
 | M1 | `test_spoolman.py::test_m1_spoolman_unreachable` | Spoolman unreachable: polls skip and log once; queued charges go in order when back. |
 | M2 | `test_spoolman.py::test_m2_rejected_charge_is_dropped` | A charge Spoolman rejects with a 4xx is dropped with an error; later ones go through. |
@@ -100,7 +122,10 @@ current and that the scenario rows name their tests.
 | M3 | `test_spoolman.py::test_m3_deleted_active_spool_holds_usage` | Active spool deleted: its usage is held, then charged to the next spool made active. |
 | M3a | `test_spoolman.py::test_m3a_archived_active_spool` | Active spool archived: still charged and flagged until the next unload. |
 | M4 | `test_spoolman.py::test_m4_location_renamed` | Location renamed: the spool stays active until the next unload, then usage is held. |
+| M5 | `test_spoolman.py::test_m5_spool_used_past_empty` | Spool used past empty: still charged, a negative weight logged once, no flag. |
+| M5a | `test_spoolman.py::test_m5a_runout_with_plenty_left_is_flagged` | Runout in a started print with over 5% left flags the spool; a weight edit clears it. |
 | M6 | `test_spoolman.py::test_m6_flags_by_others_left_alone` | A flag someone else wrote stays while the bridge sets and clears its own elsewhere. |
+| M7 | `test_spoolman.py::test_m7_density_edit_applies_to_later_charges` | Density edited in Spoolman: later charges use the new one, earlier aren't recalculated. |
 | X1 | `test_printers.py::test_x1_spoolman_first_across_printers` | Spool moved LA to LB first: A charges it until its unload, B stages it until its own. |
 | X2 | `test_printers.py::test_x2_filament_first_across_printers` | Unload at A, load at B, then move the spool: B's swap confirms, A's stays open and holds. |
 | X3 | `test_printers.py::test_x3_spool_moved_but_never_loaded_elsewhere` | Spool moved LA to LB with no unload: A charges it, B stages it and flags it at a print. |
