@@ -307,6 +307,14 @@ does and how often it happens, as the old live-check ranks had it:
    the power-panic resume the simulator has now. Done: all eight are End to
    end.
 2. **Writes**: W2 to W5, W9, W11, W12, W14, and the blip drop above.
+   Done: all eight are End to end, and W5's test is the blip drop, twice.
+   One thing those tests turned up to trace: after the bridge uploads a
+   sync job it polls again soon, and a poll that lands in the sync job's
+   own start blip sees `IDLE` with no job, so the bridge uploads a second
+   time. The simulator answers that upload with a 409 and the bridge waits;
+   the F10b trace at 1 s polls showed no blip at all for a sync job, so
+   this may never happen on the printer. Record what a real overwrite
+   upload does there, with F10.
 3. **Multi-tool**: an INDX print with tool changes, a swap on one tool
    while another prints, and the per-tool write. Checked by hand once
    (three segments: tool 0 charged 505 = 475 + 30 purge, tool 1 charged
@@ -322,7 +330,8 @@ does and how often it happens, as the old live-check ranks had it:
    Spoolman. Then M3, M3a, M4, M6.
 5. **Several printers**: X1 to X16 with a two-printer `world`. The
    simulator already runs any number.
-6. **`sync_delay` above 0**, unit-tested only so far.
+6. **`sync_delay` above 0**: W4's test runs it end to end; the rest of the
+   rows that mention it are unit-tested only so far.
 7. **Counters and boots**: C1 to C9, B1 to B6.
 
 Findings from the first live run of the suite that belong in scenario rows:

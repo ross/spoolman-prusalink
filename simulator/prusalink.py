@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 
 from aiohttp import web
 
@@ -15,14 +16,22 @@ def _json(data: dict | None, status: int = 200) -> web.Response:
     return web.json_response(data, status=status)
 
 
-def make_app(sim: Simulation, name: str) -> web.Application:
-    """Build the app for printer `name`, looked up per request so a restore takes effect."""
+def make_app(
+    sim: Simulation, name: str, before_request: Callable[[str, str], None] | None = None
+) -> web.Application:
+    """Build the app for printer `name`, looked up per request so a restore takes effect.
+
+    `before_request(method, path)` runs before each request is served, so a test can
+    change the printer between two requests of one poll.
+    """
 
     def printer() -> SimPrinter:
         return sim.printer(name)
 
     @web.middleware
     async def gate(request: web.Request, handler) -> web.StreamResponse:
+        if before_request is not None:
+            before_request(request.method, request.path)
         p = printer()
         if p.power is not Power.ON:
             await _no_reply(request, printer)
