@@ -49,6 +49,14 @@ Without `SPOOLMAN_URL`, every test is skipped. The `dev` extra
   Core One L INDX (`8.10.0`) instead, with no UUIDs on the printer and tool 1
   loaded with spool D's green PETG in `<prefix> T1`. The `World` helpers that
   act on a tool take a `tool` argument, 0 by default.
+- **A second printer, when asked for.** A test that takes `world_printers`
+  at 2 (`@pytest.mark.parametrize("world_printers", [2], indirect=True)`)
+  also gets printer `b`, a second Core One L with its own PrusaLink server on
+  the same simulation, so ticks move both. Its tool 0 is loaded with spool E's
+  white PLA and UUID, and E is in `<prefix> LB`. `w.at("it")` and `w.at("b")`
+  give each printer with its location, tool, counter and the bridge's state
+  for the tool, and `printer_of(records, "b")` keeps one printer's ledger
+  records. These are in `integration/printers.py`.
 - **Short phases.** The simulator's settings in `conftest.py` make unloads,
   loads, prints and sync jobs take a second or so. A load counts 36 mm of feed
   and 40 mm of purge.
@@ -93,6 +101,21 @@ current and that the scenario rows name their tests.
 | M3a | `test_spoolman.py::test_m3a_archived_active_spool` | Active spool archived: still charged and flagged until the next unload. |
 | M4 | `test_spoolman.py::test_m4_location_renamed` | Location renamed: the spool stays active until the next unload, then usage is held. |
 | M6 | `test_spoolman.py::test_m6_flags_by_others_left_alone` | A flag someone else wrote stays while the bridge sets and clears its own elsewhere. |
+| X1 | `test_printers.py::test_x1_spoolman_first_across_printers` | Spool moved LA to LB first: A charges it until its unload, B stages it until its own. |
+| X2 | `test_printers.py::test_x2_filament_first_across_printers` | Unload at A, load at B, then move the spool: B's swap confirms, A's stays open and holds. |
+| X3 | `test_printers.py::test_x3_spool_moved_but_never_loaded_elsewhere` | Spool moved LA to LB with no unload: A charges it, B stages it and flags it at a print. |
+| X4 | `test_printers.py::test_x4_evicted_spool_moves_to_the_other_printer` | A swap on A, the old spool moved into LB before the eviction: it's left there for B. |
+| X4a | `test_printers.py::test_x4a_eviction_rereads_the_spool` | Spool moved into LB between the bridge's Spoolman read and its eviction: left in LB. |
+| X5 | `test_printers.py::test_x5_claim_on_b_while_a_still_has_the_spool` | Spool claimed in LB while A, off, still has it active: B takes it, A lets go on return. |
+| X6 | `test_printers.py::test_x6_one_spool_active_in_two_tools` | A missed an unload over a reboot and B loads the spool: logged once, flagged, both charge. |
+| X7 | `test_printers.py::test_x7_two_claims_one_per_printer` | Two spools claimed in one poll, one in LA and one in LB: each claim is its tool's. |
+| X8 | `test_printers.py::test_x8_one_printer_off` | Printer A off: logged once, B charged, A's eviction runs, A's claim waits for it. |
+| X9 | `test_printers.py::test_x9_spoolman_unreachable` | Spoolman down: printers still read; both printers' charges queue in one outbox, in order. |
+| X10 | `test_printers.py::test_x10_firmware_without_the_filament_endpoint` | A's firmware lacks the filament endpoint: logged once, nothing charged, B unaffected. |
+| X11 | `test_printers.py::test_x11_charge_rejected_with_404` | A 404 on a charge is held for the record's printer and tool, not the other printer's. |
+| X13 | `test_printers.py::test_x13_version_2_state_with_two_printers` | A version 2 state file with two printers configured: refused until one printer saves v3. |
+| X14 | `test_printers.py::test_x14_printer_renamed` | A printer renamed: its old state kept but inert, with a warning; the new name baselines. |
+| X16 | `test_printers.py::test_x16_runout_flag_clears_when_active_elsewhere` | A runout flag set on A clears when the spool becomes active in B after another spool. |
 | T1 | `test_tools.py::test_t1_tool_changes_charge_each_tool` | Tool change: each tool's spool gets its own moves; the pickup purge goes to the new tool. |
 | T2 | `test_tools.py::test_t2_tool_change_is_not_an_unload` | A tool change isn't an unload: no swap opens on either tool, and nothing is flagged. |
 | T3 | `test_tools.py::test_t3_swap_on_one_tool_leaves_the_other` | Swap on tool 1 between prints: tool 1's spool changes, tool 0's state is untouched. |
@@ -141,8 +164,13 @@ To make Spoolman fail, use `w.spoolman_faults`, a transport in front of the
 bridge's Spoolman client (`integration/faults.py`). It passes requests through
 until the test asks for a fault: `cut()` makes every request fail to connect,
 `answer("PUT", "/api/v1/spool/7/use", 503)` replies 503 to the next matching
-request without sending it (`times=None` keeps replying), and `restore()` ends
-both. Its `requests` list says what each of the bridge's requests got. The same
+request without sending it (`times=None` keeps replying, and `containing=`
+matches on the request body too). Its `hook`, an async function that gets each
+request after the outage check and before the answers, can change Spoolman
+between two of the bridge's requests, such as move or delete a spool, and can
+return a response to use instead.
+`restore()` ends all three. Its `requests` list says what each of the bridge's
+requests got, as `"PUT /api/v1/spool/7/use 503"` or `"... unreachable"`. The same
 module has the Spoolman edits the `world` helpers don't cover: deleting and
 archiving a spool, writing a text field, and renaming a location.
 
