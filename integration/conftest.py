@@ -152,6 +152,12 @@ class SpoolmanHelper:
         resp = await self.client.patch(f"/api/v1/spool/{spool_id}", json={"location": location})
         resp.raise_for_status()
 
+    async def edit_filament(self, spool_id: int, **fields) -> None:
+        """Change the spool's filament, as the user would edit it in Spoolman."""
+        filament_id = (await self.get(spool_id))["filament"]["id"]
+        resp = await self.client.patch(f"/api/v1/filament/{filament_id}", json=fields)
+        resp.raise_for_status()
+
     async def claim(self, spool_id: int) -> None:
         """Tick the spool's Claim held usage box, as the user would in Spoolman."""
         await self.ensure_field(CLAIM_FIELD, "Claim held usage", "boolean")
@@ -266,6 +272,8 @@ class World:
     shelf: str
     spools: dict[str, int] = field(default_factory=dict)
     uuids: dict[str, str] = field(default_factory=dict)
+    # Runs before the simulator serves each request, with its method and path.
+    before_request: Callable[[str, str], None] | None = None
 
     @property
     def tool(self) -> SimTool:
@@ -359,13 +367,24 @@ class World:
 
 
 @pytest.fixture
-async def world(spoolman: SpoolmanHelper, prefix: str, tmp_path: Path):
+def world_config(request: pytest.FixtureRequest) -> dict:
+    """Bridge settings `world` overrides in its `Config`, such as `sync_drift`.
+
+    None by default. A test sets them with
+    `@pytest.mark.parametrize("world_config", [dict(...)], indirect=True)`.
+    """
+    return getattr(request, "param", {})
+
+
+@pytest.fixture
+async def world(spoolman: SpoolmanHelper, prefix: str, tmp_path: Path, world_config: dict):
     """The starting point every scenario shares.
 
     A Core One L whose tool 0 is loaded with spool A's PLA, A's instance UUID and some
     extrusion on the counter; spool A in the tool's location; B (PETG) and C (ASA) on
     this test's shelf. Each filament weighs 1000 g and no spool has used any, so a
-    runout always leaves plenty and trips the mid-print flag.
+    runout always leaves plenty and trips the mid-print flag. The bridge's clock is the
+    simulator's, so `sync_delay` counts simulated seconds.
     """
     tool_location, shelf = f"{prefix} T", f"{prefix} shelf"
     await spoolman.ensure_text_field(UUID_FIELD, "Instance UUID")
@@ -387,7 +406,13 @@ async def world(spoolman: SpoolmanHelper, prefix: str, tmp_path: Path):
     tool = SimTool(0, loaded=True, material=replace(a), previous=replace(a), extruded=1000.0)
     printer = SimPrinter("it", 0, KEY, MODELS["8.1.0"], tools={0: tool})
     sim.add(printer)
-    server = TestServer(make_app(sim, printer.name))
+    w: World
+
+    def before_request(method: str, path: str) -> None:
+        if w.before_request is not None:
+            w.before_request(method, path)
+
+    server = TestServer(make_app(sim, printer.name, before_request))
     await server.start_server()
     cfg = Config(
         spoolman_url=str(spoolman.client.base_url).rstrip("/"),
@@ -403,8 +428,10 @@ async def world(spoolman: SpoolmanHelper, prefix: str, tmp_path: Path):
         state_file=tmp_path / "state.json",
         ledger_file=tmp_path / "ledger.jsonl",
         dry_run=False,
+        **world_config,
     )
     bridge = Bridge.from_config(cfg)
+    bridge.clock = lambda: sim.now
     w = World(sim, printer, bridge, cfg, spoolman, tool_location, shelf, spools, {"A": uuid_a})
     try:
         yield w

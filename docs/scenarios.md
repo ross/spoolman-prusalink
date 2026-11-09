@@ -93,19 +93,19 @@ archived active spool (M3, M3a) is logged once when the bridge finds it.
 | # | Scenario | What the bridge does | Status |
 | --- | --- | --- | --- |
 | W1 | Write after a swap, printer idle. | Uploads and runs the sync job: model checks, `G28 O`, `M865` with every parameter, `M865.1` UUID. Gives the spool a UUID first if it has none. | Seen live; end to end (`test_w1_write_after_swap`) |
-| W2 | Write due while the printer is printing. | Waits until it's idle. | Tested |
-| W3 | Printer refuses the upload (409 busy). | Waits for the next idle poll. | Tested |
-| W4 | User starts a print within a minute of loading. | The write waits until that print ends, so the print runs with the menu's metadata. | Tested |
-| W5 | The printer still differs after two sync jobs. | Stops and flags the spool ("didn't take"). | Tested |
-| W6 | The bridge's own sync job. | Not counted as a print start: recognized by its file name. | Tested |
+| W2 | Write due while the printer is printing. | Waits until it's idle. | Tested; end to end (`test_w2_write_waits_while_printing`) |
+| W3 | Printer refuses the upload (409 busy). | Waits for the next idle poll. | Tested; end to end (`test_w3_upload_refused_busy`) |
+| W4 | User starts a print within a minute of loading. | The write waits until that print ends, so the print runs with the menu's metadata. | Tested; end to end (`test_w4_print_soon_after_loading_runs_first`) |
+| W5 | The printer still differs after two sync jobs. | Stops and flags the spool ("didn't take"). | Tested; end to end (`test_w5_write_that_does_not_take_is_flagged`) |
+| W6 | The bridge's own sync job. | Not counted as a print start: recognized by its file name. | Tested; end to end (`test_w6_sync_job_is_not_a_print_start`) |
 | W7 | Spool's material isn't a preset and Spoolman has no temperatures. | Flags the spool and doesn't write. | Tested |
 | W8 | PPS or PPA. | Flags the spool and doesn't write: `M865` can't set the HT idler-door requirement. Once the printer shows the material, loaded from its menu, the flag clears; the color and UUID the menu load leaves out aren't drift. | Tested |
-| W9 | Printer differs with no swap or unload behind it (drift). | Flags it and leaves the printer alone, unless `sync_drift = true`. | Tested |
+| W9 | Printer differs with no swap or unload behind it (drift). | Flags it and leaves the printer alone, unless `sync_drift = true`. | Tested; end to end (`test_w9_drift_is_flagged_unless_sync_drift`) |
 | W10 | Unsupported, unknown or mismatched model. | Logs once, flags waiting spools, and doesn't write. Charging continues. | Tested |
-| W11 | Unconfirmed swap open. | Writes the assigned spool, so the printer shows what Spoolman thinks is loaded. | Tested |
-| W12 | Spool staged. | Waits for the unload before writing. | Tested |
+| W11 | Unconfirmed swap open. | Writes the assigned spool, so the printer shows what Spoolman thinks is loaded. | Tested; end to end (`test_w11_unconfirmed_swap_writes_the_assigned_spool`) |
+| W12 | Spool staged. | Waits for the unload before writing. | Tested; end to end (`test_w12_staged_spool_waits_for_the_unload`) |
 | W13 | Unhomed printer after a boot. | `G28 O` homes it before the job ends, so the end-of-job bed move is safe. | Seen live (2026-11-07: a sync job right after a cold boot homed, then lowered the bed safely) |
-| W14 | Spoolman changes the spool's color, name, material, temperatures or UUID with no swap (an edit). | If the printer still matches the bridge's last write, writes the edit when idle (see Q6). Otherwise it's drift (W9). A name-only edit isn't written when the filament has a material: the printer's filament name is then the material, so the spool's name isn't on the printer. With no material, the printer's filament name is the first 7 letters, digits, `_` or `-` of the vendor and name, so a name edit is written only if it changes them. | Seen live (spool 20: a color edit, then two quick temperature edits, each written) |
+| W14 | Spoolman changes the spool's color, name, material, temperatures or UUID with no swap (an edit). | If the printer still matches the bridge's last write, writes the edit when idle (see Q6). Otherwise it's drift (W9). A name-only edit isn't written when the filament has a material: the printer's filament name is then the material, so the spool's name isn't on the printer. With no material, the printer's filament name is the first 7 letters, digits, `_` or `-` of the vendor and name, so a name edit is written only if it changes them. | Seen live (spool 20: a color edit, then two quick temperature edits, each written); end to end (`test_w14_spoolman_edit_is_written`) |
 
 ## Spoolman
 
