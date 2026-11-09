@@ -284,7 +284,8 @@ it can be counted twice. Every other failure delays charges rather than
 losing or repeating them.
 
 Flags go to the `flag_field` extra field (`bridge_flag` by default), which
-the bridge creates on first use:
+the bridge creates on first use and treats as its own: don't keep your own
+notes there, since a flag replaces them and clearing it empties the field.
 
 - An unconfirmed swap, on the spool still assigned, until Spoolman changes,
   a print starts, or the next unload. If that spool is moved out of the
