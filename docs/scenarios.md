@@ -226,7 +226,9 @@ there's no second printer yet (see "A second printer" in `live-checks.md`).
 A multi-tool printer, such as an INDX or an XL, has several tools, each with
 its own filament path, sensor and counters. One location per tool is mapped
 in the config, and the bridge keeps each tool's state and charges apart, so
-every row above applies to each tool on its own. These rows come from
+every row above applies to each tool on its own, except the printer writes,
+which are off on these models (T6), and the rows that need an instance UUID,
+such as S12, since these models keep none (F21). These rows come from
 [printer-behaviors.md](printer-behaviors.md) F19 to F23. No multi-tool
 printer is at hand, so they run end to end against the simulator only, which
 follows the firmware source; each gets traced when the INDX arrives.
