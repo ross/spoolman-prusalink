@@ -77,6 +77,7 @@ current and that the scenario rows name their tests.
 | S1 | `test_swaps.py::test_s1_tag_uuid_conflict_is_flagged` | The new spool has a different UUID in Spoolman: flagged, neither overwritten (#66). |
 | S1 | `test_swaps.py::test_s1_tag_uuid_is_adopted` | The new spool has no UUID: it takes the tag's, and nothing is written (#66). |
 | S1 | `test_swaps.py::test_s1_tag_with_other_temperatures_is_written` | Spoolman first, and the tag matches but for its temperatures: Spoolman's are written. |
+| S1 | `test_swaps.py::test_s1_untrusted_tag_uuid_is_kept` | A tag the bridge didn't see load is kept on the printer, not minted over (#66). |
 | S2 | `test_swaps.py::test_s2_filament_first_swap` | Filament swapped first: the charge is held, then moves once Spoolman is updated. |
 | S3 | `test_swaps.py::test_s3_moved_after_the_write_back` | Spoolman updated after the old spool was written back: confirmed, then B is written. |
 | S3 | `test_swaps.py::test_s3_old_spool_moved_back` | Old spool moved out and back: the swap stays open, or closes as of a print start. |

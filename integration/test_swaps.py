@@ -154,6 +154,43 @@ async def test_s1_tag_uuid_is_adopted(world: World):
     assert w.material() == (PETG[0], PETG[1], tag)
 
 
+async def test_s1_untrusted_tag_uuid_is_kept(world: World):
+    """A tag the bridge didn't see load is kept on the printer, not minted over (#66).
+
+    The tag is loaded while the bridge restarts, so it didn't watch the tag appear.
+    The tag's temperatures differ from Spoolman's, so a write is due anyway.
+    """
+    w = world
+    b = w.spools["B"]
+    await s1_swap_to_b(w)
+    tag = str(uuid.uuid4())
+    load = {"source": "tag", "name": PETG[0], "color": PETG[1], "uuid": tag}
+    await w.swap_cycle(temperatures=(250, 170, 80), **load)
+    await w.restart()
+    await w.poll()
+    puts = w.requests("PUT")
+    assert len(puts) == 1 and f'M865.1 I0 C"{tag}"' in puts[0].data["body"]
+    await w.run_until(lambda: w.printer.job is None)
+    for _ in range(2):
+        await w.poll()
+        w.advance(2.0)
+    assert len(w.requests("PUT")) == 1
+    assert w.material() == (PETG[0], PETG[1], tag)
+    assert await w.spoolman.extra(b, UUID_FIELD) is None  # Kept, not stored or minted.
+
+    # A reload of the same tag with no Spoolman change is an unconfirmed swap: the tag
+    # may be another spool's, so it's kept again, still not minted over or stored.
+    await w.unload()
+    await w.poll()
+    await w.swap_cycle(poll_every=0.3, temperatures=(250, 170, 80), **load)
+    await w.poll()
+    await w.run_until(lambda: w.printer.job is None)
+    await w.poll()
+    assert len(w.requests("PUT")) == 2
+    assert w.material() == (PETG[0], PETG[1], tag)
+    assert await w.spoolman.extra(b, UUID_FIELD) is None
+
+
 async def test_s1_tag_uuid_conflict_is_flagged(world: World, caplog: pytest.LogCaptureFixture):
     """The new spool has a different UUID in Spoolman: flagged, neither overwritten (#66)."""
     w = world

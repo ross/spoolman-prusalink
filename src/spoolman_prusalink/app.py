@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import re
 import time
 import uuid
 from collections.abc import Callable, Hashable
@@ -145,6 +146,12 @@ def _now() -> str:
     return datetime.now(UTC).isoformat(timespec="seconds")
 
 
+def _written_uuid(written: str | None) -> str | None:
+    """The instance UUID in the bridge's last write to a tool, if any."""
+    found = re.search(r'^M865\.1 I0 C"([^"]+)"', written or "", re.MULTILINE)
+    return found.group(1).lower() if found else None
+
+
 @dataclass
 class PrinterBridge:
     """One printer's side of the bridge: read it, account its tools, and write to it.
@@ -179,8 +186,12 @@ class PrinterBridge:
     # with one spool isn't adopted by the next. In memory only, so after a restart a tag
     # already loaded isn't trusted until the next load.
     _seen_uuid: dict[int, tuple[str, int, bool]] = field(default_factory=dict)
-    # Per tool: the spool to give the tag's instance UUID this poll, and that UUID.
-    _adopts: dict[int, tuple[int, str]] = field(default_factory=dict)
+    # Tools the bridge saw with no material or no instance UUID since `_seen_uuid` was
+    # last set: a UUID shown next appeared while the bridge watched.
+    _uuid_gap: set[int] = field(default_factory=set)
+    # Per tool: the spool whose write carries the printer's UUID this poll, that UUID,
+    # and whether to store it on the spool (adopt) or only keep it on the printer.
+    _adopts: dict[int, tuple[int, str, bool]] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         self._printer_outage = Outage(self.label)
@@ -534,15 +545,17 @@ class PrinterBridge:
                     self.bridge.state.runouts.pop(active.id, None)
                 self._check_remaining(active)
             tag = None
+            if tool == 0 and (material is None or not material.instance_uuid):
+                self._uuid_gap.add(tool)
             if not result.skipped and material is not None and active is not None:
                 tag = self._tag_uuid(tool, st, material, active, spools)
             if tag is not None and tag[0] == "conflict":
                 self._uuid_conflict(location, material, active, notes, flags)
             elif not result.skipped and material is not None and active is not None:
                 if tag is not None:
-                    # Compare as if Spoolman already had the tag's UUID: adopting it
-                    # makes the tool match, and a write keeps it.
-                    self._adopts[tool] = (active.id, tag[1])
+                    # Compare as if Spoolman already had the printer's UUID: adopting it
+                    # makes the tool match, and a write keeps it either way.
+                    self._adopts[tool] = (active.id, tag[1], tag[0] == "adopt")
                     active = replace(active, instance_uuid=tag[1])
                 if printer_sync.loaded_from_menu(material.name, active):
                     diffs, edited = [], None  # As the "can't write" flag asked.
@@ -585,7 +598,13 @@ class PrinterBridge:
         """Decide what to do with the instance UUID of a type loaded from a tag.
 
         Returns ("adopt", uuid) when the active spool should take the tag's UUID,
-        ("conflict", uuid) when the spool has a different UUID in Spoolman, or None.
+        ("keep", uuid) when the spool has no UUID and the printer shows a tag's that no
+        spool has but that isn't trusted as this spool's, ("conflict", uuid) when the
+        spool has a different UUID in Spoolman than a trusted tag, or None.
+
+        A kept UUID is written back instead of a minted one, so a tag the bridge
+        doesn't trust yet isn't overwritten: its next watched load adopts it. The
+        write clears the tag's markers, so a UUID the bridge last wrote is kept too.
 
         The tag's UUID is the spool's identifier, but the printer can report one that
         isn't this spool's: a runout reload keeps the old filament's type, tag UUIDs
@@ -601,20 +620,26 @@ class PrinterBridge:
         seen = self._seen_uuid.get(tool)
         if seen is not None and seen[0] == value and seen[1] != active.id:
             return None  # Still the spool before's UUID, until the printer shows another.
-        if st.assigned != st.active or st.swap is not None or st.provisional is not None:
-            return None  # The active spool isn't certain.
-        if seen is None or seen[0] != value:
-            seen = self._seen_uuid[tool] = (value, active.id, seen is not None)
-        if not material.from_tag or not seen[2]:
-            return None
         if any(s.id != active.id and (s.instance_uuid or "").lower() == value for s in spools):
-            return None  # Another spool's tag: a correction (S12) or drift, not ours.
+            return None  # Another spool's UUID: a correction (S12) or drift, not ours.
+        certain = st.assigned == st.active and st.swap is None and st.provisional is None
+        if certain and (seen is None or seen[0] != value or tool in self._uuid_gap):
+            appeared = seen is not None or tool in self._uuid_gap
+            seen = self._seen_uuid[tool] = (value, active.id, appeared)
+            self._uuid_gap.discard(tool)
+        # While the active spool isn't certain, such as a reload with no Spoolman change,
+        # a tag is only kept: it may be another spool's.
+        trusted = certain and material.from_tag and seen is not None and seen[2]
         have = (active.instance_uuid or "").lower()
         if not have:
             if (active.id, value) in self.bridge._refused_uuids:
                 return None  # An archived spool has it.
-            return ("adopt", value)
-        if have != value:
+            if trusted:
+                return ("adopt", value)
+            if material.from_tag or value == _written_uuid(st.written):
+                return ("keep", value)
+            return None
+        if have != value and trusted:
             return ("conflict", value)
         return None
 
@@ -648,12 +673,16 @@ class PrinterBridge:
         """Store the UUIDs of tags `process()` found on spools that have none.
 
         A UUID an archived spool turns out to have is dropped, so a write this poll
-        gives the spool its own UUID rather than the tag's.
+        gives the spool its own UUID rather than the tag's. On any other failure the
+        tool's write waits, so the next poll tries again while the printer still shows
+        the tag: a write now would clear the tag's markers and lose it.
         """
-        for tool, (spool_id, value) in list(self._adopts.items()):
-            await self.bridge._adopt_uuid(spool_id, value)
-            if (spool_id, value) in self.bridge._refused_uuids:
-                del self._adopts[tool]
+        for tool, (spool_id, value, store) in list(self._adopts.items()):
+            if await self.bridge._adopt_uuid(spool_id, value, store=store):
+                continue
+            del self._adopts[tool]
+            if (spool_id, value) not in self.bridge._refused_uuids:
+                self._pending_writes = [t for t in self._pending_writes if t != tool]
 
     def _check_runout(self, location: str, spool: Spool | None) -> None:
         """Flag a spool that unloaded mid-print with more than RUNOUT_LEFT remaining.
@@ -980,6 +1009,8 @@ class Bridge:
     # Tag UUIDs not adopted because an archived spool has them, so the archived spools
     # aren't read again every poll.
     _refused_uuids: set[tuple[int, str]] = field(default_factory=set)
+    # UUIDs kept on the printer for a spool that no archived spool has, checked once.
+    _unowned_uuids: set[tuple[int, str]] = field(default_factory=set)
     clock: Callable[[], float] = time.monotonic
 
     def __post_init__(self) -> None:
@@ -1405,16 +1436,19 @@ class Bridge:
         log.info("gave spool %d instance UUID %s", spool.id, value)
         return value
 
-    async def _adopt_uuid(self, spool_id: int, value: str) -> bool:
+    async def _adopt_uuid(self, spool_id: int, value: str, store: bool = True) -> bool:
         """Store a tag's instance UUID on a spool that has none. Returns whether it did.
 
         Spoolman's list leaves out archived spools, so they're checked here: a runout
         reload can show an archived spool's tag. A spool that has the UUID already keeps
-        it, and this one doesn't take it.
+        it, and this one doesn't take it. With `store` False, only that check is made,
+        once, for a UUID kept on the printer without storing it.
         """
         key = self.config.uuid_field
         assert key
-        if self.config.dry_run:
+        if not store and (spool_id, value) in self._unowned_uuids:
+            return True
+        if self.config.dry_run and store:
             if self._dry_uuids.get(spool_id) != value:
                 self._dry_uuids[spool_id] = value
                 log.info("would give spool %d its tag's instance UUID %s", spool_id, value)
@@ -1441,13 +1475,17 @@ class Bridge:
             self._problems.fail(
                 ("uuid", spool_id),
                 owner,
-                "not giving spool %d the loaded tag's instance UUID %s: archived spool %d has it",
+                "spool %d can't take instance UUID %s from the printer: archived spool %d has it",
                 spool_id,
                 value,
                 owner,
                 level=logging.INFO,
             )
             return False
+        if not store:
+            self._unowned_uuids.add((spool_id, value))
+            self._problems.clear(("uuid", spool_id))
+            return True
         if not await self._ensure_field(key, UUID_FIELD_NAME):
             return False
         try:
