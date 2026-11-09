@@ -22,6 +22,7 @@ from integration.conftest import (
     print_spec,
 )
 from integration.faults import set_extra_text
+from integration.temperatures import TEMPERATURES
 from simulator.model import State
 
 
@@ -83,6 +84,36 @@ async def test_s1_matching_tag_writes_nothing(world: World):
     records += await w.poll()
     assert w.charged(records, "B") == LOAD_MM
     assert w.requests("PUT") == []
+    assert w.material() == (PETG[0], PETG[1], uuid_b)
+
+
+async def test_s1_tag_with_other_temperatures_is_written(world: World):
+    """Spoolman first, and the tag matches but for its temperatures: Spoolman's are written."""
+    w = world
+    b = w.spools["B"]
+    await baseline(w)
+    uuid_b = str(uuid.uuid4())
+    await set_extra_text(w.spoolman.client, b, UUID_FIELD, uuid_b)
+    await w.move("B", w.tool_location)
+    await w.poll()
+    await w.unload()
+    await w.poll()
+
+    # A tag gives the midpoint of its ranges, here 250 for the nozzle and 80 for the bed.
+    await w.swap_cycle(
+        poll_every=0.3,
+        source="tag",
+        name=PETG[0],
+        color=PETG[1],
+        uuid=uuid_b,
+        temperatures=(250, 170, 80),
+    )
+    await w.poll()
+    puts = w.requests("PUT")
+    assert len(puts) == 1 and " T220 B60 " in puts[0].data["body"]
+    await w.run_until(lambda: w.printer.job is None)
+    await w.poll()
+    assert w.printer.tools[0].material.temperatures() == TEMPERATURES
     assert w.material() == (PETG[0], PETG[1], uuid_b)
 
 

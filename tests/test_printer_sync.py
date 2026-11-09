@@ -1,16 +1,19 @@
 import pytest
 
-from spoolman_prusalink.models import Spool
+from spoolman_prusalink.models import Material, Spool
 from spoolman_prusalink.printer_sync import (
     COREONEL_PREAMBLE,
     PRINTER_MODELS,
     CannotSync,
+    Temperatures,
     ToolWrite,
     build_job,
     default_preamble,
     filament_lines,
     model_problem,
+    printer_matches_write,
     printer_name,
+    temperatures,
 )
 
 
@@ -116,3 +119,30 @@ def test_model_problems():
 def test_default_preamble_names_model():
     assert default_preamble(PRINTER_MODELS["1.4.0"])[0].startswith('M862.3 P "MK4"')
     assert COREONEL_PREAMBLE[0] == 'M862.3 P "COREONEL" ; printer model check'
+
+
+def test_temperatures():
+    assert temperatures(spool()) == Temperatures(215, 170, 60)
+    # Preheat never exceeds the nozzle temperature.
+    assert temperatures(spool(material="PC", extruder_temp=240)) == Temperatures(240, 240, 100)
+    # A material that isn't a preset gets M865 R's default preheat.
+    s = spool(material="PLA-CF", extruder_temp=225, bed_temp=65)
+    assert temperatures(s) == Temperatures(225, 170, 65)
+    with pytest.raises(CannotSync):
+        temperatures(spool(material="PLA-CF"))
+
+
+def reported(name, color, nozzle, preheat, bed):
+    return Material(
+        name, color, nozzle_temperature=nozzle, preheat_temperature=preheat, bed_temperature=bed
+    )
+
+
+@pytest.mark.parametrize("material", ["PLA", "PLA-CF"])
+def test_printer_matches_write_compares_temperatures(material):
+    s = spool(material=material, extruder_temp=225, bed_temp=65)
+    written = "\n".join(filament_lines(ToolWrite(0, s, None)))
+    assert printer_matches_write(reported(material, "#8c9099", 225, 170, 65), written, False)
+    assert not printer_matches_write(reported(material, "#8c9099", 230, 170, 65), written, False)
+    assert not printer_matches_write(reported(material, "#8c9099", 225, 160, 65), written, False)
+    assert not printer_matches_write(reported(material, "#8c9099", 225, 170, 60), written, False)

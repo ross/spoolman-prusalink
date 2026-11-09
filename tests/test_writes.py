@@ -2,6 +2,7 @@
 
 import json
 import math
+import re
 from dataclasses import replace
 
 import httpx
@@ -11,7 +12,7 @@ from spoolman_prusalink.accounting import UNKNOWN_WRITE, ToolState
 from spoolman_prusalink.app import Bridge
 from spoolman_prusalink.color import quantize
 from spoolman_prusalink.config import Config, PrinterConfig
-from spoolman_prusalink.printer_sync import COREONEL_PREAMBLE
+from spoolman_prusalink.printer_sync import COREONEL_PREAMBLE, PRESETS
 from spoolman_prusalink.prusalink import PrusaLink
 from spoolman_prusalink.spoolman import Spoolman
 from spoolman_prusalink.state import Runout, load_state
@@ -158,10 +159,10 @@ class Printer:
             if not self.counters:
                 tool = {"index": 0}
                 if self.material:
-                    tool["material"] = self.material
+                    tool["material"] = reported(self.material)
                 return httpx.Response(200, json={"tools": [tool]})
             if self.material:
-                tool["material"] = self.material
+                tool["material"] = reported(self.material)
             return httpx.Response(200, json={"boot_id": self.boot_id, "tools": [tool]})
         if request.url.path == "/api/v1/job":
             if not self.job:
@@ -193,12 +194,28 @@ class Printer:
         for line in gcode.splitlines():
             if line.startswith("M865 X"):
                 name = line.split('N"')[1].split('"')[0]
-                material = {"name": name}
+                # R resets every temperature to the firmware default first.
+                reset = zip(TEMPERATURE_KEYS, DEFAULT_TEMPERATURES, strict=True)
+                material = {"name": name, **dict(reset)}
+                for key, letter in zip(TEMPERATURE_KEYS, "TPB", strict=True):
+                    if m := re.search(rf"\s{letter}(\d+)\b", line):
+                        material[key] = int(m.group(1))
                 if 'O"' in line:
                     material["color"] = quantize("#" + line.split('O"#')[1][:6])
                 self.material = material
             if line.startswith("M865.1"):
                 self.material = {**self.material, "instance_uuid": line.split('C"')[1][:36]}
+
+
+TEMPERATURE_KEYS = ("nozzle_temperature", "preheat_temperature", "bed_temperature")
+DEFAULT_TEMPERATURES = (215, 170, 60)
+PRESET_TEMPERATURES = {k: (p.nozzle, p.preheat, p.bed) for k, p in PRESETS.items()}
+
+
+def reported(material):
+    """`material` as the printer reports it: a menu load takes the preset's temperatures."""
+    base = PRESET_TEMPERATURES.get(material["name"].upper(), DEFAULT_TEMPERATURES)
+    return {**dict(zip(TEMPERATURE_KEYS, base, strict=True)), **material}
 
 
 PRINTER_KEYS = {"gcode_preamble", "sync_storage", "sync_file", "uuids"}
@@ -1137,6 +1154,35 @@ async def test_spoolman_edit_that_doesnt_apply_is_retried_then_flagged(tmp_path)
     assert len(jobs(printer)) == 3  # The swap write, then the edit twice (W5).
     assert "didn't take" in fake.flag(20)
     assert "printer filament differs" not in fake.flag(20)
+    await bridge.aclose()
+
+
+async def test_temperature_edit_that_doesnt_apply_is_retried_then_flagged(tmp_path):
+    # The printer reports temperatures, so a temperature-only edit is checked like a color.
+    bridge, fake, printer = await written_state(tmp_path, flag_drift=True)
+    printer.run_job = lambda gcode: None  # Cancelled on the screen: nothing changes.
+    fake.spools[20]["filament"]["settings_extruder_temp"] = 205
+    for _ in range(4):
+        await bridge.poll()
+    assert len(jobs(printer)) == 3  # The swap write, then the edit twice (W5).
+    assert "didn't take" in fake.flag(20)
+    assert "nozzle printer=215 spoolman=205" in fake.flag(20)
+    await bridge.aclose()
+
+
+@pytest.mark.parametrize("sync_drift", [False, True])
+async def test_temperature_changed_on_the_printer_is_drift(tmp_path, caplog, sync_drift):
+    bridge, fake, printer = await written_state(tmp_path, flag_drift=True, sync_drift=sync_drift)
+    printer.material = {**printer.material, "bed_temperature": 70}
+    await bridge.poll()
+    assert "bed printer=70 spoolman=60" in caplog.text
+    if sync_drift:
+        assert len(jobs(printer)) == 2
+        await bridge.poll()
+        assert fake.flag(20) is None
+    else:
+        assert len(jobs(printer)) == 1
+        assert "printer filament differs: bed printer=70 spoolman=60" in fake.flag(20)
     await bridge.aclose()
 
 

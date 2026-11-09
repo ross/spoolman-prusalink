@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING
 
 from aiohttp.test_utils import TestServer
 
+from integration.temperatures import WRITTEN
 from simulator.model import MODELS, Material, PrintSpec, SimPrinter, SimTool, Simulation, State
 from simulator.prusalink import make_app
 from spoolman_prusalink.accounting import ToolState
@@ -108,7 +109,7 @@ async def add_printers(
     filament = await spoolman.filament(vendor, *PLA_WHITE)
     spools["E"] = await spoolman.spool(filament, location, "E", uuid_e)
     uuids["E"] = uuid_e
-    e = Material(PLA_WHITE[0], PLA_WHITE[1], uuid_e)
+    e = Material(PLA_WHITE[0], PLA_WHITE[1], uuid_e, **WRITTEN)
     tool = SimTool(0, loaded=True, material=replace(e), previous=replace(e), extruded=2000.0)
     printer = SimPrinter(SECOND, 0, key, MODELS["8.1.0"], tools={0: tool})
     sim.add(printer)

@@ -115,6 +115,28 @@ MODELS = _models(
 )
 
 
+# Nozzle, preheat and bed temperatures of the firmware's preset filaments
+# (`src/common/filament_presets.cpp`), with the preheat for printers with a load cell.
+PRESET_TEMPERATURES = {
+    "PLA": (215, 170, 60),
+    "PETG": (230, 170, 85),
+    "ASA": (260, 170, 100),
+    "PC": (275, 250, 100),
+    "PVB": (215, 170, 75),
+    "ABS": (255, 170, 100),
+    "HIPS": (220, 170, 100),
+    "PP": (240, 170, 100),
+    "FLEX": (240, 210, 50),
+    "PA": (285, 260, 100),
+    "PPS": (320, 170, 105),
+    "PPA": (320, 170, 105),
+    "PVA": (210, 160, 60),
+    "BVOH": (210, 160, 60),
+}
+# What `M865 R` resets them to (`FilamentTypeParameters` in `filament.hpp`).
+DEFAULT_TEMPERATURES = (215, 170, 60)
+
+
 @dataclass
 class Material:
     name: str
@@ -123,6 +145,17 @@ class Material:
     # A preset has no color or UUID and ignores edits; tag loads, loads with a picked color,
     # and M865 X writes are ad-hoc. The page shows the flag; PrusaLink doesn't.
     adhoc: bool = True
+    # None takes the value of the preset with this name, else the firmware default. A tag
+    # load gets its temperatures from the tag; the simulator uses the preset's.
+    nozzle: int | None = None
+    preheat: int | None = None
+    bed: int | None = None
+
+    def temperatures(self) -> tuple[int, int, int]:
+        """Return the nozzle, preheat and bed temperatures the printer reports."""
+        base = PRESET_TEMPERATURES.get(self.name.upper(), DEFAULT_TEMPERATURES)
+        set_ = (self.nozzle, self.preheat, self.bed)
+        return tuple(b if v is None else v for v, b in zip(set_, base, strict=True))
 
 
 @dataclass
@@ -304,6 +337,15 @@ def _check_name(name: Any) -> str:
     if not isinstance(name, str) or not gcode.NAME_RE.match(name):
         raise Invalid(f"filament name {name!r} must be 1 to 7 of A-Z a-z 0-9 _ -")
     return name
+
+
+def _check_temperatures(temps: Any) -> tuple[int | None, int | None, int | None]:
+    if temps is None:
+        return None, None, None
+    ok = isinstance(temps, list | tuple) and len(temps) == 3
+    if not ok or not all(isinstance(v, int) and 0 <= v <= 500 for v in temps):
+        raise Invalid(f"temperatures must be [nozzle, preheat, bed] in °C, got {temps!r}")
+    return tuple(temps)
 
 
 def _check_color(color: Any) -> str | None:
@@ -492,7 +534,13 @@ class SimPrinter:
         m = tool.material
         if m is None or tool.sensor_fault:
             return None
-        out = {"name": m.name}
+        nozzle, preheat, bed = m.temperatures()
+        out: dict[str, Any] = {
+            "name": m.name,
+            "nozzle_temperature": nozzle,
+            "preheat_temperature": preheat,
+            "bed_temperature": bed,
+        }
         if m.color:
             out["color"] = m.color
         if self.model.uuids and tool.index == 0 and m.instance_uuid:
@@ -577,15 +625,17 @@ class SimPrinter:
         uuid: str | None = None,
         feed_mm: float | None = None,
         purge_mm: float | None = None,
+        temperatures: Any = None,
     ) -> None:
         """Load filament into a tool: feed over the gap, counted feed, set the type, purge.
 
         `source` None keeps the previous type and is only for the reload a runout waits
         for. While the printer is off the filament is pushed in by hand: the type is set
-        at once and nothing is counted.
+        at once and nothing is counted. `temperatures` is a tag's nozzle, preheat and bed
+        temperatures; without it a tag load takes the preset's.
         """
         t = self._tool(tool)
-        material = self._new_material(t, source, name, color, uuid)
+        material = self._new_material(t, source, name, color, uuid, temperatures)
         job = self.job
         waiting = job is not None and job.phase is JobPhase.WAIT_LOAD and job.wait_tool == tool
         if source is None and not waiting:
@@ -609,22 +659,27 @@ class SimPrinter:
             self._set_state(State.BUSY)
 
     def _new_material(
-        self, t: SimTool, source: str | None, name: Any, color: Any, uuid: Any
+        self, t: SimTool, source: str | None, name: Any, color: Any, uuid: Any, temps: Any
     ) -> Material | None:
         if source is None:
+            if temps is not None:
+                raise Invalid("only a tag load takes temperatures")
             return None
         if source not in ("tag", "preset"):
             raise Invalid(f"source must be tag or preset, got {source!r}")
         name, color = _check_name(name), _check_color(color)
         if source == "preset":
-            if uuid:
-                raise Invalid("a preset load has no UUID")
+            if uuid or temps is not None:
+                raise Invalid("a preset load has no UUID or temperatures")
             # Picking a color makes the preset ad-hoc, which replaces the ad-hoc slot.
             return Material(name, color, adhoc=color is not None)
         if not self.model.uuids:
             raise Invalid(f"{self.model.name} has no tag reader")
         value = _check_uuid(uuid)
-        return Material(name, color, value if t.index == 0 else None)
+        nozzle, preheat, bed = _check_temperatures(temps)
+        return Material(
+            name, color, value if t.index == 0 else None, nozzle=nozzle, preheat=preheat, bed=bed
+        )
 
     def _hand_load(self, t: SimTool, material: Material | None) -> None:
         if t.process is not None:
@@ -1249,12 +1304,16 @@ class SimPrinter:
             # An ad-hoc write edits the ad-hoc slot; R starts it afresh.
             old = t.previous
             if c.reset or old is None:
-                material = Material(c.name or (old.name if old else "Custom"))
+                # R starts from the firmware defaults, not a preset's values.
+                nozzle, preheat, bed = DEFAULT_TEMPERATURES
+                name = c.name or (old.name if old else "Custom")
+                material = Material(name, nozzle=nozzle, preheat=preheat, bed=bed)
                 temps: dict[str, int] = {}
             else:
                 material, temps = replace(old, adhoc=True), dict(t.temps)
             material.name = c.name or material.name
             material.color = c.color or material.color
+            _apply_temperatures(material, c.temps)
             temps.update(c.temps)
             t.temps = temps
         elif c.name:
@@ -1268,6 +1327,7 @@ class SimPrinter:
                 self._log("gcode", f"M865 L{c.tool} ignored on preset {t.material.name}")
                 return
             material = replace(t.material, color=c.color or t.material.color)
+            _apply_temperatures(material, c.temps)
             t.temps = {**t.temps, **c.temps}
         else:
             self._log("gcode", f"M865 L{c.tool}: nothing to write")
@@ -1364,6 +1424,12 @@ def _enum(cls: type, value: Any) -> Any:
     except ValueError:
         known = ", ".join(v.value for v in cls)
         raise Invalid(f"{value!r} isn't one of {known}") from None
+
+
+def _apply_temperatures(material: Material, temps: dict[str, int]) -> None:
+    for key in ("nozzle", "preheat", "bed"):
+        if key in temps:
+            setattr(material, key, temps[key])
 
 
 # Snapshots: asdict() out, explicit reconstruction in.

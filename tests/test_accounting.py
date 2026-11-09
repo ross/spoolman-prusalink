@@ -17,8 +17,11 @@ from spoolman_prusalink.accounting import (
 )
 from spoolman_prusalink.models import Material, ToolReading
 
+# What the printer reports for the PLA preset, which `spool()` writes.
+PLA_TEMPS = {"nozzle_temperature": 215, "preheat_temperature": 170, "bed_temperature": 60}
+
 BOOT = 111
-PLA = Material("PLA", "#73737b")
+PLA = Material("PLA", "#73737b", **PLA_TEMPS)
 
 
 def r(extruded, material=PLA, unloads=0, at_unload=0):
@@ -619,7 +622,7 @@ def test_measured_reboot_then_menu_unload_and_load():
     # Sequence measured on the Core One L+ (2026-11-04): reboot, menu unload, menu load
     # of the PLA preset (color and UUID dropped), 116 mm counted by the load.
     old, new = 3308742886, 3018224650
-    plain = Material("PLA")
+    plain = Material("PLA", **PLA_TEMPS)
     charges, _, state = run(
         [
             (old, r(43812), loc(7)),

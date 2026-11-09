@@ -96,7 +96,13 @@ async def test_sync_job_upload_runs_to_finished(setup):
 
     sim.tick(0.8)
     filament = await (await client.get("/api/v1/filament", headers=AUTH)).json()
-    assert filament["tools"][0]["material"] == {"name": "PETG", "color": "#1f6fb2"}
+    assert filament["tools"][0]["material"] == {
+        "name": "PETG",
+        "nozzle_temperature": 215,
+        "preheat_temperature": 170,
+        "bed_temperature": 60,
+        "color": "#1f6fb2",
+    }
     sim.tick(10)
     status = await (await client.get("/api/v1/status", headers=AUTH)).json()
     assert status["printer"]["state"] == "FINISHED" and "job" not in status

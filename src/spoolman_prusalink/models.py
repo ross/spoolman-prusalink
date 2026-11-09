@@ -13,6 +13,9 @@ class Material:
     name: str
     color: str | None = None
     instance_uuid: str | None = None
+    nozzle_temperature: int = field(kw_only=True)
+    preheat_temperature: int = field(kw_only=True)
+    bed_temperature: int = field(kw_only=True)
 
 
 @dataclass(frozen=True)

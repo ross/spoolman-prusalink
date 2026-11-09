@@ -20,6 +20,7 @@ import pytest
 from aiohttp.test_utils import TestServer
 
 from integration.printers import Station, add_printers
+from integration.temperatures import TEMPERATURES, WRITTEN
 from simulator.model import (
     MODELS,
     Material,
@@ -382,7 +383,12 @@ class World:
     async def swap_cycle(
         self, poll_every: float | None = None, *, tool: int = 0, **load
     ) -> list[dict]:
-        """Load a tool and tick until the load is done; `load` goes to `SimPrinter.load`."""
+        """Load a tool and tick until the load is done; `load` goes to `SimPrinter.load`.
+
+        A tag load reports `TEMPERATURES` unless `load` gives others.
+        """
+        if load.get("source") == "tag":
+            load.setdefault("temperatures", TEMPERATURES)
         self.printer.load(tool, **load)
         return await self.run_until(
             lambda: self.tool_at(tool).process is None, poll_every=poll_every
@@ -519,10 +525,10 @@ async def world(
         )
 
     sim = Simulation(Settings(**SETTINGS))
-    a = Material(PLA[0], PLA[1], uuid_a)
+    a = Material(PLA[0], PLA[1], uuid_a, **WRITTEN)
     tools = {0: SimTool(0, loaded=True, material=replace(a), previous=replace(a), extruded=1000.0)}
     if world_tools == 2:
-        d = Material(*PETG_GREEN)
+        d = Material(*PETG_GREEN, **WRITTEN)
         tools[1] = SimTool(1, loaded=True, material=replace(d), previous=replace(d), extruded=500.0)
     printer = SimPrinter("it", 0, KEY, MODELS[WORLD_MODELS[world_tools]], tools=tools)
     sim.add(printer)

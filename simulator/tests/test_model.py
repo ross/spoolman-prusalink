@@ -29,11 +29,17 @@ def tool0(printer):
     return printer.tools[0]
 
 
+TEMPERATURE_KEYS = ("nozzle_temperature", "preheat_temperature", "bed_temperature")
+# What M865 R resets the temperatures to.
+RESET = {"nozzle": 215, "preheat": 170, "bed": 60}
+
+
 def shown(printer, index=0):
-    """The material the API shows for a tool, or None."""
+    """The material the API shows for a tool, without its temperatures, or None."""
     for t in printer.filament_json()["tools"]:
         if t["index"] == index:
-            return t.get("material")
+            m = t.get("material")
+            return None if m is None else {k: v for k, v in m.items() if k not in TEMPERATURE_KEYS}
     raise AssertionError(f"tool {index} not in the filament endpoint")
 
 
@@ -518,7 +524,14 @@ def test_filament_json_full():
                 "extruded": 12,
                 "unload_count": 0,
                 "extruded_at_unload": 0,
-                "material": {"name": "PLA", "color": "#73737b", "instance_uuid": PLA.instance_uuid},
+                "material": {
+                    "name": "PLA",
+                    "nozzle_temperature": 215,
+                    "preheat_temperature": 170,
+                    "bed_temperature": 60,
+                    "color": "#73737b",
+                    "instance_uuid": PLA.instance_uuid,
+                },
             }
         ],
     }
@@ -531,7 +544,14 @@ def test_filament_json_no_counters_and_no_endpoint():
         "tools": [
             {
                 "index": 0,
-                "material": {"name": "PLA", "color": "#73737b", "instance_uuid": PLA.instance_uuid},
+                "material": {
+                    "name": "PLA",
+                    "nozzle_temperature": 215,
+                    "preheat_temperature": 170,
+                    "bed_temperature": 60,
+                    "color": "#73737b",
+                    "instance_uuid": PLA.instance_uuid,
+                },
             }
         ]
     }
@@ -551,7 +571,7 @@ def test_filament_json_multi_tool_skips_disabled_and_hides_uuids():
     sim, p = make("8.10.0", tools)
     data = p.filament_json()
     assert [t["index"] for t in data["tools"]] == [0, 2, 3]
-    assert data["tools"][0]["material"] == {"name": "PLA", "color": "#73737b"}
+    assert shown(p) == {"name": "PLA", "color": "#73737b"}
     assert "material" not in data["tools"][2]
     p.set_sensor_fault(2, True)
     assert "material" not in p.filament_json()["tools"][1]
@@ -583,7 +603,8 @@ def test_sync_job_applies_and_finishes():
     sim.tick(0.3)
     assert p.state is State.PRINTING and p.job_json() is not None
     m = tool0(p).material
-    assert m == Material("PETG", "#1f6fb2", "8b6a3e3e-3f6c-4d7b-9a43-6c1f0e7d2a11")
+    uuid = "8b6a3e3e-3f6c-4d7b-9a43-6c1f0e7d2a11"
+    assert m == Material("PETG", "#1f6fb2", uuid, nozzle=230, preheat=170, bed=85)
     assert tool0(p).temps["nozzle"] == 230 and tool0(p).temps["chamber_max"] == 45
     assert p.message == "Spoolman: test" and p.homed
     sim.tick(3 + 1)
@@ -661,7 +682,7 @@ def test_m865_on_missing_tool_is_a_parse_error():
 def test_m865_reset_clears_uuid_and_preset_write_ignores_parameters():
     sim, p = make()
     p.apply(gcode.parse('M865 X R N"ASA" O"#d9342b" L0'))
-    assert tool0(p).material == Material("ASA", "#d9342b")
+    assert tool0(p).material == Material("ASA", "#d9342b", **RESET)
     p.apply(gcode.parse('M865.1 I0 C"8b6a3e3e-3f6c-4d7b-9a43-6c1f0e7d2a11"'))
     assert tool0(p).material.instance_uuid
     p.apply(gcode.parse('M865 X O"#000000" L0'))  # ad-hoc edit keeps the UUID
@@ -699,7 +720,7 @@ def test_m865_writes_disabled_and_unconfigured_tools():
 def test_m865_writes_an_unloaded_tool():
     sim, p = make(tools=[SimTool(0)])
     p.apply(gcode.parse('M865 X R N"PLA" L0'))
-    assert tool0(p).material == Material("PLA") and not tool0(p).loaded
+    assert tool0(p).material == Material("PLA", **RESET) and not tool0(p).loaded
 
 
 def test_m865_1_only_on_tool_0_of_uuids_model():
@@ -716,7 +737,7 @@ def test_m865_1_only_on_tool_0_of_uuids_model():
 def test_m865_on_other_tool_and_copy_from_empty_tool():
     sim, p = make("8.10.0", [loaded(0, PETG), loaded(1, PETG), SimTool(2)])
     p.apply(gcode.parse('M865 X R N"PLA" O"#73737b" L1'))
-    assert p.tools[1].material == Material("PLA", "#73737b")
+    assert p.tools[1].material == Material("PLA", "#73737b", **RESET)
     assert p.selected_tool == 0
     p.apply(gcode.parse("M865 I2 L1"))  # copies "none": an unload of T1
     assert p.tools[1].material is None and p.tools[1].unload_count == 1
@@ -964,3 +985,28 @@ def test_upload_during_the_start_blip_is_dropped():
     assert p.job.id == 1 and p.job.kind == "user" and "spoolman.gcode" in p.files
     sim.tick(0.3 + 1)
     assert p.state is State.PRINTING and p.job.kind == "user"
+
+
+def temperatures(printer, index=0):
+    m = next(t for t in printer.filament_json()["tools"] if t["index"] == index)["material"]
+    return tuple(m[k] for k in TEMPERATURE_KEYS)
+
+
+def test_preset_load_reports_the_preset_temperatures():
+    sim, p = make()
+    p.unload(0)
+    sim.tick(3.0)
+    p.load(0, source="preset", name="PC")
+    sim.tick(100.0)
+    assert temperatures(p) == (275, 250, 100)
+
+
+def test_m865_temperatures():
+    sim, p = make()
+    # R resets to the firmware defaults, not the PC preset's preheat.
+    p.apply(gcode.parse('M865 X R N"PC" T260 B90 L0'))
+    assert temperatures(p) == (260, 170, 90)
+    p.apply(gcode.parse("M865 X P200 L0"))  # an ad-hoc edit keeps the rest
+    assert temperatures(p) == (260, 200, 90)
+    p.apply(gcode.parse('M865 N"PETG" T250 L0'))  # a preset write ignores them
+    assert temperatures(p) == (230, 170, 85)
