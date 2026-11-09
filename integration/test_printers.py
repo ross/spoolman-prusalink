@@ -565,7 +565,7 @@ async def test_x10_firmware_without_the_filament_endpoint(
 
 
 async def test_x11_charge_rejected_with_404(world: World, caplog: pytest.LogCaptureFixture):
-    """A's charge rejected with 404: held for A's tool, not B's where the spool was staged."""
+    """A 404 on a charge is held for the record's printer and tool, not the other printer's."""
     caplog.set_level(logging.INFO, logger="spoolman_prusalink")
     w = world
     it, b = w.at(IT), w.at(B)
@@ -610,6 +610,24 @@ async def test_x11_charge_rejected_with_404(world: World, caplog: pytest.LogCapt
     assert charged(records, c) == 40 and charges(records, e) == []
     b.extrude(5)
     assert charged(await w.poll(), e) == 5
+
+    # The same from printer b: E deleted just before b's charge is held for b's tool, found
+    # by the record's printer, and it, first in the config, holds none of it.
+    async def delete_e(request: httpx.Request) -> None:
+        if request.method == "PUT" and request.url.path == f"/api/v1/spool/{e}/use":
+            resp = await w.spoolman.client.delete(f"/api/v1/spool/{e}")
+            resp.raise_for_status()
+
+    faults.hook = delete_e
+    b.extrude(10)
+    records = await w.poll()
+    faults.hook = None
+    failed = [r for r in records if "failed" in r]
+    assert [(r["printer"], r["spool_id"], r["failed"], r.get("held")) for r in failed] == [
+        (B, e, "404", True)
+    ]
+    assert (b.state.active, b.state.deleted_spool, b.state.held_mm) == (None, e, 10)
+    assert (it.state.active, it.state.deleted_spool, it.state.held_mm) == (c, None, 0)
 
 
 async def test_x13_version_2_state_with_two_printers(world: World):

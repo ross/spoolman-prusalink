@@ -112,7 +112,7 @@ current and that the scenario rows name their tests.
 | X8 | `test_printers.py::test_x8_one_printer_off` | Printer A off: logged once, B charged, A's eviction runs, A's claim waits for it. |
 | X9 | `test_printers.py::test_x9_spoolman_unreachable` | Spoolman down: printers still read; both printers' charges queue in one outbox, in order. |
 | X10 | `test_printers.py::test_x10_firmware_without_the_filament_endpoint` | A's firmware lacks the filament endpoint: logged once, nothing charged, B unaffected. |
-| X11 | `test_printers.py::test_x11_charge_rejected_with_404` | A's charge rejected with 404: held for A's tool, not B's where the spool was staged. |
+| X11 | `test_printers.py::test_x11_charge_rejected_with_404` | A 404 on a charge is held for the record's printer and tool, not the other printer's. |
 | X13 | `test_printers.py::test_x13_version_2_state_with_two_printers` | A version 2 state file with two printers configured: refused until one printer saves v3. |
 | X14 | `test_printers.py::test_x14_printer_renamed` | A printer renamed: its old state kept but inert, with a warning; the new name baselines. |
 | X16 | `test_printers.py::test_x16_runout_flag_clears_when_active_elsewhere` | A runout flag set on A clears when the spool becomes active in B after another spool. |
@@ -166,8 +166,9 @@ until the test asks for a fault: `cut()` makes every request fail to connect,
 `answer("PUT", "/api/v1/spool/7/use", 503)` replies 503 to the next matching
 request without sending it (`times=None` keeps replying, and `containing=`
 matches on the request body too). Its `hook`, an async function that gets each
-request first, can change Spoolman between two of the bridge's requests, such
-as move or delete a spool, and can return a response to use instead.
+request after the outage check and before the answers, can change Spoolman
+between two of the bridge's requests, such as move or delete a spool, and can
+return a response to use instead.
 `restore()` ends all three. Its `requests` list says what each of the bridge's
 requests got, as `"PUT /api/v1/spool/7/use 503"` or `"... unreachable"`. The same
 module has the Spoolman edits the `world` helpers don't cover: deleting and
