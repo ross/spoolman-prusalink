@@ -151,16 +151,23 @@ cheap filament.
    movement between two consecutive polls is exactly what the simulator
    shows between their places: a poll that saw no movement means the
    simulator was still there, and a poll that saw movement means the
-   simulator moved the same way somewhere in between. A poll that brought
-   no counter (the printer unreachable, or the filament read failed)
-   accepts anything, which is how movement in the last poll before a power
-   cut is lost; without time, movement earlier in a still run before the
-   cut can hide the same way, a known limit. The simulator may not move
-   before the first poll or after the last, since a recording starts and
-   ends at rest. Durations enter in one place: simulator states the probe
-   never sampled must together fit within one poll, or the printer would
-   have shown them. Otherwise a replay may run its states faster or slower
-   than the printer did.
+   simulator moved the same way somewhere in between. An event's poll can
+   come up to a poll after the event and carry movement from what follows,
+   so it may sit anywhere up to the end of the next step's stretch. A poll
+   that brought no counter (the printer unreachable, or the filament read
+   failed) takes no place of its own: the next poll that saw the counter is
+   measured from the last that did. Before a reboot the counters restart,
+   so there the blind poll accepts anything, which is how movement in the
+   last poll before a power cut is lost; without time, movement earlier in
+   a still run before the cut can hide the same way, a known limit. The
+   simulator may not move before the first poll or after the last, since a
+   recording starts and ends at rest. Durations enter in one place:
+   simulator states the probe never sampled must together fit within one
+   poll, or the printer would have shown them. Otherwise a replay may run
+   its states faster or slower than the printer did, as long as each
+   stretch has at least as many simulator samples (ten a second) as the
+   trace kept polls there: the probe keeps a still sample every heartbeat,
+   so a long wait on the printer needs a few seconds in the replay.
 2. **Mark each step** by typing what you're about to do and pressing Enter,
    then do it at the printer: `unload from the menu`, `pulled the plug`.
    Marks carry their time and show up in the review. Stop the probe with

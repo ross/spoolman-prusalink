@@ -423,6 +423,12 @@ def _match_event(
     return None
 
 
+def _deferrable(step: Step) -> bool:
+    """Whether a live run may pass over simulator event `step` for a later live event to
+    fold: only a job's first sighting, which the start blip can hide from one poll."""
+    return step.job == "new" and step.boot == "same" and not step.changed and step.unloads == 0
+
+
 def compare(live: list[Step], sim: list[Step], gap: float | None = None) -> list[str]:
     """Problems with `sim` as a stand-in for `live`: empty when the two agree.
 
@@ -442,13 +448,20 @@ def compare(live: list[Step], sim: list[Step], gap: float | None = None) -> list
     counter's movement between consecutive live samples is exactly the movement the
     simulator shows between their places: a poll that saw no movement means the
     simulator was still over that stretch, and a poll that saw movement means the
-    simulator moved the same way somewhere in it. A poll that brought no counter (the
-    printer unreachable, or the filament read failed) accepts any movement, so movement
-    before a power cut can hide behind it: a limit of a rule without time. The simulator
-    may not move before the first live sample or after the last, since a recording
-    begins and ends at rest. Durations take part in one place only: simulator runs the
-    probe never sampled must together fit within one poll, or the printer would have
-    shown them. Otherwise a replay may run its states faster or slower than the printer.
+    simulator moved the same way somewhere in it. A live event's poll may come up to a
+    poll later than the simulator's event and carry movement from the run after it, so
+    it may sit anywhere up to the end of the next live step's stretch. A poll that
+    brought no counter (the printer unreachable, or the filament read failed) takes no
+    place: the next poll that brought one is measured from the last that did, as the
+    signature measures it. When that next poll is a reboot's first, the counters have
+    restarted and the blind poll accepts any movement, so movement before a power cut
+    can hide behind it: a limit of a rule without time. The simulator may not move
+    before the first live sample or after the last, since a recording begins and ends at
+    rest. Durations take part in one place only: simulator runs the probe never sampled
+    must together fit within one poll, or the printer would have shown them. Otherwise a
+    replay may run its states faster or slower than the printer, as long as each stretch
+    has at least as many simulator samples as the trace has polls there, since two polls
+    can't share a place.
     """
     problems: list[str] = []
     window = (gap if gap is not None else poll_gap(live)) * SLACK
@@ -482,8 +495,15 @@ def compare(live: list[Step], sim: list[Step], gap: float | None = None) -> list
                         problems.append(f"  (the next live step is: {live[i + 1]})")
                     return problems
                 if sim[j].is_event():
-                    # The probe missed this event's poll, such as a job's first sighting
-                    # before the start blip; a later live event has to account for it.
+                    # The probe can miss a job's first sighting before the start blip; a
+                    # later live event has to account for it. Any other event is
+                    # cumulative, so the printer's next poll would have shown it.
+                    if not _deferrable(sim[j]):
+                        problems.append(
+                            f"simulator step {j} is an event the printer didn't show: {sim[j]}"
+                        )
+                        problems.append(f"  (while looking for live step {i}: {step})")
+                        return problems
                     pending.append(j)
                 elif sim[j].shape() == step.shape():
                     matched.append(j)
@@ -541,7 +561,8 @@ def _coarsening(live: list[Step], sim: list[Step], spans: list[tuple[int, int]])
     Dynamic programming over (live sample, simulator sample): a live sample may sit at a
     simulator sample within its step's stretch if some placement of the sample before it
     leaves exactly its movement in between. Prefix counts of moving simulator samples
-    make each step a range query.
+    make each step a range query. A blind sample followed in the same boot by one that
+    saw the counter is skipped, so that one is measured from the last sighting.
     """
     dirs = [d for st in sim for d in st.dirs]
     n = len(dirs)
@@ -560,10 +581,10 @@ def _coarsening(live: list[Step], sim: list[Step], spans: list[tuple[int, int]])
     for st in sim:
         starts.append(starts[-1] + st.samples)
 
-    def bounds(d: str, blind: bool, i: int) -> tuple[int, int]:
+    def bounds(d: str, lenient: bool, i: int) -> tuple[int, int]:
         """The places (inclusive, as positions; -1 is before the first) the previous live
         sample may sit so that the simulator's movement over (prev, i] is exactly `d`."""
-        if blind:
+        if lenient:
             return -1, i - 1
         if d == "0":
             return last_move[i], i - 1
@@ -574,13 +595,38 @@ def _coarsening(live: list[Step], sim: list[Step], spans: list[tuple[int, int]])
         return -1, min(last_plus[i], last_minus[i]) - 1
 
     flat = [(i, k) for i, st in enumerate(live) for k in range(st.samples)]
+    # A blind sample is skipped when the next sample that saw the counter is in the same
+    # boot: the signature measured that one from the last sighting, so the count runs on
+    # through. Before a reboot's first sample, or at the trace's end, the blind sample
+    # takes a place and accepts any movement, as the counters restarted or were never
+    # seen again.
+    lenient = [False] * len(flat)
+    placed = []
+    seen = False  # whether a sample after this one, in the same boot, saw the counter
+    for f in reversed(range(len(flat))):
+        i, k = flat[f]
+        if not live[i].blind[k]:
+            placed.append(f)
+            seen = live[i].boot == "same"
+        elif f + 1 == len(flat) or not seen:
+            lenient[f] = True
+            placed.append(f)
+    placed.reverse()
+    # An event's poll may come up to a poll after the simulator's event and carry the
+    # movement of the run after it, so it may sit anywhere up to the end of the next
+    # live step's stretch; its order among the samples keeps the next step's after it.
+    stretch = [
+        (a, spans[i + 1][1] if st.is_event() and i + 1 < len(live) else b)
+        for i, (st, (a, b)) in enumerate(zip(live, spans, strict=True))
+    ]
     # reach[p + 1] says whether the previous live sample may sit at position p (-1..n-1).
     reach = [False] * (n + 1)
     reach[0] = True
-    for f, (i, k) in enumerate(flat):
+    for f in placed:
+        i, k = flat[f]
         step = live[i]
-        d, blind = step.dirs[k], step.blind[k]
-        lo, hi = starts[spans[i][0]], starts[spans[i][1]]
+        d = step.dirs[k]
+        lo, hi = starts[stretch[i][0]], starts[stretch[i][1]]
         # The trace's last poll sits at the stretch's end: a recording ends at rest, so
         # the simulator may not move after it.
         if f + 1 == len(flat):
@@ -590,7 +636,7 @@ def _coarsening(live: list[Step], sim: list[Step], spans: list[tuple[int, int]])
             prefix[p + 1] = prefix[p] + reach[p]
         nxt = [False] * (n + 1)
         for pos in range(lo, hi):
-            a, b = bounds(d, blind, pos)
+            a, b = bounds(d, lenient[f], pos)
             a, b = max(a, -1), min(b, pos - 1)
             if a <= b and prefix[b + 2] - prefix[a + 1] > 0:
                 nxt[pos + 1] = True
@@ -599,11 +645,19 @@ def _coarsening(live: list[Step], sim: list[Step], spans: list[tuple[int, int]])
                 d, "movement both ways"
             )
             which = "first" if k == 0 else f"{k + 1}th" if k > 2 else ("2nd", "3rd")[k - 1]
-            return [
+            problem = (
                 f"live step {i}'s {which} sample saw {saw} since the poll before, and no "
-                f"place in the simulator's steps {spans[i][0]} to {spans[i][1] - 1} fits "
+                f"place in the simulator's steps {stretch[i][0]} to {stretch[i][1] - 1} fits "
                 f"that after where the earlier samples fit: {step}"
-            ]
+            )
+            polls = sum(1 for f2 in placed if flat[f2][0] == i)
+            if hi - lo < polls:
+                problem += (
+                    f" (those steps have {hi - lo} samples for the live step's {polls} polls:"
+                    " a replay's stretch needs at least as many samples as the trace has"
+                    " polls there)"
+                )
+            return [problem]
         reach = nxt
     return []
 
