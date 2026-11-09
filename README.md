@@ -239,8 +239,8 @@ replaces the color and UUID with the preset's, so expect this after every menu
 load. Colors are compared after the printer's rounding to 5 bits per channel.
 The temperatures compared are the ones the bridge would write (see
 [Writing to the printer](#writing-to-the-printer)). A spool loaded from its tag
-is compared only by instance UUID: the bridge never writes it, so its name,
-color and temperatures stay the tag's. The UUID is read from the spool
+is compared only by instance UUID, and not at all with UUIDs off: the bridge
+never writes it, so its name, color and temperatures stay the tag's. The UUID is read from the spool
 extra field named by `uuid_field`, `instance_uuid` by default, which must be a
 text field.
 
@@ -352,8 +352,10 @@ tool's link to the tag, and the printer would stop tracking usage on the tag
 until the spool is loaded from it again. A spool with no instance UUID in
 Spoolman still takes the tag's, which writes only to Spoolman. One exception:
 a runout reload keeps the old spool's tag data while a different spool may be
-loaded. When the printer shows the UUID it showed with another spool, the
-bridge writes the loaded spool over it.
+loaded. When the printer shows the UUID it showed with another spool, and the
+tool has unloaded since, the bridge writes the loaded spool over it. This
+holds whatever the UUID settings: with `uuid_field = ""` or `uuids = false`,
+the bridge still leaves a tagged tool alone.
 
 The bridge remembers the `M865` line it last wrote for each tool. If the
 printer still shows that write but the spool has changed in Spoolman (color,

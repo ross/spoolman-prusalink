@@ -181,13 +181,16 @@ class PrinterBridge:
     # When the printer was first seen idle since it was last busy or unreachable.
     _idle_since: float | None = None
     # Per tool: the instance UUID the printer last reported while the active spool was
-    # certain, that spool, and whether the bridge saw the UUID appear: the printer showed
-    # another one, an empty tool or a type with no UUID before. A runout reload keeps the
-    # old filament's UUID, so a UUID seen with one spool isn't adopted by the next. The
-    # UUID and spool are saved in the state file (`PrinterState.seen_uuids`), restored as
-    # not appeared: a different UUID after a restart counts as appearing, but with
-    # nothing saved, a tag already loaded isn't trusted.
-    _seen_uuid: dict[int, tuple[str, int, bool]] = field(default_factory=dict)
+    # certain, that spool, whether the bridge saw the UUID appear (the printer showed
+    # another one, an empty tool or a type with no UUID before), and whether the tool
+    # unloaded since. A runout reload keeps the old filament's UUID, so a UUID seen with
+    # one spool isn't adopted by the next, and a tag seen with one spool is written over
+    # once another is loaded. Recorded whenever the model reports UUIDs, whatever the
+    # UUID settings. The UUID, spool and unload are saved in the state file
+    # (`PrinterState.seen_uuids`), restored as not appeared: a different UUID after a
+    # restart counts as appearing, but with nothing saved, a tag already loaded isn't
+    # trusted.
+    _seen_uuid: dict[int, tuple[str, int, bool, bool]] = field(default_factory=dict)
     # Tools the bridge saw with no material or no instance UUID since `_seen_uuid` was
     # last set: a UUID shown next appeared while the bridge watched.
     _uuid_gap: set[int] = field(default_factory=set)
@@ -199,7 +202,7 @@ class PrinterBridge:
         self._printer_outage = Outage(self.label)
         kept = self.bridge.state.printers.get(self.name)
         if kept is not None:
-            self._seen_uuid = {t: (u, s, False) for t, (u, s) in kept.seen_uuids.items()}
+            self._seen_uuid = {t: (u, s, False, d) for t, (u, s, d) in kept.seen_uuids.items()}
 
     @property
     def name(self) -> str:
@@ -362,6 +365,11 @@ class PrinterBridge:
             log.info("%s is %s (%s)", self.label, name, printer_type)
 
     @property
+    def _tag_reader(self) -> bool:
+        """Whether the model reads tags and reports their UUIDs on tool 0."""
+        return self._model is not None and self._model.uuids
+
+    @property
     def _uuids(self) -> bool:
         """Whether to write and compare instance UUIDs: configured with a Spoolman field to
         keep them in, and the model keeps them."""
@@ -446,6 +454,8 @@ class PrinterBridge:
                 self._check_runout(location, by_id.get(result.runout))
             if result.claimed:
                 self._claim_handled(location, claim, others)
+            if any(ev.kind is EventKind.UNLOAD for ev in result.events):
+                self._seen_unload(tool)
 
             notes = []
             for ev in result.events:
@@ -610,14 +620,39 @@ class PrinterBridge:
         if st.needs_sync or st.sync_attempts:
             self.tools[tool] = replace(st, needs_sync=False, sync_attempts=0)
 
+    def _see_uuid(
+        self, tool: int, value: str, spool_id: int, appeared: bool
+    ) -> tuple[str, int, bool, bool]:
+        """Record the UUID seen in a tool with a certain spool, and save it."""
+        seen = self._seen_uuid[tool] = (value, spool_id, appeared, False)
+        self._uuid_gap.discard(tool)
+        kept = self.bridge.state.printers.setdefault(self.name, PrinterState())
+        kept.seen_uuids[tool] = (value, spool_id, False)
+        return seen
+
+    def _seen_unload(self, tool: int) -> None:
+        """Record that the tool unloaded since its UUID was last seen."""
+        seen = self._seen_uuid.get(tool)
+        if seen is None or seen[3]:
+            return
+        self._seen_uuid[tool] = (*seen[:3], True)
+        kept = self.bridge.state.printers.setdefault(self.name, PrinterState())
+        kept.seen_uuids[tool] = (seen[0], seen[1], True)
+
     def _leftover(self, tool: int, value: str, active: Spool) -> bool:
         """Whether the printer still shows the UUID it showed with another spool.
 
         A runout reload keeps the old filament's type, tag UUIDs included, so that UUID
-        is the spool before's, not the active spool's.
+        is the spool before's, not the active spool's. A reload always follows an
+        unload. A claim or a correction (S12) changes the active spool with none, and
+        then the UUID is the newly active spool's: it was recorded with the wrong one.
+        The active spool's own UUID in Spoolman is never a leftover.
         """
+        value = value.lower()
+        if (active.instance_uuid or "").lower() == value:
+            return False
         seen = self._seen_uuid.get(tool)
-        return seen is not None and seen[0] == value.lower() and seen[1] != active.id
+        return seen is not None and seen[0] == value and seen[1] != active.id and seen[3]
 
     def _loaded_tag(self, tool: int, material: Material, active: Spool) -> bool:
         """Whether the tool's type came from the tag of the spool now loaded (Q11).
@@ -627,7 +662,7 @@ class PrinterBridge:
         runout leftover, the spool before's tag kept by a reload, isn't the loaded
         spool's, so it's written over as any other type is.
         """
-        if not (self._uuids and tool == 0 and material.from_tag):
+        if not (self._tag_reader and tool == 0 and material.from_tag):
             return False
         value = material.instance_uuid
         return not (value and self._leftover(tool, value, active))
@@ -637,8 +672,11 @@ class PrinterBridge:
 
         That's when the tag's instance UUID is another spool's in Spoolman, or differs
         from the active spool's. Name, color and temperatures don't count: the tool is
-        never written, so Spoolman's can't replace the tag's (Q11).
+        never written, so Spoolman's can't replace the tag's (Q11). With UUIDs off,
+        nothing counts.
         """
+        if not self._uuids:
+            return []
         value = (material.instance_uuid or "").lower()
         have = (active.instance_uuid or "").lower()
         if not value or value == have:
@@ -670,9 +708,12 @@ class PrinterBridge:
         trusted only while the active spool is certain (no swap open or staged, no
         provisional charge), when the bridge saw it appear, when the printer didn't
         report it with another spool before, and when no other spool in Spoolman has it.
+
+        The UUID seen is recorded whenever the model reports UUIDs, so a runout leftover
+        is found with UUIDs off too. Everything else needs them on.
         """
         value = material.instance_uuid
-        if not (self._uuids and tool == 0 and value):
+        if not (self._tag_reader and tool == 0 and value):
             return None
         value = value.lower()
         if self._leftover(tool, value, active):
@@ -681,12 +722,18 @@ class PrinterBridge:
         if any(s.id != active.id and (s.instance_uuid or "").lower() == value for s in spools):
             return None  # Another spool's UUID: a correction (S12) or drift, not ours.
         certain = st.assigned == st.active and st.swap is None and st.provisional is None
-        if certain and (seen is None or seen[0] != value or tool in self._uuid_gap):
-            appeared = seen is not None or tool in self._uuid_gap
-            seen = self._seen_uuid[tool] = (value, active.id, appeared)
-            self._uuid_gap.discard(tool)
-            kept = self.bridge.state.printers.setdefault(self.name, PrinterState())
-            kept.seen_uuids[tool] = (value, active.id)
+        if certain and (
+            seen is None or seen[0] != value or seen[1] != active.id or tool in self._uuid_gap
+        ):
+            # Seen with another spool and not a leftover: a claim or correction made this
+            # spool active. The UUID didn't appear, so it isn't trusted yet.
+            appeared = (seen is not None and seen[0] != value) or tool in self._uuid_gap
+            seen = self._see_uuid(tool, value, active.id, appeared)
+        elif certain and seen[3]:
+            # Unloaded and reloaded, and the same spool is certain again: still its UUID.
+            seen = self._see_uuid(tool, value, active.id, seen[2])
+        if not self._uuids:
+            return None
         # While the active spool isn't certain, such as a reload with no Spoolman change,
         # a tag isn't adopted: it may be another spool's.
         trusted = certain and material.from_tag and seen is not None and seen[2]

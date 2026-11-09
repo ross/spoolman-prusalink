@@ -110,15 +110,20 @@ behavior is least covered by what the Core One L+ can show.
   firmware's `time_printing` grows during the recovery, the trace will say.
 - **F10's `M865 R`** wipes the UUID too, so a sync job that doesn't carry
   `M865.1` leaves the tool with no UUID. The bridge always writes both.
-- **F10 ends F4's tag tracking.** `M865 X` edits the pending ad-hoc slot,
-  which never carries a tag hash, and `L0` saves it to the tool with the
-  hash cleared (`M865.cpp:67-68`, `filament.cpp:373, 394`). The printer's
-  usage tracker then stops reading and writing the tag, and usage not yet
-  flushed to it is lost (`filament_usage_tracker.cpp:127-139`). Neither a
-  reboot nor a runout reload restores it (`tool_tag_buddy.cpp:52-54`,
-  `M70X_preheat.cpp:48-51`); only a load from the tag does. The `tag`
-  object and the material and package UUIDs leave `/api/v1/filament`
-  (`filament_renderer.cpp:66-67`). G-code can't set the hash
+- **F10 ends F4's tag tracking.** `M865 X` edits the pending ad-hoc slot
+  (`M865.cpp:67-68`). `R` resets its parameters to the defaults, which
+  clears the tag hash and the material and package UUIDs (`M865.cpp:83-85`,
+  `filament.cpp:41-42`). `L0` saves that to the tool
+  (`store_definition.cpp:243-256`, `filament.cpp:394`). The printer's usage
+  tracker then stops reading and writing the tag, and usage not yet flushed
+  to it is lost (`filament_usage_tracker.cpp:127-139`). A reboot doesn't
+  restore it, since the stored hash stays cleared
+  (`tool_tag_buddy.cpp:52-54`). Neither does a runout reload, which keeps
+  the tool's current type (`M600.cpp:282-290`). Only a load from the tag
+  does. The `tag` object leaves `/api/v1/filament`
+  (`filament_renderer.cpp:66-67`), and so do the material and package
+  UUIDs, which it renders from the reset parameters
+  (`filament_renderer.cpp:59-60`). G-code can't set the hash
   (`M865.cpp:183`). So the bridge never writes a tool loaded from a tag
   (Q11 in scenarios.md). From source at `ff61540d4`, not yet seen on the
   printer.

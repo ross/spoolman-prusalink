@@ -2545,3 +2545,119 @@ async def test_tag_of_another_spool_is_drift_not_a_write(tmp_path, caplog):
     assert fake.flag(20) == f"{LOC}: printer filament differs: {detail}"
     assert stored_uuid(fake, 20) is None
     await bridge.aclose()
+
+
+def with_uuid(data, value):
+    data["extra"]["instance_uuid"] = json.dumps(value)
+    return data
+
+
+async def test_claim_of_the_loaded_tags_spool_writes_nothing(tmp_path):
+    """Spool 20's tag is loaded while Spoolman has 19, then 20 is claimed: not a leftover."""
+    bridge, fake, printer = make(tmp_path, [spool(19)], uuid_field="instance_uuid")
+    printer.material = other_tag()
+    await bridge.poll()  # baseline: the tag is seen with 19
+    fake.spools[20] = spool(20)
+    fake.spools[20]["extra"].update(CLAIMED)
+    for _ in range(3):
+        await bridge.poll()
+    assert bridge.printers[0].tools[0].active == 20
+    assert jobs(printer) == []
+    await bridge.aclose()
+
+
+async def test_correction_to_the_loaded_tags_spool_writes_nothing(tmp_path):
+    """S12: the user gives spool 20 the loaded tag's UUID and moves it in: nothing written."""
+    bridge, fake, printer = make(tmp_path, [spool(19)], uuid_field="instance_uuid")
+    printer.material = other_tag()
+    await bridge.poll()  # baseline: the tag is seen with 19
+    fake.spools[19]["location"] = "Shelf"
+    fake.spools[20] = with_uuid(spool(20), TAG_K)
+    for _ in range(3):
+        await bridge.poll()
+    assert bridge.printers[0].tools[0].active == 20
+    assert jobs(printer) == []
+    await bridge.aclose()
+
+
+async def test_claim_after_an_unload_missed_across_a_reboot_writes_nothing(tmp_path):
+    """20's tag goes in while the printer is off: a conflict on 19, then 20 is claimed."""
+    bridge, fake, printer = make(
+        tmp_path, [with_uuid(spool(19), "1f0e7d2a-3f6c-4d7b-9a43-6c1f0e7d2a11")]
+    )
+    await bridge.poll()  # baseline: 19, with no UUID on the printer
+    printer.boot_id, printer.extruded, printer.material = 2, 0, other_tag()
+    await bridge.poll()
+    assert "the loaded tag's instance UUID is" in fake.flag(19)
+    fake.spools[20] = spool(20)
+    fake.spools[20]["extra"].update(CLAIMED)
+    for _ in range(3):
+        await bridge.poll()
+    assert bridge.printers[0].tools[0].active == 20
+    assert jobs(printer) == []
+    await bridge.aclose()
+
+
+async def test_runout_leftover_then_a_claim_is_written_over(tmp_path):
+    """A runout reload keeps 19's tag; claiming 20 then writes 20 over it."""
+    bridge, fake, printer = make(tmp_path, [spool(19)], uuid_field="instance_uuid")
+    printer.material = tagged()
+    await bridge.poll()  # baseline: 19's tag, seen with 19
+    printer.job = 7
+    await bridge.poll()
+    printer.extruded += 100  # the print starts
+    await bridge.poll()
+    printer.unloads, printer.at_unload = 1, printer.extruded  # runout, then the reload
+    await bridge.poll()
+    printer.extruded += 50
+    await bridge.poll()
+    fake.spools[20] = spool(20)
+    fake.spools[20]["extra"].update(CLAIMED)
+    await bridge.poll()
+    assert bridge.printers[0].tools[0].active == 20
+    printer.job = None
+    await bridge.poll()
+    assert len(jobs(printer)) == 1
+    minted = stored_uuid(fake, 20)
+    assert minted not in (None, TAG_K)
+    assert printer.material["instance_uuid"] == minted
+    await bridge.aclose()
+
+
+UUIDS_OFF = [{"uuid_field": None}, {"uuids": False}]
+
+
+@pytest.mark.parametrize("cfg", UUIDS_OFF)
+async def test_tag_is_not_written_with_uuids_off(tmp_path, caplog, cfg):
+    """With UUIDs off, a new tag after a swap is still left alone, and isn't drift."""
+    bridge, fake, printer = make(tmp_path, [spool(19)], **cfg)
+    await bridge.poll()  # baseline
+    fake.spools[20] = spool(20)
+    await bridge.poll()
+    printer.unloads, printer.at_unload, printer.material = 1, printer.extruded, None
+    await bridge.poll()
+    printer.material = other_tag()
+    for _ in range(3):
+        await bridge.poll()
+    assert bridge.printers[0].tools[0].active == 20
+    assert jobs(printer) == []
+    assert not fake.flag(20)
+    assert "differs" not in caplog.text
+    await bridge.aclose()
+
+
+@pytest.mark.parametrize("cfg", UUIDS_OFF)
+async def test_runout_leftover_is_written_over_with_uuids_off(tmp_path, cfg):
+    """With UUIDs off, a reload that keeps 19's tag with 20 active is still written over."""
+    bridge, fake, printer = make(tmp_path, [spool(19)], **cfg)
+    printer.material = tagged()
+    await bridge.poll()  # baseline: 19's tag, seen with 19
+    fake.spools[20] = spool_x(20)
+    await bridge.poll()
+    printer.unloads, printer.at_unload = 1, printer.extruded  # the reload keeps 19's tag
+    for _ in range(2):
+        await bridge.poll()
+    assert bridge.printers[0].tools[0].active == 20
+    assert len(jobs(printer)) == 1 and "M865.1" not in jobs(printer)[0]
+    assert "material_uuid" not in printer.material
+    await bridge.aclose()
