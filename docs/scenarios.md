@@ -201,6 +201,7 @@ once, and the row names which. Everything here is tested with two fake
 printers against one fake Spoolman, and most rows end to end with two
 simulated printers against a real Spoolman; none of it has been seen live,
 because there's no second printer yet (see "A second printer" in `live-checks.md`).
+X12 and X15 aren't used.
 
 | # | Scenario | What the bridge does | Status |
 | --- | --- | --- | --- |
