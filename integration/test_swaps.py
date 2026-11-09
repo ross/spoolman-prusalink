@@ -117,6 +117,71 @@ async def test_s1_tag_with_other_temperatures_is_written(world: World):
     assert w.material() == (PETG[0], PETG[1], uuid_b)
 
 
+async def s1_swap_to_b(w: World) -> None:
+    """S1 up to the load: B moved in, A unloaded, B active."""
+    await baseline(w)
+    await w.move("B", w.tool_location)
+    await w.poll()
+    await w.unload()
+    records = await w.poll()
+    assert len(events(records, "swap_committed")) == 1
+
+
+async def test_s1_tag_uuid_is_adopted(world: World):
+    """The new spool has no UUID: it takes the tag's, and nothing is written (#66)."""
+    w = world
+    b = w.spools["B"]
+    await s1_swap_to_b(w)
+    tag = str(uuid.uuid4())
+    load = {"source": "tag", "name": PETG[0], "color": PETG[1], "uuid": tag}
+    records = await w.swap_cycle(poll_every=0.3, **load)
+    records += await w.poll()
+    w.advance(2.0)
+    records += await w.poll()
+    assert w.charged(records, "B") == LOAD_MM
+    assert await w.spoolman.extra(b, UUID_FIELD) == tag
+    assert w.requests("PUT") == []
+    assert w.material() == (PETG[0], PETG[1], tag)
+    assert await w.flag("B") is None
+
+    # The next load of the same tag matches: still nothing written.
+    await w.unload()
+    await w.swap_cycle(poll_every=0.3, source="tag", name=PETG[0], color=PETG[1], uuid=tag)
+    await w.poll()
+    w.advance(2.0)
+    await w.poll()
+    assert w.requests("PUT") == []
+    assert w.material() == (PETG[0], PETG[1], tag)
+
+
+async def test_s1_tag_uuid_conflict_is_flagged(world: World, caplog: pytest.LogCaptureFixture):
+    """The new spool has a different UUID in Spoolman: flagged, neither overwritten (#66)."""
+    w = world
+    b = w.spools["B"]
+    theirs = str(uuid.uuid4())
+    await set_extra_text(w.spoolman.client, b, UUID_FIELD, theirs)
+    await s1_swap_to_b(w)
+    tag = str(uuid.uuid4())
+    await w.swap_cycle(poll_every=0.3, source="tag", name=PETG[0], color=PETG[1], uuid=tag)
+    for _ in range(3):
+        await w.poll()
+        w.advance(2.0)
+    assert w.requests("PUT") == []
+    assert w.material() == (PETG[0], PETG[1], tag)
+    assert await w.spoolman.extra(b, UUID_FIELD) == theirs
+    flag = await w.flag("B") or ""
+    assert f"the loaded tag's instance UUID is {tag}, but this spool's is {theirs}" in flag
+    assert count(caplog, logging.WARNING, f"the tag loaded has instance UUID {tag}") == 1
+
+    # Clearing Spoolman's UUID settles it: the spool takes the tag's.
+    await set_extra_text(w.spoolman.client, b, UUID_FIELD, "")
+    await w.poll()
+    assert await w.spoolman.extra(b, UUID_FIELD) == tag
+    await w.poll()
+    assert await w.flag("B") is None
+    assert w.requests("PUT") == []
+
+
 async def test_s2_filament_first_swap(world: World):
     """Filament swapped first: the charge is held, then moves once Spoolman is updated."""
     w = world

@@ -3,10 +3,23 @@
 from __future__ import annotations
 
 import logging
+import uuid
+from dataclasses import replace
 
 import pytest
 
-from integration.conftest import LOAD_MM, PETG, World, charged, charges, events, logged, print_spec
+from integration.conftest import (
+    LOAD_MM,
+    PETG,
+    UUID_FIELD,
+    World,
+    charged,
+    charges,
+    events,
+    logged,
+    print_spec,
+)
+from integration.faults import archive_spool
 from simulator.model import PrintSpec, Segment, State
 
 
@@ -70,6 +83,64 @@ async def test_p2_runout_with_spoolman_updated_during_pause(world: World):
     records = await w.poll()
     assert len(w.requests("PUT")) == puts
     assert events(records) == []
+
+
+@pytest.mark.parametrize("restart", [False, True])
+async def test_p2_runout_reload_keeps_the_old_tag(
+    world: World, restart: bool, caplog: pytest.LogCaptureFixture
+):
+    """A runout reload shows the old spool's tag: the new spool doesn't take its UUID (#66).
+
+    The old spool is archived, so Spoolman's list no longer shows who has the UUID. The
+    bridge remembers seeing it with the old spool; after a restart it didn't see the tag
+    load, so it doesn't trust it.
+    """
+    caplog.set_level(logging.INFO, logger="spoolman_prusalink")
+    w = world
+    a, b = w.spools["A"], w.spools["B"]
+    # A was loaded from its tag, which Spoolman's UUID for A matches.
+    w.tool.material = replace(
+        w.tool.material, material_uuid=str(uuid.uuid4()), package_uuid=str(uuid.uuid4())
+    )
+    records = await w.poll()
+    assert len(events(records, "baseline")) == 1
+
+    start = w.tool.extruded
+    w.printer.start_print(PrintSpec([Segment(0, 400)], duration_s=4, preheat_s=0.5))
+    w.advance(1.2)
+    assert w.tool.extruded > start
+    await w.poll()
+    w.advance(0.3)
+    await w.poll()
+    w.printer.runout(0)
+    records = await w.poll()
+    assert len(events(records, "swap_unconfirmed")) == 1
+
+    # A is used up and archived, and B goes in.
+    await archive_spool(w.spoolman.client, a)
+    await w.move("B", w.tool_location)
+    records = await w.poll()
+    assert len(events(records, "swap_confirmed")) == 1
+    if restart:
+        await w.restart()
+
+    w.printer.load(0)
+    await w.run_until(lambda: w.printer.state is State.PAUSED, poll_every=1.0)
+    assert w.material() == ("PLA", "#73737b", w.uuids["A"])
+    assert w.tool.material.material_uuid is not None  # The reload kept A's tag.
+    w.printer.resume()
+    await w.run_until(
+        lambda: w.printer.state is State.FINISHED and w.printer.job is None, poll_every=1.0
+    )
+    await w.poll()
+    w.advance(1.5)
+    await w.poll()
+
+    # B gets a UUID of its own, written over A's tag.
+    minted = await w.spoolman.extra(b, UUID_FIELD)
+    assert minted is not None and minted != w.uuids["A"]
+    assert w.material() == (PETG[0], PETG[1], minted)
+    assert await w.spoolman.extra(a, UUID_FIELD) == w.uuids["A"]
 
 
 def warnings(caplog: pytest.LogCaptureFixture) -> list[str]:

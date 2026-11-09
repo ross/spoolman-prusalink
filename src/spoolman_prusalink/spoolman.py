@@ -101,14 +101,15 @@ class Spoolman:
     async def aclose(self) -> None:
         await self._client.aclose()
 
-    async def spools(self) -> list[Spool]:
-        """Return every non-archived spool.
+    async def spools(self, archived: bool = False) -> list[Spool]:
+        """Return every non-archived spool, or with `archived`, every spool.
 
         The bridge reads the full list rather than filtering by location: Spoolman's
         location filter matches partial text, and a location rename sends no websocket
         events, so a full read is the only reliable reconcile.
         """
-        resp = await self._client.get("/api/v1/spool")
+        params = {"allow_archived": "true"} if archived else None
+        resp = await self._client.get("/api/v1/spool", params=params)
         resp.raise_for_status()
         return [
             parse_spool(s, self._uuid_field, self._flag_field, self._claim_field)
