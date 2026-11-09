@@ -38,7 +38,6 @@ url = "http://127.0.0.1:7912"
 
 [bridge]
 db_file = "/tmp/sim-bridge.db"
-ledger_file = "/tmp/sim-ledger.jsonl"
 poll_printing = 2
 poll_idle = 3
 dry_run = false

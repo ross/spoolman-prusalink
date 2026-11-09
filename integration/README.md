@@ -185,9 +185,10 @@ current and that the scenario rows name their tests.
    `w.move()` for Spoolman, then `w.advance()` or `w.run_until()` to let time
    pass and `w.poll()` to run the bridge once.
 4. Assert on what the bridge left behind: ledger records from `w.poll()` or
-   `w.since(mark)` (filter them with `events()` and `charges()`), spools in
-   Spoolman (`w.used()`, `w.flag()`, `w.spoolman.extra()`), and the printer
-   (`w.material()`, `w.requests()`, `w.sim.events`).
+   `w.since(mark)`, which read the database's `ledger` table (filter them with
+   `events()` and `charges()`), spools in Spoolman (`w.used()`, `w.flag()`,
+   `w.spoolman.extra()`), and the printer (`w.material()`, `w.requests()`,
+   `w.sim.events`).
 5. Set the row's Status in `docs/scenarios.md` to end to end, naming the test,
    and run `python -m integration.table --write`.
    `pytest tests/test_integration_table.py` checks all three.
