@@ -431,7 +431,7 @@ changed or removed. Each row has these columns:
 - `printer`: the printer's name; `default` when `[printer]` sets none.
 - `tool`: the tool index.
 - `dry_run`: 1 for a record from a dry run, otherwise 0.
-- `spool_id` and `use_length`: for a charge, the spool and the millimetres
+- `spool_id` and `use_length`: for a charge, the spool and the millimeters
   charged to it.
 - `applied`: for a charge Spoolman accepted, when it accepted it.
 - `failed`: for a charge Spoolman rejected, the HTTP status. A charge held
