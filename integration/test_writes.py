@@ -18,6 +18,7 @@ from integration.conftest import (
     logged,
     print_spec,
 )
+from integration.temperatures import TEMPERATURES, WRITTEN
 from simulator.model import MODELS, JobPhase, Material, ModelInfo, State
 from spoolman_prusalink.printer_sync import COREONEL_PREAMBLE
 
@@ -341,7 +342,7 @@ async def test_w9_drift_is_flagged_unless_sync_drift(
     assert len(events(records, "baseline")) == 1
 
     # The color is changed on the printer, with no unload, as the menu's edit would.
-    w.tool.material = Material(PLA[0], ASA[1], w.uuids["A"])
+    w.tool.material = Material(PLA[0], ASA[1], w.uuids["A"], **WRITTEN)
     await w.poll()
     if not w.cfg.sync_drift:
         assert logged(caplog, logging.WARNING, f"printer differs from spool {a}: color")
@@ -353,6 +354,34 @@ async def test_w9_drift_is_flagged_unless_sync_drift(
     assert len(w.requests("PUT")) == 1
     await w.run_until(lambda: w.printer.job is None)
     assert w.material() == (PLA[0], PLA[1], w.uuids["A"])
+    await w.poll()
+    assert await w.flag("A") is None
+
+
+@pytest.mark.parametrize("world_config", [{}, dict(sync_drift=True)], indirect=True)
+async def test_w9_temperature_drift_is_flagged_unless_sync_drift(
+    world: World, caplog: pytest.LogCaptureFixture
+):
+    """A temperature changed on the printer is drift too: flagged, or rewritten."""
+    caplog.set_level(logging.INFO, logger="spoolman_prusalink")
+    w = world
+    a = w.spools["A"]
+    await w.poll()
+
+    # The nozzle temperature is edited on the printer, with no unload.
+    w.tool.material = replace(w.tool.material, nozzle=235)
+    await w.poll()
+    detail = "nozzle printer=235 spoolman=220"
+    if not w.cfg.sync_drift:
+        assert logged(caplog, logging.WARNING, f"printer differs from spool {a}: {detail}")
+        flag = await w.flag("A")
+        assert flag is not None and f"printer filament differs: {detail}" in flag
+        assert w.requests("PUT") == []
+        assert w.tool.material.temperatures() == (235, 170, 60)
+        return
+    assert len(w.requests("PUT")) == 1
+    await w.run_until(lambda: w.printer.job is None)
+    assert w.tool.material.temperatures() == TEMPERATURES
     await w.poll()
     assert await w.flag("A") is None
 
