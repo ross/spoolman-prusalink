@@ -85,6 +85,7 @@ async def test_b4_database_lost(world: World):
     # The load after the unload isn't polled before the database goes.
     await w.swap_cycle(source="tag", name=PETG[0], color=PETG[1], uuid=str(uuid.uuid4()))
     await w.bridge.aclose()
+    lost = w.since(0)  # The ledger goes with the database.
     for suffix in ("", "-wal", "-shm"):
         Path(f"{w.cfg.db_file}{suffix}").unlink(missing_ok=True)
     await w.restart()
@@ -99,7 +100,7 @@ async def test_b4_database_lost(world: World):
     records = await w.poll()
     assert [e["event"] for e in events(records)] == ["swap_staged"]
     assert charges(records) == []
-    assert w.charged(w.since(0), "A") == 20
+    assert w.charged(lost + w.since(0), "A") == 20
     assert await w.used("B") == 0
     # With the swap forgotten, B's tag on the printer is drift on A, the active spool: its
     # UUID isn't A's. The tag's name and color aren't compared, since it isn't written.

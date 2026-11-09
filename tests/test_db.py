@@ -3,7 +3,13 @@ import sqlite3
 import pytest
 
 from spoolman_prusalink.accounting import EventKind, Notice, Provisional, SwapFlag, ToolState
-from spoolman_prusalink.db import SCHEMA_VERSION, Database, DatabaseError, read_state
+from spoolman_prusalink.db import (
+    SCHEMA_VERSION,
+    Database,
+    DatabaseError,
+    read_ledger,
+    read_state,
+)
 from spoolman_prusalink.state import PrinterState, Runout, State
 
 TAG = "91da34d9-c1c1-470f-bac7-185a2346f86a"
@@ -150,9 +156,9 @@ def test_unknown_schema_version_is_refused(path):
         Database.open(path)
     with pytest.raises(DatabaseError, match="unsupported schema version '99'"):
         read_state(path)
+    with pytest.raises(DatabaseError, match="unsupported schema version '99'"):
+        read_ledger(path)
     Database.open(path.with_name("other.db")).close()  # The failed open let go of the lock.
-    with pytest.raises(DatabaseError, match="unsupported schema version"):
-        Database.open(path, create=False)
 
 
 def test_other_files_are_refused(path):
@@ -173,28 +179,154 @@ def test_a_second_opener_is_refused(path):
     lock = f"{path}.lock"
     with pytest.raises(DatabaseError, match=f"{lock} is locked"):
         Database.open(path)
-    with pytest.raises(DatabaseError, match=f"{lock} is locked"):
-        Database.open(path, create=False)  # Dry run too.
     assert read_state(path) == State()  # Reading doesn't need the lock.
+    assert read_ledger(path) == []
     db.close()
     db.close()
     Database.open(path).close()
 
 
-def test_without_create_a_missing_database_stays_missing(path):
-    db = Database.open(path, create=False)
-    assert db.load() == State()
-    with pytest.raises(DatabaseError, match="can't be saved"):
-        db.save(full_state())
-    db.close()
+def test_a_missing_database_reads_as_empty(path):
+    assert read_state(path) == State()
+    assert read_ledger(path) == []
     assert not path.exists()
+
+
+# Records as the bridge writes them, and the odd ones a record could hold.
+LEDGER = [
+    {
+        "time": "2026-11-09T10:00:00+00:00",
+        "printer": "core",
+        "tool": 0,
+        "location": "Core One L+",
+        "event": "baseline",
+        "message": "baseline extruded=1000 spool=7",
+        "dry_run": False,
+    },
+    {
+        "time": "2026-11-09T10:00:30+00:00",
+        "printer": "core",
+        "tool": 0,
+        "location": "Core One L+",
+        "spool_id": 7,
+        "extruded_mm": 500,
+        "use_length": 500.0,
+        "grams": 1.49,
+        "reason": "extruded",
+        "boot_id": 3,
+        "extruded": 1500,
+        "dry_run": False,
+        "applied": "2026-11-09T10:00:31+00:00",
+    },
+    {
+        "time": "2026-11-09T10:01:00+00:00",
+        "printer": "core",
+        "tool": 1,
+        "spool_id": 9,
+        "use_length": -2.5,
+        "grams": None,
+        "dry_run": False,
+        "failed": "404",
+        "held": True,
+    },
+    {"printer": "mk4s", "tool": 0, "spool_id": 8, "use_length": 12, "dry_run": True},
+    {"time": None, "tool": 1.0, "spool_id": True, "use_length": "5", "dry_run": 1},
+    {"event": "charge", "kind": "x", "extra": {"a": [1]}, "id": 4},
+    {"event": None},
+    {},
+]
+
+
+def test_ledger_round_trip(path):
+    db = Database.open(path)
+    assert db.save(State(), LEDGER[:2])  # Written though the state didn't change.
+    assert db.save_ledger(LEDGER[2:])
+    assert not db.save_ledger([])
+    assert not db.save(State(), [])
+    db.close()
+    records = read_ledger(path)
+    assert records == LEDGER
+    # Equal isn't enough: 1 == 1.0 == True.
+    assert [{k: type(v) for k, v in r.items()} for r in records] == [
+        {k: type(v) for k, v in r.items()} for r in LEDGER
+    ]
     assert read_state(path) == State()
 
 
-def test_without_create_an_existing_database_loads(path):
+def test_ledger_columns(path):
     db = Database.open(path)
-    db.save(full_state())
+    db.save_ledger(LEDGER[:3])
     db.close()
-    db = Database.open(path, create=False)
-    assert db.load() == full_state()
+    conn = sqlite3.connect(path)
+    rows = conn.execute(
+        "SELECT kind, printer, tool, spool_id, use_length, applied, failed, dry_run FROM ledger"
+    ).fetchall()
+    assert rows == [
+        ("baseline", "core", 0, None, None, None, None, 0),
+        ("charge", "core", 0, 7, 500.0, "2026-11-09T10:00:31+00:00", None, 0),
+        ("charge", "core", 1, 9, -2.5, None, "404", 0),
+    ]
+    extra = conn.execute("SELECT extra ->> 'grams', extra ->> 'held' FROM ledger").fetchall()
+    assert extra == [(None, None), (1.49, None), (None, 1)]
+    # What Spoolman accepted, per spool.
+    applied = conn.execute(
+        "SELECT spool_id, sum(use_length) FROM ledger WHERE applied IS NOT NULL GROUP BY spool_id"
+    ).fetchall()
+    assert applied == [(7, 500.0)]
+    conn.close()
+
+
+def test_ledger_indexes(path):
+    Database.open(path).close()
+    conn = sqlite3.connect(path)
+    indexes = {
+        name: [r[2] for r in conn.execute(f"PRAGMA index_info({name})")]
+        for (name,) in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'ledger'"
+        )
+    }
+    assert sorted(indexes.values()) == [["printer", "time"], ["spool_id", "time"]]
+    plan = conn.execute("EXPLAIN QUERY PLAN SELECT * FROM ledger WHERE spool_id = 7").fetchall()
+    assert "USING INDEX" in plan[0][3]
+    conn.close()
+
+
+class FailingConnection:
+    """A connection whose statements run until one matches `fail`, which raises instead."""
+
+    def __init__(self, conn: sqlite3.Connection, fail: str) -> None:
+        self.conn, self.fail = conn, fail
+
+    def execute(self, sql, *args):
+        if sql.startswith(self.fail):
+            raise sqlite3.OperationalError("disk I/O error")
+        return self.conn.execute(sql, *args)
+
+    def executemany(self, sql, *args):
+        if sql.startswith(self.fail):
+            raise sqlite3.OperationalError("disk I/O error")
+        return self.conn.executemany(sql, *args)
+
+
+@pytest.mark.parametrize("fail", ["INSERT INTO ledger", "COMMIT"])
+def test_a_failed_save_writes_nothing(path, fail):
+    db = Database.open(path)
+    state = full_state()
+    assert db.save(state, LEDGER[:1])
+    conn = db._conn
+    db._conn = FailingConnection(conn, fail)
+    state.outbox.pop(0)
+    state.outbox.append({"printer": "core", "tool": 0, "spool_id": 7, "use_length": 1.0})
+    state.tools("core")[1] = ToolState(boot_id=4)
+    with pytest.raises(sqlite3.OperationalError):
+        db.save(state, LEDGER[1:2])
+    with pytest.raises(sqlite3.OperationalError):
+        db.save_ledger(LEDGER[1:2])
+    assert read_state(path) == full_state()
+    assert read_ledger(path) == LEDGER[:1]
+    # The next save writes all of it.
+    db._conn = conn
+    assert db.save(state, LEDGER[1:2])
     db.close()
+    assert read_state(path) == state
+    assert read_ledger(path) == LEDGER[:2]

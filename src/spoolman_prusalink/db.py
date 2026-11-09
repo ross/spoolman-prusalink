@@ -1,4 +1,5 @@
-"""The bridge's SQLite database: per-tool state, flags, runouts, claims, and the outbox."""
+"""The bridge's SQLite database: per-tool state, flags, runouts, claims, the outbox, and
+the ledger."""
 
 from __future__ import annotations
 
@@ -6,6 +7,7 @@ import fcntl
 import json
 import os
 import sqlite3
+from collections.abc import Sequence
 from pathlib import Path
 
 from .accounting import ToolState
@@ -52,6 +54,21 @@ CREATE TABLE runouts (
     used REAL,
     printer TEXT
 );
+CREATE TABLE ledger (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    time TEXT,
+    printer TEXT,
+    tool INTEGER,
+    kind TEXT NOT NULL,
+    spool_id INTEGER,
+    use_length,
+    applied TEXT,
+    failed TEXT,
+    dry_run INTEGER,
+    extra TEXT NOT NULL
+);
+CREATE INDEX ledger_spool_time ON ledger (spool_id, time);
+CREATE INDEX ledger_printer_time ON ledger (printer, time);
 """
 
 # The tables `save` diffs by key: their key columns and their other columns.
@@ -65,6 +82,22 @@ _KEYED = {
 }
 # Outbox columns copied out of each record; the `record` column holds the rest.
 _OUTBOX_COLUMNS = ("printer", "tool", "spool_id", "use_length")
+
+# Ledger columns copied out of each record, with the types each holds. A value of any
+# other type, None included, stays in `extra`, so every record reads back as written.
+# `use_length` has no column type, so SQLite keeps an int an int and a float a float.
+_LEDGER_COLUMNS = {
+    "time": (str,),
+    "printer": (str,),
+    "tool": (int,),
+    "spool_id": (int,),
+    "use_length": (int, float),
+    "applied": (str,),
+    "failed": (str,),
+    "dry_run": (bool,),
+}
+# `ledger.kind` for a record that isn't an event.
+_CHARGE = "charge"
 
 Rows = dict[str, dict[tuple, tuple]]
 
@@ -81,29 +114,29 @@ def lock_path(path: Path) -> Path:
 class Database:
     """The bridge's database, locked for the life of the process.
 
-    `save` writes only the rows that changed since the last `load` or `save`, in one
-    transaction, so a poll that changes nothing writes nothing.
+    `save` writes only the state rows that changed since the last `load` or `save`, and
+    any ledger records given, in one transaction, so a poll that changes nothing writes
+    nothing. `save_ledger` appends ledger records alone, for dry run.
     """
 
-    def __init__(self, path: Path, conn: sqlite3.Connection | None, lock_fd: int) -> None:
+    def __init__(self, path: Path, conn: sqlite3.Connection, lock_fd: int) -> None:
         self.path = path
-        self._conn = conn
+        self._conn: sqlite3.Connection | None = conn
         self._lock_fd: int | None = lock_fd
         self._rows: Rows = {name: {} for name in _KEYED}
         self._outbox: list[tuple[int, str]] = []  # (id, canonical record), oldest first.
 
     @classmethod
-    def open(cls, path: Path, *, create: bool = True) -> Database:
-        """Lock and open the database at `path`.
+    def open(cls, path: Path) -> Database:
+        """Lock and open the database at `path`, creating it if it's missing.
 
-        With `create` false, as in dry run, a missing database isn't created: it loads as
-        an empty state and can't be saved. Raise DatabaseError if another process holds
-        the lock or the file isn't a database of a version this bridge reads.
+        Raise DatabaseError if another process holds the lock or the file isn't a
+        database of a version this bridge reads.
         """
         path = Path(path)
         lock_fd = _lock(lock_path(path))
         try:
-            conn = _connect(path, create) if create or path.exists() else None
+            conn = _connect(path)
         except BaseException:
             os.close(lock_fd)
             raise
@@ -122,20 +155,16 @@ class Database:
 
     def load(self) -> State:
         """Read the state, and take it as what `save` compares against."""
-        if self._conn is None:
-            self._rows = {name: {} for name in _KEYED}
-            self._outbox = []
-            return State()
         state, self._rows, self._outbox = _read(self._conn)
         return state
 
-    def save(self, state: State) -> bool:
-        """Write the rows of `state` that changed since the last load or save.
+    def save(self, state: State, ledger: Sequence[dict] = ()) -> bool:
+        """Write the rows of `state` that changed since the last load or save, and append
+        the `ledger` records.
 
-        All of them go in one transaction. Return whether anything was written.
+        All of it goes in one transaction, so either all of it is saved or none is.
+        Return whether anything was written.
         """
-        if self._conn is None:
-            raise DatabaseError(f"{self.path} was opened without create, so it can't be saved")
         rows = _rows(state)
         texts = [_canonical(r) for r in state.outbox]
         old = [text for _, text in self._outbox]
@@ -151,7 +180,7 @@ class Database:
             )
             for name in _KEYED
         }
-        if not gone and not new and not any(d or u for d, u in changes.values()):
+        if not gone and not new and not ledger and not any(d or u for d, u in changes.values()):
             return False
         conn = self._conn
         conn.execute("BEGIN IMMEDIATE")
@@ -179,6 +208,7 @@ class Database:
                     (*columns, json.dumps(record, sort_keys=True)),
                 )
                 added.append((cur.lastrowid, text))
+            _insert_ledger(conn, ledger)
             conn.execute("COMMIT")
         except BaseException:
             conn.execute("ROLLBACK")
@@ -187,19 +217,62 @@ class Database:
         self._outbox = self._outbox[gone:] + added
         return True
 
+    def save_ledger(self, ledger: Sequence[dict]) -> bool:
+        """Append the `ledger` records and nothing else, in one transaction.
+
+        Dry run saves its records this way, leaving the state as the last live run saved
+        it. Return whether anything was written.
+        """
+        if not ledger:
+            return False
+        conn = self._conn
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            _insert_ledger(conn, ledger)
+            conn.execute("COMMIT")
+        except BaseException:
+            conn.execute("ROLLBACK")
+            raise
+        return True
+
 
 def read_state(path: Path) -> State:
     """Read the state from the database at `path` without locking it, as a reader beside
     a running bridge does. A missing database reads as an empty state."""
-    path = Path(path)
-    if not path.exists():
+    conn = _reader(Path(path))
+    if conn is None:
         return State()
-    conn = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True)
     try:
-        _check(conn, path)
         return _read(conn)[0]
     finally:
         conn.close()
+
+
+def read_ledger(path: Path) -> list[dict]:
+    """Read every ledger record from the database at `path`, oldest first, without
+    locking it. Each is the dict the bridge saved. A missing database reads as none."""
+    conn = _reader(Path(path))
+    if conn is None:
+        return []
+    try:
+        names = ("kind", *_LEDGER_COLUMNS, "extra")
+        cursor = conn.execute(f"SELECT {', '.join(names)} FROM ledger ORDER BY id")
+        return [_ledger_record(dict(zip(names, row, strict=True))) for row in cursor]
+    finally:
+        conn.close()
+
+
+def _reader(path: Path) -> sqlite3.Connection | None:
+    """A read-only connection to the database at `path`, or None if it's missing."""
+    if not path.exists():
+        return None
+    conn = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True)
+    try:
+        _check(conn, path)
+    except BaseException:
+        conn.close()
+        raise
+    return conn
 
 
 def _lock(path: Path) -> int:
@@ -224,13 +297,13 @@ def _lock(path: Path) -> int:
     return fd
 
 
-def _connect(path: Path, create: bool) -> sqlite3.Connection:
+def _connect(path: Path) -> sqlite3.Connection:
     # Autocommit: `save` opens and commits its transactions itself.
     conn = sqlite3.connect(path, isolation_level=None)
     try:
         conn.execute("PRAGMA journal_mode = WAL")
         conn.execute("PRAGMA synchronous = FULL")
-        if not _check(conn, path) and create:
+        if not _check(conn, path):
             # One transaction, so a crash can't leave tables without the version.
             conn.executescript(
                 f"BEGIN IMMEDIATE;\n{_SCHEMA}\n"
@@ -265,6 +338,41 @@ def _check(conn: sqlite3.Connection, path: Path) -> bool:
 
 def _canonical(record: dict) -> str:
     return json.dumps(record, sort_keys=True)
+
+
+def _insert_ledger(conn: sqlite3.Connection, ledger: Sequence[dict]) -> None:
+    rows = []
+    for record in ledger:
+        extra = dict(record)
+        kind = extra.get("event")
+        if isinstance(kind, str) and kind != _CHARGE:
+            del extra["event"]
+        else:
+            kind = _CHARGE
+        columns = []
+        for name, types in _LEDGER_COLUMNS.items():
+            value = extra.get(name)
+            if type(value) in types:  # Exact, so a bool isn't taken for an int.
+                del extra[name]
+                columns.append(value)
+            else:
+                columns.append(None)
+        rows.append((kind, *columns, _canonical(extra)))
+    names = ("kind", *_LEDGER_COLUMNS, "extra")
+    conn.executemany(
+        f"INSERT INTO ledger ({', '.join(names)}) VALUES ({', '.join('?' * len(names))})", rows
+    )
+
+
+def _ledger_record(row: dict) -> dict:
+    """The record a ledger row was saved from."""
+    record = {k: row[k] for k in _LEDGER_COLUMNS if row[k] is not None}
+    if row["kind"] != _CHARGE:
+        record["event"] = row["kind"]
+    if "dry_run" in record:
+        record["dry_run"] = bool(record["dry_run"])
+    record.update(json.loads(row["extra"]))
+    return record
 
 
 def _rows(state: State) -> Rows:

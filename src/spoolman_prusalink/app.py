@@ -8,7 +8,7 @@ import logging
 import re
 import time
 import uuid
-from collections.abc import Callable, Hashable
+from collections.abc import Callable, Hashable, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 
@@ -29,7 +29,7 @@ from .db import Database
 from .models import FilamentReading, Material, Spool
 from .prusalink import BUSY_STATES, IDLE_STATES, NoFilamentEndpoint, PrinterStatus, PrusaLink
 from .spoolman import Spoolman
-from .state import PrinterState, Runout, State, append_ledger
+from .state import PrinterState, Runout, State
 
 log = logging.getLogger("spoolman_prusalink")
 
@@ -415,8 +415,8 @@ class PrinterBridge:
         """Account one poll and persist the result.
 
         In dry-run mode, charges go straight to the ledger and the state isn't saved.
-        Otherwise they go to the outbox, saved in the same write as the new counters, for
-        `flush()` to send. Returns the charge and event records.
+        Otherwise they go to the outbox for `flush()` to send, saved in one transaction
+        with the events and the new counters. Returns the charge and event records.
 
         `claims` is this printer's share of `Bridge._claims()`, by tool. Flags for spools
         are added to `flags`, which the bridge completes and writes after every printer.
@@ -613,11 +613,10 @@ class PrinterBridge:
             self._notes(tool, notes)
 
         if dry:
-            append_ledger(self.bridge.config.ledger_file, events + charges)
+            self.bridge._save(events + charges)
         else:
-            append_ledger(self.bridge.config.ledger_file, events)
             self.bridge.state.outbox.extend(charges)
-        self.bridge._save()
+            self.bridge._save(events)
         return events + charges
 
     def _no_write(self, tool: int, st: ToolState) -> None:
@@ -1139,7 +1138,7 @@ class Bridge:
     spoolman: Spoolman
     clients: dict[str, PrusaLink]  # By printer name.
     state: State = field(default_factory=State)
-    # Where the state is saved; None saves it nowhere. Closed by `aclose`.
+    # Where the state and the ledger are saved; None saves them nowhere. Closed by `aclose`.
     db: Database | None = None
     printers: list[PrinterBridge] = field(init=False, default_factory=list)
     _ready_fields: set[str] = field(default_factory=set)
@@ -1183,9 +1182,9 @@ class Bridge:
     def from_config(cls, config: Config) -> Bridge:
         """A bridge on the configured printers, Spoolman and database.
 
-        It locks the database until `aclose`. Dry run doesn't create a missing one.
+        It locks the database until `aclose`, and creates it if it's missing.
         """
-        db = Database.open(config.db_file, create=not config.dry_run)
+        db = Database.open(config.db_file)
         return cls(
             config=config,
             clients={p.name: PrusaLink(p.url, p.api_key) for p in config.printers},
@@ -1199,15 +1198,19 @@ class Bridge:
             db=db,
         )
 
-    def _save(self) -> None:
-        """Save the state, except in dry run.
+    def _save(self, ledger: Sequence[dict] = ()) -> None:
+        """Save the state and append the `ledger` records, in one transaction.
 
-        Dry run keeps its accounting in memory only, as if the bridge were stopped: the
-        next live run starts from the last live state and charges everything since, as
-        after an outage.
+        Dry run saves only the records. It keeps its accounting in memory, as if the
+        bridge were stopped: the next live run starts from the last live state and
+        charges everything since, as after an outage.
         """
-        if not self.config.dry_run and self.db is not None:
-            self.db.save(self.state)
+        if self.db is None:
+            return
+        if self.config.dry_run:
+            self.db.save_ledger(ledger)
+        else:
+            self.db.save(self.state, ledger)
 
     async def aclose(self) -> None:
         try:
@@ -1521,8 +1524,7 @@ class Bridge:
                 )
                 return False
             outbox.pop(0)
-            self._save()
-            append_ledger(self.config.ledger_file, [rec])
+            self._save([rec])  # One transaction, so the record can't be lost.
         self._problems.clear("charge", "%s", _outbox_outcome(sent, held, dropped))
         return True
 

@@ -13,7 +13,7 @@ from spoolman_prusalink.accounting import UNKNOWN_WRITE, ToolState
 from spoolman_prusalink.app import Bridge
 from spoolman_prusalink.color import quantize
 from spoolman_prusalink.config import Config, PrinterConfig
-from spoolman_prusalink.db import Database, read_state
+from spoolman_prusalink.db import Database, read_ledger, read_state
 from spoolman_prusalink.printer_sync import COREONEL_PREAMBLE, PRESETS
 from spoolman_prusalink.prusalink import PrusaLink
 from spoolman_prusalink.spoolman import Spoolman
@@ -236,7 +236,6 @@ def make(tmp_path, spools, **cfg):
         spoolman_url="http://spoolman",
         printers=(printer_cfg,),
         db_file=tmp_path / "bridge.db",
-        ledger_file=tmp_path / "ledger.jsonl",
         dry_run=False,
         **cfg,
     )
@@ -262,7 +261,7 @@ def make(tmp_path, spools, **cfg):
 
 
 def ledger(tmp_path):
-    return [json.loads(x) for x in (tmp_path / "ledger.jsonl").read_text().splitlines()]
+    return read_ledger(tmp_path / "bridge.db")
 
 
 async def test_charges_are_applied_and_recorded(tmp_path):
@@ -326,6 +325,104 @@ async def test_queued_charge_survives_restart(tmp_path):
     await restarted.poll()
     assert fake.used == {19: [500.0]}
     await restarted.aclose()
+
+
+class FailingCommit:
+    """A database connection whose commits fail while their transaction writes the ledger."""
+
+    def __init__(self, conn):
+        self.conn, self.ledger = conn, False
+
+    def execute(self, sql, *args):
+        if sql == "BEGIN IMMEDIATE":
+            self.ledger = False
+        elif sql == "COMMIT" and self.ledger:
+            raise sqlite3.OperationalError("disk I/O error")
+        return self.conn.execute(sql, *args)
+
+    def executemany(self, sql, *args):
+        self.ledger |= sql.startswith("INSERT INTO ledger")
+        return self.conn.executemany(sql, *args)
+
+
+async def test_a_failed_save_in_process_saves_nothing(tmp_path):
+    """The events, the queued charges and the counters are saved together or not at all."""
+    bridge, fake, printer = make(tmp_path, [spool(19)])
+    await bridge.poll()
+    db = tmp_path / "bridge.db"
+    state, records = read_state(db), ledger(tmp_path)
+    conn = bridge.db._conn
+    bridge.db._conn = FailingCommit(conn)
+    printer.unloads, printer.at_unload, printer.extruded = 1, 1400, 1500
+    with pytest.raises(sqlite3.OperationalError):
+        await bridge.poll()
+    assert read_state(db) == state
+    assert ledger(tmp_path) == records
+    assert fake.used == {}
+    bridge.db._conn = conn
+
+    # The bridge stops on the error; started again, it charges the same usage.
+    bridge = restart(bridge)
+    await bridge.poll()
+    assert fake.used == {19: [400.0, 100.0]}
+    assert [r.get("event") for r in ledger(tmp_path)[len(records) :]] == [
+        "unload",
+        "swap_unconfirmed",
+        None,
+        None,
+    ]
+    await bridge.aclose()
+
+
+async def test_a_failed_save_in_flush_keeps_the_charge_queued(tmp_path):
+    """A sent charge leaves the outbox in the same transaction that records it."""
+    bridge, fake, printer = make(tmp_path, [spool(19)])
+    await bridge.poll()
+    printer.extruded = 1500
+    fake.fail_use = [503]
+    await bridge.poll()
+    db = tmp_path / "bridge.db"
+    state, records = read_state(db), ledger(tmp_path)
+    assert [r["use_length"] for r in state.outbox] == [500.0]
+    conn = bridge.db._conn
+    bridge.db._conn = FailingCommit(conn)
+    with pytest.raises(sqlite3.OperationalError):
+        await bridge.flush()
+    assert fake.used == {19: [500.0]}  # Spoolman took it,
+    assert read_state(db) == state  # but it's still queued,
+    assert ledger(tmp_path) == records  # with no record of it.
+    bridge.db._conn = conn
+
+    # Sent again at restart: charges are at least once.
+    bridge = restart(bridge)
+    assert await bridge.flush()
+    assert fake.used == {19: [500.0, 500.0]}
+    assert read_state(db).outbox == []
+    assert [r["use_length"] for r in ledger(tmp_path) if r.get("applied")] == [500.0]
+    await bridge.aclose()
+
+
+async def test_dry_run_saves_records_and_not_state(tmp_path):
+    bridge, fake, printer = make(tmp_path, [spool(19)])
+    await bridge.poll()
+    printer.extruded = 1500
+    await bridge.poll()
+    db = tmp_path / "bridge.db"
+    state, records = read_state(db), ledger(tmp_path)
+    bridge = restart(bridge, dry_run=True)
+    printer.unloads, printer.at_unload, printer.extruded = 1, 1600, 1700
+    await bridge.poll()
+    assert read_state(db) == state
+    added = ledger(tmp_path)[len(records) :]
+    assert [(r.get("event"), r.get("use_length")) for r in added] == [
+        ("unload", None),
+        ("swap_unconfirmed", None),
+        (None, 100.0),
+        (None, 100.0),
+    ]
+    assert all(r["dry_run"] is True and "applied" not in r for r in added)
+    assert fake.used == {19: [500.0]}
+    await bridge.aclose()
 
 
 async def test_rejected_charge_is_dropped_not_blocking(tmp_path):
@@ -934,9 +1031,9 @@ async def test_live_ledger_records_are_marked_not_dry_run(tmp_path):
     await bridge.poll()
     printer.extruded = 1500
     await bridge.poll()
-    ledger = [json.loads(line) for line in (tmp_path / "ledger.jsonl").read_text().splitlines()]
-    assert any("event" in r for r in ledger) and any("use_length" in r for r in ledger)
-    assert all(r["dry_run"] is False for r in ledger)
+    records = ledger(tmp_path)
+    assert any("event" in r for r in records) and any("use_length" in r for r in records)
+    assert all(r["dry_run"] is False for r in records)
     await bridge.aclose()
 
 
@@ -1544,7 +1641,7 @@ def restart(bridge, **cfg):
     """A new bridge on the same printers, Spoolman and database, which the old one lets go."""
     bridge.db.close()
     config = replace(bridge.config, **cfg)
-    db = Database.open(config.db_file, create=not config.dry_run)
+    db = Database.open(config.db_file)
     return Bridge(
         config=config,
         spoolman=bridge.spoolman,
@@ -2371,7 +2468,6 @@ def two_printers(tmp_path, spools, **cfg):
             for name in printers
         ),
         db_file=tmp_path / "bridge.db",
-        ledger_file=tmp_path / "ledger.jsonl",
         dry_run=False,
         **cfg,
     )

@@ -11,7 +11,7 @@ from spoolman_prusalink.__main__ import main
 from spoolman_prusalink.accounting import Provisional, SwapFlag, ToolState
 from spoolman_prusalink.app import Bridge
 from spoolman_prusalink.config import Config, ConfigError, PrinterConfig, load
-from spoolman_prusalink.db import Database
+from spoolman_prusalink.db import Database, read_ledger, read_state
 from spoolman_prusalink.models import Material
 from spoolman_prusalink.prusalink import PrusaLink, parse_filament
 from spoolman_prusalink.spoolman import Spoolman, parse_spool
@@ -147,7 +147,6 @@ def make_config(tmp_path, **kw):
         spoolman_url="http://spoolman",
         printers=(printer,),
         db_file=tmp_path / "bridge.db",
-        ledger_file=tmp_path / "ledger.jsonl",
         **kw,
     )
 
@@ -170,7 +169,7 @@ def make_bridge(tmp_path, filament, spools):
 
     transport = httpx.MockTransport(handler)
     cfg = make_config(tmp_path)
-    db = Database.open(cfg.db_file, create=not cfg.dry_run)
+    db = Database.open(cfg.db_file)
     return Bridge(
         config=cfg,
         spoolman=Spoolman(cfg.spoolman_url, uuid_field="instance_uuid", transport=transport),
@@ -199,13 +198,13 @@ async def test_poll_logs_would_charge_and_saves_nothing(tmp_path, caplog):
     assert "[Core One L+] WOULD CHARGE spool 7" in caplog.text
     assert "≈ +2.98 g" in caplog.text
 
-    ledger = [json.loads(line) for line in (tmp_path / "ledger.jsonl").read_text().splitlines()]
+    ledger = read_ledger(tmp_path / "bridge.db")
     charges = [r for r in ledger if "use_length" in r]
     assert [(r["spool_id"], r["use_length"]) for r in charges] == [(7, 1000)]
     assert any("event" in r for r in ledger)
     assert all(r["dry_run"] is True for r in ledger)  # Events too, not just charges.
     assert bridge.printers[0].tools[0].charged == 5310
-    assert not (tmp_path / "bridge.db").exists()  # Dry run saves nothing.
+    assert read_state(tmp_path / "bridge.db") == State()  # Dry run saves only the ledger.
     assert bridge.interval() == bridge.config.poll_printing
     await bridge.aclose()
 
@@ -352,7 +351,6 @@ CONFIG_BASE = (
         ("[bridge]\nflag_field = true\n", "bridge.flag_field must be a string"),
         ('[bridge]\nclaim_field = ["a"]\n', "bridge.claim_field must be a string"),
         ("[bridge]\ndb_file = 5\n", "bridge.db_file must be a string"),
-        ("[bridge]\nledger_file = 5\n", "bridge.ledger_file must be a string"),
         ("[bridge]\neviction_location = 5\n", "bridge.eviction_location must be a string"),
         ("[printer]\nsync_storage = 5\n", "printer.sync_storage must be a string"),
         ("[printer]\nsync_file = 5\n", "printer.sync_file must be a string"),
@@ -460,8 +458,7 @@ async def test_length_factor_scales_charges(tmp_path):
     await bridge.poll()
     extruded["v"] = 2000
     await bridge.poll()
-    ledger = [json.loads(x) for x in (tmp_path / "ledger.jsonl").read_text().splitlines()]
-    charge = next(r for r in ledger if "use_length" in r)
+    charge = next(r for r in read_ledger(tmp_path / "bridge.db") if "use_length" in r)
     assert (charge["extruded_mm"], charge["use_length"]) == (1000, 1050.0)
     await bridge.aclose()
 

@@ -1,10 +1,8 @@
-"""The bridge's state in memory, which the database holds between runs, and the ledger."""
+"""The bridge's state in memory, which the database holds between runs."""
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass, field
-from pathlib import Path
 
 from .accounting import ToolState
 
@@ -60,12 +58,3 @@ class State:
     def tools(self, printer: str) -> dict[int, ToolState]:
         """Return the tool states of `printer`, creating its entry."""
         return self.printers.setdefault(printer, PrinterState()).tools
-
-
-def append_ledger(path: Path, records: list[dict]) -> None:
-    if not records:
-        return
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a") as f:
-        for record in records:
-            f.write(json.dumps(record, sort_keys=True) + "\n")

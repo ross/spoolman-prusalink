@@ -35,6 +35,7 @@ from simulator.model import (
 from simulator.prusalink import make_app
 from spoolman_prusalink.app import Bridge
 from spoolman_prusalink.config import Config, PrinterConfig
+from spoolman_prusalink.db import read_ledger
 
 # Short phases keep a scenario to a few hundred ticks. None is zero, so every phase
 # still takes at least one tick and the bridge can see it if a test polls there.
@@ -247,10 +248,7 @@ def count(caplog: pytest.LogCaptureFixture, level: int, text: str) -> int:
 
 
 def ledger(cfg: Config) -> list[dict]:
-    path = Path(cfg.ledger_file)
-    if not path.exists():
-        return []
-    return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+    return read_ledger(cfg.db_file)
 
 
 def events(records: list[dict], kind: str | None = None) -> list[dict]:
@@ -555,7 +553,6 @@ async def world(
             *(other[-1] for other in others),
         ),
         db_file=tmp_path / "bridge.db",
-        ledger_file=tmp_path / "ledger.jsonl",
         dry_run=False,
         **world_config,
     )
