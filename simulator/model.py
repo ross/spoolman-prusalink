@@ -145,17 +145,27 @@ class Material:
     # A preset has no color or UUID and ignores edits; tag loads, loads with a picked color,
     # and M865 X writes are ad-hoc. The page shows the flag; PrusaLink doesn't.
     adhoc: bool = True
-    # None takes the value of the preset with this name, else the firmware default. A tag
-    # load gets its temperatures from the tag; the simulator uses the preset's.
+    # Set when the material is built, as the firmware does: from the preset, the tag or
+    # M865. None, as in a snapshot from before temperatures, reads as the default.
     nozzle: int | None = None
     preheat: int | None = None
     bed: int | None = None
 
     def temperatures(self) -> tuple[int, int, int]:
         """Return the nozzle, preheat and bed temperatures the printer reports."""
-        base = PRESET_TEMPERATURES.get(self.name.upper(), DEFAULT_TEMPERATURES)
         set_ = (self.nozzle, self.preheat, self.bed)
-        return tuple(b if v is None else v for v, b in zip(set_, base, strict=True))
+        return tuple(d if v is None else v for v, d in zip(set_, DEFAULT_TEMPERATURES, strict=True))
+
+
+def preset_temperatures(name: str) -> dict[str, int]:
+    """Return the temperatures a material named `name` starts from, as `Material` keywords.
+
+    A preset's name matches exactly, as `FilamentType::from_name` does. A tag named TPU
+    starts from FLEX (`openprinttag/data_utils.cpp:217-219`). Anything else gets the defaults.
+    """
+    key = "FLEX" if name == "TPU" else name
+    values = PRESET_TEMPERATURES.get(key, DEFAULT_TEMPERATURES)
+    return dict(zip(("nozzle", "preheat", "bed"), values, strict=True))
 
 
 @dataclass
@@ -339,9 +349,7 @@ def _check_name(name: Any) -> str:
     return name
 
 
-def _check_temperatures(temps: Any) -> tuple[int | None, int | None, int | None]:
-    if temps is None:
-        return None, None, None
+def _check_temperatures(temps: Any) -> tuple[int, int, int]:
     ok = isinstance(temps, list | tuple) and len(temps) == 3
     if not ok or not all(isinstance(v, int) and 0 <= v <= 500 for v in temps):
         raise Invalid(f"temperatures must be [nozzle, preheat, bed] in °C, got {temps!r}")
@@ -672,14 +680,14 @@ class SimPrinter:
             if uuid or temps is not None:
                 raise Invalid("a preset load has no UUID or temperatures")
             # Picking a color makes the preset ad-hoc, which replaces the ad-hoc slot.
-            return Material(name, color, adhoc=color is not None)
+            return Material(name, color, adhoc=color is not None, **preset_temperatures(name))
         if not self.model.uuids:
             raise Invalid(f"{self.model.name} has no tag reader")
         value = _check_uuid(uuid)
-        nozzle, preheat, bed = _check_temperatures(temps)
-        return Material(
-            name, color, value if t.index == 0 else None, nozzle=nozzle, preheat=preheat, bed=bed
-        )
+        tag_temps = preset_temperatures(name)
+        if temps is not None:
+            tag_temps = dict(zip(tag_temps, _check_temperatures(temps), strict=True))
+        return Material(name, color, value if t.index == 0 else None, **tag_temps)
 
     def _hand_load(self, t: SimTool, material: Material | None) -> None:
         if t.process is not None:
@@ -1318,7 +1326,7 @@ class SimPrinter:
             t.temps = temps
         elif c.name:
             # A preset write: the firmware ignores every parameter but the type.
-            material = Material(c.name, adhoc=False)
+            material = Material(c.name, adhoc=False, **preset_temperatures(c.name))
             if c.color or c.temps:
                 self._log("gcode", f"M865 L{c.tool}: parameters ignored on preset {c.name}")
         elif (c.color or c.temps) and t.material is not None:
@@ -1647,7 +1655,13 @@ def _tool_from_config(tc: Any) -> SimTool:
         color, uuid = m.get("color"), m.get("instance_uuid")
         # A configured color or UUID can only come from an ad-hoc type; a bare name is a preset.
         adhoc = bool(color or uuid)
-        material = Material(m["name"], color.lower() if color else None, uuid, adhoc)
+        material = Material(
+            m["name"],
+            color.lower() if color else None,
+            uuid,
+            adhoc,
+            **preset_temperatures(m["name"]),
+        )
     return SimTool(
         index=tc.index,
         enabled=tc.enabled,

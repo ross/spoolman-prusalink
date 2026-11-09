@@ -19,6 +19,7 @@ from simulator.model import (
     SimTool,
     Simulation,
     State,
+    preset_temperatures,
 )
 from simulator.tests.util import PLA, loaded, make, run
 
@@ -120,7 +121,7 @@ def test_one_tick_runs_a_whole_load():
     t = tool0(p)
     assert t.loaded and t.process is None and p.state is State.IDLE
     assert t.extruded == pytest.approx(76)
-    assert t.material == Material("ASA", "#d9342b")
+    assert t.material == Material("ASA", "#d9342b", **preset_temperatures("ASA"))
 
 
 def test_menu_load_clears_color_and_uuid():
@@ -129,14 +130,14 @@ def test_menu_load_clears_color_and_uuid():
     sim.tick(3)
     p.load(0, source="preset", name="PETG")
     sim.tick(20)
-    assert tool0(p).material == Material("PETG", adhoc=False)
+    assert tool0(p).material == Material("PETG", adhoc=False, **preset_temperatures("PETG"))
     assert tool0(p).previous == PLA  # a preset leaves the ad-hoc slot alone
     p.unload(0)
     sim.tick(3)
     p.load(0, source="preset", name="PLA", color="#ff0000")
     sim.tick(20)
-    assert tool0(p).material == Material("PLA", "#ff0000")
-    assert tool0(p).previous == Material("PLA", "#ff0000")
+    picked = Material("PLA", "#ff0000", **preset_temperatures("PLA"))
+    assert tool0(p).material == picked and tool0(p).previous == picked
 
 
 def test_runout_reload_restores_a_preset_not_the_adhoc_slot():
@@ -150,7 +151,7 @@ def test_runout_reload_restores_a_preset_not_the_adhoc_slot():
     p.runout(0)
     p.load(0)
     sim.tick(20)
-    assert tool0(p).material == Material("PETG", adhoc=False)
+    assert tool0(p).material == Material("PETG", adhoc=False, **preset_temperatures("PETG"))
     assert tool0(p).previous == PLA
 
 
@@ -190,7 +191,9 @@ def test_load_and_unload_while_off_count_nothing_until_boot():
     assert t.unload_count == 1 and t.material is None and t.previous == PLA
     p.set_power("off")
     p.load(0, source="preset", name="PETG")
-    assert tool0(p).loaded and tool0(p).material == Material("PETG", adhoc=False)
+    assert tool0(p).loaded and tool0(p).material == Material(
+        "PETG", adhoc=False, **preset_temperatures("PETG")
+    )
     assert tool0(p).extruded == 0
 
 
@@ -688,7 +691,7 @@ def test_m865_reset_clears_uuid_and_preset_write_ignores_parameters():
     p.apply(gcode.parse('M865 X O"#000000" L0'))  # ad-hoc edit keeps the UUID
     assert tool0(p).material.instance_uuid and tool0(p).material.color == "#000000"
     p.apply(gcode.parse('M865 N"PETG" O"#ffffff" T250 L0'))
-    assert tool0(p).material == Material("PETG", adhoc=False)
+    assert tool0(p).material == Material("PETG", adhoc=False, **preset_temperatures("PETG"))
 
 
 def test_preset_ignores_edits_and_adhoc_write_edits_the_slot():
@@ -697,7 +700,7 @@ def test_preset_ignores_edits_and_adhoc_write_edits_the_slot():
     p.apply(gcode.parse('M865 N"PETG" L0'))
     assert tool0(p).previous == PLA  # a preset write leaves the ad-hoc slot alone
     p.apply(gcode.parse(f'M865.1 I0 C"{uuid}"\nM865 O"#ffffff" L0'))
-    assert tool0(p).material == Material("PETG", adhoc=False)
+    assert tool0(p).material == Material("PETG", adhoc=False, **preset_temperatures("PETG"))
     assert "ignored on preset" in sim.events[-1].text
     p.apply(gcode.parse('M865 X O"#000000" L0'))  # the slot is the base, not the preset
     assert tool0(p).material == replace(PLA, color="#000000")
@@ -1010,3 +1013,21 @@ def test_m865_temperatures():
     assert temperatures(p) == (260, 200, 90)
     p.apply(gcode.parse('M865 N"PETG" T250 L0'))  # a preset write ignores them
     assert temperatures(p) == (230, 170, 85)
+
+
+def test_temperatures_are_set_when_the_material_is_built():
+    sim, p = make(tools=[SimTool(0)])
+    # A TPU tag starts from FLEX; other names match a preset exactly.
+    p.load(0, source="tag", name="TPU", uuid="8b6a3e3e-3f6c-4d7b-9a43-6c1f0e7d2a11")
+    sim.tick(100.0)
+    assert temperatures(p) == (240, 210, 50)
+    p.unload(0)
+    sim.tick(3.0)
+    p.load(0, source="preset", name="PLA", color="#ff0000")
+    sim.tick(100.0)
+    p.apply(gcode.parse('M865 X N"PC" L0'))  # without R, only renames
+    assert temperatures(p) == (215, 170, 60)
+    sim, p = make(tools=[SimTool(0)])
+    p.load(0, source="tag", name="petg", uuid="8b6a3e3e-3f6c-4d7b-9a43-6c1f0e7d2a11")
+    sim.tick(100.0)
+    assert temperatures(p) == (215, 170, 60)
