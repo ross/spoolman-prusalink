@@ -58,20 +58,26 @@ async def print_both(w: World) -> list[dict]:
 
 
 async def test_t1_tool_changes_charge_each_tool(world: World):
-    """Print with tool changes: each tool's spool gets its own use and its pickup purges."""
+    """Tool change: each tool's spool gets its own moves; the pickup purge goes to the new tool."""
     w = world
     await baseline(w)
     start0, start1 = w.counter_at(0), w.counter_at(1)
 
-    records = await print_both(w)
+    # One tool change, T0 to T1, so only T1 is picked up: the purge must land on D, and
+    # a purge counted on the tool put down would show up as 30 mm more on A.
+    mark = w.mark()
+    await w.start_print(PrintSpec([Segment(0, 300), Segment(1, 100)], duration_s=4, preheat_s=0.5))
+    await finish(w)
+    await w.poll()
+    records = w.since(mark)
     changes = [e.text for e in w.sim.events if e.text.startswith("tool change")]
-    assert changes == ["tool change T0 -> T1", "tool change T1 -> T0"]
+    assert changes == ["tool change T0 -> T1"]
 
-    # Each pickup purges toolchange_purge_mm on the tool picked up: T1 once, T0 once.
-    # 300 mm of T0 moves count 285 and 100 mm of T1 count 95, at the feed ratio.
+    # 300 mm of T0 moves count 285 and 100 mm of T1 count 95, at the feed ratio, and the
+    # pickup purges toolchange_purge_mm on T1.
     purge = w.sim.settings.toolchange_purge_mm
     assert (counted(w, 300), counted(w, 100), purge) == (285, 95, 30)
-    assert w.charged(records, "A") == 285 + 30 == w.counter_at(0) - start0
+    assert w.charged(records, "A") == 285 == w.counter_at(0) - start0
     assert w.charged(records, "D") == 95 + 30 == w.counter_at(1) - start1
     assert {r["tool"] for r in charges(records, w.spools["A"])} == {0}
     assert {r["tool"] for r in charges(records, w.spools["D"])} == {1}

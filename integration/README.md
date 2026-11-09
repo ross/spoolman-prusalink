@@ -116,7 +116,7 @@ current and that the scenario rows name their tests.
 | X13 | `test_printers.py::test_x13_version_2_state_with_two_printers` | A version 2 state file with two printers configured: refused until one printer saves v3. |
 | X14 | `test_printers.py::test_x14_printer_renamed` | A printer renamed: its old state kept but inert, with a warning; the new name baselines. |
 | X16 | `test_printers.py::test_x16_runout_flag_clears_when_active_elsewhere` | A runout flag set on A clears when the spool becomes active in B after another spool. |
-| T1 | `test_tools.py::test_t1_tool_changes_charge_each_tool` | Print with tool changes: each tool's spool gets its own use and its pickup purges. |
+| T1 | `test_tools.py::test_t1_tool_changes_charge_each_tool` | Tool change: each tool's spool gets its own moves; the pickup purge goes to the new tool. |
 | T2 | `test_tools.py::test_t2_tool_change_is_not_an_unload` | A tool change isn't an unload: no swap opens on either tool, and nothing is flagged. |
 | T3 | `test_tools.py::test_t3_swap_on_one_tool_leaves_the_other` | Swap on tool 1 between prints: tool 1's spool changes, tool 0's state is untouched. |
 | T4 | `test_tools.py::test_t4_idle_sensor_clear_on_a_picked_tool` | Picking a tool whose sensor sees no filament counts an unload on that tool only. |

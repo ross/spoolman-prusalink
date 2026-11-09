@@ -119,7 +119,8 @@ async def test_m3_deleted_active_spool_holds_usage(world: World, caplog: pytest.
     records = await w.poll()
     tool = w.bridge.printers[0].tools[0]
     assert tool.active is None and tool.deleted_spool == a
-    assert charges(records) == []
+    # Found by the list and the lookup, before any charge: nothing was sent and rejected.
+    assert charges(records) == [] and [r for r in records if "failed" in r] == []
     found = f"[{w.tool_location}] spool {a} was deleted in Spoolman; holding its usage"
     assert count(caplog, logging.WARNING, found) == 1
 
