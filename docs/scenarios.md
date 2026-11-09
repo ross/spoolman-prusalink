@@ -112,14 +112,14 @@ archived active spool (M3, M3a) is logged once when the bridge finds it.
 
 | # | Scenario | What the bridge does | Status |
 | --- | --- | --- | --- |
-| M1 | Spoolman unreachable. | Skips accounting. Queued charges stay in the outbox and are retried in order. | Tested |
-| M2 | Spoolman rejects a charge (4xx). | Drops it with an error, so it doesn't block later charges. | Tested |
-| M3 | Active spool deleted in Spoolman. | Found when the spool drops out of Spoolman's list and a lookup returns 404, or when a charge to it returns 404. The tool is left with no active spool, and the rejected charge, any usage since an open unconfirmed swap's unload, and later usage are held, through reboots and unloads. The held usage is charged to the next spool that becomes active in the tool. A spool already staged is flagged and takes it at the next unload or print start, or when it's claimed. Logged once when found and once when charged (see Q7). | Tested |
-| M3a | Active spool archived in Spoolman. | Looks moved out of the location (S10): stays active and charged until the next unload. Flagged "archived but still loaded" until then (see Q7). | Tested |
-| M4 | Location renamed in Spoolman. | The location looks empty: the spool stays active until the next unload, then usage is held. There's no websocket event for renames. | Implemented |
+| M1 | Spoolman unreachable. | Skips accounting. Queued charges stay in the outbox and are retried in order. | Tested; end to end (`test_m1_spoolman_unreachable`) |
+| M2 | Spoolman rejects a charge (4xx). | Drops it with an error, so it doesn't block later charges. | Tested; end to end (`test_m2_rejected_charge_is_dropped`) |
+| M3 | Active spool deleted in Spoolman. | Found when the spool drops out of Spoolman's list and a lookup returns 404, or when a charge to it returns 404. The tool is left with no active spool, and the rejected charge, any usage since an open unconfirmed swap's unload, and later usage are held, through reboots and unloads. The held usage is charged to the next spool that becomes active in the tool. A spool already staged is flagged and takes it at the next unload or print start, or when it's claimed. Logged once when found and once when charged (see Q7). | Tested; end to end (`test_m3_deleted_active_spool_holds_usage`); a 404 on a charge end to end (`test_m3_charge_to_deleted_spool_is_held`) |
+| M3a | Active spool archived in Spoolman. | Looks moved out of the location (S10): stays active and charged until the next unload. Flagged "archived but still loaded" until then (see Q7). | Tested; end to end (`test_m3a_archived_active_spool`) |
+| M4 | Location renamed in Spoolman. | The location looks empty: the spool stays active until the next unload, then usage is held. There's no websocket event for renames. | Implemented; end to end (`test_m4_location_renamed`) |
 | M5 | Spool runs past empty in Spoolman. | Keeps charging, and logs once that the spool shows a negative remaining weight. No flag: spool weights are inexact, so slightly negative is normal (see Q8). | Tested |
 | M5a | Runout mid-print while Spoolman shows plenty left. | Flags the spool when it unloads during a started print with more than 5% of its net weight left. The flag clears when the user edits the spool's weight in Spoolman, or when another spool becomes active and then this one does. Reloading the same spool with no Spoolman change keeps it (see Q8). A jam or tangle looks the same. | Tested |
-| M6 | Flag set by someone else on a spool. | Left alone: the bridge only clears flags it set. | Tested |
+| M6 | Flag set by someone else on a spool. | Left alone: the bridge only clears flags it set. A spool the bridge flags itself loses the other text: the bridge's flag replaces it, and clearing that leaves the field empty. | Tested; end to end (`test_m6_flags_by_others_left_alone`) |
 | M7 | Spoolman's filament density is wrong. | Charges use the density at the time of each charge. Earlier charges aren't recalculated. | Implemented (Spoolman behavior) |
 
 ## The bridge itself
