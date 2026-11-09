@@ -336,6 +336,19 @@ def test_compare_accepts_movement_a_poll_could_not_see():
     )
     feed = [sample(0, "IDLE", 100, PLA)] + ticks([(5.5, "PRINTING")], start=0.1, job=7, rate=2)
     assert trace.compare(printing, trace.signature(feed + [down(6), down(7)])) == []
+    # The same when the printer comes back: the counters restarted, so the unreachable
+    # polls before the reboot's first sample accept the movement. After it the counter
+    # starts from zero, so movement the first sample didn't show fails.
+    idle = [sample(t, "IDLE", 100, PLA) for t in range(0, 30)] + [down(30), down(31)]
+    back = [sample(32, "IDLE", 0, PLA, boot=2), sample(33, "IDLE", 0, PLA, boot=2)]
+    cut = ticks([(30, "IDLE")], {29.5: 20}) + [down(30), down(31)]
+    rebooted = [sample(round(32 + k / 10, 1), "IDLE", 0, PLA, boot=2) for k in range(15)]
+    assert trace.compare(trace.signature(idle + back), trace.signature(cut + rebooted)) == []
+    moved_after = [sample(32.0, "IDLE", 0, PLA, boot=2), sample(32.1, "IDLE", 5, PLA, boot=2)]
+    moved_after += [sample(round(32.2 + k / 10, 1), "IDLE", 5, PLA, boot=2) for k in range(13)]
+    assert (
+        NO_FIT in trace.compare(trace.signature(idle + back), trace.signature(cut + moved_after))[0]
+    )
     # A poll whose filament read failed, or an unreachable run, in the same boot: the
     # next poll that saw the counter carries the movement since the last that did, so
     # movement under the blind poll is fine, and movement the counter didn't show is not.
