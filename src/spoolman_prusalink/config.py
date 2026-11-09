@@ -43,7 +43,7 @@ class PrinterConfig:
 class Config:
     spoolman_url: str
     printers: tuple[PrinterConfig, ...]
-    state_file: Path = Path("/data/state.json")
+    db_file: Path = Path("/data/bridge.db")
     ledger_file: Path = Path("/data/ledger.jsonl")
     poll_printing: float = 30.0
     poll_idle: float = 60.0
@@ -370,7 +370,7 @@ def load(path: str | os.PathLike | None, env: dict[str, str] | None = None) -> C
     return Config(
         spoolman_url=spoolman_url,
         printers=printers,
-        state_file=Path(_str(bridge, "state_file", "/data/state.json", "bridge.state_file")),
+        db_file=Path(_str(bridge, "db_file", "/data/bridge.db", "bridge.db_file")),
         ledger_file=Path(_str(bridge, "ledger_file", "/data/ledger.jsonl", "bridge.ledger_file")),
         poll_printing=_interval(bridge, "poll_printing", 30, "bridge.poll_printing"),
         poll_idle=_interval(bridge, "poll_idle", 60, "bridge.poll_idle"),

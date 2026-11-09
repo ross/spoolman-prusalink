@@ -305,9 +305,9 @@ class World:
     bridges: list[Bridge] = field(default_factory=list)
 
     async def restart(self, **config) -> None:
-        """Stop the bridge and start a new one on the same state file, with `config` changed.
+        """Stop the bridge and start a new one on the same database, with `config` changed.
 
-        The bridge's restart (B2), a lost state file (B4) and a dry run (B6) are tested
+        The bridge's restart (B2), a lost database (B4) and a dry run (B6) are tested
         this way; the new bridge runs on the simulator's clock like the first.
         """
         await self.bridge.aclose()
@@ -554,7 +554,7 @@ async def world(
             ),
             *(other[-1] for other in others),
         ),
-        state_file=tmp_path / "state.json",
+        db_file=tmp_path / "bridge.db",
         ledger_file=tmp_path / "ledger.jsonl",
         dry_run=False,
         **world_config,
