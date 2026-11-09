@@ -67,10 +67,15 @@ async def load_a_at_b(w: World) -> list[dict]:
 
 
 def bridge_for(w: World, cfg) -> Bridge:
-    """A new bridge on `cfg` with the simulator's clock, replacing `w.bridge`."""
+    """A new bridge on `cfg` with the simulator's clock, replacing `w.bridge`.
+
+    The caller closes the old bridge first; the world closes every bridge it started at
+    the end.
+    """
     bridge = Bridge.from_config(cfg)
     bridge.clock = lambda: w.sim.now
     w.bridge = bridge
+    w.bridges.append(bridge)
     return bridge
 
 
