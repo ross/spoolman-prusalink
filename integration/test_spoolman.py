@@ -331,6 +331,7 @@ async def test_m5a_runout_with_plenty_left_is_flagged(world: World, used: float,
     records += await w.poll()
     assert w.charged(records, "A") > 0
     assert mid_print in (await w.flag("A") or "")
+    assert "filament was unloaded with no Spoolman change" in (await w.flag("A") or "")
 
     # The user corrects A's weight in Spoolman: the flag clears.
     await set_used(w, "A", 995.0)
@@ -394,3 +395,15 @@ async def test_m7_density_edit_applies_to_later_charges(world: World):
     assert [r["use_length"] for r in second] == [1000.0]
     assert second[0]["grams"] == pytest.approx(2 * first[0]["grams"], abs=0.01)
     assert await w.used("A") == pytest.approx(3 * before, abs=0.01)
+
+    # A charge queued while Spoolman is down is weighed when it arrives: the bridge sends a
+    # length, so a density edit made meanwhile applies to it.
+    w.spoolman_faults.answer("PUT", use_path(a), 503)
+    w.printer.extrude(0, 1000)
+    await w.poll()
+    assert [r["use_length"] for r in w.bridge.state.outbox] == [1000.0]
+    await w.spoolman.edit_filament(a, density=3.72)
+    w.spoolman_faults.restore()
+    await w.poll()
+    assert w.bridge.state.outbox == []
+    assert await w.used("A") == pytest.approx(6 * before, abs=0.01)

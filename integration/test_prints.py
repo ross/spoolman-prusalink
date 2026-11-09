@@ -419,8 +419,10 @@ async def test_p4_runout_reloaded_with_no_spoolman_change(
     w.printer.extrude(0, 10)
     await w.unload()
     records = await w.poll()
-    kept = events(records, "provisional_kept")
-    assert len(kept) == 1 and f"provisionally to spool {a}" in kept[0]["message"]
+    assert [e["message"] for e in events(records, "provisional_kept")] == [
+        f"unload keeps the {w.tool.extruded_at_unload - at_runout} mm charged "
+        f"provisionally to spool {a}"
+    ]
     assert len(events(records, "swap_unconfirmed")) == 1
     flag = await w.flag("A") or ""
     assert "provisionally" not in flag
@@ -431,7 +433,7 @@ async def test_p4_runout_reloaded_with_no_spoolman_change(
 async def test_p5_planned_color_changes_are_unloads(world: World):
     """Two `M600` color changes: each an unload, one confirmed in Spoolman, one left open."""
     w = world
-    a, b = w.spools["A"], w.spools["B"]
+    a, b, c = w.spools["A"], w.spools["B"], w.spools["C"]
     await baseline(w)
     start = w.counter
     spec = PrintSpec([Segment(0, 400)], duration_s=4, preheat_s=0.5, color_changes_mm=[150, 300])
@@ -459,6 +461,7 @@ async def test_p5_planned_color_changes_are_unloads(world: World):
     await w.poll()
     assert len(events(w.since(mark), "unload")) == 1
     assert len(events(w.since(mark), "swap_unconfirmed")) == 1
+    second = w.tool.extruded_at_unload
     flag = await w.flag("B")
     assert flag is not None and "mid-print with" in flag
     await reload_and_resume(w)
@@ -474,7 +477,19 @@ async def test_p5_planned_color_changes_are_unloads(world: World):
     assert events(records, "staged_at_print") == []
     assert w.charged(records, "A") == first - start
     assert w.charged(records, "B") == w.counter - first
-    assert {r["spool_id"] for r in charges(records)} == {a, b}
+
+    # Still open after the print: Spoolman updated now moves everything since the change.
+    await w.move("B", w.shelf)
+    await w.move("C", w.tool_location)
+    records = await w.poll()
+    since_second = w.counter - second
+    assert [e["message"] for e in events(records, "swap_confirmed")] == [
+        f"swap confirmed: {since_second} mm moved from spool {b} to {c}"
+    ]
+    records = w.since(0)
+    assert w.charged(records, "B") == second - first
+    assert w.charged(records, "C") == since_second
+    assert {r["spool_id"] for r in charges(records)} == {a, b, c}
 
 
 async def test_p6_jam_is_an_unconfirmed_swap_and_its_purge_is_charged(world: World):

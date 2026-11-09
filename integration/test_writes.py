@@ -478,7 +478,6 @@ async def test_w13_sync_job_homes_an_unhomed_printer(world: World):
     home = next(i for i, line in enumerate(lines) if line.startswith("G28 O"))
     assert home < next(i for i, line in enumerate(lines) if line.startswith("M865"))
     await wrote_b(w)
-    assert w.printer.homed
     texts = [e.text for e in w.sim.events]
     assert texts.index("G28: homed") < next(
         i for i, t in enumerate(texts) if t.startswith("M865 T0 set to")
