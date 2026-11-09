@@ -103,6 +103,16 @@ def test_signature_sees_through_an_unreachable_gap():
     assert names(trace.signature(purged))[2] == "BUSY job=same boot=new mat=tagged ext=+"
 
 
+def test_signature_counts_a_temperature_change_as_a_material_change():
+    temps = {"nozzle_temperature": 215, "preheat_temperature": 170, "bed_temperature": 60}
+    hotter = {**PLA, **temps, "nozzle_temperature": 230}
+    samples = [sample(0, "IDLE", 100, {**PLA, **temps}), sample(1, "IDLE", 100, hotter)]
+    assert names(trace.signature(samples)) == [
+        "IDLE job=none mat=tagged ext=0",
+        "IDLE job=none mat=tagged! ext=0",
+    ]
+
+
 def test_signature_keeps_the_last_filament_when_only_that_read_fails():
     samples = [
         sample(0, "PRINTING", 100, PLA, job=7),
