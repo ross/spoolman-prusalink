@@ -3,9 +3,6 @@
 Printer "it" plays the rows' printer A: location `<prefix> T` (the rows' `LA`), spool A
 loaded. Printer "b" plays printer B: location `<prefix> LB`, spool E loaded. Both are
 Core One Ls on one simulation, so `w.advance()` and `w.run_until()` move both.
-
-X12 was removed. X15 is a config error, covered by the unit test
-`test_config_rejects_bad_printer_lists`: the checks run while the TOML file is read.
 """
 
 from __future__ import annotations
