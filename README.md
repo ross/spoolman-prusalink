@@ -81,8 +81,8 @@ that user. If you run it as another user, with `user:` in Compose or
 `--user`, make `/data` writable by that user instead. Docker copies the
 image's `/data`, owned by UID 1000, into an empty named volume, so check the
 owner again whenever you empty the volume. Otherwise the bridge exits with
-`Permission denied: '/data/bridge.db.lock'`. Run only one bridge per printer: two would charge the same usage
-twice. Run only one bridge per Spoolman, too: flags, claims and evictions
+`Permission denied: '/data/bridge.db.lock'`. Run only one bridge per
+printer: two would charge the same usage twice. Run only one bridge per Spoolman, too: flags, claims and evictions
 are keyed by spool, and a spool moves between printers, so two bridges would
 overwrite each other's flags. One bridge serves every printer (see [Several
 printers](#several-printers)).
