@@ -83,6 +83,29 @@ are keyed by spool, and a spool moves between printers, so two bridges would
 overwrite each other's flags. One bridge serves every printer (see [Several
 printers](#several-printers)).
 
+To run the container as another user, with `user:` in Compose or `--user`,
+`/data` must be writable by that user. Each time Docker creates a container
+on an empty named volume, it resets the volume's owner to the image's UID
+1000, so a `chown` on an empty volume doesn't last, and the bridge exits
+with `Permission denied: '/data/bridge.db.lock'`. Set the owner and leave a
+file in the volume, so later containers keep it. Replace `UID:GID` with the
+user the bridge runs as:
+
+```sh
+docker run --rm -u 0 -v spoolman-prusalink-data:/data --entrypoint sh \
+  spoolman-prusalink -c 'chown UID:GID /data && touch /data/.keep'
+```
+
+With Compose, run it through the service, so it uses the service's own
+volume and image:
+
+```sh
+docker compose run --rm --no-deps -u 0 --entrypoint sh spoolman-prusalink \
+  -c 'chown UID:GID /data && touch /data/.keep'
+```
+
+Do this again whenever you empty the volume.
+
 For multi-tool printers and the other settings, mount a config file based on
 `config.example.toml` at `/config/config.toml`. `PRUSALINK_URL`,
 `PRUSALINK_API_KEY`, `SPOOLMAN_URL` and `SPOOLMAN_PRUSALINK_DRY_RUN` override
