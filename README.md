@@ -84,8 +84,8 @@ owner again whenever you empty the volume. Otherwise the bridge exits with
 `Permission denied: '/data/bridge.db.lock'`. Run only one bridge per
 printer: two would charge the same usage twice. Run only one bridge per
 Spoolman, too: flags, claims and evictions are keyed by spool, and a spool
-moves between printers, so two bridges would overwrite each other's flags. One bridge serves every printer (see [Several
-printers](#several-printers)).
+moves between printers, so two bridges would overwrite each other's flags.
+One bridge serves every printer (see [Several printers](#several-printers)).
 
 For multi-tool printers and the other settings, mount a config file based on
 `config.example.toml` at `/config/config.toml`. `PRUSALINK_URL`,
