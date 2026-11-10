@@ -35,6 +35,7 @@ from simulator.model import (
 from simulator.prusalink import make_app
 from spoolman_prusalink.app import Bridge
 from spoolman_prusalink.config import Config, PrinterConfig
+from spoolman_prusalink.db import read_ledger
 
 # Short phases keep a scenario to a few hundred ticks. None is zero, so every phase
 # still takes at least one tick and the bridge can see it if a test polls there.
@@ -247,10 +248,7 @@ def count(caplog: pytest.LogCaptureFixture, level: int, text: str) -> int:
 
 
 def ledger(cfg: Config) -> list[dict]:
-    path = Path(cfg.ledger_file)
-    if not path.exists():
-        return []
-    return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+    return read_ledger(cfg.db_file)
 
 
 def events(records: list[dict], kind: str | None = None) -> list[dict]:
@@ -305,9 +303,9 @@ class World:
     bridges: list[Bridge] = field(default_factory=list)
 
     async def restart(self, **config) -> None:
-        """Stop the bridge and start a new one on the same state file, with `config` changed.
+        """Stop the bridge and start a new one on the same database, with `config` changed.
 
-        The bridge's restart (B2), a lost state file (B4) and a dry run (B6) are tested
+        The bridge's restart (B2), a lost database (B4) and a dry run (B6) are tested
         this way; the new bridge runs on the simulator's clock like the first.
         """
         await self.bridge.aclose()
@@ -554,8 +552,7 @@ async def world(
             ),
             *(other[-1] for other in others),
         ),
-        state_file=tmp_path / "state.json",
-        ledger_file=tmp_path / "ledger.jsonl",
+        db_file=tmp_path / "bridge.db",
         dry_run=False,
         **world_config,
     )

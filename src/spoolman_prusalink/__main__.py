@@ -11,6 +11,7 @@ import sys
 
 from . import config as config_mod
 from .app import Bridge
+from .db import DatabaseError
 
 DEFAULT_CONFIG = "/config/config.toml"
 
@@ -51,8 +52,8 @@ def main(argv: list[str] | None = None) -> int:
 async def _run(cfg: config_mod.Config, *, once: bool) -> int:
     try:
         bridge = Bridge.from_config(cfg)
-    except ValueError as e:  # An unreadable state file.
-        logging.error("state: %s", e)
+    except (DatabaseError, OSError) as e:  # Locked, unreadable, or can't be created.
+        logging.error("database: %s", e)
         return 2
     try:
         if once:

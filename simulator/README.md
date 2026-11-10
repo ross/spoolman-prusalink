@@ -37,8 +37,7 @@ and `[bridge]` tables to it, with short poll intervals, and run the bridge:
 url = "http://127.0.0.1:7912"
 
 [bridge]
-state_file = "/tmp/sim-state.json"
-ledger_file = "/tmp/sim-ledger.jsonl"
+db_file = "/tmp/sim-bridge.db"
 poll_printing = 2
 poll_idle = 3
 dry_run = false

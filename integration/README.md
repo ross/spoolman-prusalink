@@ -146,7 +146,6 @@ current and that the scenario rows name their tests.
 | X9 | `test_printers.py::test_x9_spoolman_unreachable` | Spoolman down: printers still read; both printers' charges queue in one outbox, in order. |
 | X10 | `test_printers.py::test_x10_firmware_without_the_filament_endpoint` | A's firmware lacks the filament endpoint: logged once, nothing charged, B unaffected. |
 | X11 | `test_printers.py::test_x11_charge_rejected_with_404` | A 404 on a charge is held for the record's printer and tool, not the other printer's. |
-| X13 | `test_printers.py::test_x13_version_2_state_with_two_printers` | A version 2 state file with two printers configured: refused until one printer saves v3. |
 | X14 | `test_printers.py::test_x14_printer_renamed` | A printer renamed: its old state kept but inert, with a warning; the new name baselines. |
 | X16 | `test_printers.py::test_x16_runout_flag_clears_when_active_elsewhere` | A runout flag set on A clears when the spool becomes active in B after another spool. |
 | T1 | `test_tools.py::test_t1_tool_changes_charge_each_tool` | Tool change: each tool's spool gets its own moves; the pickup purge goes to the new tool. |
@@ -167,7 +166,7 @@ current and that the scenario rows name their tests.
 | C9 | `test_counters.py::test_c9_printer_answers_with_an_error` | Printer answers 401 then 500: each logged once, nothing charged, then caught up. |
 | B1 | `test_bridge.py::test_b1_first_start` | First start: the counter is the baseline, and use before it isn't charged. |
 | B2 | `test_bridge.py::test_b2_restart_mid_print` | Restart mid-print: one catch-up charge, with no double charge and no loss. |
-| B4 | `test_bridge.py::test_b4_state_file_lost` | `state.json` lost: a new baseline, use since the last poll lost, the swap forgotten. |
+| B4 | `test_bridge.py::test_b4_database_lost` | The database lost: a new baseline, use since the last poll lost, the swap forgotten. |
 | B6 | `test_bridge.py::test_b6_dry_run_then_live` | Dry run: charges only logged and recorded, then a live run catches up from its state. |
 <!-- table:end -->
 
@@ -186,9 +185,10 @@ current and that the scenario rows name their tests.
    `w.move()` for Spoolman, then `w.advance()` or `w.run_until()` to let time
    pass and `w.poll()` to run the bridge once.
 4. Assert on what the bridge left behind: ledger records from `w.poll()` or
-   `w.since(mark)` (filter them with `events()` and `charges()`), spools in
-   Spoolman (`w.used()`, `w.flag()`, `w.spoolman.extra()`), and the printer
-   (`w.material()`, `w.requests()`, `w.sim.events`).
+   `w.since(mark)`, which read the database's `ledger` table (filter them with
+   `events()` and `charges()`), spools in Spoolman (`w.used()`, `w.flag()`,
+   `w.spoolman.extra()`), and the printer (`w.material()`, `w.requests()`,
+   `w.sim.events`).
 5. Set the row's Status in `docs/scenarios.md` to end to end, naming the test,
    and run `python -m integration.table --write`.
    `pytest tests/test_integration_table.py` checks all three.

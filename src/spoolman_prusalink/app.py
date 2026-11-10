@@ -8,7 +8,7 @@ import logging
 import re
 import time
 import uuid
-from collections.abc import Callable, Hashable
+from collections.abc import Callable, Hashable, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 
@@ -25,10 +25,11 @@ from .accounting import (
     hold_deleted,
 )
 from .config import Config, PrinterConfig
+from .db import Database
 from .models import FilamentReading, Material, Spool
 from .prusalink import BUSY_STATES, IDLE_STATES, NoFilamentEndpoint, PrinterStatus, PrusaLink
 from .spoolman import Spoolman
-from .state import PrinterState, Runout, State, append_ledger, load_state, save_state
+from .state import PrinterState, Runout, State
 
 log = logging.getLogger("spoolman_prusalink")
 
@@ -157,7 +158,7 @@ class PrinterBridge:
     """One printer's side of the bridge: read it, account its tools, and write to it.
 
     Everything keyed by spool rather than by tool lives on `Bridge`, which this reaches
-    through `bridge`: the Spoolman client, the state file, flags, and the problem log.
+    through `bridge`: the Spoolman client, the saved state, flags, and the problem log.
     """
 
     config: PrinterConfig
@@ -191,7 +192,7 @@ class PrinterBridge:
     # the spool recorded may have been wrong. After a runout in a print the bridge
     # didn't see start, it's still the old spool's, left on the tool. Recorded
     # whenever the model reports UUIDs, whatever the UUID settings. The UUID, spool and
-    # runout are saved in the state file (`PrinterState.seen_uuids`), restored as not
+    # runout are saved in the database (`PrinterState.seen_uuids`), restored as not
     # appeared: a different UUID after a restart counts as appearing, but with nothing
     # saved, a tag already loaded isn't trusted.
     _seen_uuid: dict[int, tuple[str, int | None, bool, bool]] = field(default_factory=dict)
@@ -414,8 +415,8 @@ class PrinterBridge:
         """Account one poll and persist the result.
 
         In dry-run mode, charges go straight to the ledger and the state isn't saved.
-        Otherwise they go to the outbox, saved in the same write as the new counters, for
-        `flush()` to send. Returns the charge and event records.
+        Otherwise they go to the outbox for `flush()` to send, saved in one transaction
+        with the events and the new counters. Returns the charge and event records.
 
         `claims` is this printer's share of `Bridge._claims()`, by tool. Flags for spools
         are added to `flags`, which the bridge completes and writes after every printer.
@@ -612,11 +613,10 @@ class PrinterBridge:
             self._notes(tool, notes)
 
         if dry:
-            append_ledger(self.bridge.config.ledger_file, events + charges)
+            self.bridge._save(events + charges)
         else:
-            append_ledger(self.bridge.config.ledger_file, events)
             self.bridge.state.outbox.extend(charges)
-        self.bridge._save()
+            self.bridge._save(events)
         return events + charges
 
     def _no_write(self, tool: int, st: ToolState) -> None:
@@ -1138,6 +1138,8 @@ class Bridge:
     spoolman: Spoolman
     clients: dict[str, PrusaLink]  # By printer name.
     state: State = field(default_factory=State)
+    # Where the state and the ledger are saved; None saves them nowhere. Closed by `aclose`.
+    db: Database | None = None
     printers: list[PrinterBridge] = field(init=False, default_factory=list)
     _ready_fields: set[str] = field(default_factory=set)
     _flags: dict[int, str] = field(default_factory=dict)  # Desired flags from the last poll.
@@ -1169,7 +1171,7 @@ class Bridge:
         for name in sorted(self.state.printers.keys() - {p.name for p in self.printers}):
             # Kept, not dropped: it can hold usage for a deleted spool or spools to evict.
             log.warning(
-                "the state file has a printer %r that isn't configured; keeping its state",
+                "the database has a printer %r that isn't configured; keeping its state",
                 name,
             )
 
@@ -1178,6 +1180,11 @@ class Bridge:
 
     @classmethod
     def from_config(cls, config: Config) -> Bridge:
+        """A bridge on the configured printers, Spoolman and database.
+
+        It locks the database until `aclose`, and creates it if it's missing.
+        """
+        db = Database.open(config.db_file)
         return cls(
             config=config,
             clients={p.name: PrusaLink(p.url, p.api_key) for p in config.printers},
@@ -1187,23 +1194,32 @@ class Bridge:
                 flag_field=None if config.dry_run else config.flag_field,
                 claim_field=config.claim_field,
             ),
-            state=load_state(config.state_file, [p.name for p in config.printers]),
+            state=db.load(),
+            db=db,
         )
 
-    def _save(self) -> None:
-        """Save the state, except in dry run.
+    def _save(self, ledger: Sequence[dict] = ()) -> None:
+        """Save the state and append the `ledger` records, in one transaction.
 
-        Dry run keeps its accounting in memory only, as if the bridge were stopped: the
-        next live run starts from the last live state and charges everything since, as
-        after an outage.
+        Dry run saves only the records. It keeps its accounting in memory, as if the
+        bridge were stopped: the next live run starts from the last live state and
+        charges everything since, as after an outage.
         """
-        if not self.config.dry_run:
-            save_state(self.config.state_file, self.state)
+        if self.db is None:
+            return
+        if self.config.dry_run:
+            self.db.save_ledger(ledger)
+        else:
+            self.db.save(self.state, ledger)
 
     async def aclose(self) -> None:
-        for client in self.clients.values():
-            await client.aclose()
-        await self.spoolman.aclose()
+        try:
+            for client in self.clients.values():
+                await client.aclose()
+            await self.spoolman.aclose()
+        finally:
+            if self.db is not None:
+                self.db.close()
 
     async def poll(self) -> None:
         """Poll every printer once, then reconcile Spoolman.
@@ -1508,8 +1524,7 @@ class Bridge:
                 )
                 return False
             outbox.pop(0)
-            self._save()
-            append_ledger(self.config.ledger_file, [rec])
+            self._save([rec])  # One transaction, so the record can't be lost.
         self._problems.clear("charge", "%s", _outbox_outcome(sent, held, dropped))
         return True
 

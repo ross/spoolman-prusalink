@@ -14,6 +14,7 @@ import pytest
 
 from integration.conftest import ASA, LOAD_MM, PETG, World, charges, events, print_spec
 from simulator.model import State
+from spoolman_prusalink.db import read_state
 
 
 def dry(records: list[dict]) -> list[dict]:
@@ -68,8 +69,8 @@ async def test_b2_restart_mid_print(world: World):
     assert round(await w.used("A"), 2) == grams
 
 
-async def test_b4_state_file_lost(world: World):
-    """`state.json` lost: a new baseline, use since the last poll lost, the swap forgotten."""
+async def test_b4_database_lost(world: World):
+    """The database lost: a new baseline, use since the last poll lost, the swap forgotten."""
     w = world
     a = w.spools["A"]
     await w.poll()
@@ -81,9 +82,12 @@ async def test_b4_state_file_lost(world: World):
     flag = await w.flag("A")
     assert flag is not None and "unloaded" in flag
 
-    # The load after the unload isn't polled before the state file goes.
+    # The load after the unload isn't polled before the database goes.
     await w.swap_cycle(source="tag", name=PETG[0], color=PETG[1], uuid=str(uuid.uuid4()))
-    Path(w.cfg.state_file).unlink()
+    await w.bridge.aclose()
+    lost = w.since(0)  # The ledger goes with the database.
+    for suffix in ("", "-wal", "-shm"):
+        Path(f"{w.cfg.db_file}{suffix}").unlink(missing_ok=True)
     await w.restart()
     records = await w.poll()
     assert [e["message"] for e in events(records)] == [f"baseline extruded={w.counter} spool={a}"]
@@ -96,7 +100,7 @@ async def test_b4_state_file_lost(world: World):
     records = await w.poll()
     assert [e["event"] for e in events(records)] == ["swap_staged"]
     assert charges(records) == []
-    assert w.charged(w.since(0), "A") == 20
+    assert w.charged(lost + w.since(0), "A") == 20
     assert await w.used("B") == 0
     # With the swap forgotten, B's tag on the printer is drift on A, the active spool: its
     # UUID isn't A's. The tag's name and color aren't compared, since it isn't written.
@@ -113,7 +117,7 @@ async def test_b6_dry_run_then_live(world: World, caplog: pytest.LogCaptureFixtu
     w.printer.extrude(0, 10)
     records = await w.poll()
     assert w.charged(records, "A") == 10
-    state = Path(w.cfg.state_file).read_bytes()
+    state = read_state(w.cfg.db_file)
     used = await w.used("A")
     puts = len(w.requests("PUT"))
 
@@ -152,13 +156,13 @@ async def test_b6_dry_run_then_live(world: World, caplog: pytest.LogCaptureFixtu
     ]
     assert any("WOULD CHARGE" in r.getMessage() for r in caplog.records)
     assert any("WOULD RUN" in r.getMessage() for r in caplog.records)
-    # Nothing changed in Spoolman, on the printer or in the state file.
+    # Nothing changed in Spoolman, on the printer or in the database.
     assert await w.used("A") == used
     assert await w.used("C") == 0
     assert await w.flag("A") is None
     assert await w.spoolman.extra(c, "instance_uuid") is None
     assert len(w.requests("PUT")) == puts
-    assert Path(w.cfg.state_file).read_bytes() == state
+    assert read_state(w.cfg.db_file) == state
 
     # Live again: everything since the last live state, as after an outage, in one poll.
     await w.restart(dry_run=False)

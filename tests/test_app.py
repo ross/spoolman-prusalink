@@ -1,5 +1,6 @@
 import json
 import re
+import sqlite3
 from dataclasses import replace
 
 import httpx
@@ -10,10 +11,11 @@ from spoolman_prusalink.__main__ import main
 from spoolman_prusalink.accounting import Provisional, SwapFlag, ToolState
 from spoolman_prusalink.app import Bridge
 from spoolman_prusalink.config import Config, ConfigError, PrinterConfig, load
+from spoolman_prusalink.db import Database, read_ledger, read_state
 from spoolman_prusalink.models import Material
 from spoolman_prusalink.prusalink import PrusaLink, parse_filament
 from spoolman_prusalink.spoolman import Spoolman, parse_spool
-from spoolman_prusalink.state import PrinterState, State, load_state, save_state
+from spoolman_prusalink.state import PrinterState, State
 
 FILAMENT = {
     "boot_id": 3308742886,
@@ -144,8 +146,7 @@ def make_config(tmp_path, **kw):
     return Config(
         spoolman_url="http://spoolman",
         printers=(printer,),
-        state_file=tmp_path / "state.json",
-        ledger_file=tmp_path / "ledger.jsonl",
+        db_file=tmp_path / "bridge.db",
         **kw,
     )
 
@@ -168,10 +169,13 @@ def make_bridge(tmp_path, filament, spools):
 
     transport = httpx.MockTransport(handler)
     cfg = make_config(tmp_path)
+    db = Database.open(cfg.db_file)
     return Bridge(
         config=cfg,
         spoolman=Spoolman(cfg.spoolman_url, uuid_field="instance_uuid", transport=transport),
         clients={"default": PrusaLink(cfg.printers[0].url, "k", transport=transport)},
+        state=db.load(),
+        db=db,
     )
 
 
@@ -194,13 +198,13 @@ async def test_poll_logs_would_charge_and_saves_nothing(tmp_path, caplog):
     assert "[Core One L+] WOULD CHARGE spool 7" in caplog.text
     assert "≈ +2.98 g" in caplog.text
 
-    ledger = [json.loads(line) for line in (tmp_path / "ledger.jsonl").read_text().splitlines()]
+    ledger = read_ledger(tmp_path / "bridge.db")
     charges = [r for r in ledger if "use_length" in r]
     assert [(r["spool_id"], r["use_length"]) for r in charges] == [(7, 1000)]
     assert any("event" in r for r in ledger)
     assert all(r["dry_run"] is True for r in ledger)  # Events too, not just charges.
     assert bridge.printers[0].tools[0].charged == 5310
-    assert not (tmp_path / "state.json").exists()  # Dry run saves nothing.
+    assert read_state(tmp_path / "bridge.db") == State()  # Dry run saves only the ledger.
     assert bridge.interval() == bridge.config.poll_printing
     await bridge.aclose()
 
@@ -238,7 +242,7 @@ async def test_printer_error_skips_poll(tmp_path, caplog):
     )
     await bridge.poll()
     assert "printer read failed" in caplog.text
-    assert not (tmp_path / "state.json").exists()
+    assert not (tmp_path / "bridge.db").exists()
     await bridge.aclose()
 
 
@@ -275,17 +279,6 @@ async def test_printer_outage_logged_on_change(tmp_path, caplog):
     assert "printer reachable again after 3h 00m" in caplog.text
     assert not bridge.printers[0]._printer_outage.down
     await bridge.aclose()
-
-
-def test_save_state_skips_unchanged(tmp_path):
-    path = tmp_path / "state.json"
-    state = State(printers={"default": PrinterState({0: ToolState(boot_id=1, charged=100)})})
-    assert save_state(path, state)
-    assert not save_state(path, state)
-    tools = state.tools("default")
-    tools[0] = replace(tools[0], charged=150)
-    assert save_state(path, state)
-    assert load_state(path, ["default"]).tools("default")[0].charged == 150
 
 
 def test_config_load(tmp_path):
@@ -357,8 +350,7 @@ CONFIG_BASE = (
         ("[bridge]\nuuid_field = 5\n", "bridge.uuid_field must be a string"),
         ("[bridge]\nflag_field = true\n", "bridge.flag_field must be a string"),
         ('[bridge]\nclaim_field = ["a"]\n', "bridge.claim_field must be a string"),
-        ("[bridge]\nstate_file = 5\n", "bridge.state_file must be a string"),
-        ("[bridge]\nledger_file = 5\n", "bridge.ledger_file must be a string"),
+        ("[bridge]\ndb_file = 5\n", "bridge.db_file must be a string"),
         ("[bridge]\neviction_location = 5\n", "bridge.eviction_location must be a string"),
         ("[printer]\nsync_storage = 5\n", "printer.sync_storage must be a string"),
         ("[printer]\nsync_file = 5\n", "printer.sync_file must be a string"),
@@ -466,8 +458,7 @@ async def test_length_factor_scales_charges(tmp_path):
     await bridge.poll()
     extruded["v"] = 2000
     await bridge.poll()
-    ledger = [json.loads(x) for x in (tmp_path / "ledger.jsonl").read_text().splitlines()]
-    charge = next(r for r in ledger if "use_length" in r)
+    charge = next(r for r in read_ledger(tmp_path / "bridge.db") if "use_length" in r)
     assert (charge["extruded_mm"], charge["use_length"]) == (1000, 1050.0)
     await bridge.aclose()
 
@@ -484,7 +475,7 @@ def test_config_from_environment_only():
         },
     )
     assert cfg.printers[0].tools == {0: "Core One L+"} and cfg.dry_run is False
-    assert cfg.state_file.as_posix() == "/data/state.json"
+    assert cfg.db_file.as_posix() == "/data/bridge.db"
     with pytest.raises(ConfigError, match="SPOOLMAN_PRUSALINK_LOCATION"):
         load(None, env={"PRUSALINK_URL": "p", "PRUSALINK_API_KEY": "k", "SPOOLMAN_URL": "s"})
     with pytest.raises(ConfigError, match="true or false"):
@@ -668,64 +659,29 @@ def test_config_single_printer_takes_a_name_and_api_key_env(tmp_path):
         load(p, env={"PRUSALINK_API_KEY": "k"})
 
 
-V2_STATE = {
-    "version": 2,
-    "tools": {"0": ToolState(boot_id=1, charged=100, active=7, assigned=7).to_json()},
-    "outbox": [{"tool": 0, "spool_id": 7, "use_length": 50.0, "extruded_mm": 50}],
-    "flagged": [7],
-    "noticed": [],
-    "runouts": {},
-    "claimed": [],
-}
-
-
-def test_state_v2_migrates_to_the_only_printer(tmp_path):
-    path = tmp_path / "state.json"
-    runouts = {"8": "old text form", "9": {"text": "with weights", "net": 1000.0, "used": 10.0}}
-    path.write_text(json.dumps({**V2_STATE, "runouts": runouts}))
-    state = load_state(path, ["core"])
-    assert list(state.printers) == ["core"]
-    assert state.tools("core")[0].active == 7
-    # Outbox records and runouts are stamped: flush() finds the record's tool by it.
-    assert [r["printer"] for r in state.outbox] == ["core"]
-    assert {k: r.printer for k, r in state.runouts.items()} == {8: "core", 9: "core"}
-    assert (state.runouts[8].text, state.runouts[9].net) == ("old text form", 1000.0)
-    assert state.flagged == [7]
-    assert save_state(path, state)
-    saved = json.loads(path.read_text())
-    assert saved["version"] == 3 and "tools" not in saved
-    assert saved["printers"]["core"]["tools"]["0"]["active"] == 7
-    assert load_state(path, ["core"]) == state
-
-
-def test_state_v2_is_refused_with_several_printers(tmp_path):
-    path = tmp_path / "state.json"
-    path.write_text(json.dumps(V2_STATE))
-    with pytest.raises(ValueError, match="single-printer bridge.*2 printers configured"):
-        load_state(path, ["core", "mk4s"])
-    path.write_text(json.dumps({**V2_STATE, "version": 1}))
-    with pytest.raises(ValueError, match="unsupported state version 1"):
-        load_state(path, ["core"])
-
-
-def test_main_exits_2_on_a_state_file_it_cannot_migrate(tmp_path, monkeypatch, caplog):
-    state = tmp_path / "state.json"
-    state.write_text(json.dumps(V2_STATE))
+def test_main_exits_2_on_a_database_it_cannot_load(tmp_path, monkeypatch, caplog):
+    db = tmp_path / "bridge.db"
+    Database.open(db).close()
+    conn = sqlite3.connect(db)
+    with conn:
+        conn.execute("UPDATE meta SET value = '0' WHERE key = 'schema_version'")
+    conn.close()
     p = tmp_path / "c.toml"
-    p.write_text(PRINTERS_BASE + f'[bridge]\nstate_file = "{state}"\n')
-    monkeypatch.setenv("CORE_KEY", "ka")
-    assert main(["-c", str(p), "once"]) == 2
-    assert "state: " in caplog.text and "single-printer bridge" in caplog.text
-
-
-def test_main_exits_2_on_a_state_file_it_cannot_load(tmp_path, monkeypatch, caplog):
-    state = tmp_path / "state.json"
-    state.write_text(json.dumps({**V2_STATE, "version": 1}))
-    p = tmp_path / "c.toml"
-    p.write_text(CONFIG_BASE + f'[bridge]\nstate_file = "{state}"\n')
+    p.write_text(CONFIG_BASE + f'[bridge]\ndb_file = "{db}"\n')
     monkeypatch.setenv("PRUSALINK_API_KEY", "k")
     assert main(["-c", str(p), "once"]) == 2
-    assert "state: " in caplog.text and "unsupported state version 1" in caplog.text
+    assert "database: " in caplog.text and "unsupported schema version '0'" in caplog.text
+
+
+def test_main_exits_2_while_another_bridge_holds_the_database(tmp_path, monkeypatch, caplog):
+    db = tmp_path / "bridge.db"
+    p = tmp_path / "c.toml"
+    p.write_text(CONFIG_BASE + f'[bridge]\ndb_file = "{db}"\n')
+    monkeypatch.setenv("PRUSALINK_API_KEY", "k")
+    running = Database.open(db)
+    assert main(["-c", str(p), "once"]) == 2  # Dry run too.
+    assert f"database: {db}.lock is locked" in caplog.text
+    running.close()
 
 
 def test_bridge_keeps_and_warns_about_an_unconfigured_printer(tmp_path, caplog):
@@ -995,13 +951,6 @@ async def test_tag_differences(printer, material, active, spools, want):
     assert printer._tag_differences(material, active, [active, *spools]) == want
 
 
-def test_seen_uuids_keep_the_unload_and_load_old_files_as_not_unloaded():
-    kept = PrinterState(seen_uuids={0: (TAG, 7, True)})
-    assert PrinterState.from_json(kept.to_json()).seen_uuids == {0: (TAG, 7, True)}
-    old = {"tools": {}, "flags": {}, "seen_uuids": {"0": [TAG, 7]}}
-    assert PrinterState.from_json(old).seen_uuids == {0: (TAG, 7, False)}
-
-
 async def test_unload_outside_a_print_makes_the_tags_spool_unknown(printer):
     """Only a runout reload keeps a type: after any other unload the tag isn't a leftover,
     and it isn't trusted either, since the spool it was seen with may have been wrong."""
@@ -1023,8 +972,3 @@ async def test_unload_outside_a_print_makes_the_tags_spool_unknown(printer):
         "adopt",
         other,
     )
-
-
-def test_seen_uuids_keep_an_unknown_spool():
-    kept = PrinterState(seen_uuids={0: (TAG, None, False)})
-    assert PrinterState.from_json(kept.to_json()).seen_uuids == {0: (TAG, None, False)}

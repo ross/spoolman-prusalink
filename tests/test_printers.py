@@ -4,7 +4,8 @@ import httpx
 from test_writes import CLAIMED, jobs, ledger, restart, spool, two_printers
 
 from spoolman_prusalink.accounting import ToolState
-from spoolman_prusalink.state import Runout, load_state
+from spoolman_prusalink.db import read_state
+from spoolman_prusalink.state import Runout
 
 A, B = "Tool a", "Tool b"
 
@@ -339,7 +340,7 @@ async def test_x9_spoolman_down_queues_both_printers_charges_in_order(tmp_path):
     fake.down = False
     fake.fail_use = [503]  # The first retry fails, so the queue is saved with both.
     await bridge.poll()
-    queued = load_state(tmp_path / "state.json", ["a", "b"]).outbox
+    queued = read_state(tmp_path / "bridge.db").outbox
     assert [(r["printer"], r["spool_id"]) for r in queued] == [("a", 19), ("b", 20)]
     await bridge.poll()
     assert fake.used == {19: [100.0, 10.0], 20: [100.0, 20.0]}
@@ -362,20 +363,6 @@ async def test_x10_unsupported_firmware_on_one_printer(tmp_path, caplog):
     await bridge.poll()
     assert "printer a now reports filament; resuming" in caplog.text
     await bridge.aclose()
-
-
-async def test_x13_two_printers_refuse_a_single_printer_state(tmp_path):
-    bridge, fake, printers = two_printers(tmp_path, [spool(19, A)])
-    await bridge.poll()
-    await bridge.aclose()
-    path = tmp_path / "state.json"
-    path.write_text(path.read_text().replace('"version": 3', '"version": 2'))
-    try:
-        load_state(path, ["a", "b"])
-    except ValueError as e:
-        assert "2 printers configured" in str(e)
-    else:
-        raise AssertionError("a version 2 state loaded with two printers")
 
 
 async def test_read_failures_name_the_printer(tmp_path, caplog):

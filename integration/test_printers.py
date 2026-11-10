@@ -7,7 +7,6 @@ Core One Ls on one simulation, so `w.advance()` and `w.run_until()` move both.
 
 from __future__ import annotations
 
-import json
 import logging
 from dataclasses import replace
 
@@ -28,6 +27,7 @@ from integration.conftest import (
 )
 from integration.printers import printer_of
 from spoolman_prusalink.app import Bridge
+from spoolman_prusalink.db import read_state
 
 pytestmark = pytest.mark.parametrize("world_printers", [2], indirect=True)
 
@@ -632,44 +632,6 @@ async def test_x11_charge_rejected_with_404(world: World, caplog: pytest.LogCapt
     assert (it.state.active, it.state.deleted_spool, it.state.held_mm) == (c, None, 0)
 
 
-async def test_x13_version_2_state_with_two_printers(world: World):
-    """A version 2 state file with two printers configured: refused until one printer saves v3."""
-    w = world
-    it, b = w.at(IT), w.at(B)
-    a, e = w.spools["A"], w.spools["E"]
-    await baseline(w)
-    it.extrude(10)
-    await w.poll()
-    await w.bridge.aclose()
-
-    # Rewrite the file as a single-printer bridge left it: version 2, the tools of it at the top.
-    path = w.cfg.state_file
-    data = json.loads(path.read_text())
-    v2 = {k: v for k, v in data.items() if k != "printers"}
-    v2.update(version=2, tools=data["printers"][IT]["tools"])
-    path.write_text(json.dumps(v2))
-    with pytest.raises(ValueError, match="2 printers configured") as refused:
-        Bridge.from_config(w.cfg)
-    assert str(path) in str(refused.value)
-    assert "is from a single-printer bridge" in str(refused.value)
-
-    # Configure it alone and poll once: it carries on from its state and saves version 3.
-    bridge_for(w, replace(w.cfg, printers=w.cfg.printers[:1]))
-    it.extrude(5)
-    records = await w.poll()
-    assert events(records) == [] and charged(records, a) == 5
-    assert json.loads(path.read_text())["version"] == 3
-    await w.bridge.aclose()
-
-    # Then add b: it starts from a baseline, and it carries on.
-    bridge_for(w, w.cfg)
-    it.extrude(7)
-    b.extrude(9)
-    records = await w.poll()
-    assert kinds(records) == [(B, "baseline")]
-    assert charged(records, a) == 7 and charges(records, e) == []
-
-
 async def test_x14_printer_renamed(world: World, caplog: pytest.LogCaptureFixture):
     """A printer renamed: its old state kept but inert, with a warning; the new name baselines."""
     caplog.set_level(logging.INFO, logger="spoolman_prusalink")
@@ -698,7 +660,7 @@ async def test_x14_printer_renamed(world: World, caplog: pytest.LogCaptureFixtur
     resp = await w.spoolman.client.delete(f"/api/v1/spool/{c}")
     resp.raise_for_status()
     renamed = replace(w.cfg, printers=(replace(w.cfg.printers[0], name="it2"), w.cfg.printers[1]))
-    warning = "the state file has a printer 'it' that isn't configured; keeping its state"
+    warning = "the database has a printer 'it' that isn't configured; keeping its state"
     bridge_for(w, renamed)
     assert count(caplog, warning) == 1
     records = await w.poll()
@@ -710,10 +672,10 @@ async def test_x14_printer_renamed(world: World, caplog: pytest.LogCaptureFixtur
         (IT, c, "404", None)
     ]
     assert logged(caplog, logging.ERROR, f"Spoolman rejected a +{LOAD_MM} mm charge to spool {c}")
-    # The old name's eviction never runs, and its state stays in the file.
+    # The old name's eviction never runs, and its state stays in the database.
     assert await w.spoolman.location(a) == it.location
-    saved = json.loads(w.cfg.state_file.read_text())["printers"]
-    assert saved[IT]["tools"]["0"]["evict"] == [a]
+    saved = read_state(w.cfg.db_file).printers
+    assert saved[IT].tools[0].evict == (a,)
     assert set(saved) == {IT, "it2", B}
     await w.bridge.aclose()
 
