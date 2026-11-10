@@ -412,8 +412,8 @@ The `/data` volume holds these files:
   Keep it across restarts: without it, the bridge takes a new baseline, drops
   queued charges, loses track of open swaps, and starts a new ledger. SQLite
   keeps `bridge.db-wal` and `bridge.db-shm` beside it while it's open; keep
-  them with it. You can read it with the `sqlite3` command-line tool while the
-  bridge runs. A database with a schema version this bridge doesn't know stops
+  them with it. You can read it with the `sqlite3` command-line tool, which
+  the image includes, while the bridge runs. A database with a schema version this bridge doesn't know stops
   it at startup.
 - `bridge.db.lock` is held by the running bridge. A second bridge on the same
   database refuses to start and names the lock file. Run only one bridge per
