@@ -96,6 +96,14 @@ docker run --rm -u 0 -v spoolman-prusalink-data:/data --entrypoint sh \
   spoolman-prusalink -c 'chown UID:GID /data && touch /data/.keep'
 ```
 
+With Compose, run it through the service, so it uses the service's own
+volume and image:
+
+```sh
+docker compose run --rm --no-deps -u 0 --entrypoint sh spoolman-prusalink \
+  -c 'chown UID:GID /data && touch /data/.keep'
+```
+
 Do this again whenever you empty the volume.
 
 For multi-tool printers and the other settings, mount a config file based on
