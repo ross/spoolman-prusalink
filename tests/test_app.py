@@ -1132,3 +1132,42 @@ async def test_from_config_opens_the_database_and_builds_the_clients(tmp_path):
     finally:
         await bridge.aclose()
     Database.open(cfg.db_file).close()
+
+
+async def test_bridge_without_a_database_charges_and_saves_nothing(tmp_path):
+    extruded, used = {"v": 4310}, []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path == "/api/v1/filament":
+            data = json.loads(json.dumps(FILAMENT))
+            data["tools"][0]["extruded"] = extruded["v"]
+            return httpx.Response(200, json=data)
+        if path == "/api/v1/spool":
+            return httpx.Response(200, json=[spool_json(7, "Core One L+")])
+        if path == "/api/version":
+            return httpx.Response(200, json={"printer": "8.1.0"})
+        if path == "/api/v1/job":
+            return httpx.Response(204)
+        if path == "/api/v1/status":
+            return httpx.Response(200, json={"printer": {"state": "PRINTING"}})
+        if request.method == "PUT" and path == "/api/v1/spool/7/use":
+            used.append(json.loads(request.content)["use_length"])
+            return httpx.Response(200, json={})
+        raise AssertionError(f"unexpected {request.method} {request.url}")
+
+    cfg = make_config(tmp_path, dry_run=False, flag_field=None, claim_field=None)
+    transport = httpx.MockTransport(handler)
+    bridge = Bridge(
+        config=cfg,
+        spoolman=Spoolman(cfg.spoolman_url, transport=transport),
+        clients={"default": PrusaLink(cfg.printers[0].url, "k", transport=transport)},
+    )
+    assert bridge.db is None
+    await bridge.poll()  # baseline
+    extruded["v"] = 5310
+    await bridge.poll()
+    assert used == [1000]
+    assert bridge.state.outbox == []
+    assert list(tmp_path.iterdir()) == []  # Nothing saved anywhere.
+    await bridge.aclose()
