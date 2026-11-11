@@ -500,6 +500,11 @@ pytest
 That's the unit suite: the bridge's tests in `tests/` and the simulator's in
 `simulator/tests`, self-contained and quick. Run it before every change.
 
+CI runs the unit suite as `pytest --cov`, which measures branch coverage of the
+bridge and the simulator and fails below the `fail_under` floor in
+`pyproject.toml`. Run it the same way to check a change. When coverage rises,
+raise the floor to match.
+
 The end-to-end tests in `integration/` run the bridge, the simulator and a
 real Spoolman together, one scenario from `docs/scenarios.md` per test. They
 need a Spoolman to talk to and take longer, so they run only when asked:

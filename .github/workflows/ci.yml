@@ -31,7 +31,7 @@ jobs:
       - run: pip install -e '.[dev]'
       - run: ruff check .
       - run: ruff format --check .
-      - run: pytest
+      - run: pytest --cov
 
   integration:
     # The bridge, the simulator and a real Spoolman, in lockstep. See integration/README.md.
