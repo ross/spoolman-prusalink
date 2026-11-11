@@ -560,7 +560,7 @@ async def test_x10_firmware_without_the_filament_endpoint(
     it.printer.set_firmware("full")
     records = await w.poll()
     assert kinds(records) == [(IT, "baseline")]
-    assert logged(caplog, logging.INFO, "printer it now reports filament; resuming")
+    assert logged(caplog, logging.ERROR, "printer it now reports filament; resuming")
     it.extrude(5)
     assert charged(await w.poll(), a) == 5
     assert count(caplog, unsupported) == 1

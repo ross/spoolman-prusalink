@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import logging
 from dataclasses import replace
 
 import httpx
@@ -54,7 +55,8 @@ async def test_unreadable_printer_model_keeps_writes_off_and_warns_once(
 
     monkeypatch.setattr(client, "printer_type", real)
     await bridge.poll()
-    assert "printer is COREONEL (8.1.0)" in caplog.text
+    # Writes coming back on ends the warning, so it's logged at the warning's level.
+    assert levels(caplog, "printer is COREONEL (8.1.0)") == ["WARNING"]
     await bridge.poll()
     assert len(jobs(printer)) == 1
     await bridge.aclose()
@@ -86,6 +88,26 @@ async def test_sync_job_failing_without_a_status_is_logged_once_and_retried(
     assert len(jobs(printer)) == 1
     assert count(caplog, "sync job failed") == 1
     assert levels(caplog, "sync job working again") == ["WARNING"]
+    await bridge.aclose()
+
+
+async def test_sync_job_busy_and_failing_ends_with_one_line(tmp_path, caplog):
+    bridge, fake, printer = make(tmp_path, [spool(19)])
+    caplog.set_level("INFO")
+    await bridge.poll()
+    problems, name = bridge._problems, bridge.printers[0].name
+    # A 409 left the job waiting, then a later attempt failed outright.
+    problems.fail((name, "sync busy"), "409", "busy", level=logging.INFO)
+    problems.fail((name, "sync failed"), "500", "failed")
+    caplog.clear()
+    await bridge.poll()  # Nothing to write any more.
+    assert levels(caplog, "sync job no longer needed") == ["WARNING"]
+    assert problems._seen == {}
+
+    problems.fail((name, "sync busy"), "409", "busy", level=logging.INFO)
+    caplog.clear()
+    await bridge.poll()
+    assert levels(caplog, "sync job no longer needed") == ["INFO"]
     await bridge.aclose()
 
 

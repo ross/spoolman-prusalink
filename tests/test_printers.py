@@ -367,7 +367,8 @@ async def test_x10_unsupported_firmware_on_one_printer(tmp_path, caplog):
     assert bridge.interval() == bridge.config.poll_idle
     a.filament_endpoint = True
     await bridge.poll()
-    assert "printer a now reports filament; resuming" in caplog.text
+    resumed = [r.levelname for r in caplog.records if "a now reports filament" in r.getMessage()]
+    assert resumed == ["ERROR"]
     await bridge.aclose()
 
 

@@ -135,6 +135,11 @@ class Once:
             log.log(seen[1], message, *args)
         return True
 
+    def failing(self, *prefix: Hashable) -> list[tuple]:
+        """The tuple keys failing now that start with `prefix`."""
+        n = len(prefix)
+        return [k for k in self._seen if isinstance(k, tuple) and k[:n] == prefix]
+
     def done(self, key: Hashable, message: str, *args: object) -> None:
         """Log a success at INFO, or as `key`'s recovery line if it ends a problem there."""
         if not self.clear(key, message, *args):
@@ -279,7 +284,7 @@ class PrinterBridge:
         self._note_state(status.state)
         if self._unsupported:
             self._unsupported = False
-            log.info("%s now reports filament; resuming", self.label)
+            log.error("%s now reports filament; resuming", self.label)
         if self._model_boot != reading.boot_id:
             await self._check_model(reading.boot_id)
         return status._replace(job_id=job_id), reading
@@ -308,9 +313,22 @@ class PrinterBridge:
         self.bridge._archived = {
             i: s for i, s in self.bridge._archived.items() if i not in listed and i in keep
         }
+        missing = {
+            st.active
+            for st in self.tools.values()
+            if st.active is not None
+            and st.active not in listed
+            and st.active not in self.bridge._archived
+        }
+        # A spool that's listed again, or unloaded, no longer needs looking up.
+        for key in self.bridge._problems.failing(self.name, "lookup"):
+            if key[2] not in missing:
+                self.bridge._problems.clear(
+                    key, "%sspool %d no longer needs looking up", self._prefix, key[2]
+                )
         for tool, st in list(self.tools.items()):
             spool_id = st.active
-            if spool_id is None or spool_id in listed or spool_id in self.bridge._archived:
+            if spool_id not in missing:
                 continue
             location = self.config.tools.get(tool, str(tool))
             try:
@@ -382,6 +400,8 @@ class PrinterBridge:
             return
         self._model_boot = boot_id
         self._model = printer_sync.PRINTER_MODELS.get(printer_type or "")
+        # Writes were off and said so: the line saying they're back on is its recovery.
+        was_off = self._model_error is not None
         self._model_error = printer_sync.model_problem(printer_type, self.config.gcode_preamble)
         name = self._model.name if self._model else "unknown"
         if self._model_error:
@@ -393,7 +413,8 @@ class PrinterBridge:
                 self._model_error,
             )
         else:
-            log.info("%s is %s (%s)", self.label, name, printer_type)
+            level = logging.WARNING if was_off else logging.INFO
+            log.log(level, "%s is %s (%s)", self.label, name, printer_type)
 
     @property
     def _tag_reader(self) -> bool:
@@ -1064,10 +1085,15 @@ class PrinterBridge:
             # no longer due. A job that was failing or waiting on a busy printer is.
             self.bridge._problems.clear((self.name, "dry-run job"))
             self.bridge._problems.clear((self.name, "sync delay"))
-            for problem in ("sync busy", "sync failed"):
-                self.bridge._problems.clear(
-                    (self.name, problem), "%s sync job no longer needed", self.label
-                )
+            # Both can be open: one line, at the failure's level if it was failing.
+            ended = self.bridge._problems.clear(
+                (self.name, "sync failed"), "%s sync job no longer needed", self.label
+            )
+            self.bridge._problems.clear(
+                (self.name, "sync busy"),
+                None if ended else "%s sync job no longer needed",
+                self.label,
+            )
             return
         delay = self.bridge.config.sync_delay
         idle_for = 0.0 if self._idle_since is None else self.bridge.clock() - self._idle_since
@@ -1305,6 +1331,10 @@ class Bridge:
             for spool_id, texts in own.items():
                 flags.setdefault(spool_id, []).extend(texts)
         self._check_shared(flags)
+        loaded = {st.active for p in self.printers for st in p.tools.values()}
+        for key in self._problems.failing("negative"):
+            if key[1] not in loaded:
+                self._problems.clear(key, "spool %d with a negative weight is unloaded", key[1])
         self._finish_flags(flags, spools, changed)
         await self.flush()
         for printer in self.printers:
@@ -1372,6 +1402,10 @@ class Bridge:
         ticked = {s.id: s for s in spools if s.claim}
         handled = [i for i in self.state.claimed if i in ticked]
         if handled != self.state.claimed:
+            for spool_id in set(self.state.claimed) - set(handled):
+                self._problems.clear(
+                    ("unclaim", spool_id), "claim on spool %d was cleared in Spoolman", spool_id
+                )
             self.state.claimed = handled  # Boxes now clear in Spoolman.
         tools = {
             location: (printer.name, tool)
@@ -1580,6 +1614,12 @@ class Bridge:
         """Move each tool's outgoing spools out of the tool's location."""
         if self.config.dry_run:
             return
+        # An eviction dropped elsewhere, such as when the spool was moved out by hand,
+        # ends any problem moving it.
+        pending = {i for p in self.printers for st in p.tools.values() for i in st.evict}
+        for key in self._problems.failing("evict"):
+            if key[1] not in pending:
+                self._problems.clear(key, "spool %d no longer needs moving out", key[1])
         where = {s.id: s.location for s in spools}
         target = self.config.eviction_location or None
         for printer in self.printers:
