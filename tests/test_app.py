@@ -1087,7 +1087,7 @@ class FakeBridge:
 
 
 @pytest.fixture
-def fake_bridge(monkeypatch):
+def fake_bridge(monkeypatch, clean_env):
     made = []
 
     def from_config(cfg):
@@ -1095,16 +1095,6 @@ def fake_bridge(monkeypatch):
         return made[-1]
 
     monkeypatch.setattr(Bridge, "from_config", from_config)
-    # Nothing from the developer's environment: every variable the entry point reads.
-    for var in (
-        "PRUSALINK_URL",
-        "SPOOLMAN_URL",
-        "SPOOLMAN_PRUSALINK_CONFIG",
-        "SPOOLMAN_PRUSALINK_LOCATION",
-        "SPOOLMAN_PRUSALINK_DRY_RUN",
-        "LOG_LEVEL",
-    ):
-        monkeypatch.delenv(var, raising=False)
     monkeypatch.setenv("PRUSALINK_API_KEY", "k")
     return made
 
