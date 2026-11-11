@@ -27,6 +27,7 @@ def test_quantize_matches_printer_readback():
     assert quantize("#ffffff") == "#ffffff"
     assert quantize("#000000") == "#000000"
     assert quantize("nope") is None
+    assert quantize("zzzzzz") is None  # Six characters, but not hex.
 
 
 def test_same_color():
@@ -34,6 +35,7 @@ def test_same_color():
     assert not same_color("#73767d", "#ff0000")
     assert not same_color(None, "#ff0000")
     assert same_color(None, None)
+    assert not same_color("zzzzzz", "zzzzzz")  # Colors that can't be read never match.
 
 
 def test_no_drift_when_matching():

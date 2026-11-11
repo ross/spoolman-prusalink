@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 
+import aiohttp
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
@@ -157,3 +158,45 @@ async def test_no_counters_shape_over_http():
     async with TestClient(TestServer(prusalink.make_app(sim, "p"))) as client:
         data = await (await client.get("/api/v1/filament", headers=AUTH)).json()
     assert data == {"tools": [{"index": 0}]}
+
+
+async def test_before_request_sees_each_request_and_may_change_the_printer():
+    sim, p = make()
+    seen = []
+
+    def hook(method: str, path: str) -> None:
+        seen.append((method, path))
+        if path == "/api/v1/filament":
+            p.set_firmware("no_endpoint")  # takes effect for this very request
+
+    async with TestClient(TestServer(prusalink.make_app(sim, "p", hook))) as client:
+        assert (await client.get("/api/v1/status", headers=AUTH)).status == 200
+        assert (await client.get("/api/v1/filament", headers=AUTH)).status == 404
+    assert seen == [("GET", "/api/v1/status"), ("GET", "/api/v1/filament")]
+
+
+async def test_off_printer_drops_the_connection(setup):
+    sim, p, client = setup
+    p.set_power("off")
+    with pytest.raises(aiohttp.ClientConnectionError):
+        await client.get("/api/v1/status", headers=AUTH)
+    p.set_power("on")
+    assert (await client.get("/api/v1/status", headers=AUTH)).status == 200
+
+
+async def test_hung_printer_drops_the_request_once_it_comes_back(setup, monkeypatch):
+    sim, p, client = setup
+    real_sleep = asyncio.sleep
+
+    async def quick(_seconds):
+        await real_sleep(0.01)
+
+    monkeypatch.setattr(prusalink.asyncio, "sleep", quick)
+    p.set_power("hung")
+    request = asyncio.ensure_future(client.get("/api/v1/status", headers=AUTH))
+    await real_sleep(0.1)
+    assert not request.done()  # still waiting, as the printer isn't answering
+    p.set_power("on")
+    with pytest.raises(aiohttp.ClientConnectionError):
+        await asyncio.wait_for(request, 2)
+    assert (await client.get("/api/v1/status", headers=AUTH)).status == 200

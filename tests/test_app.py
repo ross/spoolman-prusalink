@@ -1,17 +1,22 @@
+import asyncio
 import json
+import logging
+import os
 import re
+import signal
 import sqlite3
 from dataclasses import replace
 
 import httpx
 import pytest
 
+from spoolman_prusalink import __main__ as main_module
 from spoolman_prusalink import printer_sync
 from spoolman_prusalink.__main__ import main
 from spoolman_prusalink.accounting import Provisional, SwapFlag, ToolState
 from spoolman_prusalink.app import Bridge
 from spoolman_prusalink.config import Config, ConfigError, PrinterConfig, load
-from spoolman_prusalink.db import Database, read_ledger, read_state
+from spoolman_prusalink.db import Database, DatabaseError, read_ledger, read_state
 from spoolman_prusalink.models import Material
 from spoolman_prusalink.prusalink import PrusaLink, parse_filament
 from spoolman_prusalink.spoolman import Spoolman, parse_spool
@@ -155,6 +160,46 @@ def test_parse_spool_claim_and_last_used():
     data["last_used"] = "2026-11-07T01:47:16"  # No zone: read as UTC.
     s = parse_spool(data, claim_field="bridge_claim")
     assert s.claim is False and s.last_used.utcoffset().total_seconds() == 0
+
+
+def test_parse_spool_ignores_malformed_extras_and_timestamps():
+    data = spool_json(3, "Core One L+")
+    data["extra"] = {
+        "instance_uuid": "not json",
+        "bridge_flag": None,
+        "bridge_claim": "{",
+    }
+    data["last_used"] = "yesterday"
+    s = parse_spool(data, "instance_uuid", "bridge_flag", "bridge_claim")
+    assert (s.instance_uuid, s.flag, s.claim, s.last_used) == (None, None, False, None)
+    data["extra"]["instance_uuid"] = json.dumps(5)  # Valid JSON, but not text.
+    assert parse_spool(data, "instance_uuid").instance_uuid is None
+
+
+@pytest.mark.parametrize("body", ["[]", "not json"])
+async def test_use_length_without_a_used_weight(body):
+    transport = httpx.MockTransport(lambda request: httpx.Response(200, text=body))
+    spoolman = Spoolman("http://spoolman", transport=transport)
+    assert await spoolman.use_length(3, 10.0) is None
+    await spoolman.aclose()
+
+
+async def test_ensure_field_refuses_a_field_of_another_type():
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "GET"  # Nothing is created over it.
+        return httpx.Response(200, json=[{"key": "instance_uuid", "field_type": "integer"}])
+
+    spoolman = Spoolman("http://spoolman", transport=httpx.MockTransport(handler))
+    with pytest.raises(ValueError, match="instance_uuid.*isn't a text field"):
+        await spoolman.ensure_field("instance_uuid", "Instance UUID")
+    await spoolman.aclose()
+
+
+async def test_job_display_name_when_the_job_ended_between_reads():
+    transport = httpx.MockTransport(lambda request: httpx.Response(204))
+    client = PrusaLink("http://printer", "k", transport=transport)
+    assert await client.job_display_name() is None
+    await client.aclose()
 
 
 def make_config(tmp_path, **kw):
@@ -370,6 +415,8 @@ CONFIG_BASE = (
         ('[bridge]\nclaim_field = ["a"]\n', "bridge.claim_field must be a string"),
         ("[bridge]\ndb_file = 5\n", "bridge.db_file must be a string"),
         ("[bridge]\neviction_location = 5\n", "bridge.eviction_location must be a string"),
+        ('[printer]\nsync_file = "a/b.txt"\n', "printer.sync_file must be a plain .gcode file"),
+        ("[bridge]\nlength_factor = 3\n", "length_factor must be in (0, 2], got 3"),
         ("[printer]\nsync_storage = 5\n", "printer.sync_storage must be a string"),
         ("[printer]\nsync_file = 5\n", "printer.sync_file must be a string"),
         ("[printer]\napi_key = 5\n", "printer.api_key must be a string"),
@@ -404,6 +451,10 @@ def test_config_rejects_bad_values(tmp_path, text, error):
             '[printer]\nurl = "http://p"\n[spoolman]\nurl = "http://s"\n'
             '[[tools]]\nindex = "zero"\nlocation = "A"\n',
             "tool index must be an integer",
+        ),
+        (
+            'tools = 5\n[printer]\nurl = "http://p"\n[spoolman]\nurl = "http://s"\n',
+            "tools must be [[tools]] entries",
         ),
     ],
 )
@@ -494,6 +545,15 @@ def test_config_from_environment_only():
     )
     assert cfg.printers[0].tools == {0: "Core One L+"} and cfg.dry_run is False
     assert cfg.db_file.as_posix() == "/data/bridge.db"
+    env = {
+        "PRUSALINK_URL": "http://p",
+        "PRUSALINK_API_KEY": "k",
+        "SPOOLMAN_URL": "http://s",
+        "SPOOLMAN_PRUSALINK_LOCATION": "Core One L+",
+    }
+    for value in ("true", " YES ", "1", "on"):
+        assert load(None, env={**env, "SPOOLMAN_PRUSALINK_DRY_RUN": value}).dry_run is True
+    assert load(None, env=env).dry_run is True  # Unset: dry run is the default.
     with pytest.raises(ConfigError, match="SPOOLMAN_PRUSALINK_LOCATION"):
         load(None, env={"PRUSALINK_URL": "p", "PRUSALINK_API_KEY": "k", "SPOOLMAN_URL": "s"})
     with pytest.raises(ConfigError, match="true or false"):
@@ -992,3 +1052,151 @@ async def test_unload_outside_a_print_makes_the_tags_spool_unknown(printer):
         "adopt",
         other,
     )
+
+
+@pytest.mark.parametrize("appeared", [True, False])
+async def test_runout_reload_of_the_same_spool_keeps_its_tag_as_it_was(printer, appeared):
+    """A runout and a reload with spool 7 certain throughout: the tag is still 7's, and
+    trusted only if the bridge saw it appear before the runout."""
+    printer._seen_uuid[0] = (TAG, 7, appeared, False)
+    printer._seen_unload(0, runout=True)
+    assert printer._seen_uuid[0] == (TAG, 7, appeared, True)
+    want = ("adopt", TAG) if appeared else None
+    assert printer._tag_uuid(0, SETTLED, tag_material(), spool(7), [spool(7)]) == want
+    # The reload is seen: a later unload is a new one.
+    assert printer._seen_uuid[0] == (TAG, 7, appeared, False)
+    assert printer.bridge.state.printers[printer.name].seen_uuids[0] == (TAG, 7, False)
+
+
+class FakeBridge:
+    """Stands in for Bridge in `main`: it records what the entry point asks of it."""
+
+    def __init__(self, cfg):
+        self.config, self.polls, self.closed, self.stop = cfg, 0, False, None
+
+    async def poll(self):
+        self.polls += 1
+
+    async def run(self, stop):
+        self.stop = stop
+        os.kill(os.getpid(), signal.SIGTERM)  # As `docker stop` does.
+        await asyncio.wait_for(stop.wait(), timeout=5)
+
+    async def aclose(self):
+        self.closed = True
+
+
+@pytest.fixture
+def fake_bridge(monkeypatch):
+    made = []
+
+    def from_config(cfg):
+        made.append(FakeBridge(cfg))
+        return made[-1]
+
+    monkeypatch.setattr(Bridge, "from_config", from_config)
+    # Nothing from the developer's environment: every variable the entry point reads.
+    for var in (
+        "PRUSALINK_URL",
+        "SPOOLMAN_URL",
+        "SPOOLMAN_PRUSALINK_CONFIG",
+        "SPOOLMAN_PRUSALINK_LOCATION",
+        "SPOOLMAN_PRUSALINK_DRY_RUN",
+        "LOG_LEVEL",
+    ):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("PRUSALINK_API_KEY", "k")
+    return made
+
+
+def test_main_once_polls_once_and_closes_the_bridge(tmp_path, fake_bridge):
+    p = tmp_path / "c.toml"
+    p.write_text(CONFIG_BASE)
+    assert main(["-c", str(p), "once"]) == 0
+    (bridge,) = fake_bridge
+    assert (bridge.polls, bridge.closed, bridge.config.spoolman_url) == (1, True, "http://s")
+
+
+def test_main_run_stops_on_sigterm_and_closes_the_bridge(tmp_path, fake_bridge):
+    p = tmp_path / "c.toml"
+    p.write_text(CONFIG_BASE)
+    assert main(["-c", str(p)]) == 0  # `run` is the default command.
+    (bridge,) = fake_bridge
+    assert (bridge.polls, bridge.closed, bridge.stop.is_set()) == (0, True, True)
+
+
+def test_main_reads_the_default_config_path_when_it_exists(tmp_path, fake_bridge, monkeypatch):
+    p = tmp_path / "config.toml"
+    p.write_text(CONFIG_BASE)
+    monkeypatch.setattr(main_module, "DEFAULT_CONFIG", str(p))
+    assert main(["once"]) == 0
+    assert fake_bridge[0].config.spoolman_url == "http://s"
+
+
+@pytest.mark.parametrize(
+    ("level", "httpx_level"), [("debug", logging.NOTSET), ("info", logging.WARNING)]
+)
+def test_main_quiets_httpx_unless_debugging(tmp_path, fake_bridge, caplog, level, httpx_level):
+    # pytest's handlers make basicConfig a no-op, so the root level is set here.
+    caplog.set_level(level.upper())
+    httpx_logger = logging.getLogger("httpx")
+    before = httpx_logger.level
+    httpx_logger.setLevel(logging.NOTSET)
+    try:
+        assert main(["--log-level", level, "-c", str(tmp_path / "missing.toml"), "once"]) == 2
+        assert httpx_logger.level == httpx_level
+    finally:
+        httpx_logger.setLevel(before)
+
+
+async def test_from_config_opens_the_database_and_builds_the_clients(tmp_path):
+    cfg = make_config(tmp_path, dry_run=False)
+    bridge = Bridge.from_config(cfg)
+    try:
+        assert [p.name for p in bridge.printers] == ["default"]
+        assert set(bridge.clients) == {"default"}
+        assert bridge.db is not None and (tmp_path / "bridge.db").exists()
+        with pytest.raises(DatabaseError, match="locked"):  # Held until aclose.
+            Database.open(cfg.db_file)
+    finally:
+        await bridge.aclose()
+    Database.open(cfg.db_file).close()
+
+
+async def test_bridge_without_a_database_charges_and_saves_nothing(tmp_path):
+    extruded, used = {"v": 4310}, []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path == "/api/v1/filament":
+            data = json.loads(json.dumps(FILAMENT))
+            data["tools"][0]["extruded"] = extruded["v"]
+            return httpx.Response(200, json=data)
+        if path == "/api/v1/spool":
+            return httpx.Response(200, json=[spool_json(7, "Core One L+")])
+        if path == "/api/version":
+            return httpx.Response(200, json={"printer": "8.1.0"})
+        if path == "/api/v1/job":
+            return httpx.Response(204)
+        if path == "/api/v1/status":
+            return httpx.Response(200, json={"printer": {"state": "PRINTING"}})
+        if request.method == "PUT" and path == "/api/v1/spool/7/use":
+            used.append(json.loads(request.content)["use_length"])
+            return httpx.Response(200, json={})
+        raise AssertionError(f"unexpected {request.method} {request.url}")
+
+    cfg = make_config(tmp_path, dry_run=False, flag_field=None, claim_field=None)
+    transport = httpx.MockTransport(handler)
+    bridge = Bridge(
+        config=cfg,
+        spoolman=Spoolman(cfg.spoolman_url, transport=transport),
+        clients={"default": PrusaLink(cfg.printers[0].url, "k", transport=transport)},
+    )
+    assert bridge.db is None
+    await bridge.poll()  # baseline
+    extruded["v"] = 5310
+    await bridge.poll()
+    assert used == [1000]
+    assert bridge.state.outbox == []
+    assert list(tmp_path.iterdir()) == []  # Nothing saved anywhere.
+    await bridge.aclose()

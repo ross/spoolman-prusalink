@@ -1,3 +1,6 @@
+import errno
+import fcntl
+import os
 import sqlite3
 
 import pytest
@@ -397,3 +400,64 @@ def test_a_bad_ledger_read_is_a_database_error(path):
     with pytest.raises(DatabaseError, match="no such table: ledger"):
         read_ledger(path)
     conn.close()
+
+
+class ClosingConnection:
+    """A connection that fails on the statement starting with `fail`, and records its close."""
+
+    def __init__(self, conn: sqlite3.Connection, fail: str) -> None:
+        self.conn, self.fail, self.closed = conn, fail, False
+
+    def execute(self, sql, *args):
+        if sql.startswith(self.fail):
+            raise sqlite3.OperationalError("disk I/O error")
+        return self.conn.execute(sql, *args)
+
+    def close(self):
+        self.closed = True
+        self.conn.close()
+
+
+def test_a_failure_setting_up_the_schema_closes_the_connection(path, monkeypatch):
+    path.parent.mkdir()
+    made = []
+    connect = sqlite3.connect
+
+    def failing(*args, **kwargs):
+        made.append(ClosingConnection(connect(*args, **kwargs), "PRAGMA journal_mode"))
+        return made[-1]
+
+    monkeypatch.setattr(sqlite3, "connect", failing)
+    with pytest.raises(DatabaseError, match=f"{path}: disk I/O error"):
+        Database.open(path)
+    assert [c.closed for c in made] == [True]
+    monkeypatch.undo()
+    Database.open(path).close()  # The lock was let go too.
+
+
+def test_a_reader_that_cannot_open_the_database_is_a_database_error(path):
+    path.mkdir(parents=True)  # Exists, but isn't a file SQLite can open.
+    with pytest.raises(DatabaseError, match=str(path)):
+        read_state(path)
+    with pytest.raises(DatabaseError, match=str(path)):
+        read_ledger(path)
+
+
+def test_a_lock_that_fails_for_another_reason_lets_go_of_the_file(path, monkeypatch):
+    opened = []
+    open_file = os.open
+
+    def recording(*args, **kwargs):
+        opened.append(open_file(*args, **kwargs))
+        return opened[-1]
+
+    def broken(fd, operation):
+        raise OSError(errno.ENOLCK, "no locks available")
+
+    monkeypatch.setattr(os, "open", recording)
+    monkeypatch.setattr(fcntl, "flock", broken)
+    with pytest.raises(OSError, match="no locks available"):
+        Database.open(path)
+    (fd,) = opened
+    with pytest.raises(OSError):  # Closed.
+        os.fstat(fd)

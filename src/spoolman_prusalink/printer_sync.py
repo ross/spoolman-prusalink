@@ -103,8 +103,8 @@ def model_problem(
 class Preset:
     nozzle: int
     bed: int
+    chamber: tuple[int, int, int]  # (target, min, max); only the Core One has a chamber.
     preheat: int = 170
-    chamber: tuple[int, int, int] | None = None  # (target, min, max), Core One only.
     filtration: bool = False
     flexible: bool = False
 
@@ -241,9 +241,8 @@ def filament_lines(write: ToolWrite) -> list[str]:
     parts = ["M865 X R", f'N"{name}"', f"T{temps.nozzle}", f"B{temps.bed}"]
     if preset:
         parts.append(f"P{temps.preheat}")
-        if preset.chamber:
-            target, low, high = preset.chamber
-            parts.append(f"C{target} D{low} E{high}")
+        target, low, high = preset.chamber
+        parts.append(f"C{target} D{low} E{high}")
         if preset.filtration:
             parts.append("F1")
         if preset.flexible:

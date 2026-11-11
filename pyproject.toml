@@ -37,15 +37,22 @@ asyncio_default_fixture_loop_scope = "function"
 [tool.coverage.run]
 # Measured on the unit suite, `pytest --cov`. The integration tests don't count toward it.
 source = ["spoolman_prusalink", "simulator"]
-omit = ["simulator/tests/*"]
+omit = [
+    "simulator/tests/*",
+    # Command-line wiring and the live-printer recorder; the simulator itself is measured.
+    "simulator/__main__.py",
+    "simulator/probe.py",
+]
 branch = true
 
 [tool.coverage.report]
-# The coverage when the gate went in. Raise it as coverage grows; don't lower it.
-fail_under = 90.6
+# The coverage today. Raise it as coverage grows; don't lower it.
+fail_under = 99.4
 precision = 1
 show_missing = true
 skip_covered = true
+# A module's `if __name__ == "__main__":` guard only calls main().
+exclude_also = ['if __name__ == "__main__":']
 
 [tool.ruff]
 line-length = 100

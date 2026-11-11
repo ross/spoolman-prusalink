@@ -1,3 +1,5 @@
+from dataclasses import replace
+
 import pytest
 
 from spoolman_prusalink.models import Material, Spool
@@ -146,3 +148,38 @@ def test_printer_matches_write_compares_temperatures(material):
     assert not printer_matches_write(reported(material, "#8c9099", 230, 170, 65), written, False)
     assert not printer_matches_write(reported(material, "#8c9099", 225, 160, 65), written, False)
     assert not printer_matches_write(reported(material, "#8c9099", 225, 170, 60), written, False)
+
+
+def test_spool_with_no_material_or_name_cannot_be_written():
+    with pytest.raises(CannotSync, match="spool 1 has no material or name"):
+        filament_lines(ToolWrite(0, spool(material=None, name="™"), None))
+
+
+UUID = "44c406a5-c6f5-4440-bfba-e8060564b717"
+
+
+def test_printer_matches_write_notices_each_difference():
+    written = "\n".join(filament_lines(ToolWrite(0, spool(), UUID)))
+    ok = Material(
+        "PLA",
+        "#8c9099",
+        nozzle_temperature=215,
+        preheat_temperature=170,
+        bed_temperature=60,
+        instance_uuid=UUID.upper(),  # Case doesn't matter.
+    )
+    assert printer_matches_write(ok, written, True)
+    assert not printer_matches_write(replace(ok, name="PETG"), written, True)
+    assert not printer_matches_write(replace(ok, color="#ff0000"), written, True)
+    assert not printer_matches_write(replace(ok, instance_uuid=None), written, True)
+    other = replace(ok, instance_uuid="9b1d3f6e-0000-4000-8000-000000000000")
+    assert not printer_matches_write(other, written, True)
+    # With UUIDs off, the printer's UUID isn't compared.
+    assert printer_matches_write(other, written, False)
+
+
+def test_printer_matches_write_with_a_write_that_has_no_temperatures():
+    # No T or B in the first line: nothing the printer reports can match it.
+    material = reported("PLA", "#8c9099", 215, 170, 60)
+    assert not printer_matches_write(material, 'M865 X R N"PLA" O"#8c9099" L0', False)
+    assert not printer_matches_write(material, "", False)

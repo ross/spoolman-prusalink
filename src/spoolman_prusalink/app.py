@@ -875,9 +875,9 @@ class PrinterBridge:
                 claim,
                 ", ".join(str(i) for i in others),
             )
+        # _claims() leaves spools already in `claimed` out of the candidates.
         for spool_id in [claim, *others]:
-            if spool_id not in self.bridge.state.claimed:
-                self.bridge.state.claimed.append(spool_id)
+            self.bridge.state.claimed.append(spool_id)
             if self.bridge.config.dry_run:
                 log.info("[%s] would clear the claim on spool %d", location, spool_id)
 
@@ -1278,7 +1278,7 @@ class Bridge:
                 await printer.adopt_uuids()
         await self.evict(spools)
         if not self.config.dry_run and self.config.claim_field:
-            await self.sync_claims(spools)
+            await self.sync_claims()
         for printer in self.printers:
             if printer.name in reads and reads[printer.name][0].state in IDLE_STATES:
                 await printer.sync_printer(spools)
@@ -1432,17 +1432,18 @@ class Bridge:
                 cleared = True
         return cleared
 
-    async def sync_claims(self, spools: list[Spool]) -> None:
-        """Clear the claim box on spools whose claim has been handled."""
+    async def sync_claims(self) -> None:
+        """Clear the claim box on spools whose claim has been handled.
+
+        Every spool in `State.claimed` is ticked in this poll's list: `_claims()` drops
+        the rest, and claims handled since were ticked.
+        """
         key = self.config.claim_field
         assert key
         if not await self._ensure_field(key, CLAIM_FIELD_NAME, "boolean"):
             return
-        ticked = {s.id for s in spools if s.claim}
         changed = False
         for spool_id in list(self.state.claimed):
-            if spool_id not in ticked:
-                continue
             try:
                 await self.spoolman.set_extra(spool_id, key, False)
             except httpx.HTTPError as e:
@@ -1691,7 +1692,7 @@ class Bridge:
         for spool_id in sorted(set(self._flags) | set(self.state.flagged)):
             want = self._flags.get(spool_id)
             if spool_id not in current:
-                if spool_id in self.state.flagged and want is None:
+                if want is None:
                     self.state.flagged.remove(spool_id)  # Spool deleted or archived.
                     changed = True
                 continue
@@ -1713,9 +1714,9 @@ class Bridge:
                     f": {want}" if want else "",
                 )
             if want is None:
-                if spool_id in self.state.flagged:
-                    self.state.flagged.remove(spool_id)
-                    changed = True
+                # Only a spool the bridge flagged earlier has no desired flag.
+                self.state.flagged.remove(spool_id)
+                changed = True
             elif spool_id not in self.state.flagged:
                 self.state.flagged.append(spool_id)
                 changed = True
