@@ -11,9 +11,26 @@ The bridge never imports this package, and the Docker image doesn't ship it.
 
 ## Run it
 
+To run the simulator, a Spoolman, and the bridge together:
+
+```sh
+script/demo
 ```
-pip install -e '.[sim]'
-python -m simulator -c simulator/sim.example.toml run
+
+It starts the container `spoolman-demo` on `127.0.0.1:7912` with Podman or
+Docker, unless `SPOOLMAN_URL` names a Spoolman to use. Then it seeds Spoolman,
+writes the bridge's config to `simulator/data/bridge.toml`, and runs the
+simulator and the bridge until you press Ctrl-C. Spoolman's data lives on the
+volume `spoolman-demo-data`, so it carries over between runs; the container
+keeps running afterwards. `SIM_CONFIG` picks another simulator config. See
+the comments in `script/demo` for the rest.
+
+The rest of this section does the same steps by hand. To run only the
+simulator:
+
+```sh
+script/bootstrap
+.venv/bin/python -m simulator -c simulator/sim.example.toml run
 ```
 
 The page is at `http://127.0.0.1:8000`. The printers listen on 8001, 8002,
@@ -21,9 +38,9 @@ and so on, in config order. Each has its own API key, shown on its card.
 
 To point the bridge at the simulated printers:
 
-```
-python -m simulator -c simulator/sim.example.toml seed --spoolman http://127.0.0.1:7912
-python -m simulator -c simulator/sim.example.toml bridge-config > bridge.toml
+```sh
+.venv/bin/python -m simulator -c simulator/sim.example.toml seed --spoolman http://127.0.0.1:7912
+.venv/bin/python -m simulator -c simulator/sim.example.toml bridge-config > bridge.toml
 ```
 
 `seed` creates a vendor, a few filaments, and two spools per tool in Spoolman:
@@ -43,8 +60,8 @@ poll_idle = 3
 dry_run = false
 ```
 
-```
-PYTHONPATH=src python -m spoolman_prusalink -c bridge.toml run
+```sh
+.venv/bin/spoolman-prusalink -c bridge.toml run
 ```
 
 ## Config
@@ -139,11 +156,11 @@ Choices made where the firmware was silent or the plan left it open:
 
 ## Tests
 
-```
-pytest simulator/tests
+```sh
+script/test simulator/tests
 ```
 
-They're part of the default `pytest` run, with the bridge's own suite on `tests/`.
+They're part of `script/test`, with the bridge's own suite on `tests/`.
 
 `simulator/tests/test_traces.py` replays each behavior in
 `docs/printer-behaviors.md` and compares the simulator with the trace

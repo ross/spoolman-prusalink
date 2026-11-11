@@ -495,6 +495,10 @@ uses, keeps each tool's counters and filament, and has a page with buttons
 for loads, unloads, prints, runouts, jams, reboots and outages. See
 [simulator/README.md](simulator/README.md).
 
+`script/demo` runs everything with no hardware: a Spoolman container, the
+simulator, and the bridge pointed at both. Open the simulator's page at
+`http://127.0.0.1:8000` and watch the bridge's log as you load and print.
+
 ## Development
 
 The `script/` directory follows the
@@ -507,6 +511,7 @@ pattern, so the same commands work in every checkout and in CI:
 | `script/setup` | Deletes `.venv` and runs `script/bootstrap`, for a clean start. |
 | `script/update` | Brings `.venv` up to date after a pull or a branch switch. |
 | `script/server` | Runs the bridge with `./config.toml`. See [Run from source](#run-from-source). |
+| `script/demo` | Runs Spoolman, the simulator, and the bridge together. See [Simulator](#simulator). |
 | `script/test` | Runs the unit suite. |
 | `script/integration` | Runs the end-to-end tests in `integration/` against a Spoolman. See [Tests](#tests). |
 | `script/lint` | Checks lint rules and formatting with ruff. Changes nothing. |
