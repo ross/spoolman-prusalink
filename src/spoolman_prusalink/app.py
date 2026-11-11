@@ -1385,7 +1385,8 @@ class Bridge:
 
         Only when the response is the stored weight plus this charge: anything else
         includes a change made in Spoolman since the last read, and leaving the stored
-        weight alone lets the next read see it as an edit.
+        weight alone lets the next read see it as an edit. When the charge's weight or
+        the stored weight isn't known, the response is taken as the bridge's own charge.
         """
         runout = self.state.runouts.get(rec["spool_id"])
         if runout is None or used is None:

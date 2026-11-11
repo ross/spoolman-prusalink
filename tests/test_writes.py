@@ -1585,6 +1585,27 @@ async def test_runout_flag_from_older_state_learns_the_weights(tmp_path):
     await bridge.aclose()
 
 
+@pytest.mark.parametrize("unknown", ["grams", "used"])
+async def test_runout_flag_takes_a_charge_it_cant_check_as_the_bridges_own(tmp_path, unknown):
+    # Without the charge's weight or the stored weight, the response can't be checked,
+    # so it's taken as the bridge's own charge rather than read as an edit next time.
+    bridge, fake, printer = await runout_mid_print(tmp_path, remaining=400.0)
+    printer.extruded += 500
+    fake.fail_use = [503]  # The charge stays queued.
+    await bridge.poll()
+    assert bridge.state.outbox
+    if unknown == "grams":
+        bridge.state.outbox[0]["grams"] = None  # Charged while the spool wasn't known.
+    else:
+        bridge.state.runouts[19].used = None
+    assert await bridge.flush()
+    assert bridge.state.runouts[19].used == fake.spools[19]["used_weight"]
+    await bridge.poll()
+    assert 19 in bridge.state.runouts
+    assert "unloaded mid-print" in fake.flag(19)
+    await bridge.aclose()
+
+
 async def test_runout_near_empty_is_not_flagged(tmp_path):
     bridge, fake, printer = await runout_mid_print(tmp_path, remaining=30.0)
     assert fake.flag(19) is None or "mid-print" not in fake.flag(19)
