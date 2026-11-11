@@ -220,11 +220,6 @@ def _merge_direction(a: str, b: str) -> str:
     return "±"
 
 
-def _has(direction: str, d: str) -> bool:
-    """Whether movement `direction` includes `d` ("+" or "-")."""
-    return direction == d or direction == "±"
-
-
 class Signer:
     """Turns samples into steps one at a time; `signature()` runs it over a list.
 
@@ -598,9 +593,7 @@ def _coarsening(live: list[Step], sim: list[Step], spans: list[tuple[int, int]])
             return last_move[i], i - 1
         if d == "+":
             return last_minus[i], last_plus[i] - 1
-        if d == "-":
-            return last_plus[i], last_minus[i] - 1
-        return -1, min(last_plus[i], last_minus[i]) - 1
+        return last_plus[i], last_minus[i] - 1  # d == "-": a sample's direction is never "±"
 
     flat = [(i, k) for i, st in enumerate(live) for k in range(st.samples)]
     # A blind sample is skipped when the next sample that saw the counter is in the same

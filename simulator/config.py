@@ -138,10 +138,8 @@ def _material(value: object, prefix: str, uuids: bool, tool: int) -> dict:
             instance_uuid = str(uuid.UUID(raw))
         except ValueError as e:
             raise ConfigError(f"{name}.instance_uuid isn't a UUID, got {raw!r}") from e
-        if not uuids:
-            raise ConfigError(f"{name}.instance_uuid needs a model that holds UUIDs")
-        if tool != 0:
-            raise ConfigError(f"{name}.instance_uuid is only for tool 0")
+        if not uuids or tool != 0:
+            raise ConfigError(f"{name}.instance_uuid needs a model that holds UUIDs, on tool 0")
     return {"name": material_name, "color": color, "instance_uuid": instance_uuid}
 
 

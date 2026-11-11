@@ -898,8 +898,8 @@ class SimPrinter:
 
     def _runout(self, t: SimTool, why: str, *, jam: bool) -> None:
         job = self.job
-        if job.phase is not JobPhase.WAIT_LOAD:
-            job.paused_from = job.phase
+        # Only a print in progress runs out, so the phase is PRINTING or PREHEAT here.
+        job.paused_from = job.phase
         self._physical_unload(t, why)
         job.phase, job.wait_tool, job.jam = JobPhase.WAIT_LOAD, t.index, jam
         job.attention = f"{why} tool {t.index}"
@@ -1153,7 +1153,7 @@ class SimPrinter:
                 self._unpark(job)
         elif job.phase is JobPhase.UNPARK:
             self._begin_feeding(job)
-        elif job.phase is JobPhase.PARKING:
+        else:  # PARKING, the last of the timed phases
             self.job = None
             self._log("job", f"job {job.id} {job.end_state.lower()}")
             self._set_state(job.end_state)
