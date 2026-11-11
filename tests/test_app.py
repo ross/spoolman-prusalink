@@ -352,6 +352,8 @@ CONFIG_BASE = (
         ('[bridge]\nclaim_field = ["a"]\n', "bridge.claim_field must be a string"),
         ("[bridge]\ndb_file = 5\n", "bridge.db_file must be a string"),
         ("[bridge]\neviction_location = 5\n", "bridge.eviction_location must be a string"),
+        ('[printer]\nsync_file = "a/b.txt"\n', "printer.sync_file must be a plain .gcode file"),
+        ("[bridge]\nlength_factor = 3\n", "length_factor must be in (0, 2], got 3"),
         ("[printer]\nsync_storage = 5\n", "printer.sync_storage must be a string"),
         ("[printer]\nsync_file = 5\n", "printer.sync_file must be a string"),
         ("[printer]\napi_key = 5\n", "printer.api_key must be a string"),
@@ -386,6 +388,10 @@ def test_config_rejects_bad_values(tmp_path, text, error):
             '[printer]\nurl = "http://p"\n[spoolman]\nurl = "http://s"\n'
             '[[tools]]\nindex = "zero"\nlocation = "A"\n',
             "tool index must be an integer",
+        ),
+        (
+            'tools = 5\n[printer]\nurl = "http://p"\n[spoolman]\nurl = "http://s"\n',
+            "tools must be [[tools]] entries",
         ),
     ],
 )
@@ -476,6 +482,15 @@ def test_config_from_environment_only():
     )
     assert cfg.printers[0].tools == {0: "Core One L+"} and cfg.dry_run is False
     assert cfg.db_file.as_posix() == "/data/bridge.db"
+    env = {
+        "PRUSALINK_URL": "http://p",
+        "PRUSALINK_API_KEY": "k",
+        "SPOOLMAN_URL": "http://s",
+        "SPOOLMAN_PRUSALINK_LOCATION": "Core One L+",
+    }
+    for value in ("true", " YES ", "1", "on"):
+        assert load(None, env={**env, "SPOOLMAN_PRUSALINK_DRY_RUN": value}).dry_run is True
+    assert load(None, env=env).dry_run is True  # Unset: dry run is the default.
     with pytest.raises(ConfigError, match="SPOOLMAN_PRUSALINK_LOCATION"):
         load(None, env={"PRUSALINK_URL": "p", "PRUSALINK_API_KEY": "k", "SPOOLMAN_URL": "s"})
     with pytest.raises(ConfigError, match="true or false"):
