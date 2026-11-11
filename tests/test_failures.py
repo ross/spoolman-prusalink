@@ -220,6 +220,7 @@ async def test_printer_that_doesnt_report_a_configured_tool_is_noted_once(tmp_pa
 async def test_flag_wanted_on_a_spool_missing_from_the_list_stays_flagged(tmp_path):
     bridge, fake, printer = make(tmp_path, [spool(19)])
     bridge.state.flagged[:] = [19, 20]
+    bridge._save()
     bridge._flags = {19: "still wanted"}  # 20 has no flag wanted and isn't in the list.
     await bridge.sync_flags([])
     assert bridge.state.flagged == [19]  # 19 may be back; 20 is forgotten.
@@ -254,4 +255,33 @@ async def test_run_polls_until_stopped(tmp_path, caplog, queued):
     assert count(caplog, "1 charge(s) queued from before the restart") == int(queued)
     assert fake.used == ({19: [500.0]} if queued else {})
     assert bridge.state.outbox == []
+    await bridge.aclose()
+
+
+async def test_cleared_flag_leaves_the_flagged_list_and_is_saved(tmp_path):
+    bridge, fake, printer = make(tmp_path, [spool(19, flag="was flagged"), spool(20)])
+    bridge.state.flagged[:] = [19]
+    bridge._save()  # As an earlier poll left it.
+    bridge._flags = {}  # Nothing wanted any more.
+    await bridge.sync_flags(await bridge.spoolman.spools())
+    assert fake.flag(19) is None
+    assert bridge.state.flagged == []
+    assert read_state(tmp_path / "bridge.db").flagged == []
+    await bridge.aclose()
+
+
+@pytest.mark.parametrize("how", ["deleted", "archived"])
+async def test_flagged_spool_that_leaves_the_list_is_forgotten_and_saved(tmp_path, how):
+    bridge, fake, printer = make(tmp_path, [spool(19, flag="x"), spool(20)])
+    bridge.state.flagged[:] = [19]
+    bridge._save()  # As an earlier poll left it.
+    bridge._flags = {}
+    if how == "deleted":
+        del fake.spools[19]
+    else:
+        fake.spools[19]["archived"] = True
+    await bridge.sync_flags(await bridge.spoolman.spools())
+    assert bridge.state.flagged == []
+    assert read_state(tmp_path / "bridge.db").flagged == []
+    assert [w for w in fake.writes if w[0] == "patch"] == []  # Nothing to write to it.
     await bridge.aclose()
