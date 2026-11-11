@@ -1463,6 +1463,21 @@ async def test_printer_change_after_write_is_drift(tmp_path):
     await bridge.aclose()
 
 
+async def test_printer_change_with_a_spoolman_edit_is_drift_not_an_edit(tmp_path, caplog):
+    """The printer no longer shows the last write, so the edit isn't written over it."""
+    bridge, fake, printer = await written_state(tmp_path, flag_drift=True)
+    caplog.set_level("INFO")
+    printer.material = {"name": "PETG"}  # changed on the printer
+    fake.spools[20]["filament"]["color_hex"] = "00ff00"  # and in Spoolman
+    for _ in range(2):
+        await bridge.poll()
+    assert len(jobs(printer)) == 1
+    assert "printer filament differs" in fake.flag(20)
+    assert caplog.text.count("printer differs from spool 20") == 1
+    assert "since the last write" not in caplog.text
+    await bridge.aclose()
+
+
 async def test_state_from_before_write_tracking_is_rewritten_once(tmp_path):
     uuid19 = "91da34d9-c1c1-470f-bac7-185a2346f86a"
     bridge, fake, printer = make(tmp_path, [spool(20)], uuid_field="instance_uuid")
@@ -2837,4 +2852,21 @@ async def test_idle_reload_of_the_tag_then_a_claim_writes_nothing(tmp_path):
     assert bridge.printers[0].tools[0].active == 20
     assert jobs(printer) == []
     assert stored_uuid(fake, 20) is None
+    await bridge.aclose()
+
+
+async def test_write_keeps_the_written_uuid_for_a_spool_whose_uuid_was_cleared(tmp_path):
+    """Spoolman's UUID for spool 20 is cleared and the spool edited: the write keeps the
+    UUID the printer already has from the last write, rather than minting another."""
+    bridge, fake, printer = await written_state(tmp_path)
+    minted = stored_uuid(fake, 20)
+    assert printer.material["instance_uuid"] == minted
+    del fake.spools[20]["extra"]["instance_uuid"]
+    fake.spools[20]["filament"]["color_hex"] = "00ff00"
+    await bridge.poll()
+    assert len(jobs(printer)) == 2
+    assert f'C"{minted}"' in jobs(printer)[-1] and 'O"#00ff00"' in jobs(printer)[-1]
+    assert stored_uuid(fake, 20) is None  # Kept on the printer, not stored.
+    await bridge.poll()
+    assert len(jobs(printer)) == 2
     await bridge.aclose()

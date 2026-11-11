@@ -972,3 +972,17 @@ async def test_unload_outside_a_print_makes_the_tags_spool_unknown(printer):
         "adopt",
         other,
     )
+
+
+@pytest.mark.parametrize("appeared", [True, False])
+async def test_runout_reload_of_the_same_spool_keeps_its_tag_as_it_was(printer, appeared):
+    """A runout and a reload with spool 7 certain throughout: the tag is still 7's, and
+    trusted only if the bridge saw it appear before the runout."""
+    printer._seen_uuid[0] = (TAG, 7, appeared, False)
+    printer._seen_unload(0, runout=True)
+    assert printer._seen_uuid[0] == (TAG, 7, appeared, True)
+    want = ("adopt", TAG) if appeared else None
+    assert printer._tag_uuid(0, SETTLED, tag_material(), spool(7), [spool(7)]) == want
+    # The reload is seen: a later unload is a new one.
+    assert printer._seen_uuid[0] == (TAG, 7, appeared, False)
+    assert printer.bridge.state.printers[printer.name].seen_uuids[0] == (TAG, 7, False)
