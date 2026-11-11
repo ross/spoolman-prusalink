@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# Check the code with ruff: lint rules and formatting. Changes nothing;
+# script/format fixes what it can.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+[ -n "${SKIP_BOOTSTRAP:-}" ] || script/bootstrap
+
+echo "==> ruff check"
+.venv/bin/ruff check .
+echo "==> ruff format --check"
+.venv/bin/ruff format --check .

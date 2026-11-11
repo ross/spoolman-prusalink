@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# What CI runs for each Python version: install, lint, then the unit suite
+# with coverage.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+script/bootstrap
+SKIP_BOOTSTRAP=1 script/lint
+SKIP_BOOTSTRAP=1 script/test
