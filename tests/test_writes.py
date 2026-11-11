@@ -1877,6 +1877,34 @@ def restart(bridge, **cfg):
     )
 
 
+async def test_deleted_spool_hold_restored_after_a_restart_is_logged_and_ends(tmp_path, caplog):
+    bridge, fake, printer = make(tmp_path, [spool(19)])
+    await bridge.poll()
+    printer.extruded = 1500
+    await bridge.poll()
+    del fake.spools[19]
+    printer.extruded = 1700
+    await bridge.poll()
+
+    # The hold comes back from the database; nothing looks the spool up again.
+    caplog.set_level("INFO")
+    caplog.clear()
+    bridge = restart(bridge)
+    for extruded in (1800, 1900, 2000):
+        printer.extruded = extruded
+        await bridge.poll()
+    st = bridge.printers[0].tools[0]
+    assert (st.deleted_spool, st.held_mm) == (19, 500)
+    assert levels(caplog, "spool 19 was deleted in Spoolman; holding its usage") == ["WARNING"]
+
+    fake.spools[20] = spool(20)  # The next spool takes the held usage.
+    await bridge.poll()
+    await bridge.poll()
+    assert fake.used[20][0] == 500.0
+    assert levels(caplog, "no longer holding usage for a deleted spool") == ["WARNING"]
+    await bridge.aclose()
+
+
 async def test_dry_run_deleted_spool_is_charged_as_after_an_outage(tmp_path, caplog):
     bridge, fake, printer = make(tmp_path, [spool(19)])
     await bridge.poll()

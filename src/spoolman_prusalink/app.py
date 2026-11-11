@@ -387,6 +387,12 @@ class PrinterBridge:
             and int(r.get("extruded_mm", 0)) > 0
         )
         self.tools[tool] = hold_deleted(st, spool_id, mm, queued)
+        self._holding_for_deleted(tool, spool_id)
+        # Not saved here: flush() saves with the record popped, and process() saves after.
+        return True
+
+    def _holding_for_deleted(self, tool: int, spool_id: int) -> None:
+        """Log, once while it lasts, that a tool holds usage for a deleted spool."""
         location = self.config.tools.get(tool, str(tool))
         self.bridge._problems.fail(
             (self._key, "deleted", tool),
@@ -397,8 +403,6 @@ class PrinterBridge:
             spool_id,
             location,
         )
-        # Not saved here: flush() saves with the record popped, and process() saves after.
-        return True
 
     async def _check_model(self, boot_id: int) -> None:
         """Look up the printer's model; if the bridge can't write to it, writes stay off."""
@@ -587,7 +591,10 @@ class PrinterBridge:
                     "[%s] no longer holding usage for a deleted spool",
                     location,
                 )
-            elif st.assigned is not None:
+            else:
+                # Also logs a hold restored from the database after a restart.
+                self._holding_for_deleted(tool, st.deleted_spool)
+            if st.deleted_spool is not None and st.assigned is not None:
                 flags.setdefault(st.assigned, []).append(
                     f"{location}: usage is being held because spool {st.deleted_spool} was "
                     f"deleted. It goes to this spool at the next unload or print start, "
