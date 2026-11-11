@@ -1990,17 +1990,24 @@ async def test_spool_missing_from_a_stale_list_is_looked_up_again_only_if_still_
     await bridge.poll()
     # The list was read just before spool 19 was unarchived, so it's missing but active.
     fake.unlisted = {19}
-    printer.extruded = 1100
-    await bridge.poll()
-    assert fake.lookups == [19]
+    for extruded in (1100, 1200):  # Missing again: nothing remembered it, so looked up again.
+        printer.extruded = extruded
+        await bridge.poll()
+    assert fake.lookups == [19, 19]
     assert "archived" not in caplog.text and "deleted" not in caplog.text
     assert bridge._archived == {}
+    # Charged without its filament data while it's missing.
+    assert "spool 19 (unknown): +100 mm" in caplog.text
+    charged = [r for r in ledger(tmp_path) if r.get("spool_id") == 19 and "use_length" in r]
+    assert [r["grams"] for r in charged] == [None, None]
     # The next list has it, so it isn't looked up again.
     fake.unlisted = set()
-    printer.extruded = 1200
+    printer.extruded = 1300
     await bridge.poll()
-    assert fake.lookups == [19]
-    assert fake.used == {19: [100.0, 100.0]}
+    assert fake.lookups == [19, 19]
+    assert fake.used == {19: [100.0, 100.0, 100.0]}
+    assert "spool 19 is no longer in the" in caplog.text
+    assert "spool 19 is back in the location" in caplog.text
     await bridge.aclose()
 
 

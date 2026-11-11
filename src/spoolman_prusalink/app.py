@@ -280,8 +280,8 @@ class PrinterBridge:
         active spool, holding usage for the next one. An archived one keeps being charged
         until the next unload, and is flagged. An archived spool is remembered, so it's
         looked up once, not every poll. A spool that's found but neither archived nor
-        listed was created or unarchived after the list was read; it's charged as usual,
-        and the next poll's list has it, so nothing is remembered.
+        listed was unarchived after the list was read; it's charged without its filament
+        data this poll, and the next poll's list has it, so nothing is remembered.
         """
         listed = {s.id for s in spools}
         # The cache is shared, so keep every printer's active spools, not only this one's.
