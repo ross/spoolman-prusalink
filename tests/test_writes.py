@@ -1478,6 +1478,28 @@ async def test_printer_change_with_a_spoolman_edit_is_drift_not_an_edit(tmp_path
     await bridge.aclose()
 
 
+async def test_spool_deleted_before_its_write_runs_holds_usage_and_writes_nothing(tmp_path):
+    """Spool 20 is listed, then deleted before the poll's charge: its edit isn't written,
+    and its usage goes to the next spool, which is written instead."""
+    bridge, fake, printer = await written_state(tmp_path)
+    fake.spools[20]["filament"]["color_hex"] = "00ff00"  # A write is due.
+    printer.extruded += 50
+    fake.fail_use = [404]  # Deleted between the list read and the charge.
+    used = list(fake.used[20])
+    await bridge.poll()
+    assert len(jobs(printer)) == 1
+    assert fake.used[20] == used
+    st = bridge.printers[0].tools[0]
+    assert (st.active, st.deleted_spool, st.held_mm) == (None, 20, 50)
+
+    del fake.spools[20]
+    fake.spools[21] = spool_x(21, color="0000ff")
+    await bridge.poll()
+    assert fake.used[21] == [50.0]
+    assert len(jobs(printer)) == 2 and 'O"#0000ff"' in jobs(printer)[-1]
+    await bridge.aclose()
+
+
 async def test_state_from_before_write_tracking_is_rewritten_once(tmp_path):
     uuid19 = "91da34d9-c1c1-470f-bac7-185a2346f86a"
     bridge, fake, printer = make(tmp_path, [spool(20)], uuid_field="instance_uuid")
@@ -1617,6 +1639,24 @@ async def test_runout_flag_clears_when_spool_is_next_active(tmp_path):
     printer.unloads, printer.at_unload = 2, printer.extruded
     await bridge.poll()
     assert fake.flag(19) is None or "mid-print" not in fake.flag(19)
+    await bridge.aclose()
+
+
+async def test_runout_flag_on_an_unlisted_spool_is_left_alone(tmp_path):
+    bridge, fake, printer = await runout_mid_print(tmp_path, remaining=400.0)
+    fake.spools[20] = spool(20)  # confirms the swap: spool 19 is evicted
+    await bridge.poll()
+    runout = replace(bridge.state.runouts[19])
+    fake.spools[19]["archived"] = True  # Spoolman's list leaves it out now.
+    for _ in range(2):
+        await bridge.poll()
+    assert read_state(tmp_path / "bridge.db").runouts[19] == runout
+
+    # Unarchived with its weight corrected: that's an edit, which clears the flag.
+    fake.spools[19]["archived"] = False
+    fake.spools[19]["used_weight"] = 990.0
+    await bridge.poll()
+    assert 19 not in read_state(tmp_path / "bridge.db").runouts
     await bridge.aclose()
 
 
@@ -2129,6 +2169,30 @@ async def test_claim_failing_to_clear_is_handled_once(tmp_path, caplog):
     await bridge.aclose()
 
 
+async def test_claim_cleared_in_spoolman_is_dropped(tmp_path, caplog):
+    """The bridge can't clear a handled claim, then the user clears it: it's forgotten,
+    so ticking it again is a new claim."""
+    bridge, fake, printer = make(tmp_path, [spool(19)])
+    caplog.set_level("INFO")
+    await bridge.poll()
+    fake.spools[20] = spool_x(20, extra=dict(CLAIMED))
+    fake.fail_patch = 500
+    await bridge.poll()
+    assert read_state(tmp_path / "bridge.db").claimed == [20]
+    fake.fail_patch = None
+    fake.spools[20]["extra"]["bridge_claim"] = "false"  # Cleared by the user.
+    await bridge.poll()
+    assert read_state(tmp_path / "bridge.db").claimed == []
+    assert "cleared the claim on spool 20" not in caplog.text
+
+    fake.spools[20]["extra"].update(CLAIMED)
+    await bridge.poll()
+    assert caplog.text.count("spool 20 claimed: confirmed as loaded") == 1
+    assert claim_box(fake, 20) is False
+    assert caplog.text.count("cleared the claim on spool 20") == 1
+    await bridge.aclose()
+
+
 async def test_dry_run_handles_claim_once(tmp_path, caplog):
     bridge, fake, printer = make(tmp_path, [spool(19)])
     bridge.config = replace(bridge.config, dry_run=True)
@@ -2213,6 +2277,29 @@ async def test_deleting_swap_spool_with_queued_charge_holds_it_once(tmp_path):
     bridge, fake = await delete_during_unconfirmed_swap(tmp_path, queue_swap_charge=True)
     assert fake.used[19] == [500.0]
     assert sum(fake.used[20]) == 200.0
+    await bridge.aclose()
+
+
+async def test_404_for_a_spool_no_longer_active_drops_the_charge(tmp_path, caplog):
+    """Spool 19's last charge is queued when the tool swaps to 20, then 19 is deleted:
+    the usage was 19's, so it's dropped, not held for spool 20."""
+    bridge, fake, printer = make(tmp_path, [spool(19)])
+    await bridge.poll()
+    fake.spools[20] = spool(20)
+    printer.extruded, printer.unloads, printer.at_unload = 1500, 1, 1500
+    fake.fail_use = [503]
+    await bridge.poll()  # Swap to 20; the 500 mm for 19 stays queued.
+    assert bridge.printers[0].tools[0].active == 20
+    assert [r["spool_id"] for r in bridge.state.outbox] == [19]
+    del fake.spools[19]
+    printer.extruded = 1600
+    await bridge.poll()
+    assert fake.used == {20: [100.0]}
+    assert "Spoolman rejected a +500 mm charge to spool 19 (404" in caplog.text
+    st = read_state(tmp_path / "bridge.db").printers["default"].tools[0]
+    assert (st.active, st.deleted_spool, st.held_mm) == (20, None, 0)
+    failed = [r for r in ledger(tmp_path) if r.get("failed")]
+    assert [(r["spool_id"], r["failed"], r.get("held")) for r in failed] == [(19, "404", None)]
     await bridge.aclose()
 
 
