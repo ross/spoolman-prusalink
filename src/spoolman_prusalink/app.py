@@ -1186,8 +1186,15 @@ class PrinterBridge:
         self.bridge._save()
 
     def _notes(self, tool: int, notes: list[str]) -> None:
+        """Log a tool's notes when they change, and each note that's gone, at WARNING."""
         key = tuple(notes)
-        if self._last_notes.get(tool) != key:
+        last = self._last_notes.get(tool, ())
+        if last != key:
+            for n in last:
+                if n not in key:
+                    # Each note is "[location] text": say that text no longer holds.
+                    where, _, text = n.partition("] ")
+                    log.warning("%s] no longer: %s", where, text)
             for n in notes:
                 log.warning("%s", n)
         self._last_notes[tool] = key

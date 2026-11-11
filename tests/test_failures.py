@@ -257,6 +257,28 @@ async def test_printer_that_doesnt_report_a_configured_tool_is_noted_once(tmp_pa
     await bridge.aclose()
 
 
+async def test_a_tool_note_that_goes_away_is_logged_once_at_its_level(tmp_path, caplog):
+    bridge, fake, printer = make(tmp_path, [spool(19)])
+    caplog.set_level("INFO")
+    printer_bridge = bridge.printers[0]
+    gone = "[Tool 2] printer doesn't report tool index 1"
+    kept = "[Tool 2] another note"
+    printer_bridge._notes(1, [gone, kept])
+    printer_bridge._notes(1, [kept])  # Only the note that went away ends.
+    printer_bridge._notes(1, [kept])
+    printer_bridge._notes(1, [])
+    printer_bridge._notes(1, [])
+    ends = [(r.levelname, r.getMessage()) for r in caplog.records if "no longer" in r.getMessage()]
+    assert ends == [
+        ("WARNING", "[Tool 2] no longer: printer doesn't report tool index 1"),
+        ("WARNING", "[Tool 2] no longer: another note"),
+    ]
+    caplog.clear()
+    printer_bridge._notes(1, [gone])  # Back again: logged afresh.
+    assert [r.getMessage() for r in caplog.records] == [gone]
+    await bridge.aclose()
+
+
 async def test_flag_wanted_on_a_spool_missing_from_the_list_stays_flagged(tmp_path):
     bridge, fake, printer = make(tmp_path, [spool(19)])
     bridge.state.flagged[:] = [19, 20]

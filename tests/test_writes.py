@@ -729,7 +729,7 @@ async def test_non_preset_without_temps_is_flagged_not_written(tmp_path, caplog)
     await bridge.poll()
     assert jobs(printer) == []
     assert fake.writes.count(("patch", 20)) == patches
-    assert caplog.text.count("can't write spool 20 to the printer") == 1
+    assert caplog.text.count("] can't write spool 20 to the printer") == 1
     assert "printer will be set to spool 20" not in caplog.text
 
     fake.spools[20] = spool_x(20, material="PLA-CF", temps=(220, 60))
@@ -748,7 +748,7 @@ async def test_pps_with_temps_is_flagged_not_written_and_logged_once(tmp_path, c
         await bridge.poll()
     assert jobs(printer) == []
     assert "HT idler-door" in fake.flag(20)
-    assert caplog.text.count("can't write spool 20") == 1
+    assert caplog.text.count("] can't write spool 20") == 1
     assert "printer will be set" not in caplog.text
     await bridge.aclose()
 
@@ -787,7 +787,7 @@ async def test_bad_uuid_in_spoolman_is_flagged_not_written(tmp_path, caplog):
         await bridge.poll()
     assert jobs(printer) == []
     assert "isn't a UUID" in fake.flag(20)
-    assert caplog.text.count("can't write spool 20") == 1
+    assert caplog.text.count("] can't write spool 20") == 1
     await bridge.aclose()
 
 
@@ -1486,7 +1486,9 @@ async def test_wait_for_a_running_sync_job_is_not_logged(tmp_path, caplog):
     printer.job = None
     Printer.run_job(printer, queued[0])
     await bridge.poll()
-    assert caplog.text.count("printer will be set to spool 20") == 1
+    assert caplog.text.count("] printer will be set to spool 20") == 1
+    # Once the printer shows it, the note's end is logged once, at the note's level.
+    assert levels(caplog, "] no longer: printer will be set to spool 20") == ["WARNING"]
     assert bridge.printers[0].tools[0].needs_sync is False
     await bridge.aclose()
 
@@ -1510,7 +1512,7 @@ async def test_spoolman_edit_to_a_bad_uuid_is_flagged_not_written(
     assert len(jobs(printer)) == 1
     assert "isn't a UUID" in fake.flag(20)
     assert "printer filament differs" not in fake.flag(20)
-    assert caplog.text.count("can't write spool 20") == 1
+    assert caplog.text.count("] can't write spool 20") == 1
     await bridge.aclose()
 
 
@@ -2785,7 +2787,7 @@ async def test_model_problem_logged_once(tmp_path, caplog, printer_type, preambl
         await bridge.poll()
     assert jobs(printer) == []
     assert caplog.text.count(logged) == 1
-    assert caplog.text.count("can't write spool 20 to the printer") == 1
+    assert caplog.text.count("] can't write spool 20 to the printer") == 1
     assert fake.writes.count(("patch", 20)) == 1
     assert fake.used[20] == [116.0, 100.0, 100.0, 100.0]
     await bridge.aclose()
