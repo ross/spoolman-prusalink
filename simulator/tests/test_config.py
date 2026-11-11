@@ -154,6 +154,18 @@ BAD = {
         printer(tool("index = 0\nextruded = 10\nextruded_at_unload = 11")),
         "extruded_at_unload can't exceed extruded",
     ),
+    "nan setting": ("feed_ratio = nan\n" + printer(), "not nan or inf"),
+    "port out of range": (printer("port = 70000"), "printers[0].port must be between 1 and 65535"),
+    "tool not a table": (
+        "[[printers]]\nname = 'p'\nmodel = '8.1.0'\ntools = [1]\n",
+        "printers[0].tools[0] must be a table",
+    ),
+    "tools not a list": (printer("tools = 3"), "printers[0].tools must be a list"),
+    "tools empty": (printer("tools = []"), "printers[0].tools must be a list"),
+    "printer not a table": ("printers = [1]\n", "printers[0] must be a table"),
+    "printers not a list": ("printers = 1\n", "printers must be a list"),
+    "missing model": ("[[printers]]\nname = 'p'\n", "printers[0] needs a model"),
+    "empty api key": (printer('api_key = ""'), "printers[0].api_key can't be empty"),
 }
 
 
@@ -163,6 +175,12 @@ def test_errors(tmp_path, case):
     with pytest.raises(ConfigError) as e:
         load(write(tmp_path, text))
     assert message in str(e.value)
+
+
+def test_accepts_each_firmware(tmp_path):
+    for firmware in ("full", "no_counters", "no_endpoint"):
+        cfg = load(write(tmp_path, printer(f'firmware = "{firmware}"')))
+        assert cfg.printers[0].firmware == firmware
 
 
 def test_unparseable_file(tmp_path):
