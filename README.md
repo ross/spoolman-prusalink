@@ -507,7 +507,7 @@ pattern, so the same commands work in every checkout and in CI:
 
 | Script | What it does |
 | --- | --- |
-| `script/bootstrap` | Creates `.venv` and installs the package with its `dev` extras. Reinstalls only when `pyproject.toml` changes. |
+| `script/bootstrap` | Creates `.venv` and installs the pinned versions in `requirements-dev.txt`, then the package. Reinstalls only when `pyproject.toml` or `requirements-dev.txt` changes. |
 | `script/setup` | Deletes `.venv` and runs `script/bootstrap`, for a clean start. |
 | `script/update` | Brings `.venv` up to date after a pull or a branch switch. |
 | `script/server` | Runs the bridge with `./config.toml`. See [Run from source](#run-from-source). |
@@ -516,12 +516,34 @@ pattern, so the same commands work in every checkout and in CI:
 | `script/integration` | Runs the end-to-end tests in `integration/` against a Spoolman. See [Tests](#tests). |
 | `script/lint` | Checks lint rules and formatting with ruff. Changes nothing. |
 | `script/format` | Formats the code and applies ruff's safe fixes. |
+| `script/update-requirements` | Pins every dependency with proviso. See [Dependencies](#dependencies). |
 | `script/cibuild` | Runs what CI runs: bootstrap, lint, and the unit suite with coverage. |
 
 Every script runs `script/bootstrap` first, so a fresh clone needs no other
 step. Set `PYTHON` to pick the interpreter that creates `.venv`, for example
 `PYTHON=python3.11 script/setup`. Each checkout or worktree gets its own
 `.venv`, so the tests always import that checkout's code.
+
+### Dependencies
+
+`pyproject.toml` lists the dependencies and their allowed ranges.
+[proviso](https://github.com/octodns/proviso) resolves them into exact pins
+that work on every supported Python version:
+
+- `requirements.txt` holds the bridge's own dependencies. The image installs
+  it.
+- `requirements-dev.txt` adds every extra. `script/bootstrap` installs it.
+
+Don't edit either file by hand. After changing a dependency in
+`pyproject.toml`, or to pick up new releases, run:
+
+```sh
+script/update-requirements
+```
+
+proviso skips releases less than 7 days old, so a version from this week
+isn't picked up yet. To pin one anyway, pass `--cooldown-days 0`, which turns
+the wait off for every package.
 
 ### Tests
 

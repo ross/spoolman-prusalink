@@ -17,6 +17,7 @@ dev = [
     "pytest-cov>=6",
     "ruff>=0.17,<0.18",
     "aiohttp>=3.9",
+    "proviso>=0.4",
 ]
 # The printer simulator in simulator/, a development tool the image doesn't ship.
 sim = ["aiohttp>=3.9"]
