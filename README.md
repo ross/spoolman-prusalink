@@ -185,13 +185,17 @@ Spoolman, and set `db_file` to a directory you can write to, such as
 `./data`.
 
 ```sh
-script/bootstrap
 cp config.example.toml config.toml
-PRUSALINK_API_KEY=API_KEY .venv/bin/spoolman-prusalink -c config.toml once
+PRUSALINK_API_KEY=API_KEY script/server once
 ```
 
-`script/bootstrap` creates `.venv` and installs the package with its `dev`
-extras. See [Development](#development) for the other scripts.
+`script/server` creates `.venv` on first use and runs the bridge with
+`./config.toml`, or with `$SPOOLMAN_PRUSALINK_CONFIG` if that's set. Its
+arguments go to `spoolman-prusalink`: with none it polls until stopped, and
+`once` polls once and exits. Only one bridge may run against a printer,
+because two would charge the same usage twice, so stop any other bridge first
+or leave `dry_run = true`. See [Development](#development) for the other
+scripts.
 
 ## How usage is attributed
 
@@ -502,6 +506,7 @@ pattern, so the same commands work in every checkout and in CI:
 | `script/bootstrap` | Creates `.venv` and installs the package with its `dev` extras. Reinstalls only when `pyproject.toml` changes. |
 | `script/setup` | Deletes `.venv` and runs `script/bootstrap`, for a clean start. |
 | `script/update` | Brings `.venv` up to date after a pull or a branch switch. |
+| `script/server` | Runs the bridge with `./config.toml`. See [Run from source](#run-from-source). |
 | `script/test` | Runs the unit suite. |
 | `script/lint` | Checks lint rules and formatting with ruff. Changes nothing. |
 | `script/format` | Formats the code and applies ruff's safe fixes. |
