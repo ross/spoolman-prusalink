@@ -185,12 +185,13 @@ Spoolman, and set `db_file` to a directory you can write to, such as
 `./data`.
 
 ```sh
-python3 -m venv .venv
-.venv/bin/pip install -e '.[dev]'
+script/bootstrap
 cp config.example.toml config.toml
 PRUSALINK_API_KEY=API_KEY .venv/bin/spoolman-prusalink -c config.toml once
-.venv/bin/pytest
 ```
+
+`script/bootstrap` creates `.venv` and installs the package with its `dev`
+extras. See [Development](#development) for the other scripts.
 
 ## How usage is attributed
 
@@ -490,28 +491,52 @@ uses, keeps each tool's counters and filament, and has a page with buttons
 for loads, unloads, prints, runouts, jams, reboots and outages. See
 [simulator/README.md](simulator/README.md).
 
-## Tests
+## Development
 
-```
-pip install -e '.[dev]'
-pytest
+The `script/` directory follows the
+[Scripts to Rule Them All](https://github.com/github/scripts-to-rule-them-all)
+pattern, so the same commands work in every checkout and in CI:
+
+| Script | What it does |
+| --- | --- |
+| `script/bootstrap` | Creates `.venv` and installs the package with its `dev` extras. Reinstalls only when `pyproject.toml` changes. |
+| `script/setup` | Deletes `.venv` and runs `script/bootstrap`, for a clean start. |
+| `script/update` | Brings `.venv` up to date after a pull or a branch switch. |
+| `script/test` | Runs the unit suite. |
+| `script/lint` | Checks lint rules and formatting with ruff. Changes nothing. |
+| `script/format` | Formats the code and applies ruff's safe fixes. |
+| `script/cibuild` | Runs what CI runs: bootstrap, lint, and the unit suite with coverage. |
+
+Every script runs `script/bootstrap` first, so a fresh clone needs no other
+step. Set `PYTHON` to pick the interpreter that creates `.venv`, for example
+`PYTHON=python3.11 script/setup`. Each checkout or worktree gets its own
+`.venv`, so the tests always import that checkout's code.
+
+### Tests
+
+```sh
+script/test
 ```
 
 That's the unit suite: the bridge's tests in `tests/` and the simulator's in
 `simulator/tests`, self-contained and quick. Run it before every change.
 
-CI runs the unit suite as `pytest --cov`, which measures branch coverage of the
-bridge and the simulator and fails below the `fail_under` floor in
-`pyproject.toml`. Run it the same way to check a change. When coverage rises,
-raise the floor to match.
+With no arguments, `script/test` measures branch coverage of the bridge and
+the simulator, as CI does, and fails below the `fail_under` floor in
+`pyproject.toml`. When coverage rises, raise the floor to match. Arguments go
+to pytest without coverage, so a single file or test isn't held to the floor:
+
+```sh
+script/test tests/test_app.py -k unload
+```
 
 The end-to-end tests in `integration/` run the bridge, the simulator and a
 real Spoolman together, one scenario from `docs/scenarios.md` per test. They
 need a Spoolman to talk to and take longer, so they run only when asked:
 
-```
+```sh
 podman run -d --name spoolman-it -p 127.0.0.1:7912:8000 ghcr.io/donkie/spoolman:0.27.1
-SPOOLMAN_URL=http://127.0.0.1:7912 pytest integration
+SPOOLMAN_URL=http://127.0.0.1:7912 .venv/bin/pytest integration
 ```
 
 CI runs both, as separate jobs. See [integration/README.md](integration/README.md).
