@@ -16,7 +16,7 @@ from spoolman_prusalink.__main__ import main
 from spoolman_prusalink.accounting import Provisional, SwapFlag, ToolState
 from spoolman_prusalink.app import Bridge
 from spoolman_prusalink.config import Config, ConfigError, PrinterConfig, load
-from spoolman_prusalink.db import Database, read_ledger, read_state
+from spoolman_prusalink.db import Database, DatabaseError, read_ledger, read_state
 from spoolman_prusalink.models import Material
 from spoolman_prusalink.prusalink import PrusaLink, parse_filament
 from spoolman_prusalink.spoolman import Spoolman, parse_spool
@@ -1118,3 +1118,17 @@ def test_main_quiets_httpx_unless_debugging(tmp_path, fake_bridge, caplog, level
         assert httpx_logger.level == httpx_level
     finally:
         httpx_logger.setLevel(before)
+
+
+async def test_from_config_opens_the_database_and_builds_the_clients(tmp_path):
+    cfg = make_config(tmp_path, dry_run=False)
+    bridge = Bridge.from_config(cfg)
+    try:
+        assert [p.name for p in bridge.printers] == ["default"]
+        assert set(bridge.clients) == {"default"}
+        assert bridge.db is not None and (tmp_path / "bridge.db").exists()
+        with pytest.raises(DatabaseError, match="locked"):  # Held until aclose.
+            Database.open(cfg.db_file)
+    finally:
+        await bridge.aclose()
+    Database.open(cfg.db_file).close()
