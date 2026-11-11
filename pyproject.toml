@@ -47,7 +47,7 @@ branch = true
 
 [tool.coverage.report]
 # The coverage today. Raise it as coverage grows; don't lower it.
-fail_under = 94.6
+fail_under = 96.3
 precision = 1
 show_missing = true
 skip_covered = true
