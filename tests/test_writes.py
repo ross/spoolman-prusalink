@@ -1588,7 +1588,8 @@ async def test_runout_flag_from_older_state_learns_the_weights(tmp_path):
 @pytest.mark.parametrize("unknown", ["grams", "used"])
 async def test_runout_flag_takes_a_charge_it_cant_check_as_the_bridges_own(tmp_path, unknown):
     # Without the charge's weight or the stored weight, the response can't be checked,
-    # so it's taken as the bridge's own charge rather than read as an edit next time.
+    # so it's taken as the bridge's own charge. Without "grams", the old stored weight
+    # would read as an edit next time; without "used", the next read learns the weights.
     bridge, fake, printer = await runout_mid_print(tmp_path, remaining=400.0)
     printer.extruded += 500
     fake.fail_use = [503]  # The charge stays queued.
