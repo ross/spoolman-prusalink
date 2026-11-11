@@ -139,6 +139,46 @@ def test_parse_spool_claim_and_last_used():
     assert s.claim is False and s.last_used.utcoffset().total_seconds() == 0
 
 
+def test_parse_spool_ignores_malformed_extras_and_timestamps():
+    data = spool_json(3, "Core One L+")
+    data["extra"] = {
+        "instance_uuid": "not json",
+        "bridge_flag": None,
+        "bridge_claim": "{",
+    }
+    data["last_used"] = "yesterday"
+    s = parse_spool(data, "instance_uuid", "bridge_flag", "bridge_claim")
+    assert (s.instance_uuid, s.flag, s.claim, s.last_used) == (None, None, False, None)
+    data["extra"]["instance_uuid"] = json.dumps(5)  # Valid JSON, but not text.
+    assert parse_spool(data, "instance_uuid").instance_uuid is None
+
+
+@pytest.mark.parametrize("body", ["[]", "not json"])
+async def test_use_length_without_a_used_weight(body):
+    transport = httpx.MockTransport(lambda request: httpx.Response(200, text=body))
+    spoolman = Spoolman("http://spoolman", transport=transport)
+    assert await spoolman.use_length(3, 10.0) is None
+    await spoolman.aclose()
+
+
+async def test_ensure_field_refuses_a_field_of_another_type():
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "GET"  # Nothing is created over it.
+        return httpx.Response(200, json=[{"key": "instance_uuid", "field_type": "integer"}])
+
+    spoolman = Spoolman("http://spoolman", transport=httpx.MockTransport(handler))
+    with pytest.raises(ValueError, match="instance_uuid.*isn't a text field"):
+        await spoolman.ensure_field("instance_uuid", "Instance UUID")
+    await spoolman.aclose()
+
+
+async def test_job_display_name_when_the_job_ended_between_reads():
+    transport = httpx.MockTransport(lambda request: httpx.Response(204))
+    client = PrusaLink("http://printer", "k", transport=transport)
+    assert await client.job_display_name() is None
+    await client.aclose()
+
+
 def make_config(tmp_path, **kw):
     printer = PrinterConfig(
         name="default", url="http://printer", api_key="k", tools={0: "Core One L+"}
