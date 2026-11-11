@@ -37,6 +37,7 @@ class FakeSpoolman:
         self.fail_patch = None  # Status code for spool PATCHes.
         self.fail_field = None  # Status code for field reads.
         self.lookups = []  # Spool ids read one at a time.
+        self.unlisted = set()  # Spool ids the list leaves out, as a list read a moment early.
 
     def handle(self, request: httpx.Request) -> httpx.Response:
         path, method = request.url.path, request.method
@@ -46,7 +47,12 @@ class FakeSpoolman:
             if self.fail_read:
                 return httpx.Response(self.fail_read, text="oops")
             return httpx.Response(
-                200, json=[s for s in self.spools.values() if not s.get("archived")]
+                200,
+                json=[
+                    s
+                    for s in self.spools.values()
+                    if not s.get("archived") and s["id"] not in self.unlisted
+                ],
             )
         if path.startswith("/api/v1/spool/") and method == "GET":
             spool_id = int(path.rsplit("/", 1)[1])
@@ -1973,6 +1979,28 @@ async def test_archived_spool_is_charged_and_flagged_once(tmp_path, caplog):
     await bridge.poll()
     assert fake.flag(19) is None
     assert fake.lookups == [19]
+    await bridge.aclose()
+
+
+async def test_spool_missing_from_a_stale_list_is_looked_up_again_only_if_still_missing(
+    tmp_path, caplog
+):
+    bridge, fake, printer = make(tmp_path, [spool(19)])
+    caplog.set_level("INFO")
+    await bridge.poll()
+    # The list was read just before spool 19 was unarchived, so it's missing but active.
+    fake.unlisted = {19}
+    printer.extruded = 1100
+    await bridge.poll()
+    assert fake.lookups == [19]
+    assert "archived" not in caplog.text and "deleted" not in caplog.text
+    assert bridge._archived == {}
+    # The next list has it, so it isn't looked up again.
+    fake.unlisted = set()
+    printer.extruded = 1200
+    await bridge.poll()
+    assert fake.lookups == [19]
+    assert fake.used == {19: [100.0, 100.0]}
     await bridge.aclose()
 
 
