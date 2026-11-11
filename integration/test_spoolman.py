@@ -85,9 +85,9 @@ async def test_m1_spoolman_unreachable(world: World, caplog: pytest.LogCaptureFi
     records = await w.poll()
     assert [r["use_length"] for r in charges(records)] == [30.0, 30.0]
     assert w.bridge.state.outbox == []
-    assert count(caplog, logging.INFO, "sent 1 queued charge(s)") == 1
+    assert count(caplog, logging.WARNING, "sent 1 queued charge(s)") == 1
     await w.poll()
-    assert count(caplog, logging.INFO, "sent ") == 1
+    assert count(caplog, logging.WARNING, "sent ") == 1
     # Every millimetre was charged once: three charges reached Spoolman, for all 120 mm,
     # and the queued one was tried once a poll while Spoolman was down.
     assert w.charged(w.since(0), "A") == 60 + 30 + 30 == w.counter - 1000
@@ -186,7 +186,7 @@ async def test_m3_charge_to_deleted_spool_is_held(world: World, caplog: pytest.L
     assert count(caplog, logging.WARNING, found) == 1
     assert not logged(caplog, logging.ERROR, "Spoolman rejected")
     held_msg = "sent 0 queued charge(s); held 1 for the next spool"
-    assert count(caplog, logging.INFO, held_msg) == 1
+    assert count(caplog, logging.WARNING, held_msg) == 1
 
     # The next spool moved into the location takes it.
     await w.move("C", w.tool_location)

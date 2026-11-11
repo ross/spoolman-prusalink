@@ -521,7 +521,7 @@ async def test_x9_spoolman_unreachable(world: World, caplog: pytest.LogCaptureFi
         f"PUT /api/v1/spool/{e}/use 200",
     ]
     assert w.bridge.state.outbox == []
-    assert logged(caplog, logging.INFO, "sent 2 queued charge(s)")
+    assert logged(caplog, logging.WARNING, "sent 2 queued charge(s)")
 
 
 async def test_x10_firmware_without_the_filament_endpoint(

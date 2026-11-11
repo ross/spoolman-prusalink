@@ -96,10 +96,12 @@ class Once:
     """Log each problem once, while it lasts, keyed by what it's about.
 
     `fail()` logs the first time a key fails, and again only if the detail changes;
-    repeats go to DEBUG. `clear()` ends the problem and optionally logs one recovery line.
+    repeats go to DEBUG. `clear()` ends the problem and logs one recovery line at the
+    level the problem was last logged at, so any log level that showed the problem
+    shows its end too. Clearing a key that isn't failing logs nothing.
     """
 
-    _seen: dict[Hashable, str] = field(default_factory=dict)
+    _seen: dict[Hashable, tuple[str, int]] = field(default_factory=dict)
 
     def fail(
         self,
@@ -110,17 +112,30 @@ class Once:
         level: int = logging.WARNING,
     ) -> bool:
         detail = str(detail)
-        new = self._seen.get(key) != detail
-        self._seen[key] = detail
+        seen = self._seen.get(key)
+        new = seen is None or seen[0] != detail
+        if new:
+            self._seen[key] = (detail, level)
         log.log(level if new else logging.DEBUG, message, *args)
         return new
 
     def clear(self, key: Hashable, message: str | None = None, *args: object) -> bool:
-        if self._seen.pop(key, None) is None:
+        """End the problem at `key`. Returns whether there was one.
+
+        `message` is the recovery line. Leave it out only where the problem's end isn't
+        a recovery, such as a wait that's no longer needed.
+        """
+        seen = self._seen.pop(key, None)
+        if seen is None:
             return False
         if message:
-            log.info(message, *args)
+            log.log(seen[1], message, *args)
         return True
+
+    def done(self, key: Hashable, message: str, *args: object) -> None:
+        """Log a success at INFO, or as `key`'s recovery line if it ends a problem there."""
+        if not self.clear(key, message, *args):
+            log.info(message, *args)
 
 
 # A mid-print unload with more than this fraction of the net weight left in Spoolman

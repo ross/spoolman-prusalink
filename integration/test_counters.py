@@ -297,11 +297,12 @@ async def test_c9_printer_answers_with_an_error(world: World, caplog: pytest.Log
     assert w.since(mark) == []
     assert not logged(caplog, logging.WARNING, "unreachable")
 
-    # Cleared: logged once, and the next poll catches up on everything since.
+    # Cleared: logged once, at the failure's level, and the next poll catches up on
+    # everything since.
     w.printer.set_fault("none")
     records = await w.poll()
     records += await w.poll()
-    assert messages(caplog, "printer reads working again", logging.INFO) == [
+    assert messages(caplog, "printer reads working again", logging.WARNING) == [
         "printer reads working again"
     ]
     assert events(records) == []

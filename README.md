@@ -171,7 +171,8 @@ printing rate while any printer that can be reached is busy or hasn't
 reported its state yet. A printer that's off is logged as an outage, once
 and then hourly; one that answers with an error is logged once per distinct
 error. Either way it's skipped until it can be read, its flags in Spoolman
-stay as they were, and the others carry on. Log lines about a tool
+stay as they were, and the others carry on. When a logged problem clears,
+one line says so, at the level the problem was logged at. Log lines about a tool
 keep the `[location]` prefix; lines about a whole printer name it when there
 are several. A spool active in two tools at once, which happens when one
 printer misses an unload across a reboot, is logged once and flagged on the
