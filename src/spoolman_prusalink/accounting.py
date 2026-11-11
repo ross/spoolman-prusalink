@@ -783,8 +783,7 @@ def account(
             event(EventKind.STAGED_AT_PRINT, msg)
             if active is not None:
                 notice = Notice(active, EventKind.STAGED_AT_PRINT, msg)
-            if assigned is not None:
-                staged_notice = Notice(assigned, EventKind.STAGED_AT_PRINT, msg)
+            staged_notice = Notice(assigned, EventKind.STAGED_AT_PRINT, msg)
 
     # A spool is active again after a deletion, including by a claim: it takes the held
     # usage.

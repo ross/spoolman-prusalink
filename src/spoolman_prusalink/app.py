@@ -1687,7 +1687,7 @@ class Bridge:
         for spool_id in sorted(set(self._flags) | set(self.state.flagged)):
             want = self._flags.get(spool_id)
             if spool_id not in current:
-                if spool_id in self.state.flagged and want is None:
+                if want is None:
                     self.state.flagged.remove(spool_id)  # Spool deleted or archived.
                     changed = True
                 continue
@@ -1709,9 +1709,9 @@ class Bridge:
                     f": {want}" if want else "",
                 )
             if want is None:
-                if spool_id in self.state.flagged:
-                    self.state.flagged.remove(spool_id)
-                    changed = True
+                # Only a spool the bridge flagged earlier has no desired flag.
+                self.state.flagged.remove(spool_id)
+                changed = True
             elif spool_id not in self.state.flagged:
                 self.state.flagged.append(spool_id)
                 changed = True
