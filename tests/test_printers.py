@@ -209,6 +209,10 @@ async def test_x5_x6_claim_on_b_while_a_still_has_the_spool(tmp_path, caplog):
     assert st["a"].active is None and st["b"].active == 19
     assert fake.used[19] == [100.0, 100.0, 50.0, 10.0]
     assert "at once" not in (fake.flag(19) or "")
+    recovered = [
+        r for r in caplog.records if "no longer active in more than one tool" in r.getMessage()
+    ]
+    assert [r.levelname for r in recovered] == ["WARNING"]
     await bridge.aclose()
 
 
@@ -227,6 +231,7 @@ async def test_x6_shared_spool_logs_again_when_it_recurs(tmp_path, caplog):
         b_tools[0] = ToolState(boot_id=1, active=None, assigned=20)
         bridge._check_shared({})
     assert caplog.text.count(warning) == 2
+    assert caplog.text.count("spool 19 is no longer active in more than one tool") == 2
     await bridge.aclose()
 
 

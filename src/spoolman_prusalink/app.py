@@ -322,7 +322,12 @@ class PrinterBridge:
                     e,
                 )
                 continue
-            self.bridge._problems.clear((self.name, "lookup", spool_id))
+            self.bridge._problems.clear(
+                (self.name, "lookup", spool_id),
+                "[%s] can look up spool %d again",
+                location,
+                spool_id,
+            )
             if found is None:
                 self._hold_deleted(tool, spool_id)
             elif found.archived:
@@ -533,7 +538,11 @@ class PrinterBridge:
 
             st = self.tools.get(tool, ToolState())
             if st.deleted_spool is None:
-                self.bridge._problems.clear((self.name, "deleted", tool))
+                self.bridge._problems.clear(
+                    (self.name, "deleted", tool),
+                    "[%s] no longer holding usage for a deleted spool",
+                    location,
+                )
             elif st.assigned is not None:
                 flags.setdefault(st.assigned, []).append(
                     f"{location}: usage is being held because spool {st.deleted_spool} was "
@@ -878,7 +887,9 @@ class PrinterBridge:
                 level=logging.INFO,
             )
         else:
-            self.bridge._problems.clear(key)
+            self.bridge._problems.clear(
+                key, "spool %d no longer shows a negative weight remaining in Spoolman", spool.id
+            )
 
     def _claim_handled(self, location: str, claim: int, others: list[int]) -> None:
         """Record a handled claim and the claims it beat, so their boxes are cleared."""
@@ -1046,10 +1057,14 @@ class PrinterBridge:
             writes.append(printer_sync.ToolWrite(tool, spool, uuid_value))
 
         if not writes:
+            # A dry-run job or a wait isn't a problem, so nothing more is said when it's
+            # no longer due. A job that was failing or waiting on a busy printer is.
             self.bridge._problems.clear((self.name, "dry-run job"))
-            self.bridge._problems.clear((self.name, "sync busy"))
-            self.bridge._problems.clear((self.name, "sync failed"))
             self.bridge._problems.clear((self.name, "sync delay"))
+            for problem in ("sync busy", "sync failed"):
+                self.bridge._problems.clear(
+                    (self.name, problem), "%s sync job no longer needed", self.label
+                )
             return
         delay = self.bridge.config.sync_delay
         idle_for = 0.0 if self._idle_since is None else self.bridge.clock() - self._idle_since
@@ -1121,6 +1136,7 @@ class PrinterBridge:
                 (self.name, "sync failed"), e, "%s sync job failed: %s", self.label, e
             )
             return
+        # A wait on a busy printer ends with the job; the line below says it ran.
         self.bridge._problems.clear((self.name, "sync busy"))
         self.bridge._problems.clear(
             (self.name, "sync failed"), "%s sync job working again", self.label
@@ -1315,7 +1331,9 @@ class Bridge:
                     )
         shared = {spool_id for spool_id, locations in where.items() if len(locations) > 1}
         for spool_id in self._shared - shared:
-            self._problems.clear(("shared", spool_id))
+            self._problems.clear(
+                ("shared", spool_id), "spool %d is no longer active in more than one tool", spool_id
+            )
         self._shared = shared
         for spool_id in sorted(shared):
             locations = where[spool_id]
@@ -1380,7 +1398,9 @@ class Bridge:
                 continue
             per_tool.setdefault(tool, []).append(spool)
         for spool_id in self._unplaced - unplaced:
-            self._problems.clear(("claim", spool_id))
+            self._problems.clear(
+                ("claim", spool_id), "claimed spool %d is no longer waiting on a location", spool_id
+            )
         self._unplaced = unplaced
         chosen: dict[str, dict[int, tuple[int, list[int]]]] = {}
         for (name, tool), candidates in per_tool.items():
@@ -1466,8 +1486,7 @@ class Bridge:
                     ("unclaim", spool_id), e, "can't clear the claim on spool %d: %s", spool_id, e
                 )
                 continue
-            self._problems.clear(("unclaim", spool_id))
-            log.info("cleared the claim on spool %d", spool_id)
+            self._problems.done(("unclaim", spool_id), "cleared the claim on spool %d", spool_id)
             self.state.claimed.remove(spool_id)
             changed = True
         if changed:
@@ -1492,7 +1511,7 @@ class Bridge:
                 len(outbox),
             )
             return True
-        self._problems.clear("dry-run outbox")
+        self._problems.clear("dry-run outbox", "no queued charges held for dry run")
         sent = held = dropped = 0
         while outbox:
             rec = outbox[0]
@@ -1548,6 +1567,12 @@ class Bridge:
         self._problems.clear("charge", "%s", _outbox_outcome(sent, held, dropped))
         return True
 
+    def _evict_gone(self, location: str | None, spool_id: int) -> None:
+        """End a failing eviction of a spool that's left the location some other way."""
+        self._problems.clear(
+            ("evict", spool_id), "[%s] spool %d is out of the location now", location, spool_id
+        )
+
     async def evict(self, spools: list[Spool]) -> None:
         """Move each tool's outgoing spools out of the tool's location."""
         if self.config.dry_run:
@@ -1559,7 +1584,7 @@ class Bridge:
                 location = printer.config.tools.get(tool)
                 for spool_id in st.evict:
                     if where.get(spool_id) != location:
-                        self._problems.clear(("evict", spool_id))
+                        self._evict_gone(location, spool_id)
                         continue
                     try:
                         # Read it again first: the list is from the start of the poll, and
@@ -1567,7 +1592,7 @@ class Bridge:
                         # printer's location. Moving it then would undo that.
                         fresh = await self.spoolman.spool(spool_id)
                         if fresh is None or fresh.location != location:
-                            self._problems.clear(("evict", spool_id))
+                            self._evict_gone(location, spool_id)
                             continue
                         await self.spoolman.set_location(spool_id, target)
                     except (httpx.HTTPError, ValueError, KeyError) as e:
@@ -1580,8 +1605,8 @@ class Bridge:
                             e,
                         )
                         continue
-                    self._problems.clear(("evict", spool_id))
-                    log.info(
+                    self._problems.done(
+                        ("evict", spool_id),
                         "[%s] moved spool %d to %s",
                         location,
                         spool_id,
@@ -1612,8 +1637,7 @@ class Bridge:
                 ("uuid", spool.id), e, "can't store an instance UUID on spool %d: %s", spool.id, e
             )
             return None
-        self._problems.clear(("uuid", spool.id))
-        log.info("gave spool %d instance UUID %s", spool.id, value)
+        self._problems.done(("uuid", spool.id), "gave spool %d instance UUID %s", spool.id, value)
         return value
 
     async def _adopt_uuid(self, spool_id: int, value: str, store: bool = True) -> bool:
@@ -1664,7 +1688,12 @@ class Bridge:
             return False
         if not store:
             self._unowned_uuids.add((spool_id, value))
-            self._problems.clear(("uuid", spool_id))
+            self._problems.clear(
+                ("uuid", spool_id),
+                "checked spool %d's tag UUID %s: no other spool has it",
+                spool_id,
+                value,
+            )
             return True
         if not await self._ensure_field(key, UUID_FIELD_NAME):
             return False
@@ -1675,8 +1704,9 @@ class Bridge:
                 ("uuid", spool_id), e, "can't store an instance UUID on spool %d: %s", spool_id, e
             )
             return False
-        self._problems.clear(("uuid", spool_id))
-        log.info("gave spool %d its tag's instance UUID %s", spool_id, value)
+        self._problems.done(
+            ("uuid", spool_id), "gave spool %d its tag's instance UUID %s", spool_id, value
+        )
         return True
 
     async def _ensure_field(self, key: str, name: str, field_type: str = "text") -> bool:
@@ -1719,15 +1749,18 @@ class Bridge:
                         ("flag", spool_id), e, "can't update the flag on spool %d: %s", spool_id, e
                     )
                     continue
-                self._problems.clear(("flag", spool_id))
                 if spool_id in self._archived:
                     self._archived[spool_id] = replace(self._archived[spool_id], flag=want)
-                log.info(
+                self._problems.done(
+                    ("flag", spool_id),
                     "%s flag on spool %d%s",
                     "set" if want else "cleared",
                     spool_id,
                     f": {want}" if want else "",
                 )
+            else:
+                # Someone else made it match, so a failing update is no longer needed.
+                self._problems.clear(("flag", spool_id), "flag on spool %d is up to date", spool_id)
             if want is None:
                 # Only a spool the bridge flagged earlier has no desired flag.
                 self.state.flagged.remove(spool_id)

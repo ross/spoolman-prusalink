@@ -6,7 +6,7 @@ from dataclasses import replace
 
 import httpx
 import pytest
-from test_writes import LOC, jobs, make, restart, spool, swap_to_spool_20, two_printers
+from test_writes import LOC, jobs, levels, make, restart, spool, swap_to_spool_20, two_printers
 
 from spoolman_prusalink.db import read_state
 
@@ -85,7 +85,7 @@ async def test_sync_job_failing_without_a_status_is_logged_once_and_retried(
     await bridge.poll()
     assert len(jobs(printer)) == 1
     assert count(caplog, "sync job failed") == 1
-    assert count(caplog, "sync job working again") == 1
+    assert levels(caplog, "sync job working again") == ["WARNING"]
     await bridge.aclose()
 
 
@@ -115,6 +115,7 @@ async def test_evicted_spool_that_already_left_clears_the_eviction_problem(tmp_p
     assert fake.spools[19]["location"] == "Shelf"
     assert [w for w in fake.writes if w[0] == "location"] == []
     assert count(caplog, "can't move spool 19 out") == 1
+    assert levels(caplog, "[Tool a] spool 19 is out of the location now") == ["WARNING"]
     await bridge.aclose()
 
 
@@ -169,6 +170,21 @@ async def test_failed_archived_check_adopts_nothing_and_logs_once(uuid_bridge, c
     assert await bridge._adopt_uuid(19, TAG) is True
     assert stored_uuid(fake, 19) == TAG
     assert ("uuid", 19) not in bridge._problems._seen
+    assert levels(caplog, "gave spool 19 its tag's instance UUID") == ["WARNING"]
+    await bridge.aclose()
+
+
+async def test_failed_check_of_a_kept_uuid_logs_its_recovery(uuid_bridge, caplog):
+    bridge, fake, printer = uuid_bridge
+    caplog.set_level("INFO")
+    fake.fail_read = 500
+    assert await bridge._adopt_uuid(19, TAG, store=False) is False
+    fake.fail_read = None
+    assert await bridge._adopt_uuid(19, TAG, store=False) is True
+    assert levels(caplog, f"checked spool 19's tag UUID {TAG}: no other spool has it") == [
+        "WARNING"
+    ]
+    assert fake.writes == []
     await bridge.aclose()
 
 
@@ -186,7 +202,7 @@ async def test_failed_store_of_an_adopted_uuid_logs_once_and_retries(uuid_bridge
     assert await bridge._adopt_uuid(19, TAG) is True
     assert stored_uuid(fake, 19) == TAG
     assert ("uuid", 19) not in bridge._problems._seen
-    assert count(caplog, "gave spool 19 its tag's instance UUID") == 1
+    assert levels(caplog, "gave spool 19 its tag's instance UUID") == ["WARNING"]
     await bridge.aclose()
 
 
