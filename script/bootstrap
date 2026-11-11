@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Install the dependencies: a virtualenv in .venv with the package and its dev
-# extras. Safe to run again; it reinstalls only when pyproject.toml changes.
+# Install the dependencies: a virtualenv in .venv with the pinned versions in
+# requirements-dev.txt and the package itself. Safe to run again; it
+# reinstalls only when pyproject.toml or requirements-dev.txt changes.
 #
 # PYTHON picks the interpreter that creates .venv (default: python3).
 set -euo pipefail
@@ -21,10 +22,19 @@ if [ ! -x "$venv/bin/python" ]; then
     rm -f "$stamp"
 fi
 
-want=$("$python" -c 'import hashlib; print(hashlib.sha256(open("pyproject.toml", "rb").read()).hexdigest())')
+want=$("$python" -c '
+import hashlib
+h = hashlib.sha256()
+for name in ("pyproject.toml", "requirements-dev.txt"):
+    h.update(open(name, "rb").read())
+print(h.hexdigest())
+')
 if [ "$(cat "$stamp" 2>/dev/null)" != "$want" ]; then
     echo "==> Installing spoolman-prusalink and its dev dependencies"
     "$venv/bin/python" -m pip install --quiet --upgrade pip
-    "$venv/bin/python" -m pip install --quiet -e '.[dev]'
+    "$venv/bin/python" -m pip install --quiet -r requirements-dev.txt
+    # The dependencies are all pinned above; this adds the package and its
+    # entry point without letting pip pick other versions.
+    "$venv/bin/python" -m pip install --quiet --no-deps -e .
     echo "$want" >"$stamp"
 fi

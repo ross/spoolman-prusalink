@@ -9,9 +9,12 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends sqlite3 \
     && rm -rf /var/lib/apt/lists/*
 
+# The pinned dependencies first, so a source change doesn't reinstall them.
+COPY requirements.txt ./
+RUN pip install --no-cache-dir -r requirements.txt
 COPY pyproject.toml README.md ./
 COPY src ./src
-RUN pip install --no-cache-dir . && useradd --uid 1000 --no-create-home bridge \
+RUN pip install --no-cache-dir --no-deps . && useradd --uid 1000 --no-create-home bridge \
     && mkdir -p /data /config && chown bridge /data
 
 USER bridge
