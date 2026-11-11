@@ -278,7 +278,10 @@ class PrinterBridge:
 
         The list leaves out archived spools. A deleted one (404) leaves its tool with no
         active spool, holding usage for the next one. An archived one keeps being charged
-        until the next unload, and is flagged. Each spool is looked up once, not every poll.
+        until the next unload, and is flagged. An archived spool is remembered, so it's
+        looked up once, not every poll. A spool that's found but neither archived nor
+        listed was unarchived after the list was read; it's charged without its filament
+        data this poll, and the next poll's list has it, so nothing is remembered.
         """
         listed = {s.id for s in spools}
         # The cache is shared, so keep every printer's active spools, not only this one's.
@@ -1385,7 +1388,8 @@ class Bridge:
 
         Only when the response is the stored weight plus this charge: anything else
         includes a change made in Spoolman since the last read, and leaving the stored
-        weight alone lets the next read see it as an edit.
+        weight alone lets the next read see it as an edit. When the charge's weight or
+        the stored weight isn't known, the response is taken as the bridge's own charge.
         """
         runout = self.state.runouts.get(rec["spool_id"])
         if runout is None or used is None:

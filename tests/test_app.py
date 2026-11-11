@@ -22,6 +22,24 @@ from spoolman_prusalink.prusalink import PrusaLink, parse_filament
 from spoolman_prusalink.spoolman import Spoolman, parse_spool
 from spoolman_prusalink.state import PrinterState, State
 
+ENV_VARS = (
+    "SPOOLMAN_PRUSALINK_CONFIG",
+    "LOG_LEVEL",
+    "PRUSALINK_API_KEY",
+    "PRUSALINK_URL",
+    "SPOOLMAN_URL",
+    "SPOOLMAN_PRUSALINK_LOCATION",
+    "SPOOLMAN_PRUSALINK_DRY_RUN",
+)
+
+
+@pytest.fixture
+def clean_env(monkeypatch):
+    """Clear every variable config.py and __main__.py read, so the shell can't leak in."""
+    for var in ENV_VARS:
+        monkeypatch.delenv(var, raising=False)
+
+
 FILAMENT = {
     "boot_id": 3308742886,
     "tools": [
@@ -473,7 +491,7 @@ def test_config_file_that_is_not_utf8_is_a_config_error(tmp_path):
         load(p, env={"PRUSALINK_API_KEY": "k"})
 
 
-def test_main_exits_2_on_a_malformed_config(tmp_path, monkeypatch, caplog):
+def test_main_exits_2_on_a_malformed_config(tmp_path, clean_env, monkeypatch, caplog):
     p = tmp_path / "c.toml"
     p.write_text("[printer\n")
     monkeypatch.setenv("PRUSALINK_API_KEY", "k")
@@ -719,7 +737,7 @@ def test_config_single_printer_takes_a_name_and_api_key_env(tmp_path):
         load(p, env={"PRUSALINK_API_KEY": "k"})
 
 
-def test_main_exits_2_on_a_database_it_cannot_load(tmp_path, monkeypatch, caplog):
+def test_main_exits_2_on_a_database_it_cannot_load(tmp_path, clean_env, monkeypatch, caplog):
     db = tmp_path / "bridge.db"
     Database.open(db).close()
     conn = sqlite3.connect(db)
@@ -733,7 +751,9 @@ def test_main_exits_2_on_a_database_it_cannot_load(tmp_path, monkeypatch, caplog
     assert "database: " in caplog.text and "unsupported schema version '0'" in caplog.text
 
 
-def test_main_exits_2_while_another_bridge_holds_the_database(tmp_path, monkeypatch, caplog):
+def test_main_exits_2_while_another_bridge_holds_the_database(
+    tmp_path, clean_env, monkeypatch, caplog
+):
     db = tmp_path / "bridge.db"
     p = tmp_path / "c.toml"
     p.write_text(CONFIG_BASE + f'[bridge]\ndb_file = "{db}"\n')
