@@ -80,7 +80,7 @@ def test_m865_copy_onto_another_tool_drops_the_uuids():
     tagged = Material("PETG", "#1f6fb2", TAG, True, material_uuid=TAG, package_uuid=TAG)
     sim, p = make("1.4.1", [loaded(0, tagged)])
     p.tools[1] = SimTool(1, enabled=False)
-    p.model = type(p.model)("x", "X", max_tools=2)
+    p.model = type(p.model)("x", "X", uuids=True, max_tools=2)  # only tool 0 holds UUIDs
     p.apply(gcode.parse("M865 I0 L1"))
     copy = p.tools[1].material
     assert (copy.name, copy.instance_uuid, copy.material_uuid, copy.package_uuid) == (
@@ -157,6 +157,10 @@ def test_a_load_during_a_print_is_refused():
 
 
 def test_a_keep_load_outside_a_runout_is_refused_and_temperatures_need_a_tag():
+    sim, p = make()
+    with pytest.raises(Invalid, match="needs a source"):
+        p.load(0)
+    assert p.state is State.IDLE and tool0(p).process is None
     sim, p = printing()
     p.runout(0)
     with pytest.raises(Invalid, match="only a tag load takes temperatures"):
@@ -416,10 +420,18 @@ def test_restore_rejects_a_malformed_snapshot():
 
 
 def test_select_tool_while_off_changes_the_pick_without_touching_the_sensor():
-    sim, p = make("3.1.0", [loaded(0), loaded(1)])
+    sim, p = make("3.1.0", [loaded(0), loaded(1, sensor_fault=True)])
     p.set_power("off")
     p.select_tool(1)
     assert p.selected_tool == 1
+    assert p.tools[1].unload_count == 0 and p.tools[1].material == PLA
+
+
+def test_select_tool_while_on_counts_a_faulty_sensor_as_an_unload():
+    sim, p = make("3.1.0", [loaded(0), loaded(1, sensor_fault=True)])
+    p.select_tool(1)
+    assert p.selected_tool == 1
+    assert p.tools[1].unload_count == 1 and p.tools[1].material is None
 
 
 def test_simulation_takes_printers_at_construction():
