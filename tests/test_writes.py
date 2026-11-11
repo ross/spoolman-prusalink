@@ -1789,6 +1789,47 @@ async def test_negative_remaining_ends_when_the_spool_is_unloaded(tmp_path, capl
 # Deleted and archived active spools (M3, M3a, Q7)
 
 
+async def test_deleted_spool_hold_logs_no_end_until_it_ends(tmp_path, caplog):
+    # Polls with and without extrusion while the hold lasts, as at a print's end.
+    bridge, fake, printer = make(tmp_path, [spool(19)])
+    caplog.set_level("INFO")
+    await bridge.poll()
+    printer.extruded = 1500
+    await bridge.poll()
+    del fake.spools[19]
+    for extruded in (1700, 1800, 1800, 1900, 1900):
+        printer.extruded = extruded
+        await bridge.poll()
+    st = read_state(tmp_path / "bridge.db").printers["default"].tools[0]
+    assert (st.deleted_spool, st.held_mm) == (19, 400)
+    assert "no longer" not in caplog.text
+    assert caplog.text.count("spool 19 was deleted in Spoolman") == 1
+    await bridge.aclose()
+
+
+async def test_held_usage_over_a_reboot_logs_no_end_until_it_ends(tmp_path, caplog):
+    # Usage held with no spool assigned, kept over a reboot, then polls without usage.
+    bridge, fake, printer = make(tmp_path, [spool(19)])
+    caplog.set_level("INFO")
+    await bridge.poll()
+    del fake.spools[19]["location"]
+    printer.unloads, printer.at_unload = 1, 1000
+    printer.extruded = 1100
+    await bridge.poll()
+    await bridge.poll()
+    assert bridge.printers[0].tools[0].active is None
+    assert "holding usage: no spool assigned" in caplog.text
+    printer.boot_id, printer.extruded, printer.unloads, printer.at_unload = 2, 0, 0, 0
+    for _ in range(3):
+        await bridge.poll()
+    assert bridge.printers[0].tools[0].held_mm == 100
+    assert "no longer" not in caplog.text
+    fake.spools[20] = spool(20)
+    await bridge.poll()
+    assert levels(caplog, "no longer: holding usage: no spool assigned") == ["WARNING"]
+    await bridge.aclose()
+
+
 async def test_deleted_spool_holds_usage_for_the_next_spool(tmp_path, caplog):
     bridge, fake, printer = make(tmp_path, [spool(19)])
     caplog.set_level("INFO")
@@ -1804,7 +1845,8 @@ async def test_deleted_spool_holds_usage_for_the_next_spool(tmp_path, caplog):
     st = read_state(tmp_path / "bridge.db").printers["default"].tools[0]
     assert (st.active, st.deleted_spool, st.held_mm) == (None, 19, 400)
     assert caplog.text.count("spool 19 was deleted in Spoolman") == 1
-    assert caplog.text.count("holding usage since spool 19 was deleted") == 1
+    # The hold is logged by the line above, not as a tool note each poll.
+    assert "holding usage since spool 19 was deleted" not in caplog.text
     assert "rejected" not in caplog.text
 
     fake.spools[20] = spool(20)  # The user re-creates the spool and moves it in.
@@ -2393,7 +2435,7 @@ async def test_claim_failing_to_clear_ends_when_the_user_unticks_it(tmp_path, ca
         await bridge.poll()
     assert read_state(tmp_path / "bridge.db").claimed == []
     assert ("unclaim", 20) not in bridge._problems._seen
-    assert levels(caplog, "claim on spool 20 was cleared in Spoolman") == ["WARNING"]
+    assert levels(caplog, "spool 20 no longer needs its claim cleared") == ["WARNING"]
     assert "cleared the claim on spool 20" not in caplog.text
     await bridge.aclose()
 

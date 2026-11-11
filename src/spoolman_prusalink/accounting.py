@@ -818,6 +818,12 @@ def account(
                 swap = replace(swap, mm=swap.mm + delta)
             if provisional is not None and provisional.spool_id == active:
                 provisional = replace(provisional, mm=provisional.mm + delta)
+    elif held and active is None and deleted is None:
+        # Usage kept over a reboot is still held, though there's no new usage this poll.
+        if reading.material is None:
+            event(EventKind.HOLD_EMPTY, "holding usage until filament is reported")
+        else:
+            event(EventKind.HOLD_UNASSIGNED, "holding usage: no spool assigned")
 
     # 6. Notices that depend on the outcome.
     # After a deletion, the deleted-spool flag already covers the staged spool.

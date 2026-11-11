@@ -293,8 +293,10 @@ async def test_w7_non_preset_without_temperatures_is_flagged(
     await w.poll()
     assert await w.flag("B") is None
     assert count(caplog, logging.WARNING, f"] can't write spool {b} to the printer") == 1
-    # The note's end is logged once, at its level.
-    assert count(caplog, logging.WARNING, f"] no longer: can't write spool {b}") == 1
+    # The "can't write" note gave way to a pending write for the same spool, with no
+    # end line between; the pending write's note ends once, at its level.
+    assert not logged(caplog, logging.WARNING, f"] no longer: can't write spool {b}")
+    assert count(caplog, logging.WARNING, f"] no longer: printer will be set to spool {b}") == 1
 
 
 async def test_w8_pps_is_flagged_until_loaded_from_the_menu(

@@ -159,8 +159,10 @@ async def test_m3_deleted_active_spool_holds_usage(world: World, caplog: pytest.
     tool = w.bridge.printers[0].tools[0]
     assert tool.active == b and tool.deleted_spool is None and tool.held_mm == 0
     assert count(caplog, logging.WARNING, found) == 1
+    # The hold is logged by the deleted-spool line above, not as a note on each poll.
     holding = f"[{w.tool_location}] holding usage since spool {a} was deleted"
-    assert count(caplog, logging.WARNING, holding) == 1
+    assert not logged(caplog, logging.WARNING, holding)
+    assert not logged(caplog, logging.WARNING, "no longer: holding usage since")
 
 
 async def test_m3_charge_to_deleted_spool_is_held(world: World, caplog: pytest.LogCaptureFixture):
