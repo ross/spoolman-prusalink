@@ -339,7 +339,17 @@ async def test_printer_outage_logged_on_change(tmp_path, caplog):
 
     up["v"] = True
     await bridge.poll()
-    assert "printer reachable again after 3h 00m" in caplog.text
+    # The outage and its end show at the same level; the reminder in between is INFO.
+    outage = [
+        (r.levelname, r.getMessage().split(":")[0])
+        for r in caplog.records
+        if "reachable" in r.getMessage() and r.levelno >= logging.INFO
+    ]
+    assert outage == [
+        ("WARNING", "printer unreachable"),
+        ("INFO", "printer still unreachable after 3h 00m"),
+        ("WARNING", "printer reachable again after 3h 00m"),
+    ]
     assert not bridge.printers[0]._printer_outage.down
     await bridge.aclose()
 

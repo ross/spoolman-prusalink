@@ -307,7 +307,8 @@ async def test_x8_one_printer_off(tmp_path, caplog):
     assert bridge.interval() == bridge.config.poll_printing
     a.down = False
     await bridge.poll()
-    assert "printer a reachable again" in caplog.text
+    back = [r.levelname for r in caplog.records if "printer a reachable again" in r.getMessage()]
+    assert back == ["WARNING"]
     await bridge.aclose()
 
 

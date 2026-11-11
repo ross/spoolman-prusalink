@@ -61,7 +61,7 @@ async def test_m1_spoolman_unreachable(world: World, caplog: pytest.LogCaptureFi
     faults.restore()
     records = await w.poll()
     assert [r["use_length"] for r in charges(records)] == [60.0]
-    assert count(caplog, logging.INFO, "Spoolman reachable again") == 1
+    assert count(caplog, logging.WARNING, "Spoolman reachable again") == 1
 
     # A charge Spoolman fails with a 503 stays queued.
     caplog.clear()

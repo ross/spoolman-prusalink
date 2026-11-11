@@ -1056,7 +1056,7 @@ async def test_spoolman_read_problems_logged_once(tmp_path, caplog):
     fake.fail_read = 500
     for _ in range(3):
         await bridge.poll()
-    assert caplog.text.count("Spoolman reachable again") == 1
+    assert levels(caplog, "Spoolman reachable again") == ["WARNING"]
     assert caplog.text.count("Spoolman read failed") == 1
     fake.fail_read = None
     for _ in range(2):

@@ -62,7 +62,8 @@ class Outage:
     """Log a service going unreachable and coming back, not every failed poll.
 
     A printer that's switched off is normal, so a connection failure logs once, then
-    an hourly reminder, then a line when the service answers again.
+    an hourly reminder, then a line when the service answers again, at the level
+    the outage was reported at.
     """
 
     name: str
@@ -87,7 +88,9 @@ class Outage:
 
     def ok(self) -> None:
         if self.since is not None:
-            log.info("%s reachable again after %s", self.name, _duration(self.clock() - self.since))
+            log.warning(
+                "%s reachable again after %s", self.name, _duration(self.clock() - self.since)
+            )
             self.since = None
 
 

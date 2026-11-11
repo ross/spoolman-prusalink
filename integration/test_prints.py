@@ -347,7 +347,7 @@ async def test_p12_power_panic_resume_keeps_the_job(world: World, caplog: pytest
     assert w.printer.job.id == job
     reboots = events(records, "reboot")
     assert len(reboots) == 1 and "counters restart at 0" in reboots[0]["message"]
-    assert logged(caplog, logging.INFO, "reachable again")
+    assert logged(caplog, logging.WARNING, "reachable again")
     assert events(records, "staged_at_print") == []
     # The reboot flags the staged spool, as row S9 says.
     assert len(events(records, "staged_at_reboot")) == 1

@@ -334,7 +334,7 @@ async def test_x5_claim_on_b_while_a_still_has_the_spool(
     assert f"0 mm before the unload goes to spool {a}" in events(records, "unload")[0]["message"]
     assert it.state.active is None and b.state.active == a
     assert "at once" not in (await w.flag("A") or "")
-    assert logged(caplog, logging.INFO, "printer it reachable again")
+    assert logged(caplog, logging.WARNING, "printer it reachable again")
 
 
 async def test_x6_one_spool_active_in_two_tools(world: World, caplog: pytest.LogCaptureFixture):
@@ -471,7 +471,7 @@ async def test_x8_one_printer_off(world: World, caplog: pytest.LogCaptureFixture
     records = await w.poll()
     assert kinds(records) == [(IT, "reboot"), (IT, "claimed"), (B, "reboot")]
     assert it.state.active == w.spools["B"]
-    assert logged(caplog, logging.INFO, "printer it reachable again")
+    assert logged(caplog, logging.WARNING, "printer it reachable again")
     assert count(caplog, "printer it unreachable") == 1
 
 
