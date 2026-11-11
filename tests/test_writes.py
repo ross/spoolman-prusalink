@@ -2036,11 +2036,17 @@ async def test_failed_lookup_of_a_spool_missing_from_the_list_is_logged_once(
     assert [r["grams"] for r in charged] == [None] * 3
     # Once the lookup works again the problem clears, so a new failure is logged afresh.
     fake.fail_lookup, fake.garble_lookup = None, False
+    logged = caplog.text
     printer.extruded = 1400
     await bridge.poll()
     assert fake.lookups == [19] * 4
     assert bridge._problems._seen == {}
-    fake.fail_lookup = 500
+    assert caplog.text[len(logged) :] == "" or "look up" not in caplog.text[len(logged) :]
+    # The same failure again is a new problem, so it's logged again.
+    if failure == "http":
+        fake.fail_lookup = 500
+    else:
+        fake.garble_lookup = True
     printer.extruded = 1500
     await bridge.poll()
     assert caplog.text.count("can't look up spool 19, which is missing") == 2
