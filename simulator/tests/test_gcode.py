@@ -86,3 +86,8 @@ def test_unknown_lines_are_ignored():
 def test_errors_name_the_line(line, reason):
     with pytest.raises(GcodeError, match=rf"^line 2: .*{reason}"):
         parse(f"M117 ok\n{line}\n")
+
+
+def test_a_parameter_that_does_not_parse_names_the_rest_of_the_line():
+    with pytest.raises(GcodeError, match=r"^line 1: .*can't read '=bad'"):
+        parse("M865 X =bad\n")

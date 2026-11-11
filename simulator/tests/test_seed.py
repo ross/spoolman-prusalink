@@ -121,3 +121,48 @@ async def test_seed_reports_an_unreachable_spoolman():
 
     with pytest.raises(SeedError, match="can't reach Spoolman"):
         await seed("http://127.0.0.1:9", LOCATIONS)
+
+
+async def test_seed_finds_its_vendor_and_field_among_others():
+    fake = FakeSpoolman()
+    fake.vendors += [{"id": 1, "name": "Other"}, {"id": 2, "name": "Sim"}]
+    fake.fields += [
+        {"key": "other", "field_type": "text"},
+        {"key": "instance_uuid", "field_type": "text"},
+    ]
+    async with TestServer(fake.app) as server:
+        await seed(str(server.make_url("")).rstrip("/"), LOCATIONS)
+    assert [v["name"] for v in fake.vendors] == ["Other", "Sim"]
+    assert len(fake.fields) == 2
+    assert {f["vendor_id"] for f in fake.filaments} == {2}
+    assert "field" not in [kind for kind, _ in fake.posts]
+
+
+async def test_seed_refuses_a_uuid_field_of_another_type():
+    import pytest
+
+    from simulator.seed import SeedError
+
+    fake = FakeSpoolman()
+    fake.fields.append({"key": "instance_uuid", "field_type": "integer"})
+    async with TestServer(fake.app) as server:
+        with pytest.raises(SeedError, match="exists but isn't a text field"):
+            await seed(str(server.make_url("")).rstrip("/"), LOCATIONS)
+    assert fake.spools == []
+
+
+async def test_seed_reports_an_error_response_with_the_request():
+    import pytest
+
+    from simulator.seed import SeedError
+
+    async def refuse(request):
+        return web.Response(status=503, text="down for maintenance")
+
+    app = web.Application()
+    app.add_routes([web.get("/api/v1/vendor", refuse)])
+    async with TestServer(app) as server:
+        url = str(server.make_url("")).rstrip("/")
+        with pytest.raises(SeedError) as e:
+            await seed(url, LOCATIONS)
+    assert str(e.value) == f"GET {url}/api/v1/vendor returned 503: down for maintenance"
