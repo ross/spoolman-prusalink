@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# Run the unit suite.
+#
+# With no arguments it runs the whole suite with coverage, as CI does, and
+# fails below the floor in pyproject.toml. Arguments go to pytest as they are,
+# without coverage, so one file or test isn't held to the floor:
+#
+#   script/test tests/test_bridge.py -k unload
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+[ -n "${SKIP_BOOTSTRAP:-}" ] || script/bootstrap
+
+if [ $# -eq 0 ]; then
+    echo "==> Running the unit suite with coverage"
+    exec .venv/bin/pytest --cov
+fi
+exec .venv/bin/pytest "$@"

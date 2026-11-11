@@ -1,0 +1,95 @@
+#!/usr/bin/env bash
+# Run the whole stack locally, with no hardware: a Spoolman, the printer
+# simulator, and the bridge pointed at both. Ctrl-C stops the simulator and the
+# bridge.
+#
+# Spoolman: with SPOOLMAN_URL set, the demo uses that Spoolman. Otherwise it
+# runs the container spoolman-demo (Podman or Docker) on 127.0.0.1:7912, or on
+# DEMO_SPOOLMAN_PORT, with its data on the volume spoolman-demo-data, so spools
+# and usage carry over between runs. The container keeps running afterwards;
+# `podman rm -f spoolman-demo` removes it.
+#
+# The demo seeds Spoolman with the simulator's spools (it never deletes or
+# moves any) and keeps the bridge's config and database in simulator/data/.
+# SIM_CONFIG picks the simulator's config (default simulator/sim.example.toml).
+# Arguments go to the bridge, for example `script/demo --log-level debug`.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+[ -n "${SKIP_BOOTSTRAP:-}" ] || script/bootstrap
+
+sim_config=${SIM_CONFIG:-simulator/sim.example.toml}
+data=simulator/data
+mkdir -p "$data"
+
+wait_for() {
+    .venv/bin/python - "$1" "$2" <<'PY'
+import sys
+import time
+
+import httpx
+
+url, what = sys.argv[1:]
+deadline = time.monotonic() + 120
+while True:
+    try:
+        if httpx.get(url, timeout=2).is_success:
+            break
+    except httpx.HTTPError:
+        pass
+    if time.monotonic() > deadline:
+        sys.exit(f"{what} didn't come up within 120 seconds")
+    time.sleep(1)
+PY
+}
+
+if [ -z "${SPOOLMAN_URL:-}" ]; then
+    image=${SPOOLMAN_IMAGE:-ghcr.io/donkie/spoolman:0.27.1}
+    engine=${CONTAINER_ENGINE:-$(command -v podman >/dev/null && echo podman || echo docker)}
+    port=${DEMO_SPOOLMAN_PORT:-7912}
+    if "$engine" container inspect spoolman-demo >/dev/null 2>&1; then
+        echo "==> Starting the spoolman-demo container"
+        "$engine" start spoolman-demo >/dev/null
+        port=$("$engine" port spoolman-demo 8000 | head -n1 | sed 's/.*://')
+    else
+        echo "==> Creating the spoolman-demo container from $image on 127.0.0.1:$port"
+        "$engine" run -d --name spoolman-demo -p "127.0.0.1:$port:8000" \
+            -v spoolman-demo-data:/home/app/.local/share/spoolman "$image" >/dev/null
+    fi
+    SPOOLMAN_URL=http://127.0.0.1:$port
+fi
+
+echo "==> Waiting for Spoolman at $SPOOLMAN_URL"
+wait_for "$SPOOLMAN_URL/api/v1/health" Spoolman
+
+echo "==> Seeding Spoolman with the simulator's spools"
+.venv/bin/python -m simulator -c "$sim_config" seed --spoolman "$SPOOLMAN_URL"
+
+bridge_config=$data/bridge.toml
+{
+    .venv/bin/python -m simulator -c "$sim_config" bridge-config
+    cat <<TOML
+
+[spoolman]
+url = "$SPOOLMAN_URL"
+
+[bridge]
+db_file = "$data/bridge.db"
+poll_printing = 2
+poll_idle = 3
+dry_run = false
+TOML
+} >"$bridge_config"
+
+echo "==> Starting the simulator"
+.venv/bin/python -m simulator -c "$sim_config" run &
+sim=$!
+trap 'kill "$sim" 2>/dev/null; wait "$sim" 2>/dev/null' EXIT
+control_port=$(.venv/bin/python -c 'import sys; from simulator import config; print(config.load(sys.argv[1]).control_port)' "$sim_config")
+wait_for "http://127.0.0.1:$control_port/" simulator
+
+cat <<MSG
+==> The simulator's page is http://127.0.0.1:$control_port and Spoolman is $SPOOLMAN_URL
+==> Starting the bridge with $bridge_config
+MSG
+.venv/bin/spoolman-prusalink -c "$bridge_config" "$@"

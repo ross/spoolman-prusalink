@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# Set the project up from scratch: a fresh .venv, then everything
+# script/bootstrap installs. Leaves config.toml and data/ alone.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+echo "==> Removing .venv"
+rm -rf .venv
+
+script/bootstrap

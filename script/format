@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# Format the code and apply ruff's safe fixes.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+[ -n "${SKIP_BOOTSTRAP:-}" ] || script/bootstrap
+
+.venv/bin/ruff check --fix .
+.venv/bin/ruff format .

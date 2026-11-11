@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# Install the dependencies: a virtualenv in .venv with the package and its dev
+# extras. Safe to run again; it reinstalls only when pyproject.toml changes.
+#
+# PYTHON picks the interpreter that creates .venv (default: python3).
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+python=${PYTHON:-python3}
+venv=.venv
+stamp=$venv/.bootstrap
+
+if ! "$python" -c 'import sys; sys.exit(sys.version_info < (3, 11))'; then
+    echo "==> $python is $("$python" --version 2>&1); spoolman-prusalink needs 3.11 or newer" >&2
+    exit 1
+fi
+
+if [ ! -x "$venv/bin/python" ]; then
+    echo "==> Creating $venv with $("$python" --version 2>&1)"
+    "$python" -m venv "$venv"
+    rm -f "$stamp"
+fi
+
+want=$("$python" -c 'import hashlib; print(hashlib.sha256(open("pyproject.toml", "rb").read()).hexdigest())')
+if [ "$(cat "$stamp" 2>/dev/null)" != "$want" ]; then
+    echo "==> Installing spoolman-prusalink and its dev dependencies"
+    "$venv/bin/python" -m pip install --quiet --upgrade pip
+    "$venv/bin/python" -m pip install --quiet -e '.[dev]'
+    echo "$want" >"$stamp"
+fi

@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# Run the bridge from this checkout.
+#
+# It reads $SPOOLMAN_PRUSALINK_CONFIG, else ./config.toml. Arguments go to
+# spoolman-prusalink, so `script/server once` polls once and exits, and
+# `script/server --log-level debug` logs every request.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+[ -n "${SKIP_BOOTSTRAP:-}" ] || script/bootstrap
+
+config=${SPOOLMAN_PRUSALINK_CONFIG:-config.toml}
+if [ ! -f "$config" ]; then
+    cat >&2 <<MSG
+==> No $config. Copy the example and edit it:
+
+    cp config.example.toml config.toml
+
+Point [printer] url and [spoolman] url at your printer and Spoolman, and set
+db_file to a path you can write to, such as ./data/bridge.db.
+MSG
+    exit 1
+fi
+
+exec .venv/bin/spoolman-prusalink -c "$config" "$@"
