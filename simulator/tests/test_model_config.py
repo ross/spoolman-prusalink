@@ -38,7 +38,11 @@ def test_tool_with_color_and_uuid_is_adhoc(tmp_path):
     assert t.extruded_at_unload == 4000
     # A color or UUID can only come from an ad-hoc type, which also fills the ad-hoc slot.
     assert t.material == Material(
-        "PETG", "#1f6fb2", "7b3d2d5e-1f7a-4d8c-9a1e-2c3b4d5e6f70", True, **preset_temperatures("PETG")
+        "PETG",
+        "#1f6fb2",
+        "7b3d2d5e-1f7a-4d8c-9a1e-2c3b4d5e6f70",
+        True,
+        **preset_temperatures("PETG"),
     )
     assert t.previous == t.material and t.previous is not t.material
     assert (p.api_key, p.port, p.model.code) == ("sim-p", 8001, "8.1.0")
