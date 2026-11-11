@@ -209,6 +209,10 @@ async def test_x5_x6_claim_on_b_while_a_still_has_the_spool(tmp_path, caplog):
     assert st["a"].active is None and st["b"].active == 19
     assert fake.used[19] == [100.0, 100.0, 50.0, 10.0]
     assert "at once" not in (fake.flag(19) or "")
+    recovered = [
+        r for r in caplog.records if "no longer active in more than one tool" in r.getMessage()
+    ]
+    assert [r.levelname for r in recovered] == ["WARNING"]
     await bridge.aclose()
 
 
@@ -227,6 +231,7 @@ async def test_x6_shared_spool_logs_again_when_it_recurs(tmp_path, caplog):
         b_tools[0] = ToolState(boot_id=1, active=None, assigned=20)
         bridge._check_shared({})
     assert caplog.text.count(warning) == 2
+    assert caplog.text.count("spool 19 is no longer active in more than one tool") == 2
     await bridge.aclose()
 
 
@@ -302,7 +307,8 @@ async def test_x8_one_printer_off(tmp_path, caplog):
     assert bridge.interval() == bridge.config.poll_printing
     a.down = False
     await bridge.poll()
-    assert "printer a reachable again" in caplog.text
+    back = [r.levelname for r in caplog.records if "printer a reachable again" in r.getMessage()]
+    assert back == ["WARNING"]
     await bridge.aclose()
 
 
@@ -361,7 +367,8 @@ async def test_x10_unsupported_firmware_on_one_printer(tmp_path, caplog):
     assert bridge.interval() == bridge.config.poll_idle
     a.filament_endpoint = True
     await bridge.poll()
-    assert "printer a now reports filament; resuming" in caplog.text
+    resumed = [r.levelname for r in caplog.records if "a now reports filament" in r.getMessage()]
+    assert resumed == ["ERROR"]
     await bridge.aclose()
 
 

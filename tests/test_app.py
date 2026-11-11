@@ -14,7 +14,7 @@ from spoolman_prusalink import __main__ as main_module
 from spoolman_prusalink import printer_sync
 from spoolman_prusalink.__main__ import main
 from spoolman_prusalink.accounting import Provisional, SwapFlag, ToolState
-from spoolman_prusalink.app import Bridge
+from spoolman_prusalink.app import Bridge, Once
 from spoolman_prusalink.config import Config, ConfigError, PrinterConfig, load
 from spoolman_prusalink.db import Database, DatabaseError, read_ledger, read_state
 from spoolman_prusalink.models import Material
@@ -339,7 +339,17 @@ async def test_printer_outage_logged_on_change(tmp_path, caplog):
 
     up["v"] = True
     await bridge.poll()
-    assert "printer reachable again after 3h 00m" in caplog.text
+    # The outage and its end show at the same level; the reminder in between is INFO.
+    outage = [
+        (r.levelname, r.getMessage().split(":")[0])
+        for r in caplog.records
+        if "reachable" in r.getMessage() and r.levelno >= logging.INFO
+    ]
+    assert outage == [
+        ("WARNING", "printer unreachable"),
+        ("INFO", "printer still unreachable after 3h 00m"),
+        ("WARNING", "printer reachable again after 3h 00m"),
+    ]
     assert not bridge.printers[0]._printer_outage.down
     await bridge.aclose()
 
@@ -1190,3 +1200,81 @@ async def test_bridge_without_a_database_charges_and_saves_nothing(tmp_path):
     assert bridge.state.outbox == []
     assert list(tmp_path.iterdir()) == []  # Nothing saved anywhere.
     await bridge.aclose()
+
+
+# Once: each problem logged once, and its end logged at the problem's level
+
+
+def once_records(caplog):
+    return [(r.levelname, r.getMessage()) for r in caplog.records]
+
+
+@pytest.mark.parametrize("level", [logging.WARNING, logging.INFO])
+def test_once_logs_recovery_at_the_level_the_problem_was_reported_at(caplog, level):
+    caplog.set_level(logging.DEBUG, "spoolman_prusalink")
+    once = Once()
+    once.fail("k", "boom", "thing failed: %s", "boom", level=level)
+    once.fail("k", "boom", "thing failed: %s", "boom", level=level)
+    assert once.clear("k", "thing working again") is True
+    name = logging.getLevelName(level)
+    assert once_records(caplog) == [
+        (name, "thing failed: boom"),
+        ("DEBUG", "thing failed: boom"),
+        (name, "thing working again"),
+    ]
+
+
+def test_once_recovery_takes_the_level_of_the_last_logged_failure(caplog):
+    caplog.set_level(logging.DEBUG, "spoolman_prusalink")
+    once = Once()
+    once.fail("k", "a", "first")
+    once.fail("k", "b", "second", level=logging.INFO)
+    once.fail("k", "b", "second again", level=logging.ERROR)  # A repeat: DEBUG, kept INFO.
+    once.clear("k", "recovered")
+    assert once_records(caplog)[-1] == ("INFO", "recovered")
+
+
+def test_once_clearing_a_key_that_never_failed_logs_nothing(caplog):
+    caplog.set_level(logging.DEBUG, "spoolman_prusalink")
+    once = Once()
+    assert once.clear("k", "thing working again") is False
+    once.fail("k", "boom", "thing failed")
+    once.clear("k", "thing working again")
+    assert once.clear("k", "thing working again") is False  # Already cleared.
+    assert [m for _, m in once_records(caplog)] == ["thing failed", "thing working again"]
+
+
+def test_once_clear_without_a_message_is_silent(caplog):
+    caplog.set_level(logging.DEBUG, "spoolman_prusalink")
+    once = Once()
+    once.fail("k", "waiting", "waiting", level=logging.INFO)
+    assert once.clear("k") is True
+    assert once_records(caplog) == [("INFO", "waiting")]
+
+
+def test_once_failure_after_recovery_is_logged_afresh(caplog):
+    caplog.set_level(logging.DEBUG, "spoolman_prusalink")
+    once = Once()
+    assert once.fail("k", "boom", "thing failed") is True
+    once.clear("k", "thing working again")
+    assert once.fail("k", "boom", "thing failed") is True
+    assert once_records(caplog) == [
+        ("WARNING", "thing failed"),
+        ("WARNING", "thing working again"),
+        ("WARNING", "thing failed"),
+    ]
+
+
+def test_once_done_logs_at_info_unless_it_ends_a_problem(caplog):
+    caplog.set_level(logging.DEBUG, "spoolman_prusalink")
+    once = Once()
+    once.done("k", "moved spool %d", 19)
+    once.fail("k", "boom", "can't move spool %d", 19)
+    once.done("k", "moved spool %d", 19)
+    once.done("k", "moved spool %d", 19)
+    assert once_records(caplog) == [
+        ("INFO", "moved spool 19"),
+        ("WARNING", "can't move spool 19"),
+        ("WARNING", "moved spool 19"),
+        ("INFO", "moved spool 19"),
+    ]

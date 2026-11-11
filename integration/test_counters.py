@@ -111,7 +111,7 @@ async def test_c2_printer_off_for_hours(world: World, caplog: pytest.LogCaptureF
     records = await w.poll()
     assert len(events(records, "reboot")) == 1
     assert w.charged(records, "A") == 30
-    back = messages(caplog, "printer reachable again after", logging.INFO)
+    back = messages(caplog, "printer reachable again after", logging.WARNING)
     assert len(back) == 1 and back[0].endswith("after 2h 30m")
     assert w.bridge.interval() == interval
     await w.poll()
@@ -297,11 +297,12 @@ async def test_c9_printer_answers_with_an_error(world: World, caplog: pytest.Log
     assert w.since(mark) == []
     assert not logged(caplog, logging.WARNING, "unreachable")
 
-    # Cleared: logged once, and the next poll catches up on everything since.
+    # Cleared: logged once, at the failure's level, and the next poll catches up on
+    # everything since.
     w.printer.set_fault("none")
     records = await w.poll()
     records += await w.poll()
-    assert messages(caplog, "printer reads working again", logging.INFO) == [
+    assert messages(caplog, "printer reads working again", logging.WARNING) == [
         "printer reads working again"
     ]
     assert events(records) == []

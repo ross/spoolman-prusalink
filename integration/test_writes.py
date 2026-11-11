@@ -271,7 +271,7 @@ async def test_w7_non_preset_without_temperatures_is_flagged(
     assert w.requests("PUT") == []
     flag = await w.flag("B")
     assert flag is not None and "isn't a printer preset; set its extruder and bed" in flag
-    assert count(caplog, logging.WARNING, f"can't write spool {b} to the printer") == 1
+    assert count(caplog, logging.WARNING, f"] can't write spool {b} to the printer") == 1
     assert not logged(caplog, logging.WARNING, f"printer will be set to spool {b}")
 
     # The flag stays through a print, which is still charged to B.
@@ -292,7 +292,11 @@ async def test_w7_non_preset_without_temperatures_is_flagged(
     assert w.material() == ("PLA-CF", PETG[1], minted)
     await w.poll()
     assert await w.flag("B") is None
-    assert count(caplog, logging.WARNING, f"can't write spool {b} to the printer") == 1
+    assert count(caplog, logging.WARNING, f"] can't write spool {b} to the printer") == 1
+    # The "can't write" note gave way to a pending write for the same spool, with no
+    # end line between; the pending write's note ends once, at its level.
+    assert not logged(caplog, logging.WARNING, f"] no longer: can't write spool {b}")
+    assert count(caplog, logging.WARNING, f"] no longer: printer will be set to spool {b}") == 1
 
 
 async def test_w8_pps_is_flagged_until_loaded_from_the_menu(
@@ -312,7 +316,7 @@ async def test_w8_pps_is_flagged_until_loaded_from_the_menu(
     assert w.requests("PUT") == []
     flag = await w.flag("B")
     assert flag is not None and "needs the printer's HT idler-door setting" in flag
-    assert count(caplog, logging.WARNING, f"can't write spool {b} to the printer") == 1
+    assert count(caplog, logging.WARNING, f"] can't write spool {b} to the printer") == 1
 
     # The user reloads it from the menu as PPS, as the flag asks. The unload with no
     # Spoolman change opens a swap (W11), but the menu load is what the bridge would
@@ -329,7 +333,7 @@ async def test_w8_pps_is_flagged_until_loaded_from_the_menu(
     unloaded = "filament was unloaded with no Spoolman change"
     assert unloaded in (flag := await w.flag("B") or "") and "HT idler-door" not in flag
     assert not logged(caplog, logging.WARNING, f"printer differs from spool {b}")
-    assert count(caplog, logging.WARNING, f"can't write spool {b} to the printer") == 1
+    assert count(caplog, logging.WARNING, f"] can't write spool {b} to the printer") == 1
 
 
 @pytest.mark.parametrize("world_config", [{}, dict(sync_drift=True)], indirect=True)
@@ -435,7 +439,7 @@ async def test_w10_model_the_bridge_cannot_write(
     assert w.charged(records, "B") == LOAD_MM + 30
     flag = await w.flag("B")
     assert flag == f"{w.tool_location}: can't write to the printer: {problem}"
-    assert count(caplog, logging.WARNING, f"can't write spool {b} to the printer") == 1
+    assert count(caplog, logging.WARNING, f"] can't write spool {b} to the printer") == 1
     assert count(caplog, logging.WARNING, "printer writes are off") == 1
 
 

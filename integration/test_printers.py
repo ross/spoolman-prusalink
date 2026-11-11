@@ -334,7 +334,7 @@ async def test_x5_claim_on_b_while_a_still_has_the_spool(
     assert f"0 mm before the unload goes to spool {a}" in events(records, "unload")[0]["message"]
     assert it.state.active is None and b.state.active == a
     assert "at once" not in (await w.flag("A") or "")
-    assert logged(caplog, logging.INFO, "printer it reachable again")
+    assert logged(caplog, logging.WARNING, "printer it reachable again")
 
 
 async def test_x6_one_spool_active_in_two_tools(world: World, caplog: pytest.LogCaptureFixture):
@@ -471,7 +471,7 @@ async def test_x8_one_printer_off(world: World, caplog: pytest.LogCaptureFixture
     records = await w.poll()
     assert kinds(records) == [(IT, "reboot"), (IT, "claimed"), (B, "reboot")]
     assert it.state.active == w.spools["B"]
-    assert logged(caplog, logging.INFO, "printer it reachable again")
+    assert logged(caplog, logging.WARNING, "printer it reachable again")
     assert count(caplog, "printer it unreachable") == 1
 
 
@@ -521,7 +521,7 @@ async def test_x9_spoolman_unreachable(world: World, caplog: pytest.LogCaptureFi
         f"PUT /api/v1/spool/{e}/use 200",
     ]
     assert w.bridge.state.outbox == []
-    assert logged(caplog, logging.INFO, "sent 2 queued charge(s)")
+    assert logged(caplog, logging.WARNING, "sent 2 queued charge(s)")
 
 
 async def test_x10_firmware_without_the_filament_endpoint(
@@ -560,7 +560,7 @@ async def test_x10_firmware_without_the_filament_endpoint(
     it.printer.set_firmware("full")
     records = await w.poll()
     assert kinds(records) == [(IT, "baseline")]
-    assert logged(caplog, logging.INFO, "printer it now reports filament; resuming")
+    assert logged(caplog, logging.ERROR, "printer it now reports filament; resuming")
     it.extrude(5)
     assert charged(await w.poll(), a) == 5
     assert count(caplog, unsupported) == 1

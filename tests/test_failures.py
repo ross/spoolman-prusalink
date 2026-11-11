@@ -2,12 +2,14 @@
 
 import asyncio
 import json
+import logging
 from dataclasses import replace
 
 import httpx
 import pytest
-from test_writes import LOC, jobs, make, restart, spool, swap_to_spool_20, two_printers
+from test_writes import LOC, jobs, levels, make, restart, spool, swap_to_spool_20, two_printers
 
+from spoolman_prusalink.accounting import EventKind
 from spoolman_prusalink.db import read_state
 
 TAG = "91da34d9-c1c1-470f-bac7-185a2346f86a"
@@ -54,7 +56,8 @@ async def test_unreadable_printer_model_keeps_writes_off_and_warns_once(
 
     monkeypatch.setattr(client, "printer_type", real)
     await bridge.poll()
-    assert "printer is COREONEL (8.1.0)" in caplog.text
+    # Writes coming back on ends the warning, so it's logged at the warning's level.
+    assert levels(caplog, "printer is COREONEL (8.1.0)") == ["WARNING"]
     await bridge.poll()
     assert len(jobs(printer)) == 1
     await bridge.aclose()
@@ -85,7 +88,27 @@ async def test_sync_job_failing_without_a_status_is_logged_once_and_retried(
     await bridge.poll()
     assert len(jobs(printer)) == 1
     assert count(caplog, "sync job failed") == 1
-    assert count(caplog, "sync job working again") == 1
+    assert levels(caplog, "sync job working again") == ["WARNING"]
+    await bridge.aclose()
+
+
+async def test_sync_job_busy_and_failing_ends_with_one_line(tmp_path, caplog):
+    bridge, fake, printer = make(tmp_path, [spool(19)])
+    caplog.set_level("INFO")
+    await bridge.poll()
+    problems, name = bridge._problems, bridge.printers[0]._key
+    # A 409 left the job waiting, then a later attempt failed outright.
+    problems.fail((name, "sync busy"), "409", "busy", level=logging.INFO)
+    problems.fail((name, "sync failed"), "500", "failed")
+    caplog.clear()
+    await bridge.poll()  # Nothing to write any more.
+    assert levels(caplog, "sync job no longer needed") == ["WARNING"]
+    assert problems._seen == {}
+
+    problems.fail((name, "sync busy"), "409", "busy", level=logging.INFO)
+    caplog.clear()
+    await bridge.poll()
+    assert levels(caplog, "sync job no longer needed") == ["INFO"]
     await bridge.aclose()
 
 
@@ -115,6 +138,7 @@ async def test_evicted_spool_that_already_left_clears_the_eviction_problem(tmp_p
     assert fake.spools[19]["location"] == "Shelf"
     assert [w for w in fake.writes if w[0] == "location"] == []
     assert count(caplog, "can't move spool 19 out") == 1
+    assert levels(caplog, "[Tool a] spool 19 is out of the location now") == ["WARNING"]
     await bridge.aclose()
 
 
@@ -169,6 +193,21 @@ async def test_failed_archived_check_adopts_nothing_and_logs_once(uuid_bridge, c
     assert await bridge._adopt_uuid(19, TAG) is True
     assert stored_uuid(fake, 19) == TAG
     assert ("uuid", 19) not in bridge._problems._seen
+    assert levels(caplog, "gave spool 19 its tag's instance UUID") == ["WARNING"]
+    await bridge.aclose()
+
+
+async def test_failed_check_of_a_kept_uuid_logs_its_recovery(uuid_bridge, caplog):
+    bridge, fake, printer = uuid_bridge
+    caplog.set_level("INFO")
+    fake.fail_read = 500
+    assert await bridge._adopt_uuid(19, TAG, store=False) is False
+    fake.fail_read = None
+    assert await bridge._adopt_uuid(19, TAG, store=False) is True
+    assert levels(caplog, f"checked spool 19's tag UUID {TAG}: no other spool has it") == [
+        "WARNING"
+    ]
+    assert fake.writes == []
     await bridge.aclose()
 
 
@@ -186,7 +225,7 @@ async def test_failed_store_of_an_adopted_uuid_logs_once_and_retries(uuid_bridge
     assert await bridge._adopt_uuid(19, TAG) is True
     assert stored_uuid(fake, 19) == TAG
     assert ("uuid", 19) not in bridge._problems._seen
-    assert count(caplog, "gave spool 19 its tag's instance UUID") == 1
+    assert levels(caplog, "gave spool 19 its tag's instance UUID") == ["WARNING"]
     await bridge.aclose()
 
 
@@ -216,6 +255,70 @@ async def test_printer_that_doesnt_report_a_configured_tool_is_noted_once(tmp_pa
     assert count(caplog, "[Tool 2] printer doesn't report tool index 1") == 1
     assert fake.used == {19: [500.0]}  # The tool it does report is charged.
     assert 1 not in printer_bridge.tools
+    await bridge.aclose()
+
+
+async def test_a_tool_note_that_goes_away_is_logged_once_at_its_level(tmp_path, caplog):
+    bridge, fake, printer = make(tmp_path, [spool(19)])
+    caplog.set_level("INFO")
+    printer_bridge = bridge.printers[0]
+    gone = ("index", "[Tool 2] printer doesn't report tool index 1")
+    kept = ("other", "[Tool 2] another note")
+    printer_bridge._notes(1, [gone, kept])
+    printer_bridge._notes(1, [kept])  # Only the note that went away ends.
+    printer_bridge._notes(1, [kept])
+    printer_bridge._notes(1, [])
+    printer_bridge._notes(1, [])
+    ends = [(r.levelname, r.getMessage()) for r in caplog.records if "no longer" in r.getMessage()]
+    assert ends == [
+        ("WARNING", "[Tool 2] no longer: printer doesn't report tool index 1"),
+        ("WARNING", "[Tool 2] no longer: another note"),
+    ]
+    caplog.clear()
+    printer_bridge._notes(1, [gone])  # Back again: logged afresh.
+    assert [r.getMessage() for r in caplog.records] == [gone[1]]
+    await bridge.aclose()
+
+
+async def test_a_tool_note_with_new_detail_is_logged_without_an_end_line(tmp_path, caplog):
+    bridge, fake, printer = make(tmp_path, [spool(19)])
+    caplog.set_level("INFO")
+    printer_bridge = bridge.printers[0]
+    what = ("printer", 19)
+    printer_bridge._notes(0, [(what, f"[{LOC}] printer differs from spool 19: color")])
+    printer_bridge._notes(0, [(what, f"[{LOC}] printer differs from spool 19: color; name")])
+    assert [r.getMessage() for r in caplog.records] == [
+        f"[{LOC}] printer differs from spool 19: color",
+        f"[{LOC}] printer differs from spool 19: color; name",
+    ]
+    # A poll that doesn't compare the printer with the spool leaves the note standing.
+    caplog.clear()
+    printer_bridge._notes(0, [(EventKind.AMBIGUOUS, f"[{LOC}] location holds spools")], False)
+    printer_bridge._notes(0, [], compared=False)
+    assert [r.getMessage() for r in caplog.records] == [
+        f"[{LOC}] location holds spools",
+        f"[{LOC}] no longer: location holds spools",
+    ]
+    caplog.clear()
+    printer_bridge._notes(0, [])
+    assert [r.getMessage() for r in caplog.records] == [
+        f"[{LOC}] no longer: printer differs from spool 19: color; name"
+    ]
+    await bridge.aclose()
+
+
+async def test_printer_named_like_a_spool_problem_keeps_its_own_problems(tmp_path, caplog):
+    bridge, fake, printer = make(tmp_path, [spool(19)])
+    caplog.set_level("INFO")
+    printer_bridge = bridge.printers[0]
+    printer_bridge.config = replace(printer_bridge.config, name="evict")
+    problems = bridge._problems
+    problems.fail((printer_bridge._key, "read"), "500", "evict read failed")
+    problems.fail(("evict", 19), "500", "can't move spool 19 out")
+    await bridge.evict([])  # Spool 19 is in no tool's evict list.
+    assert (printer_bridge._key, "read") in problems._seen
+    assert ("evict", 19) not in problems._seen
+    assert levels(caplog, "spool 19 no longer needs moving out") == ["WARNING"]
     await bridge.aclose()
 
 

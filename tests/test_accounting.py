@@ -332,6 +332,20 @@ def test_unload_after_the_location_empties_holds_usage():
     assert res.charges == [Charge(8, 70, "extruded")]
 
 
+def test_usage_held_over_a_reboot_is_reported_each_poll_until_assigned():
+    # The hold note lasts as long as the hold, with or without new usage.
+    _, _, state = run([(BOOT, r(100), loc(7)), (BOOT, r(150), loc())])
+    res = account(state, BOOT, r(200, unloads=1, at_unload=180), loc())
+    for reading in (r(0), r(0)):
+        res = account(res.state, BOOT + 1, reading, loc())
+        assert (EventKind.HOLD_UNASSIGNED, "holding usage: no spool assigned") in [
+            (e.kind, e.message) for e in res.events
+        ]
+    res = account(res.state, BOOT + 1, r(0, material=None), loc())
+    assert [e.kind for e in res.events] == [EventKind.HOLD_EMPTY]
+    assert res.state.held_mm == 20
+
+
 def test_spool_removed_from_location_stays_active_until_unload():
     charges, _, state = run(
         [
