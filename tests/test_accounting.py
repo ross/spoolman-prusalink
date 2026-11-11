@@ -124,6 +124,25 @@ def test_reboot_and_unload_in_same_poll():
     assert (state.unload_count, state.boot_id, state.active) == (1, 222, 8)
 
 
+def test_usage_held_over_reboot_goes_to_the_active_spool_at_an_unload_in_the_same_poll():
+    # Usage held while the tool reported no filament, then a reboot and an unload in one
+    # poll: the held usage came before the unload, so the outgoing spool takes it.
+    charges, kinds, state = run(
+        [
+            (BOOT, r(5000), loc(7)),
+            (BOOT, r(5200, material=None), loc(7)),
+            (222, r(300, unloads=1, at_unload=100), loc(7, 8)),
+        ]
+    )
+    assert charges == [
+        Charge(7, 200, "held before the printer restarted"),
+        Charge(7, 100, "before unload"),
+        Charge(8, 200, "extruded"),
+    ]
+    assert EventKind.HELD_CHARGED in kinds
+    assert (state.active, state.held_mm, state.evict) == (8, 0, (7,))
+
+
 def test_counter_going_backwards_resyncs():
     res = account(ToolState(BOOT, 500, 0, 7, 7), BOOT, r(400), loc(7))
     assert res.charges == []
@@ -334,6 +353,28 @@ def test_correction_by_uuid_switches_immediately():
     assert EventKind.CORRECTION in kinds
     assert charges == [Charge(9, 50, "extruded"), Charge(9, 30, "extruded")]
     assert (state.active, state.evict) == (9, (7,))
+
+
+def test_provisional_charge_stays_when_a_correction_switches_spools():
+    # The reloaded spool was assumed at the print start, then the printer reports the
+    # staged spool's UUID: the provisional charge stays on spool 7, with no refund.
+    charges, kinds, state = run(
+        [
+            (BOOT, r(100), loc(7), None),
+            (BOOT, r(200, unloads=1, at_unload=100), loc(7), None),
+            (BOOT, r(200, unloads=1, at_unload=100), loc(7), 42),
+            (BOOT, r(300, unloads=1, at_unload=100), loc(7), 42),
+            (BOOT, r(350, unloads=1, at_unload=100), loc(7, 9), 42),
+        ],
+        matches=lambda spool_id: spool_id == 9,
+    )
+    assert kinds[-2:] == [EventKind.CORRECTION, EventKind.PROVISIONAL_KEPT]
+    assert charges == [
+        Charge(7, 100, "extruded"),
+        Charge(7, 100, "extruded"),
+        Charge(9, 50, "extruded"),
+    ]
+    assert (state.active, state.provisional, state.evict) == (9, None, (7,))
 
 
 def test_print_start_with_staged_swap_warns_and_keeps_old_spool():
@@ -1306,6 +1347,15 @@ def test_claim_keeps_earlier_evictions():
     res = account(state, BOOT, r(150), loc(5, 7, 9), claim=9)
     assert res.claimed
     assert (res.state.active, res.state.assigned, res.state.evict) == (9, 9, (5, 7))
+
+
+def test_claim_on_first_sight_makes_the_spool_active():
+    res = account(ToolState(), BOOT, r(0), loc(5), None, lambda _id: False, claim=5)
+    assert res.claimed
+    assert res.charges == []
+    assert [e.kind for e in res.events] == [EventKind.CLAIM_CONFIRMED, EventKind.BASELINE]
+    assert (res.state.active, res.state.assigned, res.state.boot_id) == (5, 5, BOOT)
+    assert res.state.needs_sync
 
 
 def test_claim_waits_while_location_is_ambiguous():
