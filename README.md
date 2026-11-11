@@ -508,6 +508,7 @@ pattern, so the same commands work in every checkout and in CI:
 | `script/update` | Brings `.venv` up to date after a pull or a branch switch. |
 | `script/server` | Runs the bridge with `./config.toml`. See [Run from source](#run-from-source). |
 | `script/test` | Runs the unit suite. |
+| `script/integration` | Runs the end-to-end tests in `integration/` against a Spoolman. See [Tests](#tests). |
 | `script/lint` | Checks lint rules and formatting with ruff. Changes nothing. |
 | `script/format` | Formats the code and applies ruff's safe fixes. |
 | `script/cibuild` | Runs what CI runs: bootstrap, lint, and the unit suite with coverage. |
@@ -540,8 +541,10 @@ real Spoolman together, one scenario from `docs/scenarios.md` per test. They
 need a Spoolman to talk to and take longer, so they run only when asked:
 
 ```sh
-podman run -d --name spoolman-it -p 127.0.0.1:7912:8000 ghcr.io/donkie/spoolman:0.27.1
-SPOOLMAN_URL=http://127.0.0.1:7912 .venv/bin/pytest integration
+script/integration
 ```
+
+It starts a throwaway Spoolman container with Podman or Docker and removes it
+afterwards. To use a Spoolman you already have, set `SPOOLMAN_URL`.
 
 CI runs both, as separate jobs. See [integration/README.md](integration/README.md).

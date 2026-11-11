@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+# Run the end-to-end tests in integration/ against a real Spoolman.
+#
+# With SPOOLMAN_URL set, they use that Spoolman; the tests clean up after
+# themselves, so a Spoolman in use is fine. Otherwise this starts a throwaway
+# Spoolman container with Podman or Docker on a free local port and removes it
+# afterwards. Arguments go to pytest:
+#
+#   script/integration -k runout
+#
+# SPOOLMAN_IMAGE picks the image (default below); CONTAINER_ENGINE picks
+# podman or docker (default: podman if it's installed).
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+[ -n "${SKIP_BOOTSTRAP:-}" ] || script/bootstrap
+
+if [ -z "${SPOOLMAN_URL:-}" ]; then
+    image=${SPOOLMAN_IMAGE:-ghcr.io/donkie/spoolman:0.27.1}
+    engine=${CONTAINER_ENGINE:-$(command -v podman >/dev/null && echo podman || echo docker)}
+    port=$(.venv/bin/python -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')
+
+    echo "==> Starting $image with $engine on 127.0.0.1:$port"
+    container=$("$engine" run -d --rm -p "127.0.0.1:$port:8000" "$image")
+    trap '"$engine" rm -f "$container" >/dev/null' EXIT
+
+    export SPOOLMAN_URL=http://127.0.0.1:$port
+    echo "==> Waiting for Spoolman"
+    .venv/bin/python - "$SPOOLMAN_URL" <<'PY'
+import sys
+import time
+
+import httpx
+
+deadline = time.monotonic() + 120
+while True:
+    try:
+        if httpx.get(f"{sys.argv[1]}/api/v1/health", timeout=2).is_success:
+            break
+    except httpx.HTTPError:
+        pass
+    if time.monotonic() > deadline:
+        sys.exit("Spoolman didn't come up within 120 seconds")
+    time.sleep(1)
+PY
+fi
+
+echo "==> Running the integration tests against $SPOOLMAN_URL"
+.venv/bin/pytest integration "$@"

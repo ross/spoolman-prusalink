@@ -32,12 +32,8 @@ jobs:
 
   integration:
     # The bridge, the simulator and a real Spoolman, in lockstep. See integration/README.md.
+    # script/integration starts the Spoolman container.
     runs-on: ubuntu-latest
-    services:
-      spoolman:
-        image: ghcr.io/donkie/spoolman:0.27.1
-        ports:
-          - 7912:8000
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6
@@ -45,10 +41,7 @@ jobs:
           python-version: "3.13"
           cache: pip
           cache-dependency-path: pyproject.toml
-      - run: script/bootstrap
-      - run: .venv/bin/pytest integration
-        env:
-          SPOOLMAN_URL: http://127.0.0.1:7912
+      - run: script/integration
 
   docker:
     runs-on: ubuntu-latest

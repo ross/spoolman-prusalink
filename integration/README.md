@@ -11,20 +11,22 @@ They aren't part of the default `pytest` run, which collects the unit tests in
 
 ## Run them
 
-Start a Spoolman, with Podman or Docker:
-
-```
-podman run -d --name spoolman-it -p 127.0.0.1:7912:8000 ghcr.io/donkie/spoolman:0.27.1
+```sh
+script/integration
 ```
 
-Then point the tests at it:
+It starts a throwaway Spoolman container with Podman or Docker on a free
+local port, runs the tests against it, and removes it afterwards. Arguments go
+to pytest, for example `script/integration -k runout`. `SPOOLMAN_IMAGE`
+overrides the image and `CONTAINER_ENGINE` picks `podman` or `docker`.
 
-```
-SPOOLMAN_URL=http://127.0.0.1:7912 pytest integration
+To use a Spoolman you already have, point the tests at it:
+
+```sh
+SPOOLMAN_URL=http://127.0.0.1:7912 script/integration
 ```
 
-Without `SPOOLMAN_URL`, every test is skipped. The `dev` extra
-(`pip install -e '.[dev]'`) has everything they need.
+Without `SPOOLMAN_URL`, a plain `pytest integration` skips every test.
 
 ## What they assume
 
