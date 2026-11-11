@@ -77,6 +77,7 @@ async def test_sync_job_failing_without_a_status_is_logged_once_and_retried(
     monkeypatch.setattr(client, "upload_and_print", broken)
     await swap_to_spool_20(bridge, fake, printer)
     assert jobs(printer) == []
+    await bridge.poll()  # Still broken: the same failure isn't logged again.
     assert count(caplog, f"sync job failed: {error}") == 1
     assert count(caplog, "sync job working again") == 0
 
@@ -106,6 +107,7 @@ async def test_evicted_spool_that_already_left_clears_the_eviction_problem(tmp_p
     # With a unreachable, its accounting doesn't run to drop the eviction. The user moves
     # the spool out themselves meanwhile, so the bridge finds nothing left to do.
     a.down = True
+    fake.fail_patch = None  # A move would succeed, so it not happening is the bridge's doing.
     fake.spools[19]["location"] = "Shelf"
     await bridge.poll()
     assert bridge.printers[0].tools[0].evict == (19,)
