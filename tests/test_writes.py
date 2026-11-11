@@ -36,7 +36,10 @@ class FakeSpoolman:
         self.fail_read = None  # Status code for spool reads.
         self.fail_patch = None  # Status code for spool PATCHes.
         self.fail_field = None  # Status code for field reads.
+        self.fail_lookup = None  # Status code for one-at-a-time spool reads.
+        self.garble_lookup = False  # Answer one-at-a-time spool reads with a body that isn't JSON.
         self.lookups = []  # Spool ids read one at a time.
+        self.unlisted = set()  # Spool ids the list leaves out, as a list read a moment early.
 
     def handle(self, request: httpx.Request) -> httpx.Response:
         path, method = request.url.path, request.method
@@ -46,11 +49,20 @@ class FakeSpoolman:
             if self.fail_read:
                 return httpx.Response(self.fail_read, text="oops")
             return httpx.Response(
-                200, json=[s for s in self.spools.values() if not s.get("archived")]
+                200,
+                json=[
+                    s
+                    for s in self.spools.values()
+                    if not s.get("archived") and s["id"] not in self.unlisted
+                ],
             )
         if path.startswith("/api/v1/spool/") and method == "GET":
             spool_id = int(path.rsplit("/", 1)[1])
             self.lookups.append(spool_id)
+            if self.fail_lookup:
+                return httpx.Response(self.fail_lookup, text="oops")
+            if self.garble_lookup:
+                return httpx.Response(200, text="<html>not json</html>")
             if spool_id not in self.spools:
                 return httpx.Response(404, json={"message": "not found"})
             return httpx.Response(200, json=self.spools[spool_id])
@@ -1585,6 +1597,28 @@ async def test_runout_flag_from_older_state_learns_the_weights(tmp_path):
     await bridge.aclose()
 
 
+@pytest.mark.parametrize("unknown", ["grams", "used"])
+async def test_runout_flag_takes_a_charge_it_cant_check_as_the_bridges_own(tmp_path, unknown):
+    # Without the charge's weight or the stored weight, the response can't be checked,
+    # so it's taken as the bridge's own charge. Without "grams", the old stored weight
+    # would read as an edit next time; without "used", the next read learns the weights.
+    bridge, fake, printer = await runout_mid_print(tmp_path, remaining=400.0)
+    printer.extruded += 500
+    fake.fail_use = [503]  # The charge stays queued.
+    await bridge.poll()
+    assert bridge.state.outbox
+    if unknown == "grams":
+        bridge.state.outbox[0]["grams"] = None  # Charged while the spool wasn't known.
+    else:
+        bridge.state.runouts[19].used = None
+    assert await bridge.flush()
+    assert bridge.state.runouts[19].used == fake.spools[19]["used_weight"]
+    await bridge.poll()
+    assert 19 in bridge.state.runouts
+    assert "unloaded mid-print" in fake.flag(19)
+    await bridge.aclose()
+
+
 async def test_runout_near_empty_is_not_flagged(tmp_path):
     bridge, fake, printer = await runout_mid_print(tmp_path, remaining=30.0)
     assert fake.flag(19) is None or "mid-print" not in fake.flag(19)
@@ -1973,6 +2007,78 @@ async def test_archived_spool_is_charged_and_flagged_once(tmp_path, caplog):
     await bridge.poll()
     assert fake.flag(19) is None
     assert fake.lookups == [19]
+    await bridge.aclose()
+
+
+@pytest.mark.parametrize("failure", ["http", "garbled"])
+async def test_failed_lookup_of_a_spool_missing_from_the_list_is_logged_once(
+    tmp_path, caplog, failure
+):
+    bridge, fake, printer = make(tmp_path, [spool(19)])
+    caplog.set_level("INFO")
+    await bridge.poll()
+    fake.unlisted = {19}
+    if failure == "http":
+        fake.fail_lookup = 500
+    else:
+        fake.garble_lookup = True
+    for extruded in (1100, 1200, 1300):
+        printer.extruded = extruded
+        await bridge.poll()
+    # Looked up again each poll, but the problem is logged once.
+    assert fake.lookups == [19, 19, 19]
+    assert caplog.text.count("can't look up spool 19, which is missing") == 1
+    assert bridge._archived == {}
+    assert "archived" not in caplog.text and "deleted" not in caplog.text
+    # Each poll is still charged, without filament data, as for a spool that's merely unlisted.
+    assert fake.used == {19: [100.0, 100.0, 100.0]}
+    charged = [r for r in ledger(tmp_path) if r.get("spool_id") == 19 and "use_length" in r]
+    assert [r["grams"] for r in charged] == [None] * 3
+    # Once the lookup works again the problem clears, so a new failure is logged afresh.
+    fake.fail_lookup, fake.garble_lookup = None, False
+    logged = caplog.text
+    printer.extruded = 1400
+    await bridge.poll()
+    assert fake.lookups == [19] * 4
+    assert bridge._problems._seen == {}
+    assert caplog.text[len(logged) :] == "" or "look up" not in caplog.text[len(logged) :]
+    # The same failure again is a new problem, so it's logged again.
+    if failure == "http":
+        fake.fail_lookup = 500
+    else:
+        fake.garble_lookup = True
+    printer.extruded = 1500
+    await bridge.poll()
+    assert caplog.text.count("can't look up spool 19, which is missing") == 2
+    await bridge.aclose()
+
+
+async def test_spool_missing_from_a_stale_list_is_looked_up_again_only_if_still_missing(
+    tmp_path, caplog
+):
+    bridge, fake, printer = make(tmp_path, [spool(19)])
+    caplog.set_level("INFO")
+    await bridge.poll()
+    # The list was read just before spool 19 was unarchived, so it's missing but active.
+    fake.unlisted = {19}
+    for extruded in (1100, 1200):  # Missing again: nothing remembered it, so looked up again.
+        printer.extruded = extruded
+        await bridge.poll()
+    assert fake.lookups == [19, 19]
+    assert "archived" not in caplog.text and "deleted" not in caplog.text
+    assert bridge._archived == {}
+    # Charged without its filament data while it's missing.
+    assert "spool 19 (unknown): +100 mm" in caplog.text
+    charged = [r for r in ledger(tmp_path) if r.get("spool_id") == 19 and "use_length" in r]
+    assert [r["grams"] for r in charged] == [None, None]
+    # The next list has it, so it isn't looked up again.
+    fake.unlisted = set()
+    printer.extruded = 1300
+    await bridge.poll()
+    assert fake.lookups == [19, 19]
+    assert fake.used == {19: [100.0, 100.0, 100.0]}
+    assert "spool 19 is no longer in the" in caplog.text
+    assert "spool 19 is back in the location" in caplog.text
     await bridge.aclose()
 
 
