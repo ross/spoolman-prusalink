@@ -1,11 +1,16 @@
+import asyncio
 import json
+import logging
+import os
 import re
+import signal
 import sqlite3
 from dataclasses import replace
 
 import httpx
 import pytest
 
+from spoolman_prusalink import __main__ as main_module
 from spoolman_prusalink import printer_sync
 from spoolman_prusalink.__main__ import main
 from spoolman_prusalink.accounting import Provisional, SwapFlag, ToolState
@@ -1041,3 +1046,75 @@ async def test_runout_reload_of_the_same_spool_keeps_its_tag_as_it_was(printer, 
     # The reload is seen: a later unload is a new one.
     assert printer._seen_uuid[0] == (TAG, 7, appeared, False)
     assert printer.bridge.state.printers[printer.name].seen_uuids[0] == (TAG, 7, False)
+
+
+class FakeBridge:
+    """Stands in for Bridge in `main`: it records what the entry point asks of it."""
+
+    def __init__(self, cfg):
+        self.config, self.polls, self.closed, self.stop = cfg, 0, False, None
+
+    async def poll(self):
+        self.polls += 1
+
+    async def run(self, stop):
+        self.stop = stop
+        os.kill(os.getpid(), signal.SIGTERM)  # As `docker stop` does.
+        await asyncio.wait_for(stop.wait(), timeout=5)
+
+    async def aclose(self):
+        self.closed = True
+
+
+@pytest.fixture
+def fake_bridge(monkeypatch):
+    made = []
+
+    def from_config(cfg):
+        made.append(FakeBridge(cfg))
+        return made[-1]
+
+    monkeypatch.setattr(Bridge, "from_config", from_config)
+    monkeypatch.setenv("PRUSALINK_API_KEY", "k")
+    monkeypatch.delenv("SPOOLMAN_PRUSALINK_CONFIG", raising=False)
+    return made
+
+
+def test_main_once_polls_once_and_closes_the_bridge(tmp_path, fake_bridge):
+    p = tmp_path / "c.toml"
+    p.write_text(CONFIG_BASE)
+    assert main(["-c", str(p), "once"]) == 0
+    (bridge,) = fake_bridge
+    assert (bridge.polls, bridge.closed, bridge.config.spoolman_url) == (1, True, "http://s")
+
+
+def test_main_run_stops_on_sigterm_and_closes_the_bridge(tmp_path, fake_bridge):
+    p = tmp_path / "c.toml"
+    p.write_text(CONFIG_BASE)
+    assert main(["-c", str(p)]) == 0  # `run` is the default command.
+    (bridge,) = fake_bridge
+    assert (bridge.polls, bridge.closed, bridge.stop.is_set()) == (0, True, True)
+
+
+def test_main_reads_the_default_config_path_when_it_exists(tmp_path, fake_bridge, monkeypatch):
+    p = tmp_path / "config.toml"
+    p.write_text(CONFIG_BASE)
+    monkeypatch.setattr(main_module, "DEFAULT_CONFIG", str(p))
+    assert main(["once"]) == 0
+    assert fake_bridge[0].config.spoolman_url == "http://s"
+
+
+@pytest.mark.parametrize(
+    ("level", "httpx_level"), [("debug", logging.NOTSET), ("info", logging.WARNING)]
+)
+def test_main_quiets_httpx_unless_debugging(tmp_path, fake_bridge, caplog, level, httpx_level):
+    # pytest's handlers make basicConfig a no-op, so the root level is set here.
+    caplog.set_level(level.upper())
+    httpx_logger = logging.getLogger("httpx")
+    before = httpx_logger.level
+    httpx_logger.setLevel(logging.NOTSET)
+    try:
+        assert main(["--log-level", level, "-c", str(tmp_path / "missing.toml"), "once"]) == 2
+        assert httpx_logger.level == httpx_level
+    finally:
+        httpx_logger.setLevel(before)
