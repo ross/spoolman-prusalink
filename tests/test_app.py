@@ -18,7 +18,7 @@ from spoolman_prusalink.app import Bridge, Reachability, _log_failed, _log_ok, _
 from spoolman_prusalink.config import Config, ConfigError, PrinterConfig, load
 from spoolman_prusalink.db import Database, DatabaseError, read_ledger, read_state
 from spoolman_prusalink.models import Material
-from spoolman_prusalink.prusalink import PrusaLink, parse_filament
+from spoolman_prusalink.prusalink import NoFilamentEndpoint, PrusaLink, parse_filament
 from spoolman_prusalink.spoolman import Spoolman, parse_spool
 from spoolman_prusalink.state import PrinterState, State
 
@@ -116,6 +116,15 @@ def test_parse_filament_unload_fields():
     }
     r = parse_filament({"boot_id": 5, "tools": [tool]}).tools[0]
     assert (r.extruded, r.unload_count, r.extruded_at_unload) == (900, 2, 600)
+
+
+async def test_filament_without_unload_count_is_unsupported():
+    data = {"boot_id": 5, "tools": [{"index": 0, "extruded": 10}]}
+    transport = httpx.MockTransport(lambda request: httpx.Response(200, json=data))
+    client = PrusaLink("http://printer", "k", transport=transport)
+    with pytest.raises(NoFilamentEndpoint, match="no usage counters"):
+        await client.filament()
+    await client.aclose()
 
 
 def test_parse_filament_requires_temperatures():

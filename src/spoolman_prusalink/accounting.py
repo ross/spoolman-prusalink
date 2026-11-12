@@ -671,13 +671,7 @@ def account(
                 active = assigned
         elif active is None:
             # Nothing was active: switch now.
-            event(
-                EventKind.ASSIGNMENT_CHANGED,
-                f"spool {active} -> {assigned}"
-                if active is not None
-                else f"spool {assigned} is active",
-            )
-            evict = retire(active)
+            event(EventKind.ASSIGNMENT_CHANGED, f"spool {assigned} is active")
             active = assigned
         elif assigned is None:
             # Not a swap: nothing is staged, and the active spool is still loaded.

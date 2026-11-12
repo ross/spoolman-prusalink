@@ -378,11 +378,6 @@ starts over after any poll that couldn't read the printer. It's checked once
 per poll, so the job runs up to `poll_idle` seconds later.
 The default, 0, runs the job on the first idle poll.
 
-After upgrading from a version that didn't record its writes, the bridge
-rewrites each tool once when idle. Those versions relied on `J` for
-temperatures, which the firmware ignores, so they left the nozzle and bed
-temperatures at 0.
-
 Requirements for a write:
 
 - The bridge must support the printer's model. At startup and after each
