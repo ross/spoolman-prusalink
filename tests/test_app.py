@@ -14,7 +14,7 @@ from spoolman_prusalink import __main__ as main_module
 from spoolman_prusalink import printer_sync
 from spoolman_prusalink.__main__ import main
 from spoolman_prusalink.accounting import Provisional, SwapFlag, ToolState
-from spoolman_prusalink.app import Bridge, _record
+from spoolman_prusalink.app import Bridge, Reachability, _log_failed, _log_ok, _record
 from spoolman_prusalink.config import Config, ConfigError, PrinterConfig, load
 from spoolman_prusalink.db import Database, DatabaseError, read_ledger, read_state
 from spoolman_prusalink.models import Material
@@ -403,7 +403,7 @@ async def test_printer_kind_change_and_bad_answer_reporting(tmp_path, caplog):
         ("WARNING", "printer unreachable"),
         ("WARNING", "printer read failed, skipping poll"),
     ]
-    assert ("DEBUG", "printer read still failing") in lines("still failing")
+    assert ("DEBUG", "printer read failed, skipping poll") in lines("skipping")
     await bridge.aclose()
 
 
@@ -1248,3 +1248,47 @@ def test_record_compares_the_error_text():
     assert _record(failing, 7, ValueError("boom")) is True
     assert _record(failing, 7, KeyError("boom")) is True  # Its text is "'boom'".
     assert _record(failing, 7, KeyError("boom")) is False
+
+
+def reach_lines(caplog):
+    return [
+        (r.levelname, r.getMessage().split(":")[0])
+        for r in caplog.records
+        if r.name == "spoolman_prusalink" and r.levelno >= logging.INFO
+    ]
+
+
+def test_kind_change_restarts_the_clock(caplog):
+    now = {"v": 0.0}
+    reach = Reachability("svc", clock=lambda: now["v"])
+    caplog.set_level("INFO")
+    for t, unreachable in [(0, True), (3600, True), (7000, False), (7200, False)]:
+        now["v"] = t
+        _log_failed(reach, ValueError("boom"), unreachable=unreachable)
+    now["v"] = 7260
+    _log_ok(reach)
+    assert reach_lines(caplog) == [
+        ("WARNING", "svc unreachable"),
+        ("INFO", "svc still unreachable after 1h 00m"),
+        ("WARNING", "svc read failed, skipping poll"),
+        ("WARNING", "svc reads working again after 4m"),
+    ]
+
+
+def test_bad_answers_then_unreachable_measures_the_unreachable_span(caplog):
+    now = {"v": 0.0}
+    reach = Reachability("svc", clock=lambda: now["v"])
+    caplog.set_level("INFO")
+    _log_failed(reach, ValueError("boom"), unreachable=False)
+    now["v"] = 3 * 3600
+    _log_failed(reach, ValueError("boom"), unreachable=False)  # The reminder.
+    now["v"] += 10
+    _log_failed(reach, OSError("off"), unreachable=True)
+    now["v"] += 60
+    _log_ok(reach)
+    assert reach_lines(caplog) == [
+        ("WARNING", "svc read failed, skipping poll"),
+        ("INFO", "svc still giving bad answers after 3h 00m"),
+        ("WARNING", "svc unreachable"),
+        ("WARNING", "svc reachable again after 1m"),
+    ]
