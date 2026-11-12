@@ -294,7 +294,7 @@ function renderPrinter(p) {
     '<label title="the bed cools during the outage, so the print waits for Resume"><input type="checkbox" data-k="cold"' +
     (getv(p.name, 'cold', false) ? ' checked' : '') + '>cold bed</label>' +
     btn('Tap through', 'tap_through', gate(a, 'tap_through')) +
-    (a.clear_jam == null ? btn('Clear jam', 'clear_jam', {}) : '') +
+    btn('Clear jam', 'clear_jam', gate(a, 'clear_jam')) +
     btn('Auto-accept: ' + (aa == null ? 'default' : aa ? 'on' : 'off'), 'auto_accept', { title: 'model check; cycles default, on, off' }) +
     btn('Counter step back', 'toggle', { form: 'counter', cls: isOpen(p, 'counter') ? 'on' : '' }) +
     btn('Set extruded_at_unload', 'toggle', { form: 'eau', cls: isOpen(p, 'eau') ? 'on' : '' }) +

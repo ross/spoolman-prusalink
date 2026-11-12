@@ -20,6 +20,7 @@ from integration.conftest import (
     events,
     logged,
 )
+from simulator import prusalink
 from simulator.model import PrintSpec, Segment, State
 
 pytestmark = pytest.mark.parametrize("world_tools", [2], indirect=True)
@@ -183,7 +184,7 @@ async def test_t5_tool_the_printer_does_not_report(world: World, caplog: pytest.
 
     # Disabled, or its dock not calibrated: tool 1 drops out of /api/v1/filament.
     w.printer.set_tool_enabled(TOOL1, False)
-    assert [t["index"] for t in w.printer.filament_json()["tools"]] == [0]
+    assert [t["index"] for t in prusalink.filament(w.printer)["tools"]] == [0]
     mark = w.mark()
     for _ in range(3):
         w.printer.extrude(0, 10)

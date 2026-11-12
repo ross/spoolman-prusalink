@@ -96,8 +96,11 @@ Actions: `load`, `unload`, `extrude`, `retract`, `select_tool`,
 `set_sensor_fault`, `set_stuck_write`, `set_tool_enabled`,
 `set_auto_accept`, `counter_step_back`, `set_extruded_at_unload`,
 `tap_through`. Parameter names are the keyword arguments of the methods with
-those names in `model.py`. An action the printer can't do now answers 409
-with the reason; bad parameters answer 400.
+those names in `model.py`, and their type hints say what each takes: JSON
+`true` or `false` for a bool, an integer such as `3` (not `3.0`) for an int,
+any finite number for a float, and a listed value for an enum. An action the
+printer can't do now answers 409 with the reason; bad parameters answer 400
+and name the parameter.
 
 The state lists each printer's and each tool's actions under `actions`, each
 with null when the printer would take it now or the reason it would refuse

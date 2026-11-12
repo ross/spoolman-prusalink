@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from simulator import config
+from simulator import config, prusalink
 from simulator.model import Firmware, Material, Simulation, preset_temperatures
 from simulator.tests.test_config import printer, tool, write
 from simulator.tests.test_model import shown
@@ -64,13 +64,13 @@ def test_tool_without_material_is_empty(tmp_path):
 def test_firmware_defaults_by_model(tmp_path):
     full = sim_from(tmp_path, printer(model="8.1.0")).printers["p"]
     assert full.firmware is Firmware.FULL
-    assert "boot_id" in full.filament_json()
+    assert "boot_id" in prusalink.filament(full)
     old = sim_from(tmp_path, printer(model="1.3.5")).printers["p"]
     assert old.firmware is Firmware.NO_COUNTERS
-    assert "boot_id" not in old.filament_json()
+    assert "boot_id" not in prusalink.filament(old)
     forced = sim_from(tmp_path, printer('firmware = "no_endpoint"')).printers["p"]
     assert forced.firmware is Firmware.NO_ENDPOINT
-    assert forced.filament_json() is None
+    assert prusalink.filament(forced) is None
 
 
 def test_selected_tool_is_the_first_enabled(tmp_path):
