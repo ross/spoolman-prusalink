@@ -91,4 +91,8 @@ cat <<MSG
 ==> The simulator's page is http://127.0.0.1:$control_port and Spoolman is $DEMO_SPOOLMAN_URL
 ==> Starting the bridge with $bridge_config
 MSG
-.venv/bin/spoolman-prusalink -c "$bridge_config" "$@"
+# The bridge's environment variables override its config file, so drop them:
+# an exported SPOOLMAN_URL would send the demo's writes to that Spoolman.
+env -u SPOOLMAN_URL -u PRUSALINK_URL -u PRUSALINK_API_KEY \
+    -u SPOOLMAN_PRUSALINK_LOCATION -u SPOOLMAN_PRUSALINK_CONFIG \
+    .venv/bin/spoolman-prusalink -c "$bridge_config" "$@"

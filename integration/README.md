@@ -28,6 +28,8 @@ INTEGRATION_SPOOLMAN_URL=http://127.0.0.1:7912 script/integration
 ```
 
 Without `INTEGRATION_SPOOLMAN_URL`, a plain `pytest integration` skips every test.
+The tests never read `SPOOLMAN_URL`, the bridge's own setting, so a shell
+set up for a real bridge can't point them at a real Spoolman.
 
 ### Coverage
 
