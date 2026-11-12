@@ -19,7 +19,7 @@ from spoolman_prusalink.config import Config, ConfigError, PrinterConfig, load
 from spoolman_prusalink.db import Database, DatabaseError, read_ledger, read_state
 from spoolman_prusalink.models import Material
 from spoolman_prusalink.prusalink import NoFilamentEndpoint, PrusaLink, parse_filament
-from spoolman_prusalink.spoolman import Spoolman, parse_spool
+from spoolman_prusalink.spoolman import FieldTypeError, Spoolman, parse_spool
 from spoolman_prusalink.state import PrinterState, State
 
 ENV_VARS = (
@@ -199,7 +199,7 @@ async def test_ensure_field_refuses_a_field_of_another_type():
         return httpx.Response(200, json=[{"key": "instance_uuid", "field_type": "integer"}])
 
     spoolman = Spoolman("http://spoolman", transport=httpx.MockTransport(handler))
-    with pytest.raises(ValueError, match="instance_uuid.*isn't a text field"):
+    with pytest.raises(FieldTypeError, match="instance_uuid.*isn't a text field"):
         await spoolman.ensure_field("instance_uuid", "Instance UUID")
     await spoolman.aclose()
 

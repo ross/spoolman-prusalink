@@ -27,9 +27,10 @@ from .accounting import (
 )
 from .config import Config, PrinterConfig
 from .db import Database
+from .errors import NotFound, Rejected, ServiceError, Unreachable
 from .models import FilamentReading, Material, Spool
 from .prusalink import BUSY_STATES, IDLE_STATES, NoFilamentEndpoint, PrinterStatus, PrusaLink
-from .spoolman import FieldTypeError, Spoolman
+from .spoolman import Spoolman
 from .state import PrinterState, Runout, State
 
 log = logging.getLogger("spoolman_prusalink")
@@ -169,20 +170,6 @@ def _record(failing: dict, key: Hashable, error: object) -> bool:
     new = failing.get(key) != text
     failing[key] = text
     return new
-
-
-def _unusable(error: Exception) -> bool:
-    """Whether a field setup failure lasts until someone fixes it.
-
-    That's a key of another type, or a client error from the fields API, such as a
-    proxy refusing it or a Spoolman without it. A server error, a transport error, a
-    body that can't be read, a timeout (408) or a rate limit (429) may pass.
-    """
-    return isinstance(error, FieldTypeError) or (
-        isinstance(error, httpx.HTTPStatusError)
-        and error.response.is_client_error
-        and error.response.status_code not in (408, 429)
-    )
 
 
 # A mid-print unload with more than this fraction of the net weight left in Spoolman
@@ -380,7 +367,7 @@ class PrinterBridge:
             location = self.config.tools.get(tool, str(tool))
             try:
                 found = await self.bridge.spoolman.spool(spool_id)
-            except (httpx.HTTPError, ValueError, KeyError) as e:
+            except ServiceError as e:
                 if _record(self._lookup_failing, spool_id, e):
                     log.warning(
                         "[%s] can't look up spool %d, which is missing from Spoolman's list: %s",
@@ -1393,10 +1380,10 @@ class Bridge:
             return
         try:
             spools = await self.spoolman.spools()
-        except httpx.TransportError as e:
+        except Unreachable as e:
             _log_failed(self._spoolman_reach, e, unreachable=True)
             return
-        except (httpx.HTTPError, ValueError, KeyError) as e:
+        except ServiceError as e:
             _log_failed(self._spoolman_reach, e, unreachable=False)
             return
         _log_ok(self._spoolman_reach)
@@ -1619,7 +1606,7 @@ class Bridge:
         for spool_id in list(self.state.claimed):
             try:
                 await self.spoolman.set_extra(spool_id, key, False)
-            except httpx.HTTPError as e:
+            except ServiceError as e:
                 if _record(self._unclaim_failing, spool_id, e):
                     log.warning("can't clear the claim on spool %d: %s", spool_id, e)
                 else:
@@ -1649,32 +1636,27 @@ class Bridge:
                 rec = {**rec, "applied": _now()}
                 self._follow_runout_charge(rec, used)
                 sent += 1
-            except httpx.HTTPStatusError as e:
-                code = e.response.status_code
-                if code >= 500:
-                    self._charge_stuck(rec["spool_id"], code, len(outbox))
-                    return False
+            except Rejected as e:
                 mm = int(rec.get("extruded_mm", 0))
                 printer = self._printer(rec.get("printer"))
                 if (
-                    code == 404
+                    isinstance(e, NotFound)
                     and mm > 0
                     and printer is not None
                     and printer._hold_deleted(rec.get("tool", -1), rec["spool_id"], mm)
                 ):
-                    rec = {**rec, "failed": f"{code}", "held": True}
+                    rec = {**rec, "failed": f"{e.status}", "held": True}
                     held += 1
                 else:
                     log.error(
-                        "Spoolman rejected a %+g mm charge to spool %d (%d %s); dropping it",
+                        "Spoolman rejected a %+g mm charge to spool %d (%s); dropping it",
                         rec["use_length"],
                         rec["spool_id"],
-                        code,
-                        e.response.text[:200],
+                        e,
                     )
-                    rec = {**rec, "failed": f"{code}"}
+                    rec = {**rec, "failed": f"{e.status}"}
                     dropped += 1
-            except httpx.HTTPError as e:
+            except ServiceError as e:
                 self._charge_stuck(rec["spool_id"], e, len(outbox))
                 return False
             outbox.pop(0)
@@ -1732,7 +1714,7 @@ class Bridge:
                             self._evict_gone(location, spool_id)
                             continue
                         await self.spoolman.set_location(spool_id, target)
-                    except (httpx.HTTPError, ValueError, KeyError) as e:
+                    except ServiceError as e:
                         if _record(self._evict_failing, spool_id, e):
                             log.warning("[%s] can't move spool %d out: %s", location, spool_id, e)
                         else:
@@ -1760,7 +1742,7 @@ class Bridge:
             return None
         try:
             await self.spoolman.set_extra_text(spool.id, key, value)
-        except httpx.HTTPError as e:
+        except ServiceError as e:
             self._uuid_trouble(spool.id, e, "can't store an instance UUID on spool %d: %s")
             return None
         self._uuid_failing.pop(spool.id, None)
@@ -1781,7 +1763,7 @@ class Bridge:
             return True
         try:
             every = await self.spoolman.spools(archived=True)
-        except (httpx.HTTPError, ValueError, KeyError) as e:
+        except ServiceError as e:
             self._uuid_trouble(spool_id, e, "can't check spool %d's tag UUID: %s")
             return False
         owner = next(
@@ -1812,7 +1794,7 @@ class Bridge:
             return False
         try:
             await self.spoolman.set_extra_text(spool_id, key, value)
-        except httpx.HTTPError as e:
+        except ServiceError as e:
             self._uuid_trouble(spool_id, e, "can't store an instance UUID on spool %d: %s")
             return False
         self._uuid_failing.pop(spool_id, None)
@@ -1831,8 +1813,10 @@ class Bridge:
             return True
         try:
             await self.spoolman.ensure_field(key, name, field_type)
-        except (httpx.HTTPError, ValueError) as e:
-            if _unusable(e):
+        except ServiceError as e:
+            # A refusal, such as a key of another type, a proxy refusing the fields API or
+            # a Spoolman without it, lasts until someone fixes it. Anything else may pass.
+            if isinstance(e, Rejected):
                 self._unusable_fields.add(key)
             else:
                 self._unusable_fields.discard(key)  # Passing, whatever failed before.
@@ -1880,7 +1864,7 @@ class Bridge:
                 # and a stale one is cleared.
                 try:
                     found = await self.spoolman.spool(spool_id)
-                except (httpx.HTTPError, ValueError, KeyError) as e:
+                except ServiceError as e:
                     if _record(self._flag_failing, spool_id, e):
                         log.warning("can't look up flagged spool %d: %s", spool_id, e)
                     else:
@@ -1898,13 +1882,13 @@ class Bridge:
             if current[spool_id] != want:
                 try:
                     await self.spoolman.set_extra_text(spool_id, key, want)
-                except httpx.HTTPError as e:
-                    if isinstance(e, httpx.HTTPStatusError) and e.response.status_code == 404:
-                        # Deleted since it was listed or cached. An active spool that
-                        # was cached as archived is looked up again, as deleted.
-                        self._archived.pop(spool_id, None)
-                        changed |= self._flag_spool_deleted(spool_id)
-                        continue
+                except NotFound:
+                    # Deleted since it was listed or cached. An active spool that was
+                    # cached as archived is looked up again, as deleted.
+                    self._archived.pop(spool_id, None)
+                    changed |= self._flag_spool_deleted(spool_id)
+                    continue
+                except ServiceError as e:
                     if _record(self._flag_failing, spool_id, e):
                         log.warning("can't update the flag on spool %d: %s", spool_id, e)
                     else:

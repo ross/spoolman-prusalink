@@ -312,11 +312,13 @@ async def test_usage_while_ambiguous_is_kept_over_a_reboot(tmp_path):
     await bridge.aclose()
 
 
-async def test_spoolman_outage_queues_and_retries_in_order(tmp_path):
+# A timeout (408) or a rate limit (429) may pass, like a server error.
+@pytest.mark.parametrize("code", [503, 408, 429])
+async def test_spoolman_outage_queues_and_retries_in_order(tmp_path, code):
     bridge, fake, printer = make(tmp_path, [spool(19)])
     await bridge.poll()
     printer.extruded = 1500
-    fake.fail_use = [503]
+    fake.fail_use = [code]
     await bridge.poll()
     assert fake.used == {}
     assert [r["use_length"] for r in read_state(tmp_path / "bridge.db").outbox] == [500.0]
