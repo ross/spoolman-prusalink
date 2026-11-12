@@ -582,7 +582,7 @@ async def test_s3_spoolman_changed_during_the_load(world: World):
     # Mid-load, A is moved out: usage is held from here and the swap stays open.
     await w.move("A", w.shelf)
     records = await w.poll()
-    assert [e["message"] for e in events(records, "active_unassigned")] == [
+    assert [e["message"] for e in events(records, "swap_unassigned")] == [
         f"spool {a} is no longer in the location; holding usage until a spool is assigned, "
         f"which also takes the {on_a:g} mm since the unload"
     ]
@@ -634,7 +634,7 @@ async def test_s3_old_spool_moved_back(world: World):
     assert charges(records) == []
     await w.move("A", w.tool_location)
     records = await w.poll()
-    assert [e["message"] for e in events(records, "active_unassigned")] == [
+    assert [e["message"] for e in events(records, "active_reassigned")] == [
         f"spool {a} is back in the location"
     ]
     assert w.charged(records, "A") == 10
@@ -786,7 +786,7 @@ async def test_s6_unload_with_nothing_assigned(world: World, caplog: pytest.LogC
     await w.move("A", w.shelf)
     await w.unload()
     records = await w.poll()
-    assert len(events(records, "active_unassigned")) == 1
+    assert len(events(records, "unloaded_unassigned")) == 1
     await w.swap_cycle(poll_every=0.3, source="tag", name=PETG[0], color=PETG[1])
     await w.poll()
     await w.unload()
@@ -894,7 +894,7 @@ async def test_s10_spool_moved_out_with_no_replacement(
     await w.unload()
     records = await w.poll()
     assert w.charged(records, "A") == 30
-    assert [e["message"] for e in events(records, "active_unassigned")] == [
+    assert [e["message"] for e in events(records, "unloaded_unassigned")] == [
         f"spool {a} unloaded with no spool in the location; holding usage until one is assigned"
     ]
     assert events(records, "swap_unconfirmed") == []
@@ -1189,7 +1189,7 @@ async def test_s8_staged_spool_leaves_after_the_active_one(
     # The unload ends A's time in the tool: S10, usage held until a spool is assigned.
     await w.unload()
     records = await w.poll()
-    assert len(events(records, "active_unassigned")) == 1
+    assert len(events(records, "unloaded_unassigned")) == 1
     assert w.bridge.printers[0].tools[0].active is None
     assert await w.flag("B") is None
 
