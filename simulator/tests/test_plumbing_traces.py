@@ -18,7 +18,7 @@ from simulator.tests.test_traces import REPLAYS, Recorder, recorder
 from simulator.tests.util import make
 
 PLA = {"name": "PLA", "color": "#73737b", "instance_uuid": "u1"}
-PETG = {"name": "PETG", "color": "#1f6fb2", "instance_uuid": "u2"}
+PETG = {"name": "PETG", "color": "#186bb5", "instance_uuid": "u2"}
 
 
 def sample(t, state, extruded, material=None, unloads=0, job=None, boot=1, **kw):
