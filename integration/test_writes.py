@@ -1,4 +1,4 @@
-"""Writing Spoolman's spool to the printer: docs/scenarios.md rows W1 to W14."""
+"""Writing Spoolman's spool to the printer: docs/scenarios.md rows W1 to W15."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ import uuid
 from dataclasses import replace
 
 import pytest
+from aiohttp import web
 
 from integration.conftest import (
     ASA,
@@ -23,6 +24,7 @@ from integration.conftest import (
 from integration.faults import set_extra_text
 from integration.temperatures import TEMPERATURES, WRITTEN
 from simulator.model import MODELS, JobPhase, Material, ModelInfo, State
+from simulator.prusalink import DROP, Reply
 from spoolman_prusalink.printer_sync import COREONEL_PREAMBLE
 
 SYNC_FILE = "spoolman-sync.gcode"
@@ -632,3 +634,269 @@ async def test_w14_edit_after_the_uuid_is_cleared_keeps_the_printers(
     assert await w.spoolman.extra(b, UUID_FIELD) is None  # Kept on the printer, not stored.
     assert await w.flag("B") is None
     assert len(w.requests("PUT")) == 2
+
+
+async def test_w3_print_started_before_the_upload(world: World, caplog: pytest.LogCaptureFixture):
+    """A print starts between the poll's read and the upload: nothing is uploaded until idle."""
+    caplog.set_level(logging.DEBUG, logger="spoolman_prusalink")
+    w = world
+    await write_due(w)
+
+    # The poll reads the printer idle, and a print starts just before the bridge reads
+    # the status again to check it's still idle.
+    statuses = 0
+
+    def start_print_second(method: str, path: str) -> None:
+        nonlocal statuses
+        if path == "/api/v1/status":
+            statuses += 1
+            if statuses == 2:
+                w.before_request = None
+                w.printer.start_print(print_spec())
+
+    w.before_request = start_print_second
+    await w.poll()
+    assert statuses == 2
+    assert w.printer.state is State.PRINTING
+    assert w.requests("PUT") == []
+    waits = "printer became PRINTING; sync job waits for the next idle poll"
+    assert count(caplog, logging.INFO, waits) == 1
+
+    await w.run_until(lambda: w.printer.job is None, poll_every=1.0)
+    assert w.requests("PUT") == []
+
+    # Idle again: the write goes through, and the job's line ends the wait.
+    await w.poll()
+    puts = w.requests("PUT")
+    assert len(puts) == 1 and puts[0].text.endswith(" 201")
+    await wrote_b(w)
+    await w.poll()
+    assert count(caplog, logging.INFO, "became ") == 1
+    assert count(caplog, logging.INFO, f"ran printer job {SYNC_FILE}") == 1
+    assert count(caplog, logging.WARNING, "sync job") == 0
+
+
+@pytest.mark.parametrize("failure", ["500", "drop"])
+async def test_w15_upload_fails(world: World, caplog: pytest.LogCaptureFixture, failure: str):
+    """Upload fails with a 500 or a dropped connection: logged once, retried each idle poll."""
+    caplog.set_level(logging.DEBUG, logger="spoolman_prusalink")
+    w = world
+    await write_due(w)
+
+    failed = 0
+
+    def fail_uploads(method: str, path: str) -> Reply:
+        nonlocal failed
+        if method != "PUT":
+            return None
+        failed += 1
+        if failure == "drop":
+            return DROP
+        return web.json_response({"message": "storage error"}, status=500)
+
+    w.before_request = fail_uploads
+    for _ in range(3):
+        w.advance(1.0)
+        await w.poll()
+    assert failed == 3
+    assert w.printer.job is None
+    assert w.material() == (PETG[0], None, None)
+    assert count(caplog, logging.WARNING, "printer sync job failed") == 1
+
+    # The printer takes uploads again: the next idle poll writes B, and says so once.
+    w.before_request = None
+    await w.poll()
+    puts = w.requests("PUT")
+    assert puts[-1].text.endswith(" 201")
+    await wrote_b(w)
+    await w.poll()
+    assert count(caplog, logging.WARNING, "printer sync job working again") == 1
+    assert count(caplog, logging.WARNING, "printer sync job failed") == 1
+    assert count(caplog, logging.INFO, f"ran printer job {SYNC_FILE}") == 1
+
+
+def mint_refused(w: World) -> None:
+    """Make Spoolman refuse to store an instance UUID on spool B until restored."""
+    b = w.spools["B"]
+    w.spoolman_faults.answer(
+        "PATCH", f"/api/v1/spool/{b}", 500, times=None, containing=UUID_FIELD.encode()
+    )
+
+
+async def test_w1_uuid_mint_fails(world: World, caplog: pytest.LogCaptureFixture):
+    """Storing a minted UUID fails: logged once, and B is written without a UUID."""
+    caplog.set_level(logging.DEBUG, logger="spoolman_prusalink")
+    w = world
+    b = w.spools["B"]
+    mint_refused(w)
+    await write_due(w)
+    await w.poll()
+    await w.run_until(lambda: w.printer.job is None)
+    for _ in range(3):
+        w.advance(1.0)
+        await w.poll()
+    assert len(w.requests("PUT")) == 1
+    assert w.material()[:2] == PETG
+    assert await w.spoolman.extra(b, UUID_FIELD) is None
+    assert count(caplog, logging.WARNING, f"can't store an instance UUID on spool {b}") == 1
+    assert await w.flag("B") is None
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="a failed mint isn't retried: the write goes ahead without a UUID, and once the "
+    "printer matches it nothing is due, so B never gets one and the failure never ends",
+)
+async def test_w1_uuid_minted_once_spoolman_takes_it(
+    world: World, caplog: pytest.LogCaptureFixture
+):
+    """Storing a minted UUID fails, then works: B gets a UUID and the printer shows it (W1)."""
+    caplog.set_level(logging.DEBUG, logger="spoolman_prusalink")
+    w = world
+    b = w.spools["B"]
+    mint_refused(w)
+    await write_due(w)
+    await w.poll()
+    await w.run_until(lambda: w.printer.job is None)
+    await w.poll()
+
+    w.spoolman_faults.restore()
+    for _ in range(3):
+        await w.run_until(lambda: w.printer.job is None)
+        w.advance(1.0)
+        await w.poll()
+    minted = await w.spoolman.extra(b, UUID_FIELD)
+    assert minted is not None
+    assert w.material() == (PETG[0], PETG[1], minted)
+    assert count(caplog, logging.WARNING, f"can't store an instance UUID on spool {b}") == 1
+    assert count(caplog, logging.INFO, f"gave spool {b} instance UUID") == 1
+
+
+async def test_w10_model_unreadable_until_it_answers(
+    world: World, caplog: pytest.LogCaptureFixture
+):
+    """`/api/version` fails while other reads work: writes stay off, logged once each way."""
+    caplog.set_level(logging.DEBUG, logger="spoolman_prusalink")
+    w = world
+
+    def no_version(method: str, path: str) -> Reply:
+        if path == "/api/version":
+            return web.json_response({"message": "Internal Server Error"}, status=500)
+        return None
+
+    w.before_request = no_version
+    await write_due(w)
+    records = await w.poll()
+    assert w.charged(records, "B") == LOAD_MM
+    for _ in range(3):
+        w.advance(1.0)
+        w.printer.extrude(0, 10)
+        records = await w.poll()
+        assert w.charged(records, "B") == 10
+    assert w.requests("PUT") == []
+    off = "can't read the printer model ("
+    cant = f"] can't write spool {w.spools['B']} to the printer"
+    assert count(caplog, logging.WARNING, cant) == 1
+    assert count(caplog, logging.WARNING, "printer writes are off until it can") == 1
+    flag = await w.flag("B")
+    assert flag is not None and f"can't write to the printer: {off}" in flag
+    versions = [e for e in w.sim.events if e.kind == "request" and "/api/version" in e.text]
+    assert len(versions) == 7  # Read again at each poll until it answers.
+
+    # The printer answers: the model is read once, writes come back on, and B is written.
+    w.before_request = None
+    await w.poll()
+    assert count(caplog, logging.WARNING, "printer is COREONEL (8.1.0)") == 1
+    assert len(w.requests("PUT")) == 1
+    await wrote_b(w)
+    for _ in range(2):
+        w.advance(1.0)
+        await w.poll()
+    assert await w.flag("B") is None
+    assert count(caplog, logging.WARNING, "printer writes are off until it can") == 1
+    assert count(caplog, logging.INFO, "printer is ") == 0
+    assert count(caplog, logging.WARNING, "printer is ") == 1
+
+
+async def test_w6_sync_job_gone_before_its_name_is_read(
+    world: World, caplog: pytest.LogCaptureFixture
+):
+    """The sync job ends between the bridge's status and job reads: still not a print start."""
+    caplog.set_level(logging.INFO, logger="spoolman_prusalink")
+    w = world
+    records = await w.poll()
+    assert len(events(records, "baseline")) == 1
+    await w.unload()
+    records = await w.poll()
+    assert len(events(records, "swap_unconfirmed")) == 1
+    await w.swap_cycle(source="preset", name=PETG[0])
+
+    # The idle poll writes A (W11). The next poll's status shows the sync job, but it
+    # ends before the bridge asks for the job's name, so `/api/v1/job` answers 204.
+    await w.poll()
+    assert len(w.requests("PUT")) == 1
+    w.advance(0.5)
+    assert w.printer.job is not None
+
+    def finish_first(method: str, path: str) -> None:
+        if path == "/api/v1/job":
+            w.before_request = None
+            w.advance(5.0)
+            assert w.printer.job is None
+
+    w.before_request = finish_first
+    mark = w.mark()
+    await w.poll()
+    assert [e.text for e in w.requests("GET /api/v1/job")] == ["GET /api/v1/job 204"]
+    assert not logged(caplog, logging.WARNING, "read failed")
+    for _ in range(2):
+        w.advance(1.0)
+        w.printer.extrude(0, 5)
+        await w.poll()
+    records = w.since(mark)
+    assert events(records, "swap_assumed") == []
+    assert w.charged(records, "A") == 10
+    flag = await w.flag("A")
+    assert flag is not None and "unloaded with no Spoolman change" in flag
+
+    # The swap is still open: the user's next print is the print start that assumes A.
+    records = await w.start_print(print_spec())
+    assert len(events(records, "swap_assumed")) == 1
+
+
+async def test_w9_malformed_color_is_drift(world: World, caplog: pytest.LogCaptureFixture):
+    """The printer reports a color that isn't a hex color: drift, logged and cleared once."""
+    caplog.set_level(logging.INFO, logger="spoolman_prusalink")
+    w = world
+    a = w.spools["A"]
+    records = await w.poll()
+    assert len(events(records, "baseline")) == 1
+    assert await w.flag("A") is None
+
+    # The simulator only stores valid colors, so the filament reply is edited on the way.
+    def bad_color(method: str, path: str) -> Reply:
+        if path != "/api/v1/filament":
+            return None
+        data = w.printer.filament_json()
+        assert data is not None
+        data["tools"][0]["material"]["color"] = "#7g737b"
+        return web.json_response(data)
+
+    w.before_request = bad_color
+    for _ in range(3):
+        w.printer.extrude(0, 10)
+        records = await w.poll()
+        assert w.charged(records, "A") == 10
+    assert w.requests("PUT") == []
+    differs = f"printer differs from spool {a}: color printer=#7g737b spoolman={PLA[1]}"
+    assert count(caplog, logging.WARNING, differs) == 1
+    flag = await w.flag("A")
+    assert flag is not None and "color printer=#7g737b" in flag
+
+    # The printer reports a valid color again: the note and the flag end once.
+    w.before_request = None
+    for _ in range(2):
+        await w.poll()
+    assert await w.flag("A") is None
+    assert count(caplog, logging.WARNING, f"no longer: {differs}") == 1
+    assert count(caplog, logging.WARNING, differs) == 2
