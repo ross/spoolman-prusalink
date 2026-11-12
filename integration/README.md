@@ -90,7 +90,10 @@ script/integration --cov=spoolman_prusalink --cov-fail-under=0
   white PLA and UUID, and E is in `<prefix> LB`. `w.at("it")` and `w.at("b")`
   give each printer with its location, tool, counter and the bridge's state
   for the tool, and `printer_of(records, "b")` keeps one printer's ledger
-  records. These are in `integration/printers.py`.
+  records. These are in `integration/printers.py`. The moves themselves, such
+  as `unload`, `swap_cycle` and `start_print`, are in `integration/station.py`,
+  a plain module that the unit suite uses too. The `World` helpers hand to
+  printer `it`'s.
 - **Short phases.** The simulator's settings in `conftest.py` make unloads,
   loads, prints and sync jobs take a second or so. A load counts 36 mm of feed
   and 40 mm of purge.

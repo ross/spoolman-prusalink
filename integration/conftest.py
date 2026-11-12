@@ -20,7 +20,7 @@ import pytest
 from aiohttp.test_utils import TestServer
 
 from integration.printers import Station, add_printers
-from integration.temperatures import TEMPERATURES, WRITTEN
+from integration.temperatures import WRITTEN
 from simulator.model import (
     MODELS,
     Material,
@@ -50,7 +50,6 @@ SETTINGS = dict(
     print_rate_mm_s=100.0,
     start_blip=True,
 )
-STEP = 0.1
 KEY = "it-key"
 FLAG_FIELD = "bridge_flag"
 UUID_FIELD = "instance_uuid"
@@ -245,14 +244,6 @@ async def spoolman(spoolman_url: str, prefix: str):
             await helper.cleanup()
 
 
-def advance(sim: Simulation, seconds: float) -> None:
-    """Move simulated time on by `seconds`, in the clock task's 0.1 s steps."""
-    t = 0.0
-    while t < seconds - 1e-9:
-        sim.tick(min(STEP, seconds - t))
-        t += STEP
-
-
 def print_spec() -> PrintSpec:
     """A 400 mm print that takes 4 s after a 0.5 s preheat."""
     return PrintSpec([Segment(0, 400)], duration_s=4, preheat_s=0.5)
@@ -320,14 +311,16 @@ class World:
 
     def at(self, name: str) -> Station:
         """One printer by name, "it" included, with its tool 0."""
-        if name == self.printer.name:
-            return Station(self, name, self.printer, self.tool_location)
-        return self.others[name]
+        return self.station if name == self.printer.name else self.others[name]
 
     # --- End of several printers ---
 
     # Every bridge this world started, the current one last; the fixture closes them all.
     bridges: list[Bridge] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        # Printer "it" with its moves, which the ones below hand to.
+        self.station = Station(self.sim, self.printer, world=self, location=self.tool_location)
 
     async def restart(self, **config) -> None:
         """Stop the bridge and start a new one on the same database, with `config` changed.
@@ -343,22 +336,22 @@ class World:
 
     @property
     def tool(self) -> SimTool:
-        return self.tool_at(0)
+        return self.station.tool
 
     @property
     def counter(self) -> int:
         """Tool 0's extrusion counter as the printer reports it, in whole millimetres."""
-        return self.counter_at(0)
+        return self.station.counter
 
     def tool_at(self, tool: int) -> SimTool:
-        return self.printer.tools[tool]
+        return self.station.tool_at(tool)
 
     def counter_at(self, tool: int) -> int:
         """A tool's extrusion counter as the printer reports it, in whole millimetres."""
-        return int(self.tool_at(tool).extruded)
+        return self.station.counter_at(tool)
 
     def advance(self, seconds: float) -> None:
-        advance(self.sim, seconds)
+        self.station.advance(seconds)
 
     async def poll(self) -> list[dict]:
         """Poll once and return the ledger records it wrote."""
@@ -380,17 +373,7 @@ class World:
         Returns the ledger records written meanwhile. Fails rather than spin if `done()`
         never comes true within `limit` seconds.
         """
-        mark = self.mark()
-        t = since_poll = 0.0
-        while not done():
-            assert t < limit, f"not done after {limit} simulated seconds"
-            self.sim.tick(STEP)
-            t += STEP
-            since_poll += STEP
-            if poll_every is not None and since_poll >= poll_every - 1e-9:
-                await self.bridge.poll()
-                since_poll = 0.0
-        return self.since(mark)
+        return await self.station.run_until(done, limit=limit, poll_every=poll_every)
 
     async def finish_print(self) -> list[dict]:
         """Poll every second until the print ends, then once more idle; return the records."""
@@ -402,8 +385,7 @@ class World:
         return self.since(mark) + await self.poll()
 
     async def unload(self, tool: int = 0) -> None:
-        self.printer.unload(tool)
-        await self.run_until(lambda: self.tool_at(tool).process is None)
+        await self.station.unload(tool)
 
     async def swap_cycle(
         self, poll_every: float | None = None, *, tool: int = 0, **load
@@ -412,28 +394,11 @@ class World:
 
         A tag load reports `TEMPERATURES` unless `load` gives others.
         """
-        if load.get("source") == "tag":
-            load.setdefault("temperatures", TEMPERATURES)
-        self.printer.load(tool, **load)
-        return await self.run_until(
-            lambda: self.tool_at(tool).process is None, poll_every=poll_every
-        )
+        return await self.station.swap_cycle(poll_every, tool=tool, **load)
 
     async def start_print(self, spec: PrintSpec) -> list[dict]:
-        """Start a print and poll until the bridge counts it as started.
-
-        Scan, blip and a 0.5 s preheat take 0.9 s. The bridge sees a print start when the
-        counter moves between two polls of the same job, so this polls twice once the
-        printer is extruding.
-        """
-        first = self.tool_at(spec.segments[0].tool)
-        start = first.extruded
-        self.printer.start_print(spec)
-        self.advance(1.2)
-        assert self.printer.state is State.PRINTING and first.extruded > start
-        records = await self.poll()
-        self.advance(0.3)
-        return records + await self.poll()
+        """Start a print and poll until the bridge counts it as started. See `Station`."""
+        return await self.station.start_print(spec)
 
     async def move(self, name: str, location: str | None) -> None:
         await self.spoolman.move(self.spools[name], location)
@@ -454,8 +419,7 @@ class World:
         return [e for e in self.sim.events if e.kind == "request" and e.text.startswith(method)]
 
     def material(self, tool: int = 0) -> tuple[str | None, str | None, str | None]:
-        m = self.tool_at(tool).material
-        return (None, None, None) if m is None else (m.name, m.color, m.instance_uuid)
+        return self.station.material(tool)
 
     @property
     def spoolman_faults(self):
@@ -661,7 +625,7 @@ async def world(
         fields=keys,
     )
     for name, sim_printer, location, other_server, _ in others:
-        w.others[name] = Station(w, name, sim_printer, location, other_server)
+        w.others[name] = Station(sim, sim_printer, world=w, location=location, server=other_server)
     w.bridges.append(bridge)
     try:
         yield w

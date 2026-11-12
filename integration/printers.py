@@ -9,13 +9,15 @@ as a `Station`. Ledger records name their printer, so `printer_of()` splits them
 from __future__ import annotations
 
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
 from aiohttp.test_utils import TestServer
 
-from integration.temperatures import WRITTEN
-from simulator.model import MODELS, Material, PrintSpec, SimPrinter, SimTool, Simulation, State
+from integration import station
+from integration.temperatures import TEMPERATURES, WRITTEN
+from simulator.model import MODELS, Material, PrintSpec, SimPrinter, SimTool, Simulation
 from simulator.prusalink import make_app
 from spoolman_prusalink.accounting import ToolState
 from spoolman_prusalink.config import PrinterConfig
@@ -28,58 +30,57 @@ PLA_WHITE = ("PLA", "#f2f2f2")
 SECOND = "b"
 
 
-@dataclass
-class Station:
-    """One printer of `world` with its tool 0, as `World.at()` returns it."""
+@dataclass(kw_only=True)
+class Station(station.Station):
+    """One printer of `world`, as `World.at()` returns it.
+
+    The moves that tick return the ledger records the bridge wrote meanwhile.
+    """
 
     world: World
-    name: str
-    printer: SimPrinter
-    location: str
+    location: str  # Tool 0's Spoolman location.
     server: TestServer | None = None  # None for printer "it", which `world` serves.
 
-    @property
-    def tool(self) -> SimTool:
-        return self.printer.tools[0]
+    def __post_init__(self) -> None:
+        # The world's bridge changes at a restart, so look it up at each poll.
+        self.poll = lambda: self.world.bridge.poll()
 
     @property
-    def counter(self) -> int:
-        """Tool 0's extrusion counter as the printer reports it, in whole millimetres."""
-        return int(self.tool.extruded)
+    def name(self) -> str:
+        return self.printer.name
 
     @property
     def state(self) -> ToolState | None:
         """The bridge's state for this printer's tool 0, None before its first read."""
         return self.world.bridge.state.tools(self.name).get(0)
 
-    def material(self) -> tuple[str | None, str | None, str | None]:
-        m = self.tool.material
-        return (None, None, None) if m is None else (m.name, m.color, m.instance_uuid)
-
     def extrude(self, mm: float) -> None:
         self.printer.extrude(0, mm)
 
-    async def unload(self) -> None:
-        self.printer.unload(0)
-        await self.world.run_until(lambda: self.tool.process is None)
+    async def run_until(
+        self, done: Callable[[], bool], *, limit: float = 30.0, poll_every: float | None = None
+    ) -> list[dict]:
+        mark = self.world.mark()
+        await super().run_until(done, limit=limit, poll_every=poll_every)
+        return self.world.since(mark)
 
-    async def swap_cycle(self, poll_every: float | None = None, **load) -> list[dict]:
-        """Load tool 0 and tick until the load is done; `load` goes to `SimPrinter.load`."""
-        self.printer.load(0, **load)
-        return await self.world.run_until(lambda: self.tool.process is None, poll_every=poll_every)
+    async def swap_cycle(
+        self, poll_every: float | None = None, *, tool: int = 0, **load
+    ) -> list[dict]:
+        """Load a tool and tick until the load is done; `load` goes to `SimPrinter.load`.
+
+        A tag load reports `TEMPERATURES` unless `load` gives others.
+        """
+        if load.get("source") == "tag":
+            load.setdefault("temperatures", TEMPERATURES)
+        mark = self.world.mark()
+        await super().swap_cycle(poll_every, tool=tool, **load)
+        return self.world.since(mark)
 
     async def start_print(self, spec: PrintSpec) -> list[dict]:
-        """Start a print here and poll until the bridge counts it as started.
-
-        As `World.start_print`: two polls once the printer is extruding.
-        """
-        start = self.tool.extruded
-        self.printer.start_print(spec)
-        self.world.advance(1.2)
-        assert self.printer.state is State.PRINTING and self.tool.extruded > start
-        records = await self.world.poll()
-        self.world.advance(0.3)
-        return records + await self.world.poll()
+        mark = self.world.mark()
+        await super().start_print(spec)
+        return self.world.since(mark)
 
 
 def printer_of(records: list[dict], name: str) -> list[dict]:
