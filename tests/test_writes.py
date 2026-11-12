@@ -1130,7 +1130,9 @@ async def test_flag_failure_ends_when_spoolman_already_matches(tmp_path, caplog)
     await bridge.poll()
     assert caplog.text.count("can't update the flag on spool 19") == 1
     # The user writes the same flag themselves, so there's nothing left to update.
-    fake.spools[19]["extra"]["bridge_flag"] = json.dumps(bridge._flags[19])
+    fake.spools[19]["extra"]["bridge_flag"] = json.dumps(
+        " | ".join(bridge.printers[0].flags({})[19])
+    )
     await bridge.poll()
     assert levels(caplog, "flag on spool 19 is up to date") == ["INFO"]
     await bridge.aclose()

@@ -237,11 +237,11 @@ async def test_x6_shared_spool_logs_again_when_it_recurs(tmp_path, caplog):
     for _ in range(2):
         a_tools[0] = ToolState(boot_id=1, active=19, assigned=19)
         b_tools[0] = ToolState(boot_id=1, active=19, assigned=20)
-        bridge._check_shared({})
-        bridge._check_shared({})
+        bridge._check_shared()
+        bridge._check_shared()
         a_tools[0] = ToolState(boot_id=1, active=None, assigned=19)
         b_tools[0] = ToolState(boot_id=1, active=None, assigned=20)
-        bridge._check_shared({})
+        bridge._check_shared()
     assert caplog.text.count(warning) == 2
     assert caplog.text.count("spool 19 is no longer active in more than one tool") == 2
     await bridge.aclose()
@@ -252,12 +252,12 @@ async def test_shared_spool_logs_again_when_its_locations_change(tmp_path, caplo
     a_tools, b_tools = bridge.state.tools("a"), bridge.state.tools("b")
     a_tools[0] = ToolState(boot_id=1, active=19, assigned=19)
     b_tools[0] = ToolState(boot_id=1, active=19, assigned=20)
-    bridge._check_shared({})
-    bridge._check_shared({})
+    bridge._check_shared()
+    bridge._check_shared()
     assert caplog.text.count("spool 19 is active in Tool a and Tool b at once") == 1
     bridge.printers[0].config.tools[0] = "Tool c"
-    bridge._check_shared({})
-    bridge._check_shared({})
+    bridge._check_shared()
+    bridge._check_shared()
     assert caplog.text.count("spool 19 is active in Tool c and Tool b at once") == 1
     assert "no longer active" not in caplog.text
     await bridge.aclose()

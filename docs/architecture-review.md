@@ -65,32 +65,6 @@ needs through public methods.
 
 Size: medium. Easier after B2, which removes most of the reach-ins.
 
-### B5. The poll order is an implicit protocol
-
-`Bridge.poll()` (`app.py`) calls its phases in a fixed order, and the
-phases talk through fields:
-
-- `process()` fills `_pending_writes` and `_adopts`. `adopt_uuids()` removes
-  tools from `_pending_writes`. `sync_printer()` consumes both.
-- `flags` is a dictionary passed down as an out-parameter and filled by
-  `_claims`, `process`, `_check_shared`, and `_finish_flags`. The result is
-  left in `_flags` for `sync_flags`.
-- `sync_printer` sets `_last_state = "BUSY"`, a state the printer didn't
-  report, so that `interval()` polls again soon.
-- There are seven `_save()` call sites. Several mutations of saved state
-  rely on a later save by other code. `_hold_deleted` has a comment that
-  says so.
-
-Why it hurts: reordering two phases, or adding one, can break another phase
-with no failing type or signature.
-
-Shape: each phase returns a value and the next takes it as an argument.
-`process()` returns the writes it wants, the adoptions, the flags, and the
-ledger records. `poll()` passes them on. A "poll again soon" request is its
-own field. Each phase saves once, at its end.
-
-Size: medium. Falls out of B2 for the most part.
-
 ### B10. Smaller items
 
 - The `tools` table holds a JSON blob per tool, `printer_flags` holds JSON,
@@ -239,7 +213,7 @@ Size: medium.
 
 | # | Workstream | Findings | Depends on |
 | --- | --- | --- | --- |
-| 3 | Conditions and saved facts | B5, B10, T1 (rest) | Nothing |
+| 3 | Conditions and saved facts | B10, T1 (rest) | Nothing |
 | 5 | Narrow the bridge boundary | B4, T1 (UUID registry tests) | Workstream 3 |
 | 8 | Simulator state | S1, S5, S6, then S2, S4 | Nothing. S4 continues the move that put the PrusaLink routing in `prusalink.serve` |
 
