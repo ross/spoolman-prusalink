@@ -718,6 +718,53 @@ async def test_uuid_field_setup_failing_holds_the_write_until_stored(tmp_path, c
     await bridge.aclose()
 
 
+async def test_uuid_field_refused_by_the_fields_api_writes_without_a_uuid(tmp_path, caplog):
+    """A 4xx from the fields API lasts, like a key of another type: no UUID is written."""
+    bridge, fake, printer = make(tmp_path, [spool(19)], uuid_field="instance_uuid")
+    caplog.set_level("DEBUG")
+    await swap_to_menu_loaded_20(bridge, fake, printer)
+    fake.fail_field = 403
+    for _ in range(2):
+        await bridge.poll()
+    (gcode,) = jobs(printer)
+    assert 'M865 X R N"PLA"' in gcode and "M865.1" not in gcode
+    assert stored_uuid(fake, 20) is None
+    assert levels(caplog, "can't set up the 'instance_uuid' spool field") == ["WARNING"]
+    await bridge.aclose()
+
+
+async def test_uuid_field_fixed_then_failing_holds_the_write(tmp_path, caplog):
+    """A key of another type writes without a UUID; once fixed, a 500 holds the write."""
+    bridge, fake, printer = make(tmp_path, [spool(19)], uuid_field="instance_uuid")
+    caplog.set_level("INFO")
+    wrong = {"key": "instance_uuid", "name": "UUID", "field_type": "integer"}
+    fake.fields.append(wrong)
+    await swap_to_menu_loaded_20(bridge, fake, printer)
+    await bridge.poll()
+    (gcode,) = jobs(printer)
+    assert "M865.1" not in gcode
+
+    # Someone deletes the wrong field and edits the spool, but the field read fails.
+    fake.fields.remove(wrong)
+    fake.spools[20]["filament"]["color_hex"] = "00ff00"
+    fake.fail_field = 500
+    for _ in range(2):
+        await bridge.poll()
+    assert len(jobs(printer)) == 1
+    assert stored_uuid(fake, 20) is None
+
+    fake.fail_field = None
+    await bridge.poll()
+    minted = stored_uuid(fake, 20)
+    assert minted is not None
+    assert len(jobs(printer)) == 2
+    assert 'O"#00ff00"' in jobs(printer)[-1]
+    assert f'M865.1 I0 C"{minted}"' in jobs(printer)[-1]
+    assert caplog.text.count("can't set up the 'instance_uuid' spool field") == 2
+    assert caplog.text.count("'instance_uuid' spool field is set up") == 1
+    await bridge.aclose()
+
+
 async def test_failed_uuid_mint_leaves_a_failing_sync_job_failing(tmp_path, caplog):
     """A write waiting on the mint is still needed: the job's failure isn't over."""
     bridge, fake, printer = make(tmp_path, [spool(19)], uuid_field="instance_uuid")

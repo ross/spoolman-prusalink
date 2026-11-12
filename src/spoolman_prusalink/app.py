@@ -171,6 +171,18 @@ def _record(failing: dict, key: Hashable, error: object) -> bool:
     return new
 
 
+def _unusable(error: Exception) -> bool:
+    """Whether a field setup failure lasts until someone fixes it.
+
+    That's a key of another type, or a client error from the fields API, such as a
+    proxy refusing it or a Spoolman without it. A server error, a transport error or
+    a body that can't be read may pass.
+    """
+    return isinstance(error, FieldTypeError) or (
+        isinstance(error, httpx.HTTPStatusError) and error.response.is_client_error
+    )
+
+
 # A mid-print unload with more than this fraction of the net weight left in Spoolman
 # gets a flag.
 RUNOUT_LEFT = 0.05
@@ -1121,13 +1133,13 @@ class PrinterBridge:
                 else:
                     uuid_value = await self.bridge._mint_uuid(spool)
                     if uuid_value is None and self.bridge.config.uuid_field not in (
-                        self.bridge._wrong_type_fields
+                        self.bridge._unusable_fields
                     ):
                         # The spool gets its UUID first (W1): written without one, the
                         # printer would match the write and no later poll would mint
                         # again. The write stays due, and the next poll retries the mint.
-                        # Only a UUID key of another type doesn't hold the write, since
-                        # it won't fix itself: the spool is written without a UUID.
+                        # Only a UUID field that's unusable until someone fixes it doesn't
+                        # hold the write: the spool is written without a UUID.
                         minting = True
                         continue
             writes.append(printer_sync.ToolWrite(tool, spool, uuid_value))
@@ -1249,8 +1261,8 @@ class Bridge:
     state: State = field(default_factory=State)
     printers: list[PrinterBridge] = field(init=False, default_factory=list)
     _ready_fields: set[str] = field(default_factory=set)
-    # Field keys found with another type and not set up since.
-    _wrong_type_fields: set[str] = field(default_factory=set)
+    # Field keys whose last setup failure needs someone to fix it (`_unusable`).
+    _unusable_fields: set[str] = field(default_factory=set)
     _flags: dict[int, str] = field(default_factory=dict)  # Desired flags from the last poll.
     _spoolman_reach: Reachability = field(default_factory=lambda: Reachability("Spoolman"))
     # What's failing now, by spool, with the last error logged for each.
@@ -1787,8 +1799,10 @@ class Bridge:
         try:
             await self.spoolman.ensure_field(key, name, field_type)
         except (httpx.HTTPError, ValueError) as e:
-            if isinstance(e, FieldTypeError):
-                self._wrong_type_fields.add(key)
+            if _unusable(e):
+                self._unusable_fields.add(key)
+            else:
+                self._unusable_fields.discard(key)  # Passing, whatever failed before.
             if _record(self._field_failing, key, e):
                 log.warning("can't set up the %r spool field: %s", key, e)
             else:
@@ -1796,7 +1810,7 @@ class Bridge:
             return False
         if self._field_failing.pop(key, None) is not None:
             log.info("%r spool field is set up", key)
-        self._wrong_type_fields.discard(key)
+        self._unusable_fields.discard(key)
         self._ready_fields.add(key)
         return True
 

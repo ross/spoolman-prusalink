@@ -188,11 +188,11 @@ async def test_uuid_field_of_another_type_is_known_until_set_up(uuid_bridge, cap
     fake.fields.append({"key": "instance_uuid", "name": "UUID", "field_type": "integer"})
     target = (await bridge.spoolman.spools())[0]
     assert await bridge._mint_uuid(target) is None
-    assert bridge._wrong_type_fields == {"instance_uuid"}
+    assert bridge._unusable_fields == {"instance_uuid"}
 
     fake.fields = []  # Someone deletes the field, so the bridge can set it up.
     assert await bridge._mint_uuid(target)
-    assert bridge._wrong_type_fields == set()
+    assert bridge._unusable_fields == set()
     assert count(caplog, "'instance_uuid' spool field is set up") == 1
     await bridge.aclose()
 
