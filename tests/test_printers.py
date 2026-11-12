@@ -106,6 +106,7 @@ async def test_x2_filament_first_across_printers(tmp_path):
     assert st["a"].active is None and st["a"].swap is not None  # S3 on a: open, held.
     assert fake.flag(20) is None
     assert "Tool a: filament was unloaded, then this spool was moved out" in fake.flag(19)
+    assert jobs(b) == []  # b's printer matches spool 19, so nothing is written there.
 
     # Whatever went into a confirms a's swap and takes the usage held there.
     fill(a.tool, menu("PLA"))

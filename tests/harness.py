@@ -226,7 +226,33 @@ def make(tmp_path, spools, **cfg):
             transport=httpx.MockTransport(fake.handle),
         ),
     )
+    guard_polls(bridge, [printer])
     return bridge, fake, printer
+
+
+def guard_polls(bridge, stations):
+    """Make `bridge.poll()` fail while one of `stations` runs a sync job.
+
+    A sync job runs only as the test ticks, and while one runs the bridge holds every
+    other write. A test that forgot `finish_job()` would then pass because the printer
+    was busy, not because nothing was due. `poll_during_job()` polls on purpose.
+    """
+    poll = bridge.poll
+
+    async def guarded():
+        for station in stations:
+            job = station.printer.job
+            running = job is not None and job.kind == "sync"
+            assert not running, f"{station.printer.name} is still running a sync job"
+        await poll()
+
+    guarded.unguarded, guarded.stations = poll, stations
+    bridge.poll = guarded
+
+
+async def poll_during_job(bridge):
+    """Poll while a printer runs a sync job, which `bridge.poll()` refuses in a test."""
+    await bridge.poll.unguarded()
 
 
 def ledger(tmp_path):
@@ -247,8 +273,22 @@ def spool_x(id, location=LOC, material="PLA", color="ff0000", temps=(None, None)
 
 
 def jobs(station):
-    """The G-code of each sync job the printer accepted."""
-    return [e.data["body"] for e in station.requests("PUT") if e.text.endswith(" 201")]
+    """The G-code of each upload that the printer started as a sync job.
+
+    An upload the printer only stored, as without `Print-After-Upload`, doesn't count.
+    The simulator logs the job's start while it serves the upload, before the request.
+    """
+    found, started = [], False
+    for e in station.sim.events:
+        if e.printer != station.printer.name:
+            continue
+        if e.kind == "job" and "(sync)" in e.text and e.text.endswith(" started"):
+            started = True
+        elif e.kind == "request" and e.text.startswith("PUT"):
+            if started and e.text.endswith(" 201"):
+                found.append(e.data["body"])
+            started = False
+    return found
 
 
 def refused(station):
@@ -311,13 +351,15 @@ def restart(bridge, **cfg):
     bridge.db.close()
     config = replace(bridge.config, **cfg)
     db = Database.open(config.db_file)
-    return Bridge(
+    restarted = Bridge(
         config=config,
         spoolman=bridge.spoolman,
         clients=bridge.clients,
         state=db.load(),
         db=db,
     )
+    guard_polls(restarted, bridge.poll.stations)
+    return restarted
 
 
 CLAIMED = {"bridge_claim": "true"}
@@ -359,4 +401,5 @@ def two_printers(tmp_path, spools, **cfg):
             for name, p in printers.items()
         },
     )
+    guard_polls(bridge, list(printers.values()))
     return bridge, fake, printers
