@@ -54,7 +54,13 @@ script/integration --cov=spoolman_prusalink --cov-fail-under=0
   spool loses its location.
 - **Extra fields.** The tests register the `instance_uuid` text field if it's
   missing, because spool A is created with a UUID before the bridge runs. The
-  bridge creates `bridge_flag` and `bridge_claim` itself.
+  bridge creates `bridge_flag` and `bridge_claim` itself. A test that takes
+  `world_fields` as `"fresh"`
+  (`@pytest.mark.parametrize("world_fields", ["fresh"], indirect=True)`)
+  registers nothing, so the bridge sets up every field itself. Fields are
+  shared by every spool, so that world gives the bridge keys of the test's own,
+  such as `it_3fa2c1_flag`, in `w.fields`, and deletes them afterwards. Spool A
+  has no UUID there, in Spoolman or on the printer.
 - **A Core One L.** Every scenario starts with one simulated Core One L
   (`8.1.0`): tool 0 loaded with spool A's PLA and instance UUID, 1000 mm on the
   counter, spool A in the tool's location, and spools B (PETG) and C (ASA) on
