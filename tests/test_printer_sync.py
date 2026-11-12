@@ -4,7 +4,6 @@ import pytest
 
 from spoolman_prusalink.models import Material, Spool
 from spoolman_prusalink.printer_sync import (
-    COREONEL_PREAMBLE,
     PRINTER_MODELS,
     CannotSync,
     Temperatures,
@@ -17,6 +16,8 @@ from spoolman_prusalink.printer_sync import (
     printer_name,
     temperatures,
 )
+
+COREONEL_PREAMBLE = default_preamble(PRINTER_MODELS["8.1.0"])
 
 
 def spool(**kw):

@@ -34,7 +34,7 @@ class ToolReading:
     index: int
     extruded: int
     material: Material | None = None
-    # Pending firmware fields.
+    # The firmware's unload counter and the extruded length at the last unload.
     unload_count: int = 0
     extruded_at_unload: int | None = None
 
