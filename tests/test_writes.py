@@ -3265,3 +3265,52 @@ async def test_write_keeps_the_written_uuid_for_a_spool_whose_uuid_was_cleared(t
     await bridge.poll()
     assert len(jobs(station)) == 2
     await bridge.aclose()
+
+
+async def cleared_and_edited(tmp_path):
+    """Spool 20 written to the printer, then its UUID cleared in Spoolman and its color
+    edited. Returns the UUID the printer still has, which the next write would keep."""
+    bridge, fake, station = await written_state(tmp_path)
+    minted = stored_uuid(fake, 20)
+    del fake.spools[20]["extra"]["instance_uuid"]
+    fake.spools[20]["filament"]["color_hex"] = "00ff00"
+    return bridge, fake, station, minted
+
+
+async def test_kept_uuid_waits_for_the_archived_spools_check(tmp_path, caplog):
+    """The printer's UUID may be an archived spool's. While Spoolman can't say, the write
+    waits: written with another UUID, the printer would lose the one to keep."""
+    bridge, fake, station, minted = await cleared_and_edited(tmp_path)
+    fake.fail_archived = 500
+    for _ in range(2):
+        await bridge.poll()
+    assert len(jobs(station)) == 1
+    assert caplog.text.count("can't check spool 20's tag UUID") == 1
+
+    fake.fail_archived = None
+    await bridge.poll()
+    assert len(jobs(station)) == 2 and f'C"{minted}"' in jobs(station)[-1]
+    assert stored_uuid(fake, 20) is None
+    station.finish_job()
+    await bridge.aclose()
+
+
+async def test_kept_uuid_of_an_archived_spool_is_replaced(tmp_path, caplog):
+    """An archived spool has the UUID the printer shows: the write gives spool 20 its own."""
+    bridge, fake, station, minted = await cleared_and_edited(tmp_path)
+    caplog.set_level("INFO")
+    fake.spools[18] = {
+        **spool_x(18, None, extra={"instance_uuid": json.dumps(minted.upper())}),
+        "archived": True,
+    }
+    await bridge.poll()
+    assert caplog.text.count("archived spool 18 has it") == 1
+    own = stored_uuid(fake, 20)
+    assert own and own != minted
+    assert len(jobs(station)) == 2 and f'C"{own}"' in jobs(station)[-1]
+    station.finish_job()
+    # The printer shows spool 20's own UUID now, and the refusal isn't asked about again.
+    await bridge.poll()
+    assert len(jobs(station)) == 2
+    assert caplog.text.count("archived spool 18 has it") == 1
+    await bridge.aclose()
