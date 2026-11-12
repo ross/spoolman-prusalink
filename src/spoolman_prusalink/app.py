@@ -175,11 +175,13 @@ def _unusable(error: Exception) -> bool:
     """Whether a field setup failure lasts until someone fixes it.
 
     That's a key of another type, or a client error from the fields API, such as a
-    proxy refusing it or a Spoolman without it. A server error, a transport error or
-    a body that can't be read may pass.
+    proxy refusing it or a Spoolman without it. A server error, a transport error, a
+    body that can't be read, a timeout (408) or a rate limit (429) may pass.
     """
     return isinstance(error, FieldTypeError) or (
-        isinstance(error, httpx.HTTPStatusError) and error.response.is_client_error
+        isinstance(error, httpx.HTTPStatusError)
+        and error.response.is_client_error
+        and error.response.status_code not in (408, 429)
     )
 
 

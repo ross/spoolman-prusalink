@@ -698,12 +698,13 @@ async def test_uuid_field_of_another_type_writes_without_a_uuid(tmp_path, caplog
     await bridge.aclose()
 
 
-async def test_uuid_field_setup_failing_holds_the_write_until_stored(tmp_path, caplog):
+@pytest.mark.parametrize("status", [500, 408, 429])
+async def test_uuid_field_setup_failing_holds_the_write_until_stored(tmp_path, caplog, status):
     """A field read that fails passes: the write waits, then goes out with the UUID."""
     bridge, fake, printer = make(tmp_path, [spool(19)], uuid_field="instance_uuid")
     caplog.set_level("DEBUG")
     await swap_to_menu_loaded_20(bridge, fake, printer)
-    fake.fail_field = 500
+    fake.fail_field = status
     for _ in range(2):
         await bridge.poll()
     assert jobs(printer) == []
