@@ -17,35 +17,16 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 [ -n "${SKIP_BOOTSTRAP:-}" ] || script/bootstrap
+# shellcheck source=script/lib/spoolman.sh
+source script/lib/spoolman.sh
 
 sim_config=${SIM_CONFIG:-simulator/sim.example.toml}
 data=simulator/data
 mkdir -p "$data"
 
-wait_for() {
-    .venv/bin/python - "$1" "$2" <<'PY'
-import sys
-import time
-
-import httpx
-
-url, what = sys.argv[1:]
-deadline = time.monotonic() + 120
-while True:
-    try:
-        if httpx.get(url, timeout=2).is_success:
-            break
-    except httpx.HTTPError:
-        pass
-    if time.monotonic() > deadline:
-        sys.exit(f"{what} didn't come up within 120 seconds")
-    time.sleep(1)
-PY
-}
-
 if [ -z "${DEMO_SPOOLMAN_URL:-}" ]; then
-    image=${SPOOLMAN_IMAGE:-ghcr.io/donkie/spoolman:0.27.1}
-    engine=${CONTAINER_ENGINE:-$(command -v podman >/dev/null && echo podman || echo docker)}
+    image=$spoolman_image
+    engine=$container_engine
     port=${DEMO_SPOOLMAN_PORT:-7912}
     if "$engine" container inspect spoolman-demo >/dev/null 2>&1; then
         echo "==> Starting the spoolman-demo container"

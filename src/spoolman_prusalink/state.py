@@ -19,7 +19,6 @@ class Runout:
     text: str
     net: float
     used: float
-    printer: str | None = None  # Whose tool it ran out in.
 
 
 @dataclass

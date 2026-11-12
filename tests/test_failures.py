@@ -5,7 +5,6 @@ import json
 import logging
 from dataclasses import replace
 
-import httpx
 import pytest
 from test_writes import (
     LOC,
@@ -21,6 +20,7 @@ from test_writes import (
 
 from spoolman_prusalink.accounting import EventKind
 from spoolman_prusalink.db import read_state
+from spoolman_prusalink.errors import BadAnswer, Unreachable
 
 TAG = "91da34d9-c1c1-470f-bac7-185a2346f86a"
 
@@ -46,7 +46,7 @@ def stored_uuid(fake, spool_id):
 
 
 @pytest.mark.parametrize(
-    "error", [httpx.ConnectError("no route"), ValueError("not json")], ids=["http", "json"]
+    "error", [Unreachable("no route"), BadAnswer("not json")], ids=["http", "json"]
 )
 async def test_unreadable_printer_model_keeps_writes_off_and_warns_once(
     tmp_path, caplog, monkeypatch, error
@@ -70,7 +70,7 @@ async def test_unreadable_printer_model_keeps_writes_off_and_warns_once(
 
     # A different error is news.
     async def other():
-        raise httpx.ReadTimeout("slow")
+        raise Unreachable("slow")
 
     monkeypatch.setattr(client, "printer_type", other)
     await bridge.poll()
@@ -86,7 +86,7 @@ async def test_unreadable_printer_model_keeps_writes_off_and_warns_once(
 
 
 @pytest.mark.parametrize(
-    "error", [httpx.ConnectError("printer refused"), ValueError("bad json")], ids=["http", "json"]
+    "error", [Unreachable("printer refused"), BadAnswer("bad json")], ids=["http", "json"]
 )
 async def test_sync_job_failing_without_a_status_is_logged_once_and_retried(
     tmp_path, caplog, monkeypatch, error
@@ -607,4 +607,86 @@ async def test_archived_active_spool_deleted_while_its_flag_fails_ends_once(tmp_
     assert records_after(caplog, before) == []
     assert bridge._flag_failing == {}
     assert levels(caplog, "can't update the flag on spool 19") == ["WARNING", "DEBUG"]
+    await bridge.aclose()
+
+
+def error_pages():
+    """Make 502s whose body names a new request each time, as a proxy's error page can."""
+    calls = {"n": 0}
+
+    def gateway(path):
+        calls["n"] += 1
+        summary = f"502 Bad Gateway for {path}"
+        return BadAnswer(f"{summary}: request {calls['n']}", 502, summary)
+
+    return gateway
+
+
+async def test_error_page_that_changes_each_time_is_logged_once(tmp_path, caplog, monkeypatch):
+    """A proxy's error page with a request ID in it isn't a new failure on every poll."""
+    bridge, fake, printer = make(tmp_path, [spool(19)])
+    await bridge.poll()
+    caplog.set_level("INFO")
+    gateway = error_pages()
+
+    async def use_length(spool_id, mm):
+        raise gateway("PUT /api/v1/spool/19/use")
+
+    async def spools(archived=False):
+        raise gateway("GET /api/v1/spool")
+
+    real = bridge.spoolman.use_length
+    monkeypatch.setattr(bridge.spoolman, "use_length", use_length)
+    printer.extruded = 1500
+    for _ in range(3):  # The charge is queued, and the next polls can't send it.
+        await bridge.poll()
+    assert count(caplog, "charge to spool 19 failed (502 Bad Gateway") == 1
+    assert "failed (502 Bad Gateway for PUT /api/v1/spool/19/use: request 1)" in caplog.text
+
+    monkeypatch.setattr(bridge.spoolman, "use_length", real)
+    monkeypatch.setattr(bridge.spoolman, "spools", spools)
+    for _ in range(3):
+        await bridge.poll()
+    assert count(caplog, "Spoolman read failed") == 1
+    assert "skipping poll: 502 Bad Gateway for GET /api/v1/spool: request 4" in caplog.text
+    await bridge.aclose()
+
+
+async def test_printer_error_page_that_changes_each_time_is_logged_once(
+    tmp_path, caplog, monkeypatch
+):
+    bridge, fake, printer = make(tmp_path, [spool(19)], uuid_field="instance_uuid")
+    client = bridge.printers[0].client
+    real = client.printer_type
+    caplog.set_level("INFO")
+    gateway = error_pages()
+
+    async def upload(*args):
+        raise gateway("PUT /api/v1/files/usb/spoolman-sync.gcode")
+
+    monkeypatch.setattr(client, "upload_and_print", upload)
+    await swap_to_spool_20(bridge, fake, printer)
+    for _ in range(3):
+        await bridge.poll()
+    assert count(caplog, "sync job failed") == 1
+    assert (
+        "sync job failed: 502 Bad Gateway for PUT /api/v1/files/usb/spoolman-sync.gcode: request"
+        in (caplog.text)
+    )
+
+    async def version():
+        raise gateway("GET /api/version")
+
+    monkeypatch.setattr(client, "printer_type", version)
+    printer.boot_id += 1  # A reboot makes the bridge read the model again.
+    for _ in range(3):
+        await bridge.poll()
+    assert count(caplog, "printer writes are off until it can") == 1
+    assert "can't read the printer model (502 Bad Gateway for GET /api/version: request" in (
+        caplog.text
+    )
+    # The flag has the summary alone, so it isn't rewritten when the body changes.
+    flag = "can't read the printer model (502 Bad Gateway for GET /api/version)"
+    assert f"{LOC}: can't write to the printer: {flag}" in fake.flag(20)
+    monkeypatch.setattr(client, "printer_type", real)
     await bridge.aclose()

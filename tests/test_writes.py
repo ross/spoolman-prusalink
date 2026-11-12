@@ -5,7 +5,7 @@ import logging
 import math
 import re
 import sqlite3
-from dataclasses import replace
+from dataclasses import fields, replace
 
 import httpx
 import pytest
@@ -15,9 +15,11 @@ from spoolman_prusalink.app import Bridge
 from spoolman_prusalink.color import quantize
 from spoolman_prusalink.config import Config, PrinterConfig
 from spoolman_prusalink.db import Database, read_ledger, read_state
-from spoolman_prusalink.printer_sync import COREONEL_PREAMBLE, PRESETS
+from spoolman_prusalink.printer_sync import PRESETS, PRINTER_MODELS, default_preamble
 from spoolman_prusalink.prusalink import PrusaLink
 from spoolman_prusalink.spoolman import Spoolman
+
+COREONEL_PREAMBLE = default_preamble(PRINTER_MODELS["8.1.0"])
 
 LOC = "Core One L+"
 
@@ -244,7 +246,7 @@ def reported(material):
     return {**dict(zip(TEMPERATURE_KEYS, base, strict=True)), **material}
 
 
-PRINTER_KEYS = {"gcode_preamble", "sync_storage", "sync_file"}
+PRINTER_KEYS = {f.name for f in fields(PrinterConfig)}
 
 
 def make(tmp_path, spools, **cfg):
@@ -312,11 +314,13 @@ async def test_usage_while_ambiguous_is_kept_over_a_reboot(tmp_path):
     await bridge.aclose()
 
 
-async def test_spoolman_outage_queues_and_retries_in_order(tmp_path):
+# A timeout (408) or a rate limit (429) may pass, like a server error.
+@pytest.mark.parametrize("code", [503, 408, 429])
+async def test_spoolman_outage_queues_and_retries_in_order(tmp_path, code):
     bridge, fake, printer = make(tmp_path, [spool(19)])
     await bridge.poll()
     printer.extruded = 1500
-    fake.fail_use = [503]
+    fake.fail_use = [code]
     await bridge.poll()
     assert fake.used == {}
     assert [r["use_length"] for r in read_state(tmp_path / "bridge.db").outbox] == [500.0]
@@ -831,7 +835,7 @@ async def test_failed_uuid_mint_leaves_a_failing_sync_job_failing(tmp_path, capl
     await swap_to_menu_loaded_20(bridge, fake, printer)
     printer.upload_error = 500
     await bridge.poll()
-    assert caplog.text.count("sync job failed (500)") == 1
+    assert caplog.text.count("sync job failed: 500 Internal Server Error") == 1
 
     # Someone clears the UUID minted for the failed job, and Spoolman won't take another.
     fake.spools[20]["extra"].pop("instance_uuid")
@@ -1146,10 +1150,10 @@ async def test_missing_filament_endpoint_logged_once(tmp_path, caplog):
     printer.filament_endpoint = False
     for _ in range(3):
         await bridge.poll()
-    assert caplog.text.count("printer firmware has no /api/v1/filament") == 1
-    # With one printer the line reads as it always has, with no printer label in front.
+    assert caplog.text.count("printer: firmware has no /api/v1/filament") == 1
+    # With one printer the line starts with the bare label, "printer: ".
     (record,) = [r for r in caplog.records if "isn't supported" in r.getMessage()]
-    assert record.getMessage().startswith("printer firmware has no /api/v1/filament")
+    assert record.getMessage().startswith("printer: firmware has no /api/v1/filament")
     assert "printer read failed" not in caplog.text
     assert 0 not in bridge.printers[0].tools
 

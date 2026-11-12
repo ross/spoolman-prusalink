@@ -1,4 +1,4 @@
-"""Two printers against one Spoolman: the X scenarios in docs/multi-printer.md."""
+"""Two printers against one Spoolman: the X scenarios in docs/scenarios.md."""
 
 import httpx
 from test_writes import CLAIMED, jobs, ledger, restart, spool, two_printers
@@ -399,9 +399,7 @@ async def test_read_failures_name_the_printer(tmp_path, caplog):
 async def test_x16_runout_flag_clears_when_the_spool_becomes_active_elsewhere(tmp_path):
     bridge, fake, printers = await baseline(tmp_path, [spool(19, A), spool(20, B)])
     a, b = printers["a"], printers["b"]
-    bridge.state.runouts[19] = Runout(
-        "Tool a: unloaded mid-print with 900 g left", 1000.0, 100.0, "a"
-    )
+    bridge.state.runouts[19] = Runout("Tool a: unloaded mid-print with 900 g left", 1000.0, 100.0)
     unload(a)
     await bridge.poll()
     assert "unloaded mid-print" in fake.flag(19)

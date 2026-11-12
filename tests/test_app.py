@@ -17,9 +17,10 @@ from spoolman_prusalink.accounting import Provisional, SwapFlag, ToolState
 from spoolman_prusalink.app import Bridge, Reachability, _log_failed, _log_ok, _record
 from spoolman_prusalink.config import Config, ConfigError, PrinterConfig, load
 from spoolman_prusalink.db import Database, DatabaseError, read_ledger, read_state
+from spoolman_prusalink.errors import BadAnswer, Unreachable
 from spoolman_prusalink.models import Material
 from spoolman_prusalink.prusalink import NoFilamentEndpoint, PrusaLink, parse_filament
-from spoolman_prusalink.spoolman import Spoolman, parse_spool
+from spoolman_prusalink.spoolman import FieldTypeError, Spoolman, parse_spool
 from spoolman_prusalink.state import PrinterState, State
 
 ENV_VARS = (
@@ -199,7 +200,7 @@ async def test_ensure_field_refuses_a_field_of_another_type():
         return httpx.Response(200, json=[{"key": "instance_uuid", "field_type": "integer"}])
 
     spoolman = Spoolman("http://spoolman", transport=httpx.MockTransport(handler))
-    with pytest.raises(ValueError, match="instance_uuid.*isn't a text field"):
+    with pytest.raises(FieldTypeError, match="instance_uuid.*isn't a text field"):
         await spoolman.ensure_field("instance_uuid", "Instance UUID")
     await spoolman.aclose()
 
@@ -436,11 +437,11 @@ def test_config_load(tmp_path):
     assert cfg.printers[0].tools == {0: "Core One L+"}
     assert cfg.printers[0].api_key == "secret"
     assert cfg.printers[0].name == "default"
-    assert cfg.length_factor == 1.0
+    assert cfg.printers[0].length_factor == 1.0
     # P1 and C2: poll every 30 s while printing and every 60 s otherwise.
     assert cfg.poll_printing == 30
     assert cfg.poll_idle == 60
-    assert cfg.sync_delay == 0
+    assert cfg.printers[0].sync_delay == 0
 
     with pytest.raises(ConfigError, match="PRUSALINK_API_KEY"):
         load(p, env={})
@@ -468,36 +469,36 @@ CONFIG_BASE = (
 @pytest.mark.parametrize(
     "text, error",
     [
-        ('[bridge]\nprinter_sync = "false"\n', "bridge.printer_sync must be true or false"),
-        ('[bridge]\nflag_drift = "no"\n', "bridge.flag_drift must be true or false"),
-        ("[bridge]\nsync_drift = 1\n", "bridge.sync_drift must be true or false"),
+        ('[printer]\nprinter_sync = "false"\n', "printer.printer_sync must be true or false"),
+        ('[printer]\nflag_drift = "no"\n', "printer.flag_drift must be true or false"),
+        ("[printer]\nsync_drift = 1\n", "printer.sync_drift must be true or false"),
         ('[printer]\ngcode_preamble = "M862.3"\n', "gcode_preamble must be a list of strings"),
         ('[printer]\ngcode_preamble = ["M862.3", 1]\n', "gcode_preamble must be a list of strings"),
-        ("[bridge]\npoll_idle = 0\n", "bridge.poll_idle must be a number greater than 0"),
-        ("[bridge]\nsync_delay = -1\n", "bridge.sync_delay must be a number of seconds"),
-        ('[bridge]\nsync_delay = "5m"\n', "bridge.sync_delay must be a number of seconds"),
-        ("[bridge]\npoll_printing = -5\n", "bridge.poll_printing must be a number greater than 0"),
-        ('[bridge]\npoll_idle = "soon"\n', "bridge.poll_idle must be a number greater than 0"),
-        ('[bridge]\nlength_factor = "x"\n', "bridge.length_factor must be a number"),
-        ("[bridge]\npoll_idle = nan\n", "bridge.poll_idle must be a number greater than 0"),
-        ("[bridge]\npoll_printing = inf\n", "bridge.poll_printing must be a number greater than 0"),
+        ("[bridge]\npoll_idle = 0\n", "bridge.poll_idle must be greater than 0"),
+        ("[printer]\nsync_delay = -1\n", "printer.sync_delay must be 0 or more"),
+        ('[printer]\nsync_delay = "5m"\n', "printer.sync_delay must be a number"),
+        ("[bridge]\npoll_printing = -5\n", "bridge.poll_printing must be greater than 0"),
+        ('[bridge]\npoll_idle = "soon"\n', "bridge.poll_idle must be a number"),
+        ('[printer]\nlength_factor = "x"\n', "printer.length_factor must be a number"),
+        ("[bridge]\npoll_idle = nan\n", "bridge.poll_idle must be a finite number"),
+        ("[bridge]\npoll_printing = inf\n", "bridge.poll_printing must be a finite number"),
         (
             "[bridge]\npoll_printing = -nan\n",
-            "bridge.poll_printing must be a number greater than 0",
+            "bridge.poll_printing must be a finite number",
         ),
-        ("[bridge]\nlength_factor = nan\n", "bridge.length_factor must be a finite number"),
-        ("[bridge]\nlength_factor = inf\n", "bridge.length_factor must be a finite number"),
+        ("[printer]\nlength_factor = nan\n", "printer.length_factor must be a finite number"),
+        ("[printer]\nlength_factor = inf\n", "printer.length_factor must be a finite number"),
         (
-            "[bridge]\nlength_factor = 1" + "0" * 400 + "\n",
-            "bridge.length_factor must be a finite number",
+            "[printer]\nlength_factor = 1" + "0" * 400 + "\n",
+            "printer.length_factor must be a finite number",
         ),
         (
             "[bridge]\npoll_idle = 1" + "0" * 400 + "\n",
-            "bridge.poll_idle must be a number greater than 0",
+            "bridge.poll_idle must be a finite number",
         ),
         (
-            "[bridge]\nsync_delay = 1" + "0" * 400 + "\n",
-            "bridge.sync_delay must be a number of seconds",
+            "[printer]\nsync_delay = 1" + "0" * 400 + "\n",
+            "printer.sync_delay must be a finite number",
         ),
         ("[bridge]\nuuid_field = 5\n", "bridge.uuid_field must be a string"),
         ("[bridge]\nflag_field = true\n", "bridge.flag_field must be a string"),
@@ -505,10 +506,14 @@ CONFIG_BASE = (
         ("[bridge]\ndb_file = 5\n", "bridge.db_file must be a string"),
         ("[bridge]\neviction_location = 5\n", "bridge.eviction_location must be a string"),
         ('[printer]\nsync_file = "a/b.txt"\n', "printer.sync_file must be a plain .gcode file"),
-        ("[bridge]\nlength_factor = 3\n", "length_factor must be in (0, 2], got 3"),
+        ("[printer]\nlength_factor = 3\n", "printer.length_factor must be in (0, 2], got 3"),
         ("[printer]\nsync_storage = 5\n", "printer.sync_storage must be a string"),
         ("[printer]\nsync_file = 5\n", "printer.sync_file must be a string"),
         ("[printer]\napi_key = 5\n", "printer.api_key must be a string"),
+        *(
+            (f"[bridge]\n{key} = 1\n", f"bridge.{key} is a printer setting")
+            for key in ("length_factor", "flag_drift", "printer_sync", "sync_delay", "sync_drift")
+        ),
     ],
 )
 def test_config_rejects_bad_values(tmp_path, text, error):
@@ -527,7 +532,7 @@ def test_config_rejects_bad_values(tmp_path, text, error):
     "text, error",
     [
         ("[printer\n", "can't parse"),
-        ("[bridge]\nlength_factor = 1" + "0" * 5000 + "\n", "can't parse"),
+        ("[bridge]\npoll_idle = 1" + "0" * 5000 + "\n", "can't parse"),
         (
             '[printer]\nurl = "http://p"\n[spoolman]\nurl = "http://s"\n'
             '[[tools]]\nlocation = "A"\n',
@@ -559,7 +564,11 @@ def test_config_malformed_file_is_a_config_error(tmp_path, text, error):
     "text, error",
     [
         ('[printer]\nurl = 5\n[spoolman]\nurl = "http://s"\n', "printer.url must be a string"),
-        ('[printer]\nurl = "http://p"\n[spoolman]\nurl = 5\n', "spoolman.url must be a string"),
+        (
+            '[printer]\nurl = "http://p"\n[spoolman]\nurl = 5\n'
+            '[[tools]]\nindex = 0\nlocation = "X"\n',
+            "spoolman.url must be a string",
+        ),
         (
             '[printer]\nurl = "http://p"\n[spoolman]\nurl = "http://s"\n'
             "[[tools]]\nindex = 0\nlocation = 5\n",
@@ -594,12 +603,12 @@ def test_config_accepts_booleans_and_preamble_list(tmp_path):
     p.write_text(
         CONFIG_BASE.replace(
             "[printer]\n",
-            '[printer]\ngcode_preamble = ["M862.3 P \\"COREONEL\\""]\n',
+            '[printer]\nprinter_sync = false\ngcode_preamble = ["M862.3 P \\"COREONEL\\""]\n',
         )
-        + "[bridge]\nprinter_sync = false\npoll_idle = 0.5\n"
+        + "[bridge]\npoll_idle = 0.5\n"
     )
     cfg = load(p, env={"PRUSALINK_API_KEY": "k"})
-    assert cfg.printer_sync is False
+    assert cfg.printers[0].printer_sync is False
     assert cfg.printers[0].gcode_preamble == ('M862.3 P "COREONEL"',)
     assert cfg.poll_idle == 0.5
 
@@ -613,7 +622,8 @@ async def test_length_factor_scales_charges(tmp_path):
         return data
 
     bridge = make_bridge(tmp_path, filament, lambda: [spool_json(7, "Core One L+")])
-    bridge.config = replace(bridge.config, length_factor=1.05)
+    printer = bridge.printers[0]
+    printer.config = replace(printer.config, length_factor=1.05)
     await bridge.poll()
     extruded["v"] = 2000
     await bridge.poll()
@@ -664,6 +674,19 @@ def test_config_lists_several_printers(tmp_path):
         "kb",
         {0: "MK4S"},
     )
+
+
+def test_config_keeps_each_printers_settings(tmp_path):
+    """A printer setting applies to the entry that sets it; the others keep the default."""
+    p = tmp_path / "c.toml"
+    p.write_text(
+        PRINTERS_BASE.replace(
+            'api_key = "kb"\n', 'api_key = "kb"\nlength_factor = 1.05\nprinter_sync = false\n'
+        )
+    )
+    core, mk4s = load(p, env={"CORE_KEY": "ka"}).printers
+    assert (core.length_factor, core.printer_sync) == (1.0, True)
+    assert (mk4s.length_factor, mk4s.printer_sync) == (1.05, False)
 
 
 @pytest.mark.parametrize(
@@ -769,15 +792,26 @@ def test_config_url_keys_keep_ipv6_hosts_apart_from_their_port(tmp_path):
     [
         ("", {}, "set PRUSALINK_API_KEY or printer.api_key"),
         ("", {"PRUSALINK_API_KEY": "k"}, "set printer.url or PRUSALINK_URL"),
-        ("", {"PRUSALINK_API_KEY": "k", "PRUSALINK_URL": "http://p"}, "set spoolman.url"),
+        ("", {"PRUSALINK_API_KEY": "k", "PRUSALINK_URL": "http://p"}, "configure [[tools]]"),
+        (
+            "",
+            {"PRUSALINK_API_KEY": "k", "PRUSALINK_URL": "p", "SPOOLMAN_PRUSALINK_LOCATION": "X"},
+            "set spoolman.url",
+        ),
         ("[printer]\napi_key = 5\n[spoolman]\nurl = 5\n", {}, "printer.api_key must be a string"),
         ("[printer]\nurl = 5\n[spoolman]\nurl = 5\n", {}, "printer.url must be a string"),
         ("printer = 5\nspoolman = 5\n", {}, "[printer] must be a table"),
-        ("spoolman = 5\n[printer]\nurl = 5\n", {}, "[spoolman] must be a table"),
+        ("spoolman = 5\n[printer]\nurl = 5\n", {}, "printer.url must be a string"),
+        (
+            'spoolman = 5\n[printer]\nurl = "http://p"\n[[tools]]\nindex = 0\nlocation = "X"\n',
+            {"PRUSALINK_API_KEY": "k"},
+            "[spoolman] must be a table",
+        ),
     ],
 )
-def test_config_single_printer_reports_errors_in_the_old_order(tmp_path, text, env, error):
-    # The order of these first errors is what a bare start shows; it hasn't changed.
+def test_config_reports_the_printer_then_spoolman(tmp_path, text, env, error):
+    """The first error is the printer's, then Spoolman's: within the printer, a value of
+    the wrong type before a missing one."""
     p = tmp_path / "c.toml"
     p.write_text(text)
     with pytest.raises(ConfigError, match=re.escape(error)):
@@ -1243,7 +1277,7 @@ async def test_from_config_passes_the_clock_and_transports(tmp_path):
         await bridge.poll()  # The printer read fails, so Spoolman isn't read.
         assert seen == ["printer"]
         assert bridge.printers[0]._printer_reach.since == 3600.0
-        with pytest.raises(httpx.ConnectError):
+        with pytest.raises(Unreachable):
             await bridge.spoolman.spools()
         assert seen == ["printer", "spoolman"]
     finally:
@@ -1255,18 +1289,18 @@ async def test_from_config_passes_the_clock_and_transports(tmp_path):
 
 def test_record_says_whether_an_error_is_new_or_changed():
     failing: dict[int, str] = {}
-    assert _record(failing, 7, "boom") is True
-    assert _record(failing, 7, "boom") is False
-    assert _record(failing, 7, "bang") is True
-    assert _record(failing, 8, "bang") is True
+    assert _record(failing, 7, BadAnswer("boom")) is True
+    assert _record(failing, 7, BadAnswer("boom")) is False
+    assert _record(failing, 7, BadAnswer("bang")) is True
+    assert _record(failing, 8, BadAnswer("bang")) is True
     assert failing == {7: "bang", 8: "bang"}
 
 
-def test_record_compares_the_error_text():
+def test_record_compares_the_summary_not_the_body():
     failing: dict[int, str] = {}
-    assert _record(failing, 7, ValueError("boom")) is True
-    assert _record(failing, 7, KeyError("boom")) is True  # Its text is "'boom'".
-    assert _record(failing, 7, KeyError("boom")) is False
+    assert _record(failing, 7, BadAnswer("502: request 1", 502, "502")) is True
+    assert _record(failing, 7, BadAnswer("502: request 2", 502, "502")) is False
+    assert _record(failing, 7, BadAnswer("503: request 3", 503, "503")) is True
 
 
 def reach_lines(caplog):
@@ -1283,7 +1317,7 @@ def test_kind_change_restarts_the_clock(caplog):
     caplog.set_level("INFO")
     for t, unreachable in [(0, True), (3600, True), (7000, False), (7200, False)]:
         now["v"] = t
-        _log_failed(reach, ValueError("boom"), unreachable=unreachable)
+        _log_failed(reach, BadAnswer("boom"), unreachable=unreachable)
     now["v"] = 7260
     _log_ok(reach)
     assert reach_lines(caplog) == [
@@ -1298,11 +1332,11 @@ def test_bad_answers_then_unreachable_measures_the_unreachable_span(caplog):
     now = {"v": 0.0}
     reach = Reachability("svc", clock=lambda: now["v"])
     caplog.set_level("INFO")
-    _log_failed(reach, ValueError("boom"), unreachable=False)
+    _log_failed(reach, BadAnswer("boom"), unreachable=False)
     now["v"] = 3 * 3600
-    _log_failed(reach, ValueError("boom"), unreachable=False)  # The reminder.
+    _log_failed(reach, BadAnswer("boom"), unreachable=False)  # The reminder.
     now["v"] += 10
-    _log_failed(reach, OSError("off"), unreachable=True)
+    _log_failed(reach, Unreachable("off"), unreachable=True)
     now["v"] += 60
     _log_ok(reach)
     assert reach_lines(caplog) == [
