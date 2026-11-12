@@ -860,7 +860,7 @@ class SimPrinter:
             raise Busy("a load or unload is already running")
         t.fill(t.kept() if material is None else material)
         t.gap = 0.0
-        self._log("load", f"T{t.index} loaded by hand while off: {_describe(material)}")
+        self._log("load", f"T{t.index} loaded by hand while off: {_describe(t.material)}")
 
     def unload(self, tool: int) -> None:
         """Unload a tool. While the printer is off the type stays stored until the next boot."""
@@ -1245,7 +1245,7 @@ class SimPrinter:
         elif p.phase == "FEED":
             material = p.material if p.material is not None else t.kept()
             t.store(material)
-            self._log("load", f"T{t.index} type set to {_describe(material)}")
+            self._log("load", f"T{t.index} type set to {_describe(t.material)}")
             p.phase, p.remaining = "PURGE", p.purge_mm
         else:
             t.loaded, t.process = True, None

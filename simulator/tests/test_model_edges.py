@@ -541,3 +541,21 @@ def test_a_snapshot_from_an_older_simulator_is_refused():
     del data["printers"][0]["tools"][0]["kept_type"]  # older snapshots had no kept type
     with pytest.raises(Invalid, match="bad snapshot"):
         Simulation().restore(data)
+
+
+def test_load_logs_name_the_type_the_tool_holds():
+    """A runout reload by hand logs the kept type, and a load logs the color as stored."""
+    sim, p = printing()
+    p.runout(0)
+    p.set_power("off")
+    p.load(0)
+    assert (
+        messages(sim, "load")[-1]
+        == f"T0 loaded by hand while off: PLA {PLA.color} {PLA.instance_uuid}"
+    )
+    p.set_power("on")
+    p.unload(0)
+    run(sim, 10)
+    p.load(0, source="preset", name="PETG", color="#73767d")
+    run(sim, 20)
+    assert "T0 type set to PETG #73737b" in messages(sim, "load")
