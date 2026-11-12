@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 
 import httpx
 import pytest
 
 from integration.conftest import (
+    CLAIM_FIELD,
     FLAG_FIELD,
     LOAD_MM,
     PETG,
@@ -890,6 +892,48 @@ async def test_m5a_runout_spool_archived_before_its_refund(world: World):
     assert mid_print in (await w.flag("A") or "")
 
 
+async def test_m5a_refund_past_the_used_weight_is_not_an_edit(
+    world: World, caplog: pytest.LogCaptureFixture
+):
+    """A refund bigger than the runout spool's used weight stops at 0: not taken for an edit."""
+    caplog.set_level(logging.INFO, logger="spoolman_prusalink")
+    w = world
+    a = w.spools["A"]
+    mid_print = f"{w.tool_location}: unloaded mid-print with"
+    await runout_flagged(w)
+
+    # B goes in by the menu during the pause, charged to A as the open swap's usage.
+    w.printer.load(0, source="preset", name=PETG[0])
+    await w.run_until(lambda: w.printer.state is State.PAUSED, poll_every=1.0)
+    swap_mm = w.bridge.printers[0].tools[0].swap.mm
+    assert swap_mm > 0
+    used = await w.used("A")
+    assert w.bridge.state.runouts[a].used == pytest.approx(used, abs=0.01)
+
+    # A's density is raised, which isn't a weight edit, so the refund of the swap's
+    # usage at the new density weighs more than all A has used.
+    grams_per_mm = math.pi * (1.75 / 2) ** 2 / 1000  # Per g/cm³ of density.
+    density = round(2 * used / (swap_mm * grams_per_mm), 2)
+    await w.spoolman.edit_filament(a, density=density)
+    await w.move("A", w.shelf)
+    await w.move("B", w.tool_location)
+    records = await w.poll()
+    assert len(events(records, "swap_confirmed")) == 1
+    refund = charges(records, a)
+    assert [r["use_length"] for r in refund] == [-swap_mm]
+    assert -refund[0]["grams"] > used
+
+    # Spoolman stops the used weight at 0, and the flag's weight follows it there.
+    assert await w.used("A") == 0.0
+    assert w.bridge.state.runouts[a].used == 0.0
+    for _ in range(2):
+        await w.poll()
+    assert a in w.bridge.state.runouts
+    assert mid_print in (await w.flag("A") or "")
+    assert not logged(caplog, logging.INFO, f"spool {a}'s weight was edited in Spoolman")
+    assert not logged(caplog, logging.INFO, f"spool {a} shows -")
+
+
 # --- Notes and flags for M3 and M5 (#111) ---
 
 
@@ -932,6 +976,63 @@ async def test_m3_staged_spool_flag_and_unload(world: World, caplog: pytest.LogC
     assert count(caplog, logging.WARNING, ended) == 1
     assert count(caplog, logging.INFO, f"cleared flag on spool {b}") == 1
     assert count(caplog, logging.WARNING, found) == 1
+
+
+async def test_m3_staged_spool_claimed_takes_held_usage(
+    world: World, caplog: pytest.LogCaptureFixture
+):
+    """Active spool deleted with B staged, then B claimed: B is active and takes what's held."""
+    caplog.set_level(logging.INFO, logger="spoolman_prusalink")
+    w = world
+    a, b = w.spools["A"], w.spools["B"]
+    await baseline(w)
+    await w.move("B", w.tool_location)
+    records = await w.poll()
+    assert len(events(records, "swap_staged")) == 1
+
+    await delete_spool(w.spoolman.client, a)
+    w.printer.extrude(0, 20)
+    records = await w.poll()
+    assert charges(records) == []
+    tool = w.bridge.printers[0].tools[0]
+    assert tool.active is None and tool.deleted_spool == a and tool.held_mm == 20
+    loc = w.tool_location
+    flag = await w.flag("B")
+    assert flag is not None and "or when this spool is claimed" in flag
+
+    # The user ticks Claim held usage on B: B is active, and takes the 20 mm held and
+    # the 10 mm since, with no refund to the deleted spool.
+    w.printer.extrude(0, 10)
+    await w.claim("B")
+    records = await w.poll()
+    claimed = events(records, "claimed")
+    assert len(claimed) == 1 and claimed[0]["message"].startswith(f"spool {b} claimed in place of")
+    assert [e["message"] for e in events(records, "held_charged")] == [
+        f"spool {b} is active; charged it 20 mm held after spool {a} was deleted"
+    ]
+    assert [(r["spool_id"], r["use_length"], r["reason"]) for r in charges(records)] == [
+        (b, 20.0, f"held after spool {a} was deleted"),
+        (b, 10.0, "extruded"),
+    ]
+    assert [r for r in records if "failed" in r] == []
+    tool = w.bridge.printers[0].tools[0]
+    assert tool.active == b and tool.deleted_spool is None and tool.held_mm == 0
+    assert await w.spoolman.extra(b, CLAIM_FIELD) is None
+    assert count(caplog, logging.INFO, f"cleared the claim on spool {b}") == 1
+
+    # The hold and B's flag end once, and once B is written, later use is B's alone.
+    await w.run_until(lambda: w.printer.job is None)
+    w.printer.extrude(0, 5)
+    records = await w.poll()
+    assert [(r["spool_id"], r["use_length"]) for r in charges(records)] == [(b, 5.0)]
+    assert await w.flag("B") is None
+    found = f"[{loc}] spool {a} was deleted in Spoolman; holding its usage"
+    ended = f"[{loc}] no longer holding usage for a deleted spool"
+    assert count(caplog, logging.WARNING, found) == 1
+    assert count(caplog, logging.WARNING, ended) == 1
+    assert count(caplog, logging.INFO, f"cleared flag on spool {b}") == 1
+    assert count(caplog, logging.INFO, f"cleared the claim on spool {b}") == 1
+    assert w.charged(w.since(0), "B") == 35
 
 
 async def test_m3_deleted_spool_replaced_with_nothing_held(

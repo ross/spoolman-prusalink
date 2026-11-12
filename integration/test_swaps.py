@@ -1267,6 +1267,79 @@ async def test_s11_ambiguous_location_at_first_start(
     assert count(caplog, logging.WARNING, gone) == 1
 
 
+async def test_s11_reboots_while_the_tool_is_skipped(
+    world: World, caplog: pytest.LogCaptureFixture
+):
+    """Reboots while skipped as ambiguous: the usage is held once, charged once it's clear."""
+    caplog.set_level(logging.INFO, logger="spoolman_prusalink")
+    w = world
+    a, b, c = w.spools["A"], w.spools["B"], w.spools["C"]
+    await baseline(w)
+
+    # A leaves and B and C go in, as in test_s11_two_spools_neither_active.
+    await w.move("A", w.shelf)
+    await w.move("B", w.tool_location)
+    await w.move("C", w.tool_location)
+    w.printer.extrude(0, 20)
+    records = await w.poll()
+    assert charges(records) == []
+    ids = ", ".join(str(i) for i in sorted((b, c)))
+    msg = f"[{w.tool_location}] location holds spools {ids}; skipping until it's clear"
+    assert count(caplog, logging.WARNING, msg) == 1
+
+    # Two reboots while the tool is skipped: each keeps what was held before it, once.
+    w.printer.reboot()
+    records = await w.poll()
+    reboots = events(records, "reboot")
+    assert len(reboots) == 1
+    assert reboots[0]["message"].endswith("; 20 mm held before the restart is kept")
+    assert charges(records) == []
+    w.printer.extrude(0, 10)
+    await w.poll()
+    w.printer.reboot()
+    records = await w.poll()
+    reboots = events(records, "reboot")
+    assert len(reboots) == 1
+    assert reboots[0]["message"].endswith("; 10 mm held before the restart is kept")
+    assert charges(records) == []
+    tool = w.bridge.printers[0].tools[0]
+    assert tool.active == a and tool.held_mm == 30 and tool.reboot_pending
+    assert count(caplog, logging.WARNING, msg) == 1
+
+    # C is removed: A, never unloaded, takes the 30 mm held and the 5 mm since, and B is
+    # staged with the reboot's warning.
+    w.printer.extrude(0, 5)
+    await w.move("C", w.shelf)
+    records = await w.poll()
+    assert [e["message"] for e in events(records, "held_charged")] == [
+        f"spool {a} is active; charged it 30 mm held before the printer restarted"
+    ]
+    assert [(r["spool_id"], r["use_length"], r["reason"]) for r in charges(records)] == [
+        (a, 30.0, "held before the printer restarted"),
+        (a, 5.0, "extruded"),
+    ]
+    assert len(events(records, "swap_staged")) == 1
+    assert len(events(records, "staged_at_reboot")) == 1
+    flag = await w.flag("B")
+    assert flag is not None and "printer restarted while spool" in flag
+    gone = f"[{w.tool_location}] no longer: location holds spools {ids}"
+    assert count(caplog, logging.WARNING, gone) == 1
+    tool = w.bridge.printers[0].tools[0]
+    assert tool.held_mm == 0 and not tool.reboot_pending
+
+    # Nothing is charged again, and the unload commits the swap to B with nothing held.
+    w.printer.extrude(0, 7)
+    await w.unload()
+    records = await w.poll()
+    assert [(r["spool_id"], r["use_length"]) for r in charges(records)] == [(a, 7.0)]
+    assert len(events(records, "swap_committed")) == 1
+    assert events(records, "held_charged") == []
+    assert w.charged(w.since(0), "A") == 30 + 5 + 7
+    assert w.charged(w.since(0), "B") == w.charged(w.since(0), "C") == 0
+    assert count(caplog, logging.WARNING, msg) == 1
+    assert count(caplog, logging.WARNING, gone) == 1
+
+
 async def test_s11_drift_note_stands_while_the_tool_is_skipped(
     world: World, caplog: pytest.LogCaptureFixture
 ):
