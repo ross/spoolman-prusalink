@@ -1,7 +1,7 @@
 # Example: run the bridge next to Spoolman.
 services:
   spoolman:
-    image: ghcr.io/donkie/spoolman:latest
+    image: ghcr.io/donkie/spoolman:0.27.1
     ports:
       - "7912:8000"
     volumes:
