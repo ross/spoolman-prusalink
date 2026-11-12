@@ -96,7 +96,7 @@ async def test_x1_spoolman_first_across_printers(world: World, b_first: bool):
     records = await w.poll()
     assert kinds(records) == [
         (IT, "unload"),
-        (IT, "active_unassigned"),
+        (IT, "unloaded_unassigned"),
         (B, "unload"),
         (B, "swap_committed"),
     ]
@@ -147,7 +147,7 @@ async def test_x2_filament_first_across_printers(world: World):
     await w.move("A", b.location)
     b.extrude(100)
     records = await w.poll()
-    assert kinds(records) == [(IT, "active_unassigned"), (B, "swap_confirmed")]
+    assert kinds(records) == [(IT, "swap_unassigned"), (B, "swap_confirmed")]
     assert b.state.active == a and b.state.swap is None
     # The usage since b's unload, the load, moves from E to A.
     assert charged(records, e) == -LOAD_MM
@@ -201,8 +201,8 @@ async def test_x3_spool_moved_but_never_loaded_elsewhere(world: World):
     # S8 on b: moving A back cancels the staging there and resumes the assignment in it.
     await w.move("A", it.location)
     records = await w.poll()
-    assert kinds(records) == [(IT, "active_unassigned"), (B, "staging_cancelled")]
-    assert events(records, "active_unassigned")[0]["message"] == (
+    assert kinds(records) == [(IT, "active_reassigned"), (B, "staging_cancelled")]
+    assert events(records, "active_reassigned")[0]["message"] == (
         f"spool {a} is back in the location"
     )
     assert (it.state.active, it.state.assigned) == (a, a)
@@ -320,7 +320,7 @@ async def test_x5_claim_on_b_while_a_still_has_the_spool(
     it.printer.unload(0)
     it.printer.set_power("on")
     records = await w.poll()
-    assert kinds(records) == [(IT, "reboot"), (IT, "unload"), (IT, "active_unassigned")]
+    assert kinds(records) == [(IT, "reboot"), (IT, "unload"), (IT, "unloaded_unassigned")]
     assert f"0 mm before the unload goes to spool {a}" in events(records, "unload")[0]["message"]
     assert it.state.active is None and b.state.active == a
     assert "at once" not in (await w.flag("A") or "")
@@ -773,7 +773,7 @@ async def test_x16_runout_flag_clears_when_active_elsewhere(world: World):
     await w.move("E", w.shelf)
     await w.move("A", b.location)
     records = await w.poll()
-    assert kinds(records) == [(IT, "active_unassigned"), (B, "swap_staged")]
+    assert kinds(records) == [(IT, "swap_unassigned"), (B, "swap_staged")]
     assert runout in (await w.flag("A") or "")
     await settle(w, B)
     await load_a_at_b(w)
