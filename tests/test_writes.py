@@ -24,8 +24,10 @@ from harness import (
 
 from spoolman_prusalink.accounting import ToolState
 from spoolman_prusalink.db import read_state
-from spoolman_prusalink.printer_sync import COREONEL_PREAMBLE
+from spoolman_prusalink.printer_sync import PRINTER_MODELS, default_preamble
 from spoolman_prusalink.prusalink import PrusaLink
+
+COREONEL_PREAMBLE = default_preamble(PRINTER_MODELS["8.1.0"])
 
 
 async def test_charges_are_applied_and_recorded(tmp_path):
@@ -53,11 +55,13 @@ async def test_usage_while_ambiguous_is_kept_over_a_reboot(tmp_path):
     await bridge.aclose()
 
 
-async def test_spoolman_outage_queues_and_retries_in_order(tmp_path):
+# A timeout (408) or a rate limit (429) may pass, like a server error.
+@pytest.mark.parametrize("code", [503, 408, 429])
+async def test_spoolman_outage_queues_and_retries_in_order(tmp_path, code):
     bridge, fake, printer = make(tmp_path, [spool(19)])
     await bridge.poll()
     printer.extruded = 1500
-    fake.fail_use = [503]
+    fake.fail_use = [code]
     await bridge.poll()
     assert fake.used == {}
     assert [r["use_length"] for r in read_state(tmp_path / "bridge.db").outbox] == [500.0]
@@ -555,7 +559,7 @@ async def test_failed_uuid_mint_leaves_a_failing_sync_job_failing(tmp_path, capl
     await swap_to_menu_loaded_20(bridge, fake, printer)
     printer.upload_error = 500
     await bridge.poll()
-    assert caplog.text.count("sync job failed (500)") == 1
+    assert caplog.text.count("sync job failed: 500 Internal Server Error") == 1
 
     # Someone clears the UUID minted for the failed job, and Spoolman won't take another.
     fake.spools[20]["extra"].pop("instance_uuid")
@@ -859,10 +863,10 @@ async def test_missing_filament_endpoint_logged_once(tmp_path, caplog):
     printer.filament_endpoint = False
     for _ in range(3):
         await bridge.poll()
-    assert caplog.text.count("printer firmware has no /api/v1/filament") == 1
-    # With one printer the line reads as it always has, with no printer label in front.
+    assert caplog.text.count("printer: firmware has no /api/v1/filament") == 1
+    # With one printer the line starts with the bare label, "printer: ".
     (record,) = [r for r in caplog.records if "isn't supported" in r.getMessage()]
-    assert record.getMessage().startswith("printer firmware has no /api/v1/filament")
+    assert record.getMessage().startswith("printer: firmware has no /api/v1/filament")
     assert "printer read failed" not in caplog.text
     assert 0 not in bridge.printers[0].tools
 

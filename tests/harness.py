@@ -3,7 +3,7 @@
 import json
 import math
 import re
-from dataclasses import replace
+from dataclasses import fields, replace
 
 import httpx
 
@@ -244,7 +244,7 @@ def reported(material):
     return {**dict(zip(TEMPERATURE_KEYS, base, strict=True)), **material}
 
 
-PRINTER_KEYS = {"gcode_preamble", "sync_storage", "sync_file"}
+PRINTER_KEYS = {f.name for f in fields(PrinterConfig)}
 
 
 def make(tmp_path, spools, **cfg):
