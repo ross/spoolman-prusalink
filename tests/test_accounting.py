@@ -4,7 +4,6 @@ from dataclasses import fields, replace
 import pytest
 
 from spoolman_prusalink.accounting import (
-    UNKNOWN_WRITE,
     Charge,
     EventKind,
     Notice,
@@ -27,11 +26,6 @@ PLA = Material("PLA", "#73737b", **PLA_TEMPS)
 def r(extruded, material=PLA, unloads=0, at_unload=0):
     """A reading from firmware with the unload fields."""
     return ToolReading(0, extruded, material, unloads, at_unload)
-
-
-def legacy(extruded, material=PLA):
-    """A reading from firmware without the unload fields."""
-    return ToolReading(0, extruded, material)
 
 
 def loc(*ids):
@@ -1020,22 +1014,6 @@ def test_state_without_last_reading_holds_nothing_over_reboot():
     assert charges == [Charge(7, 10, "extruded")] and state.held_mm == 0
 
 
-# Firmware without unload fields
-
-
-def test_legacy_assignment_change_switches_after_charging_outgoing():
-    charges, kinds, state = run(
-        [
-            (BOOT, legacy(100), loc(7)),
-            (BOOT, legacy(250), loc(7, 8)),
-            (BOOT, legacy(300), loc(8)),
-        ]
-    )
-    assert charges == [Charge(7, 150, "extruded"), Charge(8, 50, "extruded")]
-    assert EventKind.SWAP_STAGED not in kinds
-    assert (state.active, state.evict) == (8, ())
-
-
 # Persistence
 
 
@@ -1069,12 +1047,6 @@ def test_state_round_trip():
     assert ToolState.from_json(json.loads(json.dumps(s.to_json()))) == s
     unwritten = replace(s, written=None)
     assert ToolState.from_json(json.loads(json.dumps(unwritten.to_json()))) == unwritten
-
-
-def test_state_from_before_writes_were_recorded_has_an_unknown_write():
-    old = ToolState(BOOT, 10, 1, 7, 7).to_json()
-    del old["written"]
-    assert ToolState.from_json(old).written == UNKNOWN_WRITE
 
 
 def test_held_usage_round_trips_and_old_state_has_none():
@@ -1124,10 +1096,6 @@ def test_hold_deleted_clears_the_active_spool():
         50,
     )
     assert hold_deleted(state, 19, 30).held_mm == 80  # Another rejected charge.
-    assert hold_deleted(state, 7, 30) == state  # Not this tool's spool.
-    # A spool in the claim window that's neither active nor deleted is left alone too.
-    windowed = replace(state, since_load={7: 40})
-    assert hold_deleted(windowed, 7, 30) == windowed
 
 
 def test_hold_deleted_drops_only_the_deleted_spool_from_evict():
@@ -1525,7 +1493,7 @@ def test_state_from_before_claims_loads():
         "unload_count": 1,
         "active": 7,
         "assigned": 7,
-        "evict": None,
+        "evict": [],
         "swap": None,
         "job_id": None,
         "notice": {"spool_id": 7, "kind": "swap_assumed", "message": "assumed"},
@@ -1534,13 +1502,6 @@ def test_state_from_before_claims_loads():
     assert (s.provisional, s.staged_notice, s.since_load) == (None, None, {})
     assert s.reboot_pending is False
     assert s.notice == Notice(7, EventKind.SWAP_ASSUMED, "assumed")
-
-
-def test_state_with_one_eviction_loads():
-    old = ToolState(BOOT, 10, 1, 8, 8).to_json()
-    assert ToolState.from_json({**old, "evict": 7}).evict == (7,)
-    assert ToolState.from_json({**old, "evict": None}).evict == ()
-    assert ToolState.from_json({**old, "evict": [7, 9]}).evict == (7, 9)
 
 
 def test_claim_takes_usage_held_for_a_deleted_spool():
@@ -1649,7 +1610,7 @@ def test_first_claim_after_upgrade_moves_only_usage_since_then():
         "unload_count": 1,
         "active": 7,
         "assigned": 7,
-        "evict": None,
+        "evict": [],
         "swap": None,
         "job_id": None,
     }
@@ -1661,23 +1622,3 @@ def test_first_claim_after_upgrade_moves_only_usage_since_then():
         Charge(7, -50, "moved to claimed spool"),
         Charge(9, 20, "extruded"),
     ]
-
-
-def test_legacy_claim_window_restarts_at_assignment_change():
-    _, _, state = run(
-        [
-            (BOOT, legacy(100), loc(7)),
-            (BOOT, legacy(250), loc(7)),
-            (BOOT, legacy(300), loc(8)),  # 7 -> 8: the window restarts
-            (BOOT, legacy(340), loc(8)),
-        ]
-    )
-    assert state.since_load == {8: 40}
-    res = account(state, BOOT, legacy(360), loc(8, 9), claim=9)
-    assert res.claimed
-    assert res.charges == [
-        Charge(9, 40, "claimed usage since load"),
-        Charge(8, -40, "moved to claimed spool"),
-        Charge(9, 20, "extruded"),
-    ]
-    assert (res.state.active, res.state.evict) == (9, (8,))

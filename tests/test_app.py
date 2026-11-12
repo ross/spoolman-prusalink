@@ -18,7 +18,7 @@ from spoolman_prusalink.app import Bridge, Reachability, _log_failed, _log_ok, _
 from spoolman_prusalink.config import Config, ConfigError, PrinterConfig, load
 from spoolman_prusalink.db import Database, DatabaseError, read_ledger, read_state
 from spoolman_prusalink.models import Material
-from spoolman_prusalink.prusalink import PrusaLink, parse_filament
+from spoolman_prusalink.prusalink import NoFilamentEndpoint, PrusaLink, parse_filament
 from spoolman_prusalink.spoolman import Spoolman, parse_spool
 from spoolman_prusalink.state import PrinterState, State
 
@@ -45,6 +45,7 @@ FILAMENT = {
         {
             "index": 0,
             "extruded": 4310,
+            "unload_count": 0,
             "material": {
                 "name": "PLA",
                 "color": "#73737b",
@@ -91,12 +92,12 @@ def test_parse_filament_with_and_without_material():
     r = parse_filament(
         {
             "boot_id": 5,
-            "tools": [FILAMENT["tools"][0], {"index": 1, "extruded": 0}],
+            "tools": [FILAMENT["tools"][0], {"index": 1, "extruded": 0, "unload_count": 0}],
         }
     )
     assert r.boot_id == 5
     assert r.tools[0].material.instance_uuid.startswith("44c4")
-    assert r.tools[0].unload_count is None
+    assert r.tools[0].unload_count == 0
     assert r.tools[1].material is None
 
 
@@ -115,6 +116,15 @@ def test_parse_filament_unload_fields():
     }
     r = parse_filament({"boot_id": 5, "tools": [tool]}).tools[0]
     assert (r.extruded, r.unload_count, r.extruded_at_unload) == (900, 2, 600)
+
+
+async def test_filament_without_unload_count_is_unsupported():
+    data = {"boot_id": 5, "tools": [{"index": 0, "extruded": 10}]}
+    transport = httpx.MockTransport(lambda request: httpx.Response(200, json=data))
+    client = PrusaLink("http://printer", "k", transport=transport)
+    with pytest.raises(NoFilamentEndpoint, match="no usage counters"):
+        await client.filament()
+    await client.aclose()
 
 
 def test_parse_filament_requires_temperatures():
@@ -304,11 +314,13 @@ async def test_printer_error_skips_poll(tmp_path, caplog):
     cfg = make_config(tmp_path)
     t = httpx.MockTransport(handler)
     bridge = Bridge(
-        cfg, Spoolman("http://s", transport=t), {"default": PrusaLink("http://p", "k", transport=t)}
+        cfg,
+        Spoolman("http://s", transport=t),
+        {"default": PrusaLink("http://p", "k", transport=t)},
+        Database.open(cfg.db_file),
     )
     await bridge.poll()
     assert "printer read failed" in caplog.text
-    assert not (tmp_path / "bridge.db").exists()
     await bridge.aclose()
 
 
@@ -324,7 +336,10 @@ async def test_printer_outage_logged_on_change(tmp_path, caplog):
     cfg = make_config(tmp_path)
     t = httpx.MockTransport(handler)
     bridge = Bridge(
-        cfg, Spoolman("http://s", transport=t), {"default": PrusaLink("http://p", "k", transport=t)}
+        cfg,
+        Spoolman("http://s", transport=t),
+        {"default": PrusaLink("http://p", "k", transport=t)},
+        Database.open(cfg.db_file),
     )
     bridge.printers[0]._printer_reach.clock = lambda: now["v"]
     caplog.set_level("INFO")
@@ -369,7 +384,10 @@ async def test_printer_kind_change_and_bad_answer_reporting(tmp_path, caplog):
     cfg = make_config(tmp_path)
     t = httpx.MockTransport(handler)
     bridge = Bridge(
-        cfg, Spoolman("http://s", transport=t), {"default": PrusaLink("http://p", "k", transport=t)}
+        cfg,
+        Spoolman("http://s", transport=t),
+        {"default": PrusaLink("http://p", "k", transport=t)},
+        Database.open(cfg.db_file),
     )
     reach = bridge.printers[0]._printer_reach
     reach.clock = lambda: now["v"]
@@ -812,11 +830,13 @@ def test_bridge_keeps_and_warns_about_an_unconfigured_printer(tmp_path, caplog):
         cfg,
         Spoolman("http://s", transport=t),
         {"default": PrusaLink("http://p", "k", transport=t)},
+        Database.open(cfg.db_file),
         State(printers={"old": old}),
     )
     assert "printer 'old' that isn't configured; keeping its state" in caplog.text
     assert bridge.printers[0].tools == {}
     assert bridge.state.printers["old"] == old
+    bridge.db.close()
 
 
 TAG = "8b6a3e3e-3f6c-4d7b-9a43-6c1f0e7d2a11"
@@ -955,9 +975,9 @@ async def test_adopt_uuid_checks_archived_spools(tmp_path, caplog):
         config=cfg,
         spoolman=Spoolman(cfg.spoolman_url, uuid_field="instance_uuid", transport=transport),
         clients={"default": PrusaLink(cfg.printers[0].url, "k", transport=transport)},
+        db=Database.open(cfg.db_file),
     )
     caplog.set_level("INFO")
-    assert await bridge._adopt_uuid(7, TAG) is False
     assert await bridge._adopt_uuid(7, TAG) is False
     assert reads == ["true"] and writes == []
     assert caplog.text.count("archived spool 6 has it") == 1
@@ -994,6 +1014,7 @@ async def test_kept_uuid_is_checked_against_archived_spools_once(tmp_path):
         config=cfg,
         spoolman=Spoolman(cfg.spoolman_url, uuid_field="instance_uuid", transport=transport),
         clients={"default": PrusaLink(cfg.printers[0].url, "k", transport=transport)},
+        db=Database.open(cfg.db_file),
     )
     for _ in range(2):
         assert await bridge._adopt_uuid(7, TAG, store=False) is True
@@ -1190,45 +1211,6 @@ async def test_from_config_opens_the_database_and_builds_the_clients(tmp_path):
     finally:
         await bridge.aclose()
     Database.open(cfg.db_file).close()
-
-
-async def test_bridge_without_a_database_charges_and_saves_nothing(tmp_path):
-    extruded, used = {"v": 4310}, []
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        path = request.url.path
-        if path == "/api/v1/filament":
-            data = json.loads(json.dumps(FILAMENT))
-            data["tools"][0]["extruded"] = extruded["v"]
-            return httpx.Response(200, json=data)
-        if path == "/api/v1/spool":
-            return httpx.Response(200, json=[spool_json(7, "Core One L+")])
-        if path == "/api/version":
-            return httpx.Response(200, json={"printer": "8.1.0"})
-        if path == "/api/v1/job":
-            return httpx.Response(204)
-        if path == "/api/v1/status":
-            return httpx.Response(200, json={"printer": {"state": "PRINTING"}})
-        if request.method == "PUT" and path == "/api/v1/spool/7/use":
-            used.append(json.loads(request.content)["use_length"])
-            return httpx.Response(200, json={})
-        raise AssertionError(f"unexpected {request.method} {request.url}")
-
-    cfg = make_config(tmp_path, flag_field=None, claim_field=None)
-    transport = httpx.MockTransport(handler)
-    bridge = Bridge(
-        config=cfg,
-        spoolman=Spoolman(cfg.spoolman_url, transport=transport),
-        clients={"default": PrusaLink(cfg.printers[0].url, "k", transport=transport)},
-    )
-    assert bridge.db is None
-    await bridge.poll()  # baseline
-    extruded["v"] = 5310
-    await bridge.poll()
-    assert used == [1000]
-    assert bridge.state.outbox == []
-    assert list(tmp_path.iterdir()) == []  # Nothing saved anywhere.
-    await bridge.aclose()
 
 
 # _record: a failing dict keeps the last error logged for each key

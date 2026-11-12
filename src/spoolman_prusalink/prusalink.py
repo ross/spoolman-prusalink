@@ -41,7 +41,7 @@ def parse_filament(data: dict) -> FilamentReading:
             index=index,
             extruded=int(raw["extruded"]),
             material=material,
-            unload_count=raw.get("unload_count"),
+            unload_count=int(raw["unload_count"]),
             extruded_at_unload=raw.get("extruded_at_unload"),
         )
     return FilamentReading(boot_id=int(data["boot_id"]), tools=tools)
@@ -76,8 +76,11 @@ class PrusaLink:
             raise NoFilamentEndpoint("printer firmware has no /api/v1/filament")
         resp.raise_for_status()
         data = resp.json()
-        # MINI and MK3.5 firmware report only the loaded material, with no counters.
-        if "boot_id" not in data or any("extruded" not in t for t in data.get("tools", [])):
+        # MINI and MK3.5 firmware report only the loaded material, with no counters. Firmware
+        # that reports `extruded` without `unload_count` isn't supported either.
+        if "boot_id" not in data or any(
+            "extruded" not in t or "unload_count" not in t for t in data.get("tools", [])
+        ):
             raise NoFilamentEndpoint("printer's /api/v1/filament has no usage counters")
         return parse_filament(data)
 
