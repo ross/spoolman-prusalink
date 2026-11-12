@@ -218,15 +218,14 @@ async def test_seed_matches_the_material_the_bridge_compares():
 
 
 async def test_a_seeded_example_tool_agrees_with_the_bridge_drift_check():
-    from simulator.config import load, locations
-    from simulator.model import Simulation
+    from simulator.config import build, load, locations
     from spoolman_prusalink.drift import differences
     from spoolman_prusalink.models import Material
     from spoolman_prusalink.spoolman import parse_spool
 
     cfg = load(Path(__file__).parent.parent / "sim.example.toml")
     locs = locations(cfg)
-    printers = Simulation.from_config(cfg).printers
+    printers = build(cfg).printers
     fake = FakeSpoolman()
     async with TestServer(fake.app) as server:
         await seed(str(server.make_url("")).rstrip("/"), locs)

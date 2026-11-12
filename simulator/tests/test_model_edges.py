@@ -533,3 +533,11 @@ def test_each_state_change_is_logged_once():
 )
 def test_the_screen_text_for_each_reason(attention, text):
     assert str(attention) == text
+
+
+def test_a_snapshot_from_an_older_simulator_is_refused():
+    sim, p = make()
+    data = json.loads(json.dumps(sim.snapshot()))
+    del data["printers"][0]["tools"][0]["kept_type"]  # older snapshots had no kept type
+    with pytest.raises(Invalid, match="bad snapshot"):
+        Simulation().restore(data)

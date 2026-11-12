@@ -378,10 +378,6 @@ Size: large.
 
 ### S6. Smaller items
 
-- Config-to-model conversion lives in `model.py` (`from_config`,
-  `_tool_from_config`), with an import cycle hidden
-  behind `TYPE_CHECKING`. Material name, color, and UUID checks exist in
-  both `config.py` and `model.py`.
 - The control API dispatches with `getattr(printer, action)(**body)`
   (`control.py`) and catches `TypeError` around the whole call, so a
   bug inside an action returns 400 "bad parameters". The action list is
@@ -389,9 +385,6 @@ Size: large.
 - `Simulation` mixes the clock with web streaming, and `log()` always calls
   `changed()` (`model.py`). `Station.requests` (`integration/station.py`)
   and `jobs` (`tests/harness.py`) find requests by parsing log text.
-- Snapshots are a dump of the internal dataclasses, with shims for older
-  snapshots in `_process_from`, `_tool_from` (`kept_type`), and `Material`'s
-  optional temperatures.
 
 ## Order and dependencies
 

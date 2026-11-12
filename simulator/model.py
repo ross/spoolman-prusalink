@@ -15,12 +15,9 @@ from collections.abc import Callable
 from dataclasses import asdict, dataclass, field, fields, replace
 from enum import StrEnum
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, ClassVar
+from typing import Any, ClassVar
 
 from simulator import gcode
-
-if TYPE_CHECKING:
-    from simulator.config import SimConfig
 
 EVENT_LIMIT = 2000
 QUEUE_LIMIT = 1000  # items per SSE client before the oldest are dropped
@@ -217,10 +214,10 @@ class Material:
     # and M865 X writes are ad-hoc. The page shows the flag; PrusaLink doesn't.
     adhoc: bool = True
     # Set when the material is built, as the firmware does: from the preset, the tag or
-    # M865. None, as in a snapshot from before temperatures, reads as the default.
-    nozzle: int | None = None
-    preheat: int | None = None
-    bed: int | None = None
+    # M865. Without them, the firmware's defaults.
+    nozzle: int = DEFAULT_TEMPERATURES[0]
+    preheat: int = DEFAULT_TEMPERATURES[1]
+    bed: int = DEFAULT_TEMPERATURES[2]
     # Set by a tag load only. M865 X R starts afresh without them; edits and runout
     # reloads keep them.
     material_uuid: str | None = None
@@ -228,8 +225,7 @@ class Material:
 
     def temperatures(self) -> tuple[int, int, int]:
         """Return the nozzle, preheat and bed temperatures the printer reports."""
-        set_ = (self.nozzle, self.preheat, self.bed)
-        return tuple(d if v is None else v for v, d in zip(set_, DEFAULT_TEMPERATURES, strict=True))
+        return self.nozzle, self.preheat, self.bed
 
 
 def color555(color: str | None) -> str | None:
@@ -506,7 +502,7 @@ def _positive(value: Any, what: str) -> float:
     return float(value)
 
 
-def _check_name(name: Any) -> str:
+def check_name(name: Any) -> str:
     if not isinstance(name, str) or not gcode.NAME_RE.match(name):
         raise Invalid(f"filament name {name!r} must be 1 to 7 of A-Z a-z 0-9 _ -")
     return name
@@ -519,7 +515,7 @@ def _check_temperatures(temps: Any) -> tuple[int, int, int]:
     return tuple(temps)
 
 
-def _check_color(color: Any) -> str | None:
+def check_color(color: Any) -> str | None:
     if color is None or color == "":
         return None
     if not isinstance(color, str) or not gcode.COLOR_RE.match(color):
@@ -527,7 +523,7 @@ def _check_color(color: Any) -> str | None:
     return color.lower()
 
 
-def _check_uuid(value: Any) -> str | None:
+def check_uuid(value: Any) -> str | None:
     if value is None or value == "":
         return None
     try:
@@ -837,7 +833,7 @@ class SimPrinter:
             return None
         if source not in ("tag", "preset"):
             raise Invalid(f"source must be tag or preset, got {source!r}")
-        name, color = _check_name(name), _check_color(color)
+        name, color = check_name(name), check_color(color)
         if source == "preset":
             if uuid or temps is not None:
                 raise Invalid("a preset load has no UUID or temperatures")
@@ -845,7 +841,7 @@ class SimPrinter:
             return Material(name, color, adhoc=color is not None, **preset_temperatures(name))
         if not self.model.uuids:
             raise Invalid(f"{self.model.name} has no tag reader")
-        value = _check_uuid(uuid)
+        value = check_uuid(uuid)
         tag_temps = preset_temperatures(name)
         if temps is not None:
             tag_temps = dict(zip(tag_temps, _check_temperatures(temps), strict=True))
@@ -1616,7 +1612,6 @@ def _process_from(d: dict | None) -> LoadProcess | UnloadProcess | None:
         return None
     d = dict(d)
     kind = d.pop("kind")
-    d.pop("resume_state", None)  # older snapshots
     if kind == "unload":
         return UnloadProcess(**d)
     d["material"] = _material_from(d["material"])
@@ -1627,7 +1622,7 @@ def _tool_from(d: dict) -> SimTool:
     d = dict(d)
     d["material"] = _material_from(d["material"])
     d["previous"] = _material_from(d["previous"])
-    d["kept_type"] = _material_from(d.get("kept_type"))
+    d["kept_type"] = _material_from(d["kept_type"])
     d["process"] = _process_from(d["process"])
     return SimTool(**d)
 
@@ -1688,28 +1683,6 @@ class Simulation:
         self._queues: list[asyncio.Queue] = []
         for p in printers or []:
             self.add(p)
-
-    @classmethod
-    def from_config(cls, cfg: SimConfig) -> Simulation:
-        sim = cls(Settings(**cfg.settings), data_dir=cfg.data_dir)
-        for pc in cfg.printers:
-            model = MODELS[pc.model]
-            default = Firmware.FULL if model.counters else Firmware.NO_COUNTERS
-            tools = {tc.index: _tool_from_config(tc) for tc in pc.tools}
-            enabled = sorted(i for i, t in tools.items() if t.enabled)
-            sim.add(
-                SimPrinter(
-                    name=pc.name,
-                    port=pc.port,
-                    api_key=pc.api_key,
-                    model=model,
-                    firmware=Firmware(pc.firmware) if pc.firmware else default,
-                    auto_accept_model_check=pc.auto_accept_model_check,
-                    tools=tools,
-                    selected_tool=enabled[0] if enabled else min(tools),
-                )
-            )
-        return sim
 
     def add(self, printer: SimPrinter) -> None:
         printer._sim = self
@@ -1815,27 +1788,3 @@ class Simulation:
         if events:
             out["events"] = [asdict(e) for e in self.events[-200:]]
         return out
-
-
-def _tool_from_config(tc: Any) -> SimTool:
-    m = tc.material
-    material = None
-    if m:
-        color, uuid = m.get("color"), m.get("instance_uuid")
-        # A configured color or UUID can only come from an ad-hoc type; a bare name is a preset.
-        adhoc = bool(color or uuid)
-        material = Material(
-            m["name"],
-            color.lower() if color else None,
-            uuid,
-            adhoc,
-            **preset_temperatures(m["name"]),
-        )
-    return SimTool.loaded_with(
-        tc.index,
-        material,
-        enabled=tc.enabled,
-        extruded=float(tc.extruded),
-        unload_count=tc.unload_count,
-        extruded_at_unload=tc.extruded_at_unload,
-    )

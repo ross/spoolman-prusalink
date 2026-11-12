@@ -13,11 +13,11 @@ EXAMPLE = Path(__file__).parent.parent / "sim.example.toml"
 
 
 def sim_from(tmp_path, text: str) -> Simulation:
-    return Simulation.from_config(config.load(write(tmp_path, text)))
+    return config.build(config.load(write(tmp_path, text)))
 
 
 def test_example_builds():
-    sim = Simulation.from_config(config.load(EXAMPLE))
+    sim = config.build(config.load(EXAMPLE))
     assert list(sim.printers) == ["core-one-l", "mk4s", "indx"]
     assert [p.port for p in sim.printers.values()] == [8001, 8002, 8003]
     assert sim.data_dir is not None and sim.data_dir.name == "data"
