@@ -448,7 +448,9 @@ changed or removed. Each row has these columns:
   later as part of a new charge.
 - `extra`: the record's other fields as JSON, such as `location`, `message`,
   `reason`, `grams` and `extruded_mm`. Read them with `->>`, as in
-  `extra ->> 'reason'`.
+  `extra ->> 'reason'`. An event's `extra` also holds the facts its message
+  is written from, such as `spool`, `from_spool`, `to_spool`, and `mm`, so
+  `extra ->> 'to_spool'` finds the swaps to a spool.
 
 The bridge writes a charge's row when Spoolman answers it, and an event's
 row in the same transaction as the state it changed.

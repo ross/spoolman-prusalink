@@ -16,6 +16,7 @@ from integration.conftest import (
     UUID_FIELD,
     World,
     count,
+    event_fields,
     events,
     logged,
     logged_once,
@@ -505,8 +506,8 @@ async def test_w11_tag_is_not_written_back(world: World):
     await w.move("A", w.shelf)
     await w.move("B", w.tool_location)
     records = await w.poll()
-    assert [e["message"] for e in events(records, "swap_confirmed")] == [
-        f"swap confirmed: {LOAD_MM} mm moved from spool {a} to {b}"
+    assert event_fields(records, "swap_confirmed") == [
+        {"mm": LOAD_MM, "from_spool": a, "to_spool": b}
     ]
     for _ in range(2):
         await w.poll()
