@@ -2,25 +2,75 @@
 
 from __future__ import annotations
 
-from dataclasses import astuple
+from dataclasses import astuple, dataclass
+from enum import StrEnum
 
 from . import printer_sync
 from .color import same_color
 from .models import Material, Spool
 
 
-def differences(tool: int, material: Material, spool: Spool, uuids: bool = True) -> list[str]:
-    """Return human-readable differences, or an empty list if the tool matches.
+class What(StrEnum):
+    """What a difference is about."""
+
+    NAME = "name"
+    COLOR = "color"
+    NOZZLE = "nozzle"
+    PREHEAT = "preheat"
+    BED = "bed"
+    UUID = "uuid"
+    # The loaded tag's UUID is another spool's: `printer` is the UUID and `spoolman`
+    # is that spool's ID.
+    TAG = "tag"
+    # The spool changed in Spoolman since the bridge last wrote it. It has no values.
+    EDIT = "edit"
+
+
+@dataclass(frozen=True)
+class Difference:
+    """One way a tool differs from its spool: what, and the value on each side."""
+
+    what: What
+    printer: str | int | None = None
+    spoolman: str | int | None = None
+
+    def __str__(self) -> str:
+        if self.what is What.TAG:
+            return f"the loaded tag is spool {self.spoolman}'s ({self.printer})"
+        if self.what is What.EDIT:
+            return "spool changed in Spoolman since the last write"
+        if self.what is What.NAME:
+            return f"name printer={self.printer!r} spoolman={self.spoolman!r}"
+        return f"{self.what} printer={self.printer} spoolman={self.spoolman}"
+
+    def to_json(self) -> list:
+        return [self.what.value, self.printer, self.spoolman]
+
+    @classmethod
+    def from_json(cls, data: list) -> Difference:
+        what, printer, spoolman = data
+        return cls(What(what), printer, spoolman)
+
+
+def describe(differences: tuple[Difference, ...] | list[Difference]) -> str:
+    """Return the differences as one line of text."""
+    return "; ".join(str(d) for d in differences)
+
+
+def differences(
+    tool: int, material: Material, spool: Spool, uuids: bool = True
+) -> list[Difference]:
+    """Return how the tool differs from the spool, or an empty list if it matches.
 
     `uuids` is False on printers that can't hold an instance UUID, such as INDX.
     """
     diffs = []
     want_name = printer_sync.printer_name(spool)
     if want_name and material.name.casefold() != want_name.casefold():
-        diffs.append(f"name printer={material.name!r} spoolman={want_name!r}")
+        diffs.append(Difference(What.NAME, material.name, want_name))
     want_color = f"#{spool.color_hex.lower()}" if spool.color_hex else None
     if want_color and not same_color(material.color, want_color):
-        diffs.append(f"color printer={material.color} spoolman={want_color}")
+        diffs.append(Difference(What.COLOR, material.color, want_color))
     try:
         want_temps = printer_sync.temperatures(spool)
     except printer_sync.CannotSync:
@@ -31,18 +81,42 @@ def differences(tool: int, material: Material, spool: Spool, uuids: bool = True)
             material.preheat_temperature,
             material.bed_temperature,
         )
-        labels = ("nozzle", "preheat", "bed")
+        labels = (What.NOZZLE, What.PREHEAT, What.BED)
         for label, have, want in zip(labels, have_temps, astuple(want_temps), strict=True):
             if have != want:
-                diffs.append(f"{label} printer={have} spoolman={want}")
+                diffs.append(Difference(label, have, want))
     # Only tool 0 can hold an ad-hoc instance UUID. A UUID on the printer that the spool
     # doesn't have counts too: a runout reload keeps the old spool's UUID, and a spool of
     # the same product otherwise matches on name and color.
     have = (material.instance_uuid or "").lower()
     want = (spool.instance_uuid or "").lower()
     if uuids and tool == printer_sync.UUID_TOOL and (want or have) and have != want:
-        diffs.append(f"uuid printer={material.instance_uuid} spoolman={spool.instance_uuid}")
+        diffs.append(Difference(What.UUID, material.instance_uuid, spool.instance_uuid))
     return diffs
+
+
+def tag_differences(
+    material: Material, active: Spool, spools: list[Spool], uuids: bool = True
+) -> list[Difference]:
+    """Return why a loaded tag isn't the active spool's, or an empty list.
+
+    That's when the tag's instance UUID is another spool's in Spoolman, or differs
+    from the active spool's. Name, color and temperatures don't count: a tool loaded
+    from a tag is never written, so Spoolman's can't replace the tag's (Q11). With
+    `uuids` off, nothing counts.
+    """
+    if not uuids:
+        return []
+    value = (material.instance_uuid or "").lower()
+    have = (active.instance_uuid or "").lower()
+    if not value or value == have:
+        return []
+    for s in spools:
+        if s.id != active.id and (s.instance_uuid or "").lower() == value:
+            return [Difference(What.TAG, material.instance_uuid, s.id)]
+    if have:
+        return [Difference(What.UUID, material.instance_uuid, active.instance_uuid)]
+    return []
 
 
 def same_instance(material: Material | None, spool: Spool) -> bool:

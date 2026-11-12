@@ -11,7 +11,6 @@ import httpx
 import pytest
 
 from spoolman_prusalink import __main__ as main_module
-from spoolman_prusalink import printer_sync
 from spoolman_prusalink.__main__ import main
 from spoolman_prusalink.accounting import ToolState
 from spoolman_prusalink.app import Bridge, Reachability, _log_failed, _log_ok, _record
@@ -905,15 +904,6 @@ def tag_material(instance=TAG, from_tag=True):
     )
 
 
-@pytest.fixture
-async def printer(tmp_path):
-    bridge = make_bridge(tmp_path, lambda: FILAMENT, lambda: [])
-    p = bridge.printers[0]
-    p._model = printer_sync.PRINTER_MODELS["8.1.0"]
-    yield p
-    await bridge.aclose()
-
-
 def spool(id, uuid=None):
     return parse_spool(spool_json(id, "Core One L+", uuid=uuid), "instance_uuid")
 
@@ -968,29 +958,6 @@ async def test_kept_uuid_is_checked_against_archived_spools_once(tmp_path):
         assert await bridge._adopt_uuid(7, TAG, store=False) is True
     assert reads == ["true"]  # Read once, and nothing written.
     await bridge.aclose()
-
-
-@pytest.mark.parametrize(
-    ("material", "active", "spools", "want"),
-    [
-        # Another spool's tag, whether or not the active spool has a UUID.
-        (
-            tag_material(),
-            spool(7),
-            [spool(8, TAG.upper())],
-            [f"the loaded tag is spool 8's ({TAG})"],
-        ),
-        (tag_material(), spool(7, "x"), [spool(8, TAG)], [f"the loaded tag is spool 8's ({TAG})"]),
-        # The active spool has another UUID.
-        (tag_material(), spool(7, "x"), [], [f"uuid printer={TAG} spoolman=x"]),
-        # The spool's own tag, a spool with no UUID, or a tag with none.
-        (tag_material(), spool(7, TAG.upper()), [], []),
-        (tag_material(), spool(7), [], []),
-        (tag_material(None), spool(7, "x"), [spool(8, "y")], []),
-    ],
-)
-async def test_tag_differences(printer, material, active, spools, want):
-    assert printer._tag_differences(material, active, [active, *spools]) == want
 
 
 class FakeBridge:

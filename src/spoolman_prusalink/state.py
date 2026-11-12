@@ -5,33 +5,50 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from .accounting import ToolState
+from .conditions import Condition
+from .printer_sync import WriteState
 from .records import Outbox
 from .tags import SeenTag
 
 
 @dataclass
 class Runout:
-    """A runout flag, and the spool's weights in Spoolman as the bridge last knew them.
+    """A runout flag: a spool that unloaded mid-print while Spoolman showed plenty left.
+
+    `location` is the tool's, and `remaining` is the grams Spoolman showed then.
 
     `net` and `used` start as the weights when the flag was set, and `used` follows the
     bridge's own charges. Any other change to either is the user editing the weight,
     which answers the flag.
     """
 
-    text: str
+    location: str
+    remaining: float
     net: float
     used: float
+
+    @property
+    def flag(self) -> str:
+        return (
+            f"{self.location}: unloaded mid-print with {self.remaining:.0f} g left in "
+            "Spoolman. If it ran out, its usage is probably on another spool: check "
+            "recent swaps, then correct this spool's weight, which clears this. The "
+            "filament may also have jammed or tangled. Ignore this after a planned "
+            "color change."
+        )
 
 
 @dataclass
 class PrinterState:
     tools: dict[int, ToolState] = field(default_factory=dict)
-    # The flag texts this printer's tools last asked for, by spool. They stand in while
-    # the printer can't be read, so an outage doesn't clear its flags in Spoolman.
-    flags: dict[int, list[str]] = field(default_factory=dict)
+    # By tool: its conditions as of the last poll that read the printer. Their flags
+    # stand while the printer can't be read, so an outage doesn't clear them in Spoolman.
+    conditions: dict[int, list[Condition]] = field(default_factory=dict)
     # By tool: what the tool's instance UUID was last seen with. Kept so a runout reload
     # of one spool's tag isn't taken for the next spool's after a restart.
     seen_tags: dict[int, SeenTag] = field(default_factory=dict)
+    # By tool: where the bridge is with writing the tool's active spool to the printer.
+    writes: dict[int, WriteState] = field(default_factory=dict)
 
 
 @dataclass

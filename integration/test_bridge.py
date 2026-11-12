@@ -203,7 +203,9 @@ async def test_b5_field_with_the_wrong_type(world: World, caplog: pytest.LogCapt
     assert await w.used("A") > 0
 
     # The bridge would flag A, but leaves the field alone, and says so once.
-    assert "unloaded with no Spoolman change" in w.bridge._flags.get(a, "")
+    assert "unloaded with no Spoolman change" in " | ".join(
+        w.bridge.printers[0].flags({}).get(a, [])
+    )
     assert key not in ((await w.spoolman.get(a)).get("extra") or {})
     assert (await w.spoolman.fields_by_key())[key] == "integer"
     trouble = f"can't set up the {key!r} spool field: spool extra field {key!r} exists"
@@ -231,7 +233,9 @@ async def test_b5_field_setup_fails_then_recovers(world: World, caplog: pytest.L
     assert w.charged(records, "A") == 30
     await w.poll()
     assert key not in await w.spoolman.fields_by_key()
-    assert "unloaded with no Spoolman change" in w.bridge._flags.get(w.spools["A"], "")
+    assert "unloaded with no Spoolman change" in " | ".join(
+        w.bridge.printers[0].flags({}).get(w.spools["A"], [])
+    )
     cant = f"can't set up the {key!r} spool field"
     assert logged_once(caplog, logging.WARNING, cant)
     assert count(caplog, logging.DEBUG, cant) == 2
