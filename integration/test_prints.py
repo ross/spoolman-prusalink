@@ -13,6 +13,7 @@ from integration.conftest import (
     PETG,
     UUID_FIELD,
     World,
+    baseline,
     charged,
     charges,
     events,
@@ -145,12 +146,6 @@ async def test_p2_runout_reload_keeps_the_old_tag(
 
 def warnings(caplog: pytest.LogCaptureFixture) -> list[str]:
     return [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
-
-
-async def baseline(w: World) -> None:
-    records = await w.poll()
-    assert len(events(records, "baseline")) == 1
-    assert charges(records) == []
 
 
 async def stage_b(w: World) -> None:

@@ -215,23 +215,6 @@ tool state.
 
 Size: small to medium. Do it with B3, which reshapes `written`.
 
-### B8. Raw `httpx` errors reach every layer
-
-`app.py` has 18 `except` sites that name `httpx` errors. Seven of them also
-catch `ValueError` and `KeyError`, because the caller has to know what the
-client's parsing can raise. Status codes are interpreted far from the
-client: 404 in `flush` and `sync_flags`, 409 in `sync_printer`, 5xx in
-`flush`, and the other 4xx codes in `_unusable`.
-
-Why it hurts: a `KeyError` from a bug in bridge code inside one of those
-`try` blocks is logged as a bad answer from the service.
-
-Shape: the clients raise their own errors: unreachable, bad answer, not
-found, busy. The clients catch parse errors where they parse. `app.py`
-catches the client errors only.
-
-Size: small to medium. Independent of the rest.
-
 ### B9. `account()` keeps its tallies, legal states, and event kinds by convention
 
 `account()` (`accounting.py`) is about 500 lines in six numbered steps.
@@ -268,46 +251,8 @@ Size: small for part 1, medium for part 2.
 
 - The `tools` table holds a JSON blob per tool, `printer_flags` holds JSON,
   and `seen_uuids` has columns. `SCHEMA_VERSION` doesn't cover the blob's
-  shape.
-- "Only tool 0 holds a UUID" is written as `tool == 0` in seven places in
-  `app.py`, `drift.py`, and `printer_sync.py`.
-- `Runout.printer` is saved and never read.
-- `Spoolman.set_extra_text` and `drift.printer_name` only call another
-  function.
-- `COREONEL_PREAMBLE` is used only by tests.
-- Stale comments: "Used from phase 3" (`config.py`), "used by phase 3
-  writes" (`prusalink.py`), "Pending firmware fields" (`models.py`).
-- `config.py` has three near-identical number parsers (`_number`,
-  `_interval`, `_delay`), and `load()` keeps the single-printer checks "in
-  the order they always have".
-- Log lines name a printer three ways: `label`, `_prefix`, and
-  `[location]`.
-- `docs/sqlite.md` and `docs/multi-printer.md` describe plans that have
-  merged, in the future tense.
-
-### B11. Printer settings are configured globally
-
-A setup can mix printers, so a setting that describes a printer belongs to
-that printer's config entry. Five settings under `[bridge]` describe a
-printer and are read by `PrinterBridge` through `bridge.config`:
-
-| Setting | What it describes |
-| --- | --- |
-| `length_factor` | How far the printer's extruded length is from real usage. Two printers can need different factors, and today they share one. |
-| `printer_sync`, `sync_delay`, `sync_drift` | Whether and when the bridge writes to the printer |
-| `flag_drift` | Whether drift on the printer becomes a flag |
-
-`uuid_field`, `flag_field`, and `claim_field` name Spoolman fields and stay
-global.
-
-Shape: move the five settings to `PrinterConfig`, set in the `[printer]`
-table or in each `[[printers]]` entry, with no global default. One place
-per setting is less error prone than a default with overrides.
-`PrinterBridge` then reads them from its own config. It still reads
-`claim_field` and `uuid_field` through `bridge.config`, so this removes
-five of the reads that B4 lists, not the back-reference.
-
-Size: small.
+  shape. The blob is `ToolState.to_json` in `accounting.py`, so it belongs
+  to workstream 10.
 
 ## Tests and tooling
 
@@ -346,55 +291,11 @@ cheapest way to do that.
 Shape: make the branches cheap to reach in public. Once B1 and B2 turn the
 decisions into pure public functions, test those functions directly, as
 `tests/test_accounting.py` tests `account()`. Drive problem states through
-the fakes' behavior, which already have `upload_error` and `busy`. Give
-`Database` a way to inject a failing connection.
+the fake Spoolman's settings and the simulated printer's faults and
+`before_request` hook, as `tests/harness.py` does. Give `Database` a way to
+inject a failing connection.
 
 Size: large. Do it with B1.
-
-### T2. Nothing checks the unit suite's fake printer
-
-`tests/test_writes.py` is 3,487 lines with 158 tests and 475
-`bridge.poll()` calls. It runs on a hand-written
-`FakeSpoolman` and a fake `Printer` that has its own `M865` parser and its
-own default temperatures, which copy `simulator/gcode.py` and
-`simulator/model.py`. `tests/test_failures.py` and
-`tests/test_printers.py` import from it.
-
-Why it hurts: the fake Spoolman is checked by the integration suite, and
-the simulator is checked by the live checks. The fake `Printer` is a third
-model of the firmware that neither checks. A firmware behavior fixed in the
-simulator doesn't reach it, so these tests can pass against a stale
-printer.
-
-Shape: replace the fake `Printer` with `SimPrinter`, in process. Keep
-`FakeSpoolman`. Move the shared harness into the existing
-`tests/conftest.py`.
-
-`SimPrinter` can run in process: its PrusaLink views are plain methods
-(`status_json`, `filament_json`, `job_json`, `version_json`, `upload`), and
-time passes only when a test calls `tick`. What's missing is the routing.
-It lives in aiohttp handlers in `simulator/prusalink.py`, and the
-integration suite reaches it over a real socket.
-
-1. Move the routing and the power, key, and fault gate out of the aiohttp
-   handlers into one function that takes a method, path, headers, and body,
-   and returns a status and JSON. The aiohttp app and a new
-   `httpx.MockTransport` handler both call it, so the routes exist once.
-   This is also the first step of S4.
-2. Cover what the fake can do. The fake returns any status code for every
-   request (`error`) or for uploads only (`upload_error`), and scripts the
-   next status states (`states`). `make_app` takes a `before_request` hook
-   that can answer or drop a single request, which covers the first two.
-   Keep that hook in the new function. Check `states` against the
-   simulator's `Fault`, `Power`, and `Firmware` settings, and use the hook
-   for what they don't cover. Don't add test-only faults to the simulator.
-3. Port the tests. The fake finishes a sync job at once, and the simulator
-   takes ticks, so tests need the tick helpers that `World` has. They're in
-   `integration/conftest.py`, which can't be imported as a module, so move
-   them into a plain module that both suites import. T6 rewrites the same
-   helpers.
-
-Size: large.
 
 ### T3. A behavior change is made in two suites
 
@@ -406,40 +307,11 @@ Nothing to do now. If changing both suites for each behavior change becomes
 a burden, narrow the integration suite to the scenarios where Spoolman's
 own behavior decides the outcome. Don't narrow the unit suite.
 
-### T6. Harness duplication
-
-- The `world` fixture (`integration/conftest.py`) branches on six
-  indirect parameters. `Station` (`integration/printers.py`)
-  reimplements `World`'s `start_print`, `swap_cycle`, `unload`, `counter`,
-  and `material`, and has drifted: `Station.swap_cycle` lacks a temperature
-  default that `World.swap_cycle` adds.
-- `baseline()` is defined in seven integration test files.
-- Helpers that assert "logged once" differ by file. Some check the level
-  and some don't. Logging a problem once is product behavior, so one helper
-  should define it.
-
-Shape: build `World` from a list of station specs and have it delegate to
-`Station`. One `baseline` and one log-assertion helper in `conftest.py`.
-
-Size: medium.
-
 ### T7. Tests match prose
 
 About 78 integration lines compare an event's message exactly, and over
 300 lines across both suites match log text. B6
 removes the cause for events. Keep one prose check per event kind.
-
-### T8. Scripts and scenario table
-
-- `script/demo` and `script/integration` each detect the container engine,
-  pin `ghcr.io/donkie/spoolman:0.27.1`, and wait for health.
-  `compose.example.yaml` uses `:latest`, a version CI doesn't test.
-- The Status column of `docs/scenarios.md` names 157 tests by hand, in 88
-  rows.
-  `tests/test_integration_table.py` checks them, so the cost is the editing,
-  not drift.
-
-Size: small.
 
 ## Simulator
 
@@ -492,7 +364,7 @@ Size: large. Do S1 and S5 first.
 `_set_material` (`model.py`) keeps a tool's material, its ad-hoc slot
 (`previous`), and `kept_type` in step. `_apply_uuid` (`model.py`),
 `_tool_from_config`, and test setup in `simulator/tests/util.py`,
-`integration/conftest.py`, and `integration/printers.py` write
+`tests/harness.py` (`fill`), and `integration/printers.py` (`start`) write
 the fields directly. `SimTool.temps` copies temperatures that `Material`
 already has.
 
@@ -512,8 +384,8 @@ Size: medium.
   bug inside an action returns 400 "bad parameters". The action list is
   kept in `control.py`, the README, and `app.js`.
 - `Simulation` mixes the clock with web streaming, and `log()` always calls
-  `changed()` (`model.py`). `integration/conftest.py` counts
-  requests by parsing log text.
+  `changed()` (`model.py`). `Station.requests` (`integration/station.py`)
+  and `jobs` (`tests/harness.py`) find requests by parsing log text.
 - "UUIDs only on tool 0 of a model that holds them" is written in about
   seven places in `model.py`, `config.py`, and `seed.py`.
 - Snapshots are a dump of the internal dataclasses, with shims for older
@@ -531,16 +403,12 @@ Size: medium.
 | 2 | Tag-UUID owner | B1, T1 (UUID tests) | Nothing |
 | 3 | Conditions and saved facts | B2, B3, B5, B7, T1 (rest) | Workstreams 2 and 10. B7 changes the part of `account()` that B9 part 1 restructures |
 | 4 | Typed records | B6, B9 (part 2), T7 | Workstream 10. Easier after 3 |
-| 5 | Narrow the bridge boundary | B4 | Workstreams 2 and 3. Easier after B11 |
-| 6 | Client errors | B8 | Nothing |
-| 7 | Unit suite on the simulator | T2, T6 | Nothing. Before workstreams 2 and 3 if possible, so their tests are ported once |
-| 8 | Simulator state | S1, S5, S6, then S2, S4 | Workstream 7 for S4, which continues the routing move in T2 |
-| 9 | Small items | B10, B11, T8 | Nothing |
-| 10 | Accounting state | B9 (part 1) | Nothing |
+| 5 | Narrow the bridge boundary | B4 | Workstreams 2 and 3 |
+| 8 | Simulator state | S1, S5, S6, then S2, S4 | Nothing. S4 continues the move that put the PrusaLink routing in `prusalink.serve` |
+| 10 | Accounting state | B9 (part 1), B10 | Nothing |
 
-Workstreams 6, 9, and 10 are independent and can run at any time. T3
+Workstream 10 is independent and can run at any time. T3
 has no work, so it isn't in a workstream.
-Of the large ones, workstream 7 is best first, because workstreams 2 and 3
-rewrite many of the same tests and would otherwise port them twice. Then
-workstream 2: it has the least clear state and the most pinned tests, and
-workstreams 3 and 5 get simpler once it's done.
+Of the large ones, workstream 2 is best first: it has the least clear state
+and the most pinned tests, and workstreams 3 and 5 get simpler once it's
+done.

@@ -22,6 +22,10 @@ class PrinterModel:
     uuids: bool = False  # Whether `M865.1` stores an instance UUID (`HAS_ANFC`).
 
 
+# The only tool that holds an instance UUID, on a model with `uuids`: `M865.1 I0` sets it,
+# and the tag reader reports one there.
+UUID_TOOL = 0
+
 _NO_COUNTERS = "its firmware doesn't report usage counters in /api/v1/filament"
 _MULTI_TOOL = "multi-tool printers aren't supported yet"
 
@@ -59,8 +63,6 @@ def default_preamble(model: PrinterModel) -> tuple[str, ...]:
         'M862.6 P"Input shaper" ; FW feature check',
     )
 
-
-COREONEL_PREAMBLE = default_preamble(PRINTER_MODELS["8.1.0"])
 
 _MODEL_CHECK = re.compile(r'^\s*M862\.3\s+P\s*"([^"]+)"', re.IGNORECASE)
 
@@ -252,7 +254,7 @@ def filament_lines(write: ToolWrite) -> list[str]:
         parts.append(f'O"{color}"')
     parts.append(f"L{tool}")
     lines = [" ".join(parts)]
-    if tool == 0 and write.uuid:
+    if tool == UUID_TOOL and write.uuid:
         lines.append(f'M865.1 I0 C"{_uuid(spool, write.uuid)}"')
     return lines
 

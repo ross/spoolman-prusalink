@@ -9,18 +9,13 @@ from .color import same_color
 from .models import Material, Spool
 
 
-def printer_name(spool: Spool) -> str | None:
-    """The name the bridge would write to the printer for this spool."""
-    return printer_sync.printer_name(spool)
-
-
 def differences(tool: int, material: Material, spool: Spool, uuids: bool = True) -> list[str]:
     """Return human-readable differences, or an empty list if the tool matches.
 
     `uuids` is False on printers that can't hold an instance UUID, such as INDX.
     """
     diffs = []
-    want_name = printer_name(spool)
+    want_name = printer_sync.printer_name(spool)
     if want_name and material.name.casefold() != want_name.casefold():
         diffs.append(f"name printer={material.name!r} spoolman={want_name!r}")
     want_color = f"#{spool.color_hex.lower()}" if spool.color_hex else None
@@ -45,7 +40,7 @@ def differences(tool: int, material: Material, spool: Spool, uuids: bool = True)
     # the same product otherwise matches on name and color.
     have = (material.instance_uuid or "").lower()
     want = (spool.instance_uuid or "").lower()
-    if uuids and tool == 0 and (want or have) and have != want:
+    if uuids and tool == printer_sync.UUID_TOOL and (want or have) and have != want:
         diffs.append(f"uuid printer={material.instance_uuid} spoolman={spool.instance_uuid}")
     return diffs
 
