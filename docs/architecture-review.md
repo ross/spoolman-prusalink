@@ -292,13 +292,6 @@ Nothing to do now. If changing both suites for each behavior change becomes
 a burden, narrow the integration suite to the scenarios where Spoolman's
 own behavior decides the outcome. Don't narrow the unit suite.
 
-### T7. Tests match prose
-
-About 78 integration lines compare an event's message exactly, and over
-300 lines across both suites match log text. Events now have fields, which
-the ledger stores beside the message, and `tests/test_events.py` checks the
-wording of each kind once. Port the integration checks to the fields.
-
 ## Simulator
 
 The simulator review read every file in `simulator/`.
@@ -388,7 +381,7 @@ Size: medium.
 | --- | --- | --- | --- |
 | 2 | Tag-UUID owner | B1, T1 (UUID tests) | Nothing |
 | 3 | Conditions and saved facts | B2, B3, B5, B7, T1 (rest) | Workstream 2 |
-| 4 | Typed records | B6, B9, T7 | Nothing. Easier after 3 |
+| 4 | Typed records | B6, B9 | Nothing. Easier after 3 |
 | 5 | Narrow the bridge boundary | B4 | Workstreams 2 and 3 |
 | 8 | Simulator state | S1, S5, S6, then S2, S4 | Nothing. S4 continues the move that put the PrusaLink routing in `prusalink.serve` |
 | 10 | Accounting state | B10 | Nothing |

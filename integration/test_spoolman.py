@@ -19,6 +19,7 @@ from integration.conftest import (
     baseline,
     charges,
     count,
+    event_fields,
     events,
     logged,
     logged_once,
@@ -32,6 +33,7 @@ from integration.faults import (
     unarchive_spool,
 )
 from simulator.model import State
+from spoolman_prusalink.events import HeldCharged
 
 
 def use_path(spool_id: int) -> str:
@@ -161,9 +163,8 @@ async def test_m3_deleted_active_spool_holds_usage(world: World, caplog: pytest.
     records = await w.poll()
     records += await w.swap_cycle(poll_every=0.3, source="tag", name=PETG[0], color=PETG[1])
     records += await w.poll()
-    held = events(records, "held_charged")
-    charged = f"spool {b} is active; charged it 50 mm held after spool {a} was deleted"
-    assert [e["message"] for e in held] == [charged]
+    charged = HeldCharged(spool=b, mm=50, deleted_spool=a).message
+    assert event_fields(records, "held_charged") == [{"spool": b, "mm": 50, "deleted_spool": a}]
     assert logged_once(caplog, logging.INFO, charged)
     assert w.charged(records, "B") == 50 + LOAD_MM
     tool = w.bridge.printers[0].tools[0]
@@ -317,13 +318,9 @@ async def test_m3_staged_spool_takes_held_usage_at_print_start(
 
     # A print starts with no unload: B is made active and takes everything held.
     records = await w.start_print(print_spec())
-    assert [e["message"] for e in events(records, "active_at_print")] == [
-        f"print started with spool {b} assigned; making it active in place of deleted spool {a}"
-    ]
+    assert event_fields(records, "active_at_print") == [{"spool": b, "deleted_spool": a}]
     held = events(records, "held_charged")
-    assert len(held) == 1
-    assert held[0]["message"].startswith(f"spool {b} is active; charged it ")
-    assert held[0]["message"].endswith(f" mm held after spool {a} was deleted")
+    assert [(e["spool"], e["deleted_spool"]) for e in held] == [(b, a)]
     tool = w.bridge.printers[0].tools[0]
     assert tool.active == b and tool.deleted_spool is None and tool.held_mm == 0
     assert w.charged(w.since(0), "B") == w.counter - start
@@ -346,8 +343,8 @@ async def test_m3_unload_with_no_poll_after_the_extrusion(world: World):
     w.printer.extrude(0, 20)
     await w.unload()
     records = await w.poll()
-    assert [e["message"] for e in events(records, "unload")] == [
-        f"1 unload(s); 20 mm before the unload is held because spool {a} was deleted"
+    assert event_fields(records, "unload") == [
+        {"unloads": 1, "mm": 20, "spool": None, "deleted_spool": a}
     ]
     assert charges(records) == []
     tool = w.bridge.printers[0].tools[0]
@@ -374,12 +371,10 @@ async def test_m3_delete_and_recreate(world: World, caplog: pytest.LogCaptureFix
     await set_extra_text(w.spoolman.client, b, UUID_FIELD, w.uuids["A"])
     w.printer.extrude(0, 10)
     records = await w.poll()
-    assert [e["message"] for e in events(records, "correction")] == [
-        f"printer already has spool {b}'s filament; making it active"
+    assert event_fields(records, "correction") == [
+        {"spool": b, "from_spool": None, "moved": None, "since": None}
     ]
-    assert [e["message"] for e in events(records, "held_charged")] == [
-        f"spool {b} is active; charged it 20 mm held after spool {a} was deleted"
-    ]
+    assert event_fields(records, "held_charged") == [{"spool": b, "mm": 20, "deleted_spool": a}]
     assert w.charged(records, "B") == 20 + 10
     tool = w.bridge.printers[0].tools[0]
     assert tool.active == b and tool.deleted_spool is None and tool.held_mm == 0
@@ -445,18 +440,16 @@ async def test_m4_location_renamed(world: World, caplog: pytest.LogCaptureFixtur
         w.printer.extrude(0, 10)
         await w.poll()
     records = w.since(mark)
-    msg = f"spool {a} is no longer in the location; still charging it until the printer"
-    assert [e["message"] for e in events(records)] == [msg + " reports an unload"]
+    assert event_fields(records) == [
+        {"event": "active_unassigned", "spool": a, "staged_left": False}
+    ]
     assert w.charged(records, "A") == 20
     assert w.bridge.printers[0].tools[0].active == a
 
     # At the unload A stops being active, and the load after it is held.
     await w.unload()
     records = await w.poll()
-    unassigned = f"spool {a} unloaded with no spool in the location; holding usage"
-    assert [e["message"] for e in events(records, "unloaded_unassigned")] == [
-        unassigned + " until one is assigned"
-    ]
+    assert event_fields(records, "unloaded_unassigned") == [{"spool": a}]
     await w.swap_cycle(source="tag", name=PETG[0], color=PETG[1])
     for _ in range(2):
         assert await w.poll() == []
@@ -963,9 +956,7 @@ async def test_m3_staged_spool_flag_and_unload(world: World, caplog: pytest.LogC
     # The unload makes B active: it takes the 30 mm held, and the hold and flag end once.
     await w.unload()
     records = await w.poll()
-    assert [e["message"] for e in events(records, "held_charged")] == [
-        f"spool {b} is active; charged it 30 mm held after spool {a} was deleted"
-    ]
+    assert event_fields(records, "held_charged") == [{"spool": b, "mm": 30, "deleted_spool": a}]
     assert w.charged(records, "B") == 30
     tool = w.bridge.printers[0].tools[0]
     assert tool.active == b and tool.deleted_spool is None and tool.held_mm == 0
@@ -1006,14 +997,10 @@ async def test_m3_staged_spool_claimed_takes_held_usage(
     w.printer.extrude(0, 10)
     await w.claim("B")
     records = await w.poll()
-    claimed = events(records, "claimed")
-    assert [e["message"] for e in claimed] == [
-        f"spool {b} claimed in place of deleted spool {a}: "
-        "moved nothing (usage since the last reboot)"
+    assert event_fields(records, "claimed") == [
+        {"spool": b, "replaced": None, "deleted_spool": a, "moved": [], "since": "reboot"}
     ]
-    assert [e["message"] for e in events(records, "held_charged")] == [
-        f"spool {b} is active; charged it 20 mm held after spool {a} was deleted"
-    ]
+    assert event_fields(records, "held_charged") == [{"spool": b, "mm": 20, "deleted_spool": a}]
     assert [(r["spool_id"], r["use_length"], r["reason"]) for r in charges(records)] == [
         (b, 20.0, f"held after spool {a} was deleted"),
         (b, 10.0, "extruded"),
@@ -1057,7 +1044,7 @@ async def test_m3_deleted_spool_replaced_with_nothing_held(
 
     await w.move("B", loc)
     records = await w.poll()
-    assert [e["message"] for e in events(records)] == [f"spool {b} is active"]
+    assert event_fields(records) == [{"event": "assignment_changed", "spool": b}]
     assert charges(records) == []
     tool = w.bridge.printers[0].tools[0]
     assert tool.active == b and tool.deleted_spool is None

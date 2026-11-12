@@ -23,6 +23,7 @@ from integration.conftest import (
     charged,
     charges,
     count,
+    event_fields,
     events,
     logged,
     logged_once,
@@ -202,9 +203,7 @@ async def test_x3_spool_moved_but_never_loaded_elsewhere(world: World):
     await w.move("A", it.location)
     records = await w.poll()
     assert kinds(records) == [(IT, "active_reassigned"), (B, "staging_cancelled")]
-    assert events(records, "active_reassigned")[0]["message"] == (
-        f"spool {a} is back in the location"
-    )
+    assert event_fields(records, "active_reassigned") == [{"spool": a}]
     assert (it.state.active, it.state.assigned) == (a, a)
     assert (b.state.active, b.state.assigned) == (e, e)
     assert await w.flag("A") is None
@@ -321,7 +320,8 @@ async def test_x5_claim_on_b_while_a_still_has_the_spool(
     it.printer.set_power("on")
     records = await w.poll()
     assert kinds(records) == [(IT, "reboot"), (IT, "unload"), (IT, "unloaded_unassigned")]
-    assert f"0 mm before the unload goes to spool {a}" in events(records, "unload")[0]["message"]
+    unload = events(records, "unload")[0]
+    assert (unload["mm"], unload["spool"]) == (0, a)
     assert it.state.active is None and b.state.active == a
     assert "at once" not in (await w.flag("A") or "")
     assert logged(caplog, logging.WARNING, "printer it reachable again")

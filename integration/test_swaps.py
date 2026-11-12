@@ -20,6 +20,7 @@ from integration.conftest import (
     charged,
     charges,
     count,
+    event_fields,
     events,
     logged,
     logged_once,
@@ -28,7 +29,16 @@ from integration.conftest import (
 from integration.faults import archive_spool, set_extra_text
 from integration.temperatures import TEMPERATURES, WRITTEN
 from simulator.model import Material, State
-from spoolman_prusalink.events import StagedAtPrint
+from spoolman_prusalink.events import (
+    ActiveUnassigned,
+    Correction,
+    LostUnassigned,
+    StagedAtPrint,
+    StagedAtReboot,
+    StagingCancelled,
+    SwapAssumed,
+    SwapStaged,
+)
 
 
 async def test_s1_spoolman_first_swap(world: World):
@@ -48,8 +58,7 @@ async def test_s1_spoolman_first_swap(world: World):
     await w.unload()
     records = await w.poll()
     assert len(events(records, "unload")) == 1
-    committed = events(records, "swap_committed")
-    assert [e["message"] for e in committed] == [f"swap done: spool {a} -> {b}"]
+    assert event_fields(records, "swap_committed") == [{"from_spool": a, "to_spool": b}]
     assert w.charged(records, "A") == 30
     assert await w.spoolman.location(w.spools["A"]) is None  # Evicted to no location.
 
@@ -295,7 +304,7 @@ async def test_s2_filament_first_swap(world: World):
     records = await w.poll()
     confirmed = events(records, "swap_confirmed")
     assert len(confirmed) == 1
-    assert f"from spool {a} to {b}" in confirmed[0]["message"]
+    assert (confirmed[0]["from_spool"], confirmed[0]["to_spool"]) == (a, b)
     assert await w.flag("A") is None
 
     records = await w.swap_cycle(poll_every=0.3, source="tag", name=PETG[0], color=PETG[1])
@@ -321,10 +330,9 @@ async def test_s14_several_swaps_between_polls(world: World):
     records = await w.poll()
     unloads = events(records, "unload")
     assert len(unloads) == 1
-    assert unloads[0]["message"].startswith("2 unload(s)")
-    committed = events(records, "swap_committed")
-    assert [e["message"] for e in committed] == [
-        f"swap done: spool {w.spools['A']} -> {w.spools['C']}"
+    assert unloads[0]["unloads"] == 2
+    assert event_fields(records, "swap_committed") == [
+        {"from_spool": w.spools["A"], "to_spool": w.spools["C"]}
     ]
     # Everything up to the second unload, B's load included, is A's.
     assert w.charged(records, "A") == 30 + LOAD_MM
@@ -342,8 +350,8 @@ async def stage_b(w: World, caplog: pytest.LogCaptureFixture) -> None:
     await w.move("A", w.shelf)
     await w.move("B", w.tool_location)
     records = await w.poll()
-    msg = f"spool {b} staged; still charging spool {a} until the printer reports an unload"
-    assert [e["message"] for e in events(records, "swap_staged")] == [msg]
+    msg = SwapStaged(staged=b, active=a).message
+    assert event_fields(records, "swap_staged") == [{"staged": b, "active": a}]
     assert logged(caplog, logging.INFO, f"[{w.tool_location}] {msg}")
 
 
@@ -371,11 +379,10 @@ async def test_s5_claim_after_printing_on_the_wrong_spool(
     assert len(w.requests("PUT")) == 1
     await w.run_until(lambda: w.printer.job is None)
     records = await w.start_print(print_spec())
-    msg = (
-        "print started with no Spoolman change since the unload; assuming "
-        f"spool {a} was reloaded and charging it provisionally"
-    )
-    assert [e["message"] for e in events(records, "swap_assumed")] == [msg]
+    msg = SwapAssumed(spool=a, job=None).message
+    assert event_fields(records, "swap_assumed") == [
+        {"spool": a, "job": w.printer.job.id, "returned": False}
+    ]
     assert logged(caplog, logging.WARNING, f"[{w.tool_location}] {msg}")
     flag = await w.flag("A")
     assert flag is not None
@@ -387,8 +394,7 @@ async def test_s5_claim_after_printing_on_the_wrong_spool(
     records = await w.poll()
     claimed = events(records, "claimed")
     assert len(claimed) == 1
-    assert claimed[0]["message"].startswith(f"spool {b} claimed in place of spool {a}: moved ")
-    assert claimed[0]["message"].endswith("(usage since the last unload)")
+    assert (claimed[0]["spool"], claimed[0]["replaced"], claimed[0]["since"]) == (b, a, "unload")
     since_unload = w.since(unloaded)
     assert charged(since_unload, a) == 0
     assert charged(since_unload, b) == w.counter - w.tool.extruded_at_unload
@@ -444,11 +450,10 @@ async def test_s5_correction_after_printing_on_the_wrong_spool(
     w.advance(0.3)
     records = await w.poll()
     assert w.counter > at_unload + moved
-    msg = (
-        f"printer already has spool {b}'s filament; switching from spool {a} now and "
-        f"moving {moved} mm from spool {a} (usage since the last unload)"
-    )
-    assert [e["message"] for e in events(records, "correction")] == [msg]
+    msg = Correction(spool=b, from_spool=a, moved=((a, moved),), since="unload").message
+    assert event_fields(records, "correction") == [
+        {"spool": b, "from_spool": a, "moved": [[a, moved]], "since": "unload"}
+    ]
     assert logged(caplog, logging.INFO, f"[{w.tool_location}] {msg}")
     assert events(records, "provisional_kept") == []
     assert events(records, "claimed") == []
@@ -484,9 +489,14 @@ async def test_s13_staged_spool_claimed(world: World, caplog: pytest.LogCaptureF
 
     await w.claim("B")
     records = await w.poll()
-    assert [e["message"] for e in events(records, "claimed")] == [
-        f"spool {b} claimed in place of spool {a}: moved 30 mm from spool {a} "
-        "(usage since the last reboot)"
+    assert event_fields(records, "claimed") == [
+        {
+            "spool": b,
+            "replaced": a,
+            "deleted_spool": None,
+            "moved": [[a, 30]],
+            "since": "reboot",
+        }
     ]
     assert w.charged(records, "B") == 30
     assert w.charged(records, "A") == -30
@@ -512,8 +522,8 @@ async def test_s9_staged_spool_never_unloaded(world: World, caplog: pytest.LogCa
     start = w.counter
     mark = w.mark()
     records = await w.start_print(print_spec())
-    msg = f"print started while spool {b} is staged but not loaded; charging spool {a}"
-    assert [e["message"] for e in events(records, "staged_at_print")] == [msg]
+    msg = StagedAtPrint(staged=b, active=a).message
+    assert event_fields(records, "staged_at_print") == [{"staged": b, "active": a}]
     assert logged(caplog, logging.WARNING, f"[{w.tool_location}] {msg}")
     flag_a, flag_b = await w.flag("A"), await w.flag("B")
     assert flag_a is not None and msg in flag_a
@@ -531,11 +541,8 @@ async def test_s9_staged_spool_never_unloaded(world: World, caplog: pytest.LogCa
     w.printer.reboot()
     records = await w.poll()
     assert len(events(records, "reboot")) == 1
-    msg = (
-        f"printer restarted while spool {b} is staged; an unload just before the restart "
-        f"can be missed, so check which spool is loaded. Still charging spool {a}"
-    )
-    assert [e["message"] for e in events(records, "staged_at_reboot")] == [msg]
+    msg = StagedAtReboot(staged=b, active=a).message
+    assert event_fields(records, "staged_at_reboot") == [{"staged": b, "active": a}]
     assert logged(caplog, logging.WARNING, f"[{w.tool_location}] {msg}")
     flag_b = await w.flag("B")
     assert flag_b is not None and msg in flag_b
@@ -543,8 +550,8 @@ async def test_s9_staged_spool_never_unloaded(world: World, caplog: pytest.LogCa
     await w.claim("B")
     records = await w.poll()
     # The reboot restarted the counters, so there's no usage to move.
-    assert [e["message"] for e in events(records, "claimed")] == [
-        f"spool {b} claimed in place of spool {a}: moved nothing (usage since the last reboot)"
+    assert event_fields(records, "claimed") == [
+        {"spool": b, "replaced": a, "deleted_spool": None, "moved": [], "since": "reboot"}
     ]
     await w.run_until(lambda: w.printer.job is None)
     w.printer.extrude(0, 20)
@@ -583,10 +590,7 @@ async def test_s3_spoolman_changed_during_the_load(world: World):
     # Mid-load, A is moved out: usage is held from here and the swap stays open.
     await w.move("A", w.shelf)
     records = await w.poll()
-    assert [e["message"] for e in events(records, "swap_unassigned")] == [
-        f"spool {a} is no longer in the location; holding usage until a spool is assigned, "
-        f"which also takes the {on_a:g} mm since the unload"
-    ]
+    assert event_fields(records, "swap_unassigned") == [{"spool": a, "mm": on_a}]
     records += await w.run_until(lambda: w.tool.process is None, poll_every=0.3)
     records += await w.poll()
     assert charges(records) == []
@@ -603,9 +607,7 @@ async def test_s3_spoolman_changed_during_the_load(world: World):
     # B moved in mid-print confirms the swap and takes everything since the unload.
     await w.move("B", w.tool_location)
     records = await w.poll()
-    assert [e["message"] for e in events(records, "swap_confirmed")] == [
-        f"swap confirmed: {on_a:g} mm moved from spool {a} to {b}"
-    ]
+    assert event_fields(records, "swap_confirmed") == [{"mm": on_a, "from_spool": a, "to_spool": b}]
     records += await w.finish_print()
     since_unload = w.since(unloaded)
     assert charged(since_unload, a) == 0
@@ -635,9 +637,7 @@ async def test_s3_old_spool_moved_back(world: World):
     assert charges(records) == []
     await w.move("A", w.tool_location)
     records = await w.poll()
-    assert [e["message"] for e in events(records, "active_reassigned")] == [
-        f"spool {a} is back in the location"
-    ]
+    assert event_fields(records, "active_reassigned") == [{"spool": a}]
     assert w.charged(records, "A") == 10
     flag = await w.flag("A")
     assert flag is not None and "unloaded with no Spoolman change" in flag
@@ -653,10 +653,7 @@ async def test_s3_old_spool_moved_back(world: World):
     # A back mid-print: the swap closes as of that print start, charged provisionally.
     await w.move("A", w.tool_location)
     records = await w.poll()
-    assert [e["message"] for e in events(records, "swap_assumed")] == [
-        f"print {job} started with no Spoolman change since the unload; assuming "
-        f"spool {a} was reloaded and charging it provisionally"
-    ]
+    assert event_fields(records, "swap_assumed") == [{"spool": a, "job": job, "returned": True}]
     await w.finish_print()
     assert charged(w.since(unloaded), a) == w.counter - at_unload
     flag = await w.flag("A")
@@ -687,8 +684,8 @@ async def test_s3_unload_while_the_location_is_empty(
     w.printer.extrude(0, 25)
     await w.unload()
     records = await w.poll()
-    msg = "25 mm before unload had no spool"
-    assert [e["message"] for e in events(records, "lost_unassigned")] == [msg]
+    msg = LostUnassigned(mm=25).message
+    assert event_fields(records, "lost_unassigned") == [{"mm": 25}]
     assert logged_once(caplog, logging.WARNING, f"[{w.tool_location}] {msg}")
     assert events(records, "swap_confirmed") == [] and charges(records) == []
     assert charged(w.since(unloaded), a) == LOAD_MM  # The swap's usage stays on A.
@@ -725,8 +722,8 @@ async def test_s3_moved_after_the_write_back(world: World):
     await w.move("A", w.shelf)
     await w.move("B", w.tool_location)
     records = await w.poll()
-    assert [e["message"] for e in events(records, "swap_confirmed")] == [
-        f"swap confirmed: {LOAD_MM} mm moved from spool {a} to {b}"
+    assert event_fields(records, "swap_confirmed") == [
+        {"mm": LOAD_MM, "from_spool": a, "to_spool": b}
     ]
     assert len(w.requests("PUT")) == 2  # Written in the poll that confirms the swap.
     await w.run_until(lambda: w.printer.job is None)
@@ -750,9 +747,8 @@ async def test_s4_same_spool_reloaded_then_print(world: World):
     await w.poll()
     await w.run_until(lambda: w.printer.job is None)
     records = await w.start_print(print_spec())
-    assert [e["message"] for e in events(records, "swap_assumed")] == [
-        "print started with no Spoolman change since the unload; assuming "
-        f"spool {a} was reloaded and charging it provisionally"
+    assert event_fields(records, "swap_assumed") == [
+        {"spool": a, "job": w.printer.job.id, "returned": False}
     ]
     flag = await w.flag("A")
     assert flag is not None and "charged to it provisionally" in flag
@@ -766,9 +762,7 @@ async def test_s4_same_spool_reloaded_then_print(world: World):
     w.printer.dismiss()
     await w.unload()
     records = await w.poll()
-    assert [e["message"] for e in events(records, "provisional_kept")] == [
-        f"unload keeps the {provisional} mm charged provisionally to spool {a}"
-    ]
+    assert event_fields(records, "provisional_kept") == [{"mm": provisional, "spool": a}]
     since_unload = w.since(unloaded)
     assert all(c["spool_id"] == a and c["use_length"] > 0 for c in charges(since_unload))
     assert charged(since_unload, a) == provisional
@@ -792,8 +786,8 @@ async def test_s6_unload_with_nothing_assigned(world: World, caplog: pytest.LogC
     await w.poll()
     await w.unload()
     records = await w.poll()
-    msg = f"{LOAD_MM} mm before unload had no spool"
-    assert [e["message"] for e in events(records, "lost_unassigned")] == [msg]
+    msg = LostUnassigned(mm=LOAD_MM).message
+    assert event_fields(records, "lost_unassigned") == [{"mm": LOAD_MM}]
     assert logged_once(caplog, logging.WARNING, f"[{w.tool_location}] {msg}")
     assert charges(records) == []
 
@@ -804,7 +798,7 @@ async def test_s6_unload_with_nothing_assigned(world: World, caplog: pytest.LogC
     await w.move("C", w.tool_location)
     records = await w.poll()
     c = w.spools["C"]
-    assert [e["message"] for e in events(records, "assignment_changed")] == [f"spool {c} is active"]
+    assert event_fields(records, "assignment_changed") == [{"spool": c}]
     assert {r["spool_id"] for r in charges(records)} == {c}
     assert w.charged(records, "C") == LOAD_MM
     assert await w.used("B") == 0
@@ -819,26 +813,19 @@ async def test_s7_old_spool_out_new_in_then_unload(world: World):
     await w.move("A", w.shelf)
     w.printer.extrude(0, 10)
     records = await w.poll()
-    assert [e["message"] for e in events(records, "active_unassigned")] == [
-        f"spool {a} is no longer in the location; still charging it until the printer "
-        "reports an unload"
-    ]
+    assert event_fields(records, "active_unassigned") == [{"spool": a, "staged_left": False}]
     assert w.charged(records, "A") == 10
 
     await w.move("B", w.tool_location)
     w.printer.extrude(0, 20)
     records = await w.poll()
-    assert [e["message"] for e in events(records, "swap_staged")] == [
-        f"spool {b} staged; still charging spool {a} until the printer reports an unload"
-    ]
+    assert event_fields(records, "swap_staged") == [{"staged": b, "active": a}]
     assert w.charged(records, "A") == 20
 
     w.printer.extrude(0, 30)
     await w.unload()
     records = await w.poll()
-    assert [e["message"] for e in events(records, "swap_committed")] == [
-        f"swap done: spool {a} -> {b}"
-    ]
+    assert event_fields(records, "swap_committed") == [{"from_spool": a, "to_spool": b}]
     assert w.charged(records, "A") == 30
     assert await w.spoolman.location(a) == w.shelf  # Already out: nothing to evict.
 
@@ -862,8 +849,8 @@ async def test_s8_staged_spool_moved_back_out(world: World, caplog: pytest.LogCa
     await w.move("B", w.shelf)
     w.printer.extrude(0, 20)
     records = await w.poll()
-    msg = f"spool {b} is no longer staged; still charging spool {a}"
-    assert [e["message"] for e in events(records, "staging_cancelled")] == [msg]
+    msg = StagingCancelled(staged=b, active=a).message
+    assert event_fields(records, "staging_cancelled") == [{"staged": b, "active": a}]
     assert logged(caplog, logging.INFO, f"[{w.tool_location}] {msg}")
     assert w.charged(records, "A") == 20
 
@@ -895,9 +882,7 @@ async def test_s10_spool_moved_out_with_no_replacement(
     await w.unload()
     records = await w.poll()
     assert w.charged(records, "A") == 30
-    assert [e["message"] for e in events(records, "unloaded_unassigned")] == [
-        f"spool {a} unloaded with no spool in the location; holding usage until one is assigned"
-    ]
+    assert event_fields(records, "unloaded_unassigned") == [{"spool": a}]
     assert events(records, "swap_unconfirmed") == []
     assert await w.flag("A") is None
 
@@ -910,7 +895,7 @@ async def test_s10_spool_moved_out_with_no_replacement(
 
     await w.move("B", w.tool_location)
     records = await w.poll()
-    assert [e["message"] for e in events(records, "assignment_changed")] == [f"spool {b} is active"]
+    assert event_fields(records, "assignment_changed") == [{"spool": b}]
     assert w.charged(records, "B") == LOAD_MM
     assert w.charged(records, "A") == 0
 
@@ -938,9 +923,7 @@ async def test_s11_two_spools_neither_active(world: World, caplog: pytest.LogCap
     # C is removed: A, still loaded, takes the usage skipped meanwhile, and B is staged.
     await w.move("C", w.shelf)
     records = await w.poll()
-    assert [e["message"] for e in events(records, "swap_staged")] == [
-        f"spool {b} staged; still charging spool {a} until the printer reports an unload"
-    ]
+    assert event_fields(records, "swap_staged") == [{"staged": b, "active": a}]
     assert w.charged(records, "A") == 30
     assert w.charged(records, "B") == w.charged(records, "C") == 0
 
@@ -963,8 +946,8 @@ async def test_s12_spoolman_corrected_to_the_loaded_uuid(world: World):
     await w.move("B", w.tool_location)
     w.printer.extrude(0, 20)
     records = await w.poll()
-    assert [e["message"] for e in events(records, "correction")] == [
-        f"printer already has spool {b}'s filament; switching from spool {a} now"
+    assert event_fields(records, "correction") == [
+        {"spool": b, "from_spool": a, "moved": None, "since": None}
     ]
     assert events(records, "swap_staged") == []
     assert w.charged(records, "B") == 20
@@ -1002,9 +985,8 @@ async def test_s4_claiming_the_reloaded_spool_confirms_it(
     # The user ticks the box on A, the spool already active: it's confirmed as loaded.
     await w.claim("A")
     records = await w.poll()
-    assert [e["message"] for e in events(records, "claim_confirmed")] == [
-        f"spool {a} claimed: confirmed as loaded, nothing moves; the {provisional} mm "
-        "provisional charge stays"
+    assert event_fields(records, "claim_confirmed") == [
+        {"spool": a, "provisional_mm": provisional, "first_poll": False}
     ]
     assert events(records, "claimed") == []
     assert charges(records) == []
@@ -1041,9 +1023,14 @@ async def test_k1_claim_handled_once_when_clearing_fails(
     for _ in range(2):
         await w.poll()
     records = w.since(mark)
-    assert [e["message"] for e in events(records, "claimed")] == [
-        f"spool {b} claimed in place of spool {a}: moved 30 mm from spool {a} "
-        "(usage since the last reboot)"
+    assert event_fields(records, "claimed") == [
+        {
+            "spool": b,
+            "replaced": a,
+            "deleted_spool": None,
+            "moved": [[a, 30]],
+            "since": "reboot",
+        }
     ]
     assert [r["use_length"] for r in charges(records, b)] == [30.0]
     assert w.charged(records, "A") == -30
@@ -1112,17 +1099,22 @@ async def test_k2_two_claims_in_one_tool(
     mark = w.mark()
     records = await w.poll()
     if newer == "staged":
-        assert [e["message"] for e in events(records, "claimed")] == [
-            f"spool {b} claimed in place of spool {c}: moved {loaded} mm from spool {c} "
-            "(usage since the last unload)"
+        assert event_fields(records, "claimed") == [
+            {
+                "spool": b,
+                "replaced": c,
+                "deleted_spool": None,
+                "moved": [[c, loaded]],
+                "since": "unload",
+            }
         ]
         assert events(records, "claim_confirmed") == []
         assert w.charged(records, "B") == loaded
         assert w.charged(records, "C") == -loaded
         assert await w.spoolman.location(c) != w.tool_location
     else:
-        assert [e["message"] for e in events(records, "claim_confirmed")] == [
-            f"spool {c} claimed: confirmed as loaded, nothing moves"
+        assert event_fields(records, "claim_confirmed") == [
+            {"spool": c, "provisional_mm": None, "first_poll": False}
         ]
         assert events(records, "claimed") == []
         assert charges(records) == []
@@ -1168,13 +1160,10 @@ async def test_s8_staged_spool_leaves_after_the_active_one(
     await w.move("B", w.shelf)
     w.printer.extrude(0, 20)
     records = await w.poll()
-    cancelled = f"spool {b} is no longer staged; still charging spool {a}"
-    either = (
-        f"spool {a} isn't in the location either; still charging it until the printer "
-        "reports an unload"
-    )
-    assert [e["message"] for e in events(records, "staging_cancelled")] == [cancelled]
-    assert [e["message"] for e in events(records, "active_unassigned")] == [either]
+    cancelled = StagingCancelled(staged=b, active=a).message
+    either = ActiveUnassigned(spool=a, staged_left=True).message
+    assert event_fields(records, "staging_cancelled") == [{"staged": b, "active": a}]
+    assert event_fields(records, "active_unassigned") == [{"spool": a, "staged_left": True}]
     assert w.charged(records, "A") == 20
     tool = w.bridge.printers[0].tools[0]
     assert tool.active == a and tool.assigned is None
@@ -1203,8 +1192,8 @@ async def test_s9_staged_flags_survive_a_restart(world: World, caplog: pytest.Lo
     await baseline(w)
     await stage_b(w, caplog)
     records = await w.start_print(print_spec())
-    msg = f"print started while spool {b} is staged but not loaded; charging spool {a}"
-    assert [e["message"] for e in events(records, "staged_at_print")] == [msg]
+    msg = StagedAtPrint(staged=b, active=a).message
+    assert event_fields(records, "staged_at_print") == [{"staged": b, "active": a}]
     flag_a, flag_b = await w.flag("A"), await w.flag("B")
     assert flag_a is not None and msg in flag_a
     assert flag_b is not None and msg in flag_b
@@ -1251,7 +1240,7 @@ async def test_s11_ambiguous_location_at_first_start(
     await w.move("B", w.shelf)
     await w.move("C", w.shelf)
     records = await w.poll()
-    assert [e["message"] for e in events(records)] == [f"baseline extruded=1030 spool={a}"]
+    assert event_fields(records) == [{"event": "baseline", "extruded": 1030, "spool": a}]
     assert charges(records) == []
     gone = f"[{w.tool_location}] no longer: location holds spools {ids}"
     assert logged_once(caplog, logging.WARNING, gone)
@@ -1288,7 +1277,7 @@ async def test_s11_reboots_while_the_tool_is_skipped(
     records = await w.poll()
     reboots = events(records, "reboot")
     assert len(reboots) == 1
-    assert reboots[0]["message"].endswith("; 20 mm held before the restart is kept")
+    assert reboots[0]["kept_mm"] == 20
     assert charges(records) == []
     w.printer.extrude(0, 10)
     await w.poll()
@@ -1296,7 +1285,7 @@ async def test_s11_reboots_while_the_tool_is_skipped(
     records = await w.poll()
     reboots = events(records, "reboot")
     assert len(reboots) == 1
-    assert reboots[0]["message"].endswith("; 10 mm held before the restart is kept")
+    assert reboots[0]["kept_mm"] == 10
     assert charges(records) == []
     tool = w.bridge.printers[0].tools[0]
     assert tool.active == a and tool.held_mm == 30 and tool.reboot_pending
@@ -1307,9 +1296,7 @@ async def test_s11_reboots_while_the_tool_is_skipped(
     w.printer.extrude(0, 5)
     await w.move("C", w.shelf)
     records = await w.poll()
-    assert [e["message"] for e in events(records, "held_charged")] == [
-        f"spool {a} is active; charged it 30 mm held before the printer restarted"
-    ]
+    assert event_fields(records, "held_charged") == [{"spool": a, "mm": 30, "deleted_spool": None}]
     assert [(r["spool_id"], r["use_length"], r["reason"]) for r in charges(records)] == [
         (a, 30.0, "held before the printer restarted"),
         (a, 5.0, "extruded"),
@@ -1412,9 +1399,9 @@ async def test_k1_claim_ticked_before_the_first_start(
     await w.claim("A")
 
     records = await w.poll()
-    assert [e["message"] for e in events(records)] == [
-        f"spool {a} claimed; nothing to move",
-        f"baseline extruded=1000 spool={a}",
+    assert event_fields(records) == [
+        {"event": "claim_confirmed", "spool": a, "provisional_mm": None, "first_poll": True},
+        {"event": "baseline", "extruded": 1000, "spool": a},
     ]
     assert charges(records) == []
     assert await w.spoolman.extra(a, CLAIM_FIELD) is None
