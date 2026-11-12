@@ -9,7 +9,7 @@ import httpx
 from .errors import check, parsing, send
 from .models import FilamentReading, Material, ToolReading
 
-# Printer states in which a job file can start (used by phase 3 writes).
+# Printer states in which a job file can start, such as the sync job.
 IDLE_STATES = frozenset({"IDLE", "FINISHED", "READY", "STOPPED"})
 BUSY_STATES = frozenset({"PRINTING", "PAUSED", "BUSY", "ATTENTION"})
 
@@ -74,7 +74,7 @@ class PrusaLink:
     async def filament(self) -> FilamentReading:
         resp = await send(self._client, "GET", "/api/v1/filament")
         if resp.status_code == 404:
-            raise NoFilamentEndpoint("printer firmware has no /api/v1/filament")
+            raise NoFilamentEndpoint("firmware has no /api/v1/filament")
         check(resp)
         with parsing("the printer's filament"):
             data = resp.json()
@@ -85,7 +85,7 @@ class PrusaLink:
             )
             if counters:
                 return parse_filament(data)
-        raise NoFilamentEndpoint("printer's /api/v1/filament has no usage counters")
+        raise NoFilamentEndpoint("/api/v1/filament has no usage counters")
 
     async def printer_type(self) -> str | None:
         """Return the printer type code from `GET /api/version`, such as `8.1.0`."""

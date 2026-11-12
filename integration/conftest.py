@@ -480,7 +480,7 @@ class World:
 
 @pytest.fixture
 def world_config(request: pytest.FixtureRequest) -> dict:
-    """Bridge settings `world` overrides in its `Config`, such as `sync_drift`.
+    """Bridge settings `world` overrides in its `Config`, such as `flag_field`.
 
     None by default. A test sets them with
     `@pytest.mark.parametrize("world_config", [dict(...)], indirect=True)`.
@@ -517,7 +517,7 @@ def world_model(request: pytest.FixtureRequest, world_tools: int) -> str:
 
 @pytest.fixture
 def world_printer(request: pytest.FixtureRequest) -> dict:
-    """Settings `world` overrides in printer "it"'s `PrinterConfig`, such as `sync_file`.
+    """Settings `world` overrides in printer "it"'s `PrinterConfig`, such as `sync_drift`.
 
     None by default. A test sets them with
     `@pytest.mark.parametrize("world_printer", [dict(...)], indirect=True)`.

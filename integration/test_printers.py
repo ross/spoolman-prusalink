@@ -621,7 +621,7 @@ async def test_x10_firmware_without_the_filament_endpoint(
     records = await w.poll()
     await w.poll()
     assert charged(records, e) == 100 and charges(records, a) == []
-    unsupported = "printer it: printer firmware has no /api/v1/filament"
+    unsupported = "printer it: firmware has no /api/v1/filament"
     assert count(caplog, unsupported) == 1
     assert logged(caplog, logging.ERROR, "this firmware isn't supported")
     assert w.bridge.interval() == cfg.poll_idle
