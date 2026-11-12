@@ -160,7 +160,8 @@ BAD = {
         printer(tool("index = 0\nextruded = 10\nextruded_at_unload = 11")),
         "extruded_at_unload can't exceed extruded",
     ),
-    "nan setting": ("feed_ratio = nan\n" + printer(), "not nan or inf"),
+    "nan setting": ("feed_ratio = nan\n" + printer(), "must be a finite number"),
+    "huge setting": ("feed_ratio = 1" + "0" * 400 + "\n" + printer(), "must be a finite number"),
     "port out of range": (printer("port = 70000"), "printers[0].port must be between 1 and 65535"),
     "tool not a table": (
         "[[printers]]\nname = 'p'\nmodel = '8.1.0'\ntools = [1]\n",
