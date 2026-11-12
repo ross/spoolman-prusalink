@@ -415,7 +415,8 @@ def account(
             needs_sync=out.claimed,
             extruded=reading.extruded,
         )
-        event(EventKind.BASELINE, f"baseline extruded={reading.extruded} spool={active}")
+        spool = "none" if active is None else active
+        event(EventKind.BASELINE, f"baseline extruded={reading.extruded} spool={spool}")
         return out
 
     s = state
