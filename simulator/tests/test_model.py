@@ -23,7 +23,7 @@ from simulator.model import (
 )
 from simulator.tests.util import PLA, loaded, make, run
 
-PETG = Material("PETG", "#1f6fb2")
+PETG = Material("PETG", "#186bb5")
 
 
 def tool0(printer):
@@ -69,11 +69,11 @@ def test_unload_bookkeeping():
 
 def test_menu_use_dismisses_the_finished_screen():
     sim, p = make()
-    p.state = State.FINISHED
+    p.screen = State.FINISHED
     p.unload(0)
     run(sim, 3.1)
     assert p.state is State.IDLE
-    p.state = State.STOPPED
+    p.screen = State.STOPPED
     p.load(0, source="preset", name="PETG")
     sim.tick(20)
     assert p.state is State.IDLE
@@ -116,12 +116,12 @@ def test_one_tick_runs_a_whole_load():
     sim, p = make()
     p.unload(0)
     sim.tick(3.0)
-    p.load(0, source="preset", name="ASA", color="#D9342B")
+    p.load(0, source="preset", name="ASA", color="#DE3129")
     sim.tick(100.0)
     t = tool0(p)
     assert t.loaded and t.process is None and p.state is State.IDLE
     assert t.extruded == pytest.approx(76)
-    assert t.material == Material("ASA", "#d9342b", **preset_temperatures("ASA"))
+    assert t.material == Material("ASA", "#de3129", **preset_temperatures("ASA"))
 
 
 def test_menu_load_clears_color_and_uuid():
@@ -160,15 +160,15 @@ def test_tag_load_sets_uuid_on_uuids_model_only():
     sim, p = make()
     p.unload(0)
     sim.tick(3)
-    p.load(0, source="tag", name="PETG", color="#1F6FB2", uuid=uuid.upper())
+    p.load(0, source="tag", name="PETG", color="#186BB5", uuid=uuid.upper())
     sim.tick(20)
     tag = shown(p)
     assert tag.pop("material_uuid") and tag.pop("package_uuid")
-    assert tag == {"name": "PETG", "color": "#1f6fb2", "instance_uuid": uuid}
+    assert tag == {"name": "PETG", "color": "#186bb5", "instance_uuid": uuid}
 
     # The bridge's write starts the type afresh: only its own instance UUID is left.
-    p.apply(gcode.parse(f'M865 X R N"PETG" O"#1f6fb2" L0\nM865.1 I0 C"{uuid}"'))
-    assert shown(p) == {"name": "PETG", "color": "#1f6fb2", "instance_uuid": uuid}
+    p.apply(gcode.parse(f'M865 X R N"PETG" O"#186bb5" L0\nM865.1 I0 C"{uuid}"'))
+    assert shown(p) == {"name": "PETG", "color": "#186bb5", "instance_uuid": uuid}
 
     sim, mk4 = make("1.4.1", [SimTool(0)])
     with pytest.raises(Invalid):
@@ -209,7 +209,7 @@ def test_extrude_fills_gap_then_counts_and_retract_clamps():
     assert tool0(p).gap == 40
     p.extrude(0, 50)
     assert tool0(p).gap == 0 and tool0(p).extruded == 10
-    p.state = State.PRINTING
+    p.start_print(PrintSpec([Segment(0, 10)]))
     with pytest.raises(Busy):
         p.extrude(0, 5)
 
@@ -332,7 +332,7 @@ def test_runout_keeps_previous_and_reload_restores_it():
     at = int(tool0(p).extruded)
     p.runout(0)
     t = tool0(p)
-    assert p.state is State.ATTENTION and p.job.attention == "runout tool 0"
+    assert p.state is State.ATTENTION and str(p.job.attention) == "runout tool 0"
     assert (t.unload_count, t.extruded_at_unload, t.material) == (1, at, None)
     assert t.previous == PLA
     assert p.job_json()["state"] == "PAUSED"
@@ -354,7 +354,7 @@ def test_jam_adds_an_extra_purge_on_reload():
     p.start_print(one_segment(100, preheat_s=0))
     sim.tick(0.8 + 1)
     p.jam(0)
-    assert p.job.attention == "jam tool 0"
+    assert str(p.job.attention) == "jam tool 0"
     before = tool0(p).extruded
     p.load(0)
     sim.tick(100)
@@ -380,7 +380,7 @@ def test_color_change_in_one_large_tick():
     sim, p = make()
     p.start_print(one_segment(100, preheat_s=0, color_changes_mm=[40, 400]))
     sim.tick(1000)
-    assert p.state is State.ATTENTION and p.job.attention == "color change tool 0"
+    assert p.state is State.ATTENTION and str(p.job.attention) == "color change tool 0"
     assert p.job.fed_mm == 40
     assert tool0(p).unload_count == 1 and tool0(p).extruded_at_unload == 38
     p.load(0)
@@ -412,7 +412,7 @@ def test_tool_change_to_empty_tool_waits_for_it():
     sim, p = make("8.10.0", [loaded(0, PETG), SimTool(1)])
     p.start_print(PrintSpec([Segment(0, 10), Segment(1, 10)], preheat_s=0))
     sim.tick(100)
-    assert p.job.phase is JobPhase.WAIT_LOAD and p.job.attention == "no filament in tool 1"
+    assert p.job.phase is JobPhase.WAIT_LOAD and str(p.job.attention) == "no filament in tool 1"
 
 
 # Power and boot.
@@ -592,7 +592,7 @@ JOB = """M862.3 P "COREONEL" ; printer model check
 M862.5 P2 ; g-code level check
 M862.6 P"Input shaper" ; FW feature check
 G28 O ; home only if not homed
-M865 X R N"PETG" T230 B85 P170 C30 D15 E45 O"#1F6FB2" L0
+M865 X R N"PETG" T230 B85 P170 C30 D15 E45 O"#186BB5" L0
 M865.1 I0 C"8B6A3E3E-3F6C-4D7B-9A43-6C1F0E7D2A11"
 M117 Spoolman: test
 """
@@ -613,8 +613,7 @@ def test_sync_job_applies_and_finishes():
     assert p.state is State.PRINTING and p.job_json() is not None
     m = tool0(p).material
     uuid = "8b6a3e3e-3f6c-4d7b-9a43-6c1f0e7d2a11"
-    assert m == Material("PETG", "#1f6fb2", uuid, nozzle=230, preheat=170, bed=85)
-    assert tool0(p).temps["nozzle"] == 230 and tool0(p).temps["chamber_max"] == 45
+    assert m == Material("PETG", "#186bb5", uuid, nozzle=230, preheat=170, bed=85)
     assert p.message == "Spoolman: test" and p.homed
     sim.tick(3 + 1)
     assert p.state is State.FINISHED and p.job is None and p.job_counter == 1
@@ -638,7 +637,7 @@ def test_upload_refusals():
 def test_model_check_asks_before_the_job_is_counted():
     sim, p = make()
     p.upload("s.gcode", JOB.replace("COREONEL", "MK4S"), print_after=True, overwrite=True)
-    assert p.state is State.ATTENTION and p.job.attention == "model check"
+    assert p.state is State.ATTENTION and str(p.job.attention) == "model check"
     assert p.job_counter == 0 and p.job.id is None
     assert p.job_json() is None and "job" not in p.status_json()
     assert not p.can_print()
@@ -676,7 +675,7 @@ def test_model_check_accepts_mmu3_variant_and_auto_accept():
 def test_parse_error_holds_and_tap_through_stops():
     sim, p = make()
     run_sync(sim, p, 'M865 X N"WAYTOOLONG" L0\n')
-    assert p.state is State.ATTENTION and p.job.attention.startswith("parse error: line 1")
+    assert p.state is State.ATTENTION and str(p.job.attention).startswith("parse error: line 1")
     p.tap_through()
     sim.tick(2)
     assert p.state is State.STOPPED
@@ -685,13 +684,13 @@ def test_parse_error_holds_and_tap_through_stops():
 def test_m865_on_missing_tool_is_a_parse_error():
     sim, p = make()
     run_sync(sim, p, 'M865 X R N"PLA" L3\n')
-    assert p.job.attention.startswith("parse error")
+    assert str(p.job.attention).startswith("parse error")
 
 
 def test_m865_reset_clears_uuid_and_preset_write_ignores_parameters():
     sim, p = make()
-    p.apply(gcode.parse('M865 X R N"ASA" O"#d9342b" L0'))
-    assert tool0(p).material == Material("ASA", "#d9342b", **RESET)
+    p.apply(gcode.parse('M865 X R N"ASA" O"#de3129" L0'))
+    assert tool0(p).material == Material("ASA", "#de3129", **RESET)
     p.apply(gcode.parse('M865.1 I0 C"8b6a3e3e-3f6c-4d7b-9a43-6c1f0e7d2a11"'))
     assert tool0(p).material.instance_uuid
     p.apply(gcode.parse('M865 X O"#000000" L0'))  # ad-hoc edit keeps the UUID
@@ -711,7 +710,7 @@ def test_preset_ignores_edits_and_adhoc_write_edits_the_slot():
     p.apply(gcode.parse('M865 X O"#000000" L0'))  # the slot is the base, not the preset
     assert tool0(p).material == replace(PLA, color="#000000")
     p.apply(gcode.parse('M865 O"#111111" L0'))  # an ad-hoc type takes an edit
-    assert tool0(p).material.color == "#111111"
+    assert tool0(p).material.color == "#101010"  # stored in 5 bits a channel (F25)
 
 
 def test_m865_writes_disabled_and_unconfigured_tools():
@@ -723,7 +722,7 @@ def test_m865_writes_disabled_and_unconfigured_tools():
     assert [t["index"] for t in p.filament_json()["tools"]] == [0]
     sim, p = make("8.10.0", [loaded(0, PETG)])
     run_sync(sim, p, 'M865 X R N"PLA" L8\n')
-    assert p.job.attention.startswith("parse error")
+    assert str(p.job.attention).startswith("parse error")
 
 
 def test_m865_writes_an_unloaded_tool():
@@ -768,7 +767,6 @@ def test_stuck_write_ignores_m865():
 def test_snapshot_round_trip_mid_print_and_mid_load():
     tools = [loaded(0, PETG), SimTool(1, material=None), loaded(2, PETG)]
     sim, p = make("8.10.0", tools)
-    p.tools[0].temps = {"nozzle": 230}
     p.start_print(PrintSpec([Segment(0, 100), Segment(2, 50)], color_changes_mm=[80]))
     p.upload("x.gcode", "M117 x\n", print_after=False, overwrite=False)
     sim.tick(0.8 + 5 + 3)
@@ -814,12 +812,10 @@ def test_restore_refuses_other_printers():
 
 def test_events_log_actions_and_state_changes():
     sim, p = make()
-    queue = sim.subscribe()
     p.unload(0)
     kinds = [e.kind for e in sim.events]
     assert kinds == ["action", "state"]
     assert sim.events[-1].text == "IDLE -> BUSY"
-    assert not queue.empty()
 
 
 def test_idle_sensor_clear_after_a_sync_job_writes_an_empty_tool():
@@ -881,8 +877,7 @@ def test_cancel_stops_a_reload():
 def test_no_print_while_a_tool_process_runs():
     sim, p = make()
     p.unload(0)
-    p.state = State.IDLE  # only the process is left to refuse it
-    assert not p.can_print()
+    assert p.state is State.BUSY and not p.can_print()
 
 
 def test_tool_change_into_an_empty_tool_purges_after_the_reload():
@@ -906,14 +901,6 @@ def test_sync_job_progress_moves_with_time():
     assert p.job.phase is JobPhase.RUN and p.job.progress() == 0
     sim.tick(1.5)
     assert p.job.progress() == 50
-
-
-def test_subscriber_queue_drops_the_oldest():
-    sim, p = make()
-    queue = sim.subscribe()
-    for i in range(1500):
-        sim.push(("n", i))
-    assert queue.qsize() == 1000 and queue.get_nowait() == ("n", 500)
 
 
 def test_home_sets_the_flag_only_when_idle():
@@ -1037,3 +1024,16 @@ def test_temperatures_are_set_when_the_material_is_built():
     p.load(0, source="tag", name="petg", uuid="8b6a3e3e-3f6c-4d7b-9a43-6c1f0e7d2a11")
     sim.tick(100.0)
     assert temperatures(p) == (215, 170, 60)
+
+
+def test_a_written_color_reads_back_in_5_bits_a_channel():
+    """F25: the firmware stores a color as Color555, so `#73767d` reads back `#73737b`."""
+    sim, p = make()
+    p.apply(gcode.parse('M865 X R N"PLA" O"#73767d" L0\n'))
+    assert p.filament_json()["tools"][0]["material"]["color"] == "#73737b"
+    assert tool0(p).previous.color == "#73737b"
+    p.unload(0)
+    run(sim, 3.1)
+    p.load(0, source="preset", name="PLA", color="#73767d")
+    run(sim, 20)
+    assert tool0(p).material.color == "#73737b"

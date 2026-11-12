@@ -592,12 +592,12 @@ async def test_w14_spoolman_edit_is_written(world: World, caplog: pytest.LogCapt
     minted = w.material()[2]
 
     # A color edit, with the printer still showing the last write: written when idle.
-    await w.spoolman.edit_filament(b, color_hex="00aa55")
+    await w.spoolman.edit_filament(b, color_hex="00ad52")
     await w.poll()
     assert logged(caplog, logging.WARNING, "spool changed in Spoolman since the last write")
     assert len(w.requests("PUT")) == 2
     await w.run_until(lambda: w.printer.job is None)
-    assert w.material() == (PETG[0], "#00aa55", minted)
+    assert w.material() == (PETG[0], "#00ad52", minted)
     await w.poll()
     assert await w.flag("B") is None
 
@@ -607,6 +607,36 @@ async def test_w14_spoolman_edit_is_written(world: World, caplog: pytest.LogCapt
     await w.poll()
     assert len(w.requests("PUT")) == 2
     assert await w.flag("B") is None
+
+
+async def test_w14_a_color_the_printer_rounds_is_written_once(
+    world: World, caplog: pytest.LogCaptureFixture
+):
+    """The printer stores 5 bits a channel (F25), so an edit to `00aa55` reads back `00ad52`.
+
+    The bridge compares colors after that rounding, so it sees its write took: no drift and
+    no second write.
+    """
+    caplog.set_level(logging.INFO, logger="spoolman_prusalink")
+    w = world
+    b = w.spools["B"]
+    await write_due(w)
+    await w.poll()
+    await wrote_b(w)
+    await w.poll()  # Sees the write took.
+    minted = w.material()[2]
+
+    await w.spoolman.edit_filament(b, color_hex="00aa55")
+    await w.poll()
+    assert len(w.requests("PUT")) == 2
+    await w.run_until(lambda: w.printer.job is None)
+    assert w.material() == (PETG[0], "#00ad52", minted)
+    for _ in range(3):
+        await w.poll()
+        w.advance(1.0)
+    assert len(w.requests("PUT")) == 2
+    assert await w.flag("B") is None
+    assert not logged(caplog, logging.WARNING, "printer differs from spool")
 
 
 async def test_w14_edit_after_the_uuid_is_cleared_keeps_the_printers(
@@ -628,12 +658,12 @@ async def test_w14_edit_after_the_uuid_is_cleared_keeps_the_printers(
     # the printer already shows, and no new one is minted.
     await set_extra_text(w.spoolman.client, b, UUID_FIELD, "")
     assert await w.spoolman.extra(b, UUID_FIELD) is None
-    await w.spoolman.edit_filament(b, color_hex="00aa55")
+    await w.spoolman.edit_filament(b, color_hex="00ad52")
     await w.poll()
     assert len(w.requests("PUT")) == 2
     assert (b, written) in w.bridge._unowned_uuids  # Checked against archived spools.
     await w.run_until(lambda: w.printer.job is None)
-    assert w.material() == (PETG[0], "#00aa55", written)
+    assert w.material() == (PETG[0], "#00ad52", written)
     m865 = [t for t in gcode(w) if t.startswith("M865.1 T0")]
     assert len(m865) == 2 and written in m865[-1]
     await w.poll()

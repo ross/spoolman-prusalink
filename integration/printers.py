@@ -11,7 +11,7 @@ their printer, so `printer_of()` splits them.
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from aiohttp.test_utils import TestServer
@@ -27,7 +27,7 @@ if TYPE_CHECKING:
 
 KEY = "it-key"
 # Spool E, loaded in printer b: a PLA that none of A to D share.
-PLA_WHITE = ("PLA", "#f2f2f2")
+PLA_WHITE = ("PLA", "#f7f7f7")
 FIRST = "it"
 SECOND = "b"
 
@@ -126,13 +126,7 @@ async def start(spec: Spec, world: World) -> tuple[Station, PrinterConfig]:
     tools = {}
     for index, load in enumerate(spec.loads):
         material = Material(*load.filament, load.uuid, **WRITTEN)
-        tools[index] = SimTool(
-            index,
-            loaded=True,
-            material=replace(material),
-            previous=replace(material),
-            extruded=load.extruded,
-        )
+        tools[index] = SimTool.loaded_with(index, material, extruded=load.extruded)
     printer = SimPrinter(spec.name, 0, KEY, MODELS[spec.model], tools=tools)
     world.sim.add(printer)
     locations = {index: load.location for index, load in enumerate(spec.loads)}
