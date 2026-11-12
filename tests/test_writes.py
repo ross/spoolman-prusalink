@@ -20,6 +20,7 @@ from harness import (
     levels,
     make,
     menu,
+    poll_during_job,
     refused,
     restart,
     spool,
@@ -1297,7 +1298,7 @@ async def test_spoolman_edit_is_not_drift_while_its_job_runs(tmp_path):
     fake.spools[20]["filament"]["color_hex"] = "00ff00"
     await bridge.poll()
     assert len(jobs(station)) == 2
-    await bridge.poll()  # The job has started but hasn't reached M865 yet.
+    await poll_during_job(bridge)  # The job has started but hasn't reached M865 yet.
     assert fake.flag(20) is None
     station.finish_job()
     await bridge.poll()
@@ -1433,7 +1434,7 @@ async def test_wait_for_a_running_sync_job_is_not_logged(tmp_path, caplog):
     assert len(jobs(station)) == 2
     # The job has started but hasn't reached M865 yet, so the printer still shows the old
     # color. That's the job pending, not another reason to write.
-    await bridge.poll()
+    await poll_during_job(bridge)
     station.finish_job()
     await bridge.poll()
     assert caplog.text.count("] printer will be set to spool 20") == 1
@@ -2971,10 +2972,11 @@ async def test_old_spools_tag_after_a_restart_is_not_adopted(tmp_path):
     await restarted.poll()
     end_job(station)  # The print ends; the write runs once the printer is idle.
     await restarted.poll()
+    station.finish_job()
     await restarted.poll()
     minted = stored_uuid(fake, 20)
     assert minted is not None and minted != TAG_K
-    station.finish_job()
+    assert len(jobs(station)) == 1
     assert station.tool.material.instance_uuid == minted
     await restarted.aclose()
 
