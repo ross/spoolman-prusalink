@@ -255,7 +255,7 @@ def test_shared_spool_logs_again_when_its_locations_change(caplog):
 
 
 async def test_archived_spool_on_the_first_printer_is_looked_up_once(tmp_path, caplog):
-    # The archived-spool cache is shared: b's check must not drop what a found.
+    # The printers share the archived-spool cache, pruned once per poll.
     bridge, fake, printers = await baseline(tmp_path, [spool(19, A), spool(20, B)])
     a = printers["a"]
     fake.spools[19]["archived"] = True
@@ -265,6 +265,20 @@ async def test_archived_spool_on_the_first_printer_is_looked_up_once(tmp_path, c
     assert fake.lookups == [19]
     assert fake.flag(19) == "Tool a: spool is archived but still loaded"
     assert caplog.text.count("spool 19 is archived but still loaded") == 1
+    await bridge.aclose()
+
+
+async def test_archived_spool_unloaded_with_a_runout_flag_is_flagged_whatever_the_order(tmp_path):
+    # a finds 19 archived and unloads it in the same poll. The cache is pruned before the
+    # printers run, so 19 stays cached for this poll's flags even though b runs after a.
+    bridge, fake, printers = await baseline(tmp_path, [spool(19, A), spool(20, B)])
+    bridge.state.runouts[19] = Runout("Tool a", 900.0, 1000.0, 100.0)
+    fake.spools[19]["archived"] = True
+    unload(printers["a"])
+    await bridge.poll()
+    assert fake.lookups == [19]
+    assert "unloaded mid-print" in fake.flag(19)
+    assert 19 in bridge.state.flagged
     await bridge.aclose()
 
 
