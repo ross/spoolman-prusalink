@@ -81,7 +81,7 @@ script/integration --cov=spoolman_prusalink --cov-fail-under=0
   as `"1.4.0"` for an MK4, gets that single-tool model instead, with no UUID on
   spool A or the printer. `world_config` overrides the bridge's `Config`, such
   as `flag_field=""`, and `world_printer` overrides the printer's
-  `PrinterConfig`, such as `sync_file="other.gcode"`. All three are set with
+  `PrinterConfig`, such as `sync_drift=True`. All three are set with
   `@pytest.mark.parametrize(..., indirect=True)`.
 - **A second printer, when asked for.** A test that takes `world_printers`
   at 2 (`@pytest.mark.parametrize("world_printers", [2], indirect=True)`)
@@ -90,7 +90,15 @@ script/integration --cov=spoolman_prusalink --cov-fail-under=0
   white PLA and UUID, and E is in `<prefix> LB`. `w.at("it")` and `w.at("b")`
   give each printer with its location, tool, counter and the bridge's state
   for the tool, and `printer_of(records, "b")` keeps one printer's ledger
-  records. These are in `integration/printers.py`.
+  records. These are in `integration/printers.py`, where `world` builds every
+  printer from a `Spec` of its model and what each tool holds. The moves
+  themselves, such as `unload`, `swap_cycle` and `start_print`, are in
+  `integration/station.py`, a plain module that the unit suite uses too. The
+  `World` helpers hand to printer `it`'s.
+- **One first poll and one "logged once".** `baseline(w)` polls once and
+  checks a baseline for every tool of every printer with nothing charged.
+  `logged_once(caplog, level, text)` is true when the bridge logged `text`
+  once at `level` and at no other level but `DEBUG`. Both are in `conftest.py`.
 - **Short phases.** The simulator's settings in `conftest.py` make unloads,
   loads, prints and sync jobs take a second or so. A load counts 36 mm of feed
   and 40 mm of purge.
@@ -101,7 +109,8 @@ Each test is named after its row in `docs/scenarios.md`. The table below is
 generated from the tests: the row comes from the name and the description from
 the first line of the docstring. Update it with
 `python -m integration.table --write`. A unit test checks that the table is
-current and that the scenario rows name their tests.
+current and that every test's row is in `docs/scenarios.md` with an end to
+end Status.
 
 <!-- table:begin -->
 | Row | Test | What it checks |
@@ -284,9 +293,9 @@ current and that the scenario rows name their tests.
    `events()` and `charges()`), spools in Spoolman (`w.used()`, `w.flag()`,
    `w.spoolman.extra()`), and the printer (`w.material()`, `w.requests()`,
    `w.sim.events`).
-5. Set the row's Status in `docs/scenarios.md` to end to end, naming the test,
-   and run `python -m integration.table --write`.
-   `pytest tests/test_integration_table.py` checks all three.
+5. Set the row's Status in `docs/scenarios.md` to end to end, saying what the
+   test covers, and run `python -m integration.table --write`.
+   `pytest tests/test_integration_table.py` checks the table and the row.
 
 To make Spoolman fail, use `w.spoolman_faults`, a transport in front of the
 bridge's Spoolman client (`integration/faults.py`). It passes requests through

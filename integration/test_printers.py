@@ -19,14 +19,15 @@ from integration.conftest import (
     LOAD_MM,
     PLA,
     World,
+    baseline,
     charged,
     charges,
+    count,
     events,
     logged,
+    logged_once,
+    messages,
     print_spec,
-)
-from integration.conftest import (
-    count as count_at,
 )
 from integration.printers import printer_of
 from spoolman_prusalink.app import Bridge
@@ -40,17 +41,6 @@ IT, B = "it", "b"
 def kinds(records: list[dict]) -> list[tuple[str, str]]:
     """Each event as (printer, kind), in ledger order."""
     return [(e["printer"], e["event"]) for e in events(records)]
-
-
-def count(caplog: pytest.LogCaptureFixture, text: str) -> int:
-    """How many log lines contain `text`."""
-    return sum(text in r.getMessage() for r in caplog.records)
-
-
-async def baseline(w: World) -> None:
-    records = await w.poll()
-    assert kinds(records) == [(IT, "baseline"), (B, "baseline")]
-    assert charges(records) == []
 
 
 async def settle(w: World, *names: str) -> None:
@@ -320,11 +310,11 @@ async def test_x5_claim_on_b_while_a_still_has_the_spool(
     assert charged(records, a) == 40 + 50
     assert it.state.active == a and b.state.active == a  # Both, until it says otherwise.
     shared = f"spool {a} is active in {it.location} and {b.location} at once"
-    assert count(caplog, shared) == 1
+    assert logged_once(caplog, logging.WARNING, shared)
     assert "at once" in (await w.flag("A") or "")
     await w.poll()
-    assert count(caplog, shared) == 1  # Logged once while it lasts.
-    assert count(caplog, "printer it unreachable") == 1
+    assert logged_once(caplog, logging.WARNING, shared)  # Logged once while it lasts.
+    assert logged_once(caplog, logging.WARNING, "printer it unreachable")
 
     # A was taken out of it by hand while it was off. The boot counts that unload.
     it.printer.unload(0)
@@ -366,7 +356,7 @@ async def test_x6_one_spool_active_in_two_tools(world: World, caplog: pytest.Log
     assert kinds(records) == [(B, "unload"), (B, "swap_committed")]
     assert it.state.active == a and b.state.active == a
     shared = f"spool {a} is active in {it.location} and {b.location} at once"
-    assert count(caplog, shared) == 1
+    assert logged_once(caplog, logging.WARNING, shared)
     flag = f"active in {it.location} and {b.location} at once. One of them missed an unload"
     assert flag in (await w.flag("A") or "")
     assert await w.spoolman.location(e) is None
@@ -378,7 +368,7 @@ async def test_x6_one_spool_active_in_two_tools(world: World, caplog: pytest.Log
     records = await w.poll()
     assert charged(printer_of(records, IT), a) == 10
     assert charged(printer_of(records, B), a) == 20
-    assert count(caplog, shared) == 1
+    assert logged_once(caplog, logging.WARNING, shared)
 
     # A claim on the spool staged in it ends A's time there: what it charged A since the
     # reboot moves to C.
@@ -450,7 +440,7 @@ async def test_x8_one_printer_off(world: World, caplog: pytest.LogCaptureFixture
     assert await w.spoolman.extra(w.spools["B"], CLAIM_FIELD) is True  # The claim waits.
     assert w.bridge.interval() == cfg.poll_idle
     await w.poll()
-    assert count(caplog, "printer it unreachable") == 1
+    assert logged_once(caplog, logging.WARNING, "printer it unreachable")
 
     # The interval follows b.
     b.printer.start_print(print_spec())
@@ -472,7 +462,7 @@ async def test_x8_one_printer_off(world: World, caplog: pytest.LogCaptureFixture
     assert kinds(records) == [(IT, "reboot"), (IT, "claimed"), (B, "reboot")]
     assert it.state.active == w.spools["B"]
     assert logged(caplog, logging.WARNING, "printer it reachable again")
-    assert count(caplog, "printer it unreachable") == 1
+    assert logged_once(caplog, logging.WARNING, "printer it unreachable")
 
 
 async def failing_eviction(w: World, caplog: pytest.LogCaptureFixture) -> str:
@@ -496,8 +486,8 @@ async def failing_eviction(w: World, caplog: pytest.LogCaptureFixture) -> str:
     assert await w.spoolman.location(a) == it.location
     assert faults.requests.count(f"PATCH /api/v1/spool/{a} 503") == 3
     cant = f"[{it.location}] can't move spool {a} out: "
-    assert count_at(caplog, logging.WARNING, cant) == 1
-    assert count_at(caplog, logging.DEBUG, f"still can't move spool {a} out: ") == 2
+    assert logged_once(caplog, logging.WARNING, cant)
+    assert count(caplog, logging.DEBUG, f"still can't move spool {a} out: ") == 2
     return cant
 
 
@@ -518,8 +508,8 @@ async def test_x4_failing_eviction_ends_when_the_spool_is_moved(
     assert it.state.evict == ()
     await w.poll()
     assert await w.spoolman.location(a) == b.location
-    assert count_at(caplog, logging.INFO, f"spool {a} no longer needs moving out") == 1
-    assert count_at(caplog, logging.WARNING, cant) == 1
+    assert logged_once(caplog, logging.INFO, f"spool {a} no longer needs moving out")
+    assert logged_once(caplog, logging.WARNING, cant)
     assert w.spoolman_faults.requests.count(f"PATCH /api/v1/spool/{a} 503") == 3
 
 
@@ -540,7 +530,7 @@ async def test_x8_failing_eviction_ends_while_the_printer_is_off(
         await w.poll()
     assert it.state.evict == (a,)
     out = f"[{it.location}] spool {a} is out of the location now"
-    assert count_at(caplog, logging.INFO, out) == 1
+    assert logged_once(caplog, logging.INFO, out)
     assert w.spoolman_faults.requests.count(f"PATCH /api/v1/spool/{a} 503") == 3
 
     # it comes back and drops the eviction, with nothing more said about it.
@@ -549,9 +539,9 @@ async def test_x8_failing_eviction_ends_while_the_printer_is_off(
         await w.poll()
     assert it.state.evict == ()
     assert await w.spoolman.location(a) == w.shelf
-    assert count_at(caplog, logging.INFO, out) == 1
+    assert logged_once(caplog, logging.INFO, out)
     assert not logged(caplog, logging.INFO, f"spool {a} no longer needs moving out")
-    assert count_at(caplog, logging.WARNING, cant) == 1
+    assert logged_once(caplog, logging.WARNING, cant)
 
 
 async def test_x9_spoolman_unreachable(world: World, caplog: pytest.LogCaptureFixture):
@@ -569,8 +559,8 @@ async def test_x9_spoolman_unreachable(world: World, caplog: pytest.LogCaptureFi
     it.extrude(10)
     b.printer.set_power("off")
     assert await w.poll() == []
-    assert count(caplog, "Spoolman unreachable") == 1
-    assert count(caplog, "printer b unreachable") == 1
+    assert logged_once(caplog, logging.WARNING, "Spoolman unreachable")
+    assert logged_once(caplog, logging.WARNING, "printer b unreachable")
     b.printer.set_power("on")
     b.extrude(20)
 
@@ -621,8 +611,8 @@ async def test_x10_firmware_without_the_filament_endpoint(
     records = await w.poll()
     await w.poll()
     assert charged(records, e) == 100 and charges(records, a) == []
-    unsupported = "printer it: printer firmware has no /api/v1/filament"
-    assert count(caplog, unsupported) == 1
+    unsupported = "printer it: firmware has no /api/v1/filament"
+    assert logged_once(caplog, logging.ERROR, unsupported)
     assert logged(caplog, logging.ERROR, "this firmware isn't supported")
     assert w.bridge.interval() == cfg.poll_idle
 
@@ -642,7 +632,7 @@ async def test_x10_firmware_without_the_filament_endpoint(
     assert logged(caplog, logging.ERROR, "printer it now reports filament; resuming")
     it.extrude(5)
     assert charged(await w.poll(), a) == 5
-    assert count(caplog, unsupported) == 1
+    assert logged_once(caplog, logging.ERROR, unsupported)
 
 
 async def test_x11_charge_rejected_with_404(world: World, caplog: pytest.LogCaptureFixture):
@@ -741,7 +731,7 @@ async def test_x14_printer_renamed(world: World, caplog: pytest.LogCaptureFixtur
     renamed = replace(w.cfg, printers=(replace(w.cfg.printers[0], name="it2"), w.cfg.printers[1]))
     warning = "the database has a printer 'it' that isn't configured; keeping its state"
     bridge_for(w, renamed)
-    assert count(caplog, warning) == 1
+    assert logged_once(caplog, logging.WARNING, warning)
     records = await w.poll()
     await w.poll()
     assert kinds(records) == [("it2", "baseline")]
@@ -759,7 +749,8 @@ async def test_x14_printer_renamed(world: World, caplog: pytest.LogCaptureFixtur
     await w.bridge.aclose()
 
     bridge_for(w, renamed)  # Warned at each start.
-    assert count(caplog, warning) == 2
+    assert len(messages(caplog, None, warning)) == 2  # At any level.
+    assert count(caplog, logging.WARNING, warning) == 2
 
 
 async def test_x16_runout_flag_clears_when_active_elsewhere(world: World):
