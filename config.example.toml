@@ -22,8 +22,6 @@ url = "http://192.168.1.22"
 # Storage and file name for the sync job, which is overwritten each time.
 # sync_storage = "usb"
 # sync_file = "spoolman-sync.gcode"
-# Whether the printer can hold an instance UUID (tool 0 only). false on INDX.
-# uuids = true
 
 [spoolman]
 url = "http://spoolman:8000"

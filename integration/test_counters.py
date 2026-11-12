@@ -217,9 +217,6 @@ async def test_c2_printer_off_for_hours(world: World, caplog: pytest.LogCaptureF
     """Printer off for hours: logged going, hourly and back, idle polls, nothing charged."""
     caplog.set_level(logging.INFO, logger="spoolman_prusalink")
     w = world
-    # The outage clock runs on simulated time, offset so that it starts large, as a
-    # monotonic clock does: a reminder measured from zero would show up here too.
-    w.bridge.printers[0]._printer_reach.clock = lambda: w.sim.now + 1e6
     await baseline(w)
     w.printer.extrude(0, 10)
     records = await w.poll()

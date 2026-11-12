@@ -81,7 +81,7 @@ script/integration --cov=spoolman_prusalink --cov-fail-under=0
   as `"1.4.0"` for an MK4, gets that single-tool model instead, with no UUID on
   spool A or the printer. `world_config` overrides the bridge's `Config`, such
   as `flag_field=""`, and `world_printer` overrides the printer's
-  `PrinterConfig`, such as `uuids=False`. All three are set with
+  `PrinterConfig`, such as `sync_file="other.gcode"`. All three are set with
   `@pytest.mark.parametrize(..., indirect=True)`.
 - **A second printer, when asked for.** A test that takes `world_printers`
   at 2 (`@pytest.mark.parametrize("world_printers", [2], indirect=True)`)
@@ -106,7 +106,6 @@ current and that the scenario rows name their tests.
 <!-- table:begin -->
 | Row | Test | What it checks |
 | --- | --- | --- |
-| S1 | `test_configs.py::test_s1_tag_uuid_conflict_is_ignored_without_uuids` | UUIDs off, and the tag's differs from the spool's in Spoolman: no conflict, no flag. |
 | S1 | `test_configs.py::test_s1_tag_uuid_is_not_adopted_without_uuids` | UUIDs off, and the new spool's tag has one: nothing is stored, written or flagged. |
 | S1 | `test_swaps.py::test_s1_matching_tag_writes_nothing` | Spoolman first, and the new spool's tag already matches: nothing is written. |
 | S1 | `test_swaps.py::test_s1_menu_load_with_other_values_is_written` | Spoolman first, and a menu load of another type: Spoolman's spool is written. |
@@ -173,7 +172,6 @@ current and that the scenario rows name their tests.
 | W8 | `test_writes.py::test_w8_pps_is_flagged_until_loaded_from_the_menu` | PPS isn't written but flagged; loaded from the printer's menu, the flag clears. |
 | W9 | `test_configs.py::test_w9_drift_is_logged_but_not_flagged_with_flags_off` | Flags off: drift is logged and left alone, and the flag field is never written. |
 | W9 | `test_configs.py::test_w9_printer_change_beside_an_edit_is_drift` | A spool edited in Spoolman and the printer changed too: drift, so nothing is written. |
-| W9 | `test_configs.py::test_w9_tag_of_another_spool_is_not_drift_without_uuids` | UUIDs off, and the tag is another spool's UUID in Spoolman: not drift, not flagged. |
 | W9 | `test_writes.py::test_w9_drift_is_flagged_unless_sync_drift` | Printer changed with no unload: flagged and left alone, or rewritten with sync_drift. |
 | W9 | `test_writes.py::test_w9_malformed_color_is_drift` | The printer reports a color that isn't a hex color: drift, logged and cleared once. |
 | W9 | `test_writes.py::test_w9_temperature_drift_is_flagged_unless_sync_drift` | A temperature changed on the printer is drift too: flagged, or rewritten. |
@@ -307,9 +305,9 @@ archiving and unarchiving a spool, writing a text field, and renaming a location
 To make the printer fail one request, set `w.before_request`, a function that gets
 the method and path of each request before the simulator serves it. It can change
 the printer between two of the bridge's requests, as W3 starts a print before the
-upload. It can also return an aiohttp response to send instead, such as a 500 for
-`/api/version` or a 204 for `/api/v1/job`, or `simulator.prusalink.DROP` to close
-the connection with no answer. Returning None serves the request as usual.
+upload. It can also return a `simulator.prusalink.Answer` to send instead, such as a
+500 for `/api/version` or a 204 for `/api/v1/job`, or `simulator.prusalink.DROP` to
+close the connection with no answer. Returning None serves the request as usual.
 
 Poll where a real bridge would have polled. Some behaviour depends on what two
 polls in a row see: the bridge counts a print as started only when the counter

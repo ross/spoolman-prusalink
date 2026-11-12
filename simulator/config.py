@@ -325,8 +325,6 @@ def bridge_config(cfg: SimConfig) -> str:
             f"url = {_quote(f'http://{cfg.host}:{printer.port}')}",
             f"api_key = {_quote(printer.api_key)}",
         ]
-        if not MODELS[printer.model].uuids:
-            lines.append("uuids = false")
         lines.append("")
         for tool in printer.tools:
             lines += [

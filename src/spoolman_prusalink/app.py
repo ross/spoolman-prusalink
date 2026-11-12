@@ -8,11 +8,13 @@ import logging
 import re
 import time
 import uuid
-from collections.abc import Callable, Hashable, Sequence
+from collections.abc import Callable, Hashable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from enum import Enum
 from typing import NamedTuple
+
+import httpx  # For the transport types `from_config` takes; errors come from .errors.
 
 from . import drift, printer_sync
 from .accounting import (
@@ -90,11 +92,11 @@ class Reachability:
     again, so a reminder or recovery line gives the length of the current trouble.
 
     This class holds state only. `failed()` and `ok()` report what changed, and the
-    caller logs it.
+    caller logs it. `clock` reads the bridge's clock.
     """
 
     name: str
-    clock: Callable[[], float] = time.monotonic
+    clock: Callable[[], float]
     since: float | None = None
     unreachable: bool = False
     error: str = ""  # The bad answer's error; unused while unreachable.
@@ -264,7 +266,8 @@ class PrinterBridge:
     _compared_flags: dict[int, dict[int, list[str]]] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        self._printer_reach = Reachability(self.label)
+        # Read through the bridge, so a clock set on it later reaches this one too.
+        self._printer_reach = Reachability(self.label, lambda: self.bridge.clock())
         kept = self.bridge.state.printers.get(self.name)
         if kept is not None:
             self._seen_uuid = {t: (u, s, False, d) for t, (u, s, d) in kept.seen_uuids.items()}
@@ -473,12 +476,7 @@ class PrinterBridge:
     def _uuids(self) -> bool:
         """Whether to write and compare instance UUIDs: configured with a Spoolman field to
         keep them in, and the model keeps them."""
-        return bool(
-            self.config.uuids
-            and self.bridge.config.uuid_field
-            and self._model is not None
-            and self._model.uuids
-        )
+        return bool(self.bridge.config.uuid_field and self._tag_reader)
 
     def _preamble(self) -> tuple[str, ...]:
         if self.config.gcode_preamble is not None:
@@ -1271,7 +1269,7 @@ class Bridge:
     # Field keys whose last setup failure was `Rejected`: it needs someone to fix it.
     _unusable_fields: set[str] = field(default_factory=set)
     _flags: dict[int, str] = field(default_factory=dict)  # Desired flags from the last poll.
-    _spoolman_reach: Reachability = field(default_factory=lambda: Reachability("Spoolman"))
+    _spoolman_reach: Reachability = field(init=False)
     # What's failing now, by spool, with the last error logged for each.
     _unclaim_failing: dict[int, str] = field(default_factory=dict)
     _evict_failing: dict[int, str] = field(default_factory=dict)
@@ -1299,6 +1297,8 @@ class Bridge:
     clock: Callable[[], float] = time.monotonic
 
     def __post_init__(self) -> None:
+        # Read through `self`, so a clock set later reaches it too.
+        self._spoolman_reach = Reachability("Spoolman", lambda: self.clock())
         several = len(self.config.printers) > 1
         self.printers = [
             PrinterBridge(
@@ -1317,23 +1317,38 @@ class Bridge:
         return next((p for p in self.printers if p.name == name), None)
 
     @classmethod
-    def from_config(cls, config: Config) -> Bridge:
+    def from_config(
+        cls,
+        config: Config,
+        *,
+        clock: Callable[[], float] = time.monotonic,
+        spoolman_transport: httpx.AsyncBaseTransport | None = None,
+        printer_transports: Mapping[str, httpx.AsyncBaseTransport] | None = None,
+    ) -> Bridge:
         """A bridge on the configured printers, Spoolman and database.
 
-        It locks the database until `aclose`, and creates it if it's missing.
+        It locks the database until `aclose`, and creates it if it's missing. `clock`
+        times the idle wait and every outage. The transports, for Spoolman and by
+        printer name, replace the network; the clients close them.
         """
+        transports = printer_transports or {}
         db = Database.open(config.db_file)
         return cls(
             config=config,
-            clients={p.name: PrusaLink(p.url, p.api_key) for p in config.printers},
+            clients={
+                p.name: PrusaLink(p.url, p.api_key, transport=transports.get(p.name))
+                for p in config.printers
+            },
             spoolman=Spoolman(
                 config.spoolman_url,
                 uuid_field=config.uuid_field,
                 flag_field=config.flag_field,
                 claim_field=config.claim_field,
+                transport=spoolman_transport,
             ),
             state=db.load(),
             db=db,
+            clock=clock,
         )
 
     def _save(self, ledger: Sequence[dict] = ()) -> None:

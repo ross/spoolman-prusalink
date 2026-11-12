@@ -244,7 +244,7 @@ def reported(material):
     return {**dict(zip(TEMPERATURE_KEYS, base, strict=True)), **material}
 
 
-PRINTER_KEYS = {"gcode_preamble", "sync_storage", "sync_file", "uuids"}
+PRINTER_KEYS = {"gcode_preamble", "sync_storage", "sync_file"}
 
 
 def make(tmp_path, spools, **cfg):
@@ -3091,7 +3091,8 @@ def two_printers(tmp_path, spools, **cfg):
             uuid_field=config.uuid_field,
             flag_field=config.flag_field,
             claim_field=config.claim_field,
-            transport=httpx.MockTransport(fake.handle),
+            # Late bound, so a test can replace `fake.handle`.
+            transport=httpx.MockTransport(lambda request: fake.handle(request)),
         ),
         clients={
             name: PrusaLink(f"http://{name}", "k", transport=httpx.MockTransport(p.handle))
@@ -3390,13 +3391,9 @@ async def test_runout_leftover_then_a_claim_is_written_over(tmp_path):
     await bridge.aclose()
 
 
-UUIDS_OFF = [{"uuid_field": None}, {"uuids": False}]
-
-
-@pytest.mark.parametrize("cfg", UUIDS_OFF)
-async def test_tag_is_not_written_with_uuids_off(tmp_path, caplog, cfg):
+async def test_tag_is_not_written_with_uuids_off(tmp_path, caplog):
     """With UUIDs off, a new tag after a swap is still left alone, and isn't drift."""
-    bridge, fake, printer = make(tmp_path, [spool(19)], **cfg)
+    bridge, fake, printer = make(tmp_path, [spool(19)], uuid_field=None)
     await bridge.poll()  # baseline
     fake.spools[20] = spool(20)
     await bridge.poll()
@@ -3412,10 +3409,9 @@ async def test_tag_is_not_written_with_uuids_off(tmp_path, caplog, cfg):
     await bridge.aclose()
 
 
-@pytest.mark.parametrize("cfg", UUIDS_OFF)
-async def test_runout_leftover_is_written_over_with_uuids_off(tmp_path, cfg):
+async def test_runout_leftover_is_written_over_with_uuids_off(tmp_path):
     """With UUIDs off, a reload that keeps 19's tag with 20 active is still written over."""
-    bridge, fake, printer = make(tmp_path, [spool(19)], **cfg)
+    bridge, fake, printer = make(tmp_path, [spool(19)], uuid_field=None)
     printer.material = tagged()
     await bridge.poll()  # baseline: 19's tag, seen with 19
     fake.spools[20] = spool_x(20)

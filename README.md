@@ -118,7 +118,7 @@ To serve several printers from one bridge, replace `[printer]` and `[[tools]]`
 in the config file with a `[[printers]]` list. Each entry has a `name`, a
 `url`, the API key as `api_key` or as `api_key_env` naming the environment
 variable that holds it, its own `[[printers.tools]]` entries, and any of
-`gcode_preamble`, `sync_storage`, `sync_file` and `uuids`:
+`gcode_preamble`, `sync_storage` and `sync_file`:
 
 ```toml
 [[printers]]
@@ -356,8 +356,8 @@ loaded spool over it. Any other unload, including a runout in a print the
 bridge didn't see start (it was down at the start), leaves the tag alone. The
 new spool is then flagged only if the old spool has the tag's UUID in
 Spoolman. This
-holds whatever the UUID settings: with `uuid_field = ""` or `uuids = false`,
-the bridge still leaves a tagged tool alone.
+holds whatever the UUID settings: with `uuid_field = ""`, the bridge still
+leaves a tagged tool alone.
 
 The bridge remembers the `M865` line it last wrote for each tool. If the
 printer still shows that write but the spool has changed in Spoolman (color,
@@ -400,8 +400,9 @@ Requirements for a write:
   spool and doesn't write.
 - The printer's name is the material, cut to the 7 characters from
   `a-zA-Z0-9_-` the firmware accepts, so `PLA+` is written as `PLA`.
-- With `uuid_field` set and `uuids = true`, a spool with no instance UUID gets
-  a new one in Spoolman before it's written.
+- With `uuid_field` set, on a model that keeps instance UUIDs (Core One and
+  Core One L), a spool with no instance UUID gets a new one in Spoolman before
+  it's written.
 
 The bridge's own job doesn't count as a print start: it's recognized by
 `sync_file`.
