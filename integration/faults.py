@@ -149,6 +149,11 @@ async def archive_spool(client: httpx.AsyncClient, spool_id: int) -> None:
     resp.raise_for_status()
 
 
+async def unarchive_spool(client: httpx.AsyncClient, spool_id: int) -> None:
+    resp = await client.patch(f"/api/v1/spool/{spool_id}", json={"archived": False})
+    resp.raise_for_status()
+
+
 async def set_extra_text(client: httpx.AsyncClient, spool_id: int, key: str, text: str) -> None:
     """Write a text extra field, as a user editing the spool in Spoolman would."""
     resp = await client.patch(f"/api/v1/spool/{spool_id}", json={"extra": {key: json.dumps(text)}})
