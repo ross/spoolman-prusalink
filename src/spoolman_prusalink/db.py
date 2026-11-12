@@ -12,6 +12,7 @@ from pathlib import Path
 
 from .accounting import ToolState
 from .state import PrinterState, Runout, State
+from .tags import SeenTag
 
 SCHEMA_VERSION = 1
 
@@ -385,8 +386,10 @@ def _rows(state: State) -> Rows:
             rows["tools"][(name, tool)] = (_canonical(st.to_json()),)
         for spool_id, texts in p.flags.items():
             rows["printer_flags"][(name, spool_id)] = (json.dumps(list(texts)),)
-        for tool, (uuid, spool_id, runout) in p.seen_uuids.items():
-            rows["seen_uuids"][(name, tool)] = (uuid, spool_id, int(runout))
+        for tool, seen in p.seen_tags.items():
+            # What the bridge watched isn't saved (see `SeenTag`).
+            if seen.uuid is not None:
+                rows["seen_uuids"][(name, tool)] = (seen.uuid, seen.spool_id, int(seen.runout))
     for spool_id in state.flagged:
         rows["flagged"][(spool_id,)] = ()
     for spool_id in state.claimed:
@@ -418,8 +421,8 @@ def _read(conn: sqlite3.Connection) -> tuple[State, Rows, list[tuple[int, str]]]
     for (printer, spool_id), (texts,) in rows["printer_flags"].items():
         state.printers.setdefault(printer, PrinterState()).flags[spool_id] = json.loads(texts)
     for (printer, tool), (uuid, spool_id, runout) in rows["seen_uuids"].items():
-        seen = state.printers.setdefault(printer, PrinterState()).seen_uuids
-        seen[tool] = (uuid, spool_id, bool(runout))
+        seen = state.printers.setdefault(printer, PrinterState()).seen_tags
+        seen[tool] = SeenTag(uuid, spool_id, runout=bool(runout))
     state.printers = dict(sorted(state.printers.items()))
     state.flagged = [k for (k,) in rows["flagged"]]
     state.claimed = [k for (k,) in rows["claimed"]]
