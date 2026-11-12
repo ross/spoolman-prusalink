@@ -486,8 +486,20 @@ CONFIG_BASE = (
             "[bridge]\npoll_printing = -nan\n",
             "bridge.poll_printing must be a number greater than 0",
         ),
-        ("[bridge]\nlength_factor = nan\n", "bridge.length_factor must be a number"),
-        ("[bridge]\nlength_factor = inf\n", "bridge.length_factor must be a number"),
+        ("[bridge]\nlength_factor = nan\n", "bridge.length_factor must be a finite number"),
+        ("[bridge]\nlength_factor = inf\n", "bridge.length_factor must be a finite number"),
+        (
+            "[bridge]\nlength_factor = 1" + "0" * 400 + "\n",
+            "bridge.length_factor must be a finite number",
+        ),
+        (
+            "[bridge]\npoll_idle = 1" + "0" * 400 + "\n",
+            "bridge.poll_idle must be a number greater than 0",
+        ),
+        (
+            "[bridge]\nsync_delay = 1" + "0" * 400 + "\n",
+            "bridge.sync_delay must be a number of seconds",
+        ),
         ("[bridge]\nuuid_field = 5\n", "bridge.uuid_field must be a string"),
         ("[bridge]\nflag_field = true\n", "bridge.flag_field must be a string"),
         ('[bridge]\nclaim_field = ["a"]\n', "bridge.claim_field must be a string"),
