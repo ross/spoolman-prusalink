@@ -5,7 +5,6 @@ import logging
 import sqlite3
 from dataclasses import replace
 
-import httpx
 import pytest
 from harness import (
     CLAIMED,
@@ -35,7 +34,6 @@ from simulator.prusalink import Answer
 from spoolman_prusalink.accounting import ToolState
 from spoolman_prusalink.db import read_state
 from spoolman_prusalink.printer_sync import PRINTER_MODELS, WriteState, default_preamble
-from spoolman_prusalink.prusalink import PrusaLink
 from spoolman_prusalink.records import ChargeRecord
 
 COREONEL_PREAMBLE = default_preamble(PRINTER_MODELS["8.1.0"])
@@ -90,14 +88,9 @@ async def test_queued_charge_survives_restart(tmp_path):
     station.tool.extruded = 1500
     fake.fail_use = [503]
     await bridge.poll()
-    await bridge.aclose()
 
     # A new bridge process: it loads the outbox and sends it even if the printer is down.
-    restarted, _, _ = make(tmp_path, [])
-    restarted.spoolman = bridge.spoolman.__class__(
-        "http://spoolman", flag_field="bridge_flag", transport=httpx.MockTransport(fake.handle)
-    )
-    restarted.printers[0].client = PrusaLink("http://printer", "k", transport=station.transport())
+    restarted = restart(bridge)
     station.before_request = drop
     await restarted.poll()
     assert fake.used == {19: [500.0]}

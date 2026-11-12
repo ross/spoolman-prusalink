@@ -68,7 +68,7 @@ class FlagSync:
         fields: SpoolFields,
         archived: ArchivedSpools,
         state: State,
-        key: str,
+        key: str | None,
     ) -> None:
         self._spoolman = spoolman
         self._fields = fields

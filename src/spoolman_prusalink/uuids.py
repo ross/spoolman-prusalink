@@ -33,7 +33,7 @@ class UuidRegistry:
     every poll.
     """
 
-    def __init__(self, spoolman: Spoolman, fields: SpoolFields, key: str) -> None:
+    def __init__(self, spoolman: Spoolman, fields: SpoolFields, key: str | None) -> None:
         self._spoolman = spoolman
         self._fields = fields
         self._key = key
