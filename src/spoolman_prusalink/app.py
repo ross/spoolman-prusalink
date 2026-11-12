@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-import re
 import time
 import uuid
 from collections.abc import Callable, Hashable, Mapping, Sequence
@@ -187,12 +186,6 @@ def _outbox_outcome(sent: int, held: int, dropped: int) -> str:
 
 def _now() -> str:
     return datetime.now(UTC).isoformat(timespec="seconds")
-
-
-def _written_uuid(written: str | None) -> str | None:
-    """The instance UUID in the bridge's last write to a tool, if any."""
-    found = re.search(r'^M865\.1 I0 C"([^"]+)"', written or "", re.MULTILINE)
-    return found.group(1).lower() if found else None
 
 
 class _Adoption(NamedTuple):
@@ -629,7 +622,7 @@ class PrinterBridge:
                     spools=spools,
                     uuids=self._uuids,
                     refused=self.bridge._refused_uuids,
-                    written_uuid=_written_uuid(st.written),
+                    written_uuid=st.written.uuid if st.written else None,
                 )
             if seen != SeenTag():
                 self._seen_tags[tool] = seen
@@ -884,7 +877,7 @@ class PrinterBridge:
         if st.written is None:
             return None
         try:
-            want = self._write_lines(tool, spool, spool.instance_uuid)
+            want = self._filament(tool, spool, spool.instance_uuid)
         except printer_sync.CannotSync:
             # The edit can't be written, but it's still an edit, not drift:
             # _classify_mismatch flags why.
@@ -895,16 +888,17 @@ class PrinterBridge:
             return None
         return "spool changed in Spoolman since the last write"
 
-    def _write_lines(self, tool: int, spool: Spool, uuid_value: str | None) -> str:
+    def _filament(
+        self, tool: int, spool: Spool, uuid_value: str | None
+    ) -> printer_sync.WrittenFilament:
+        """Return what writing `spool` to `tool` would set, or raise CannotSync."""
         uuid_value = uuid_value if self._uuid_tool(tool) else None
-        return "\n".join(
-            printer_sync.filament_lines(printer_sync.ToolWrite(tool, spool, uuid_value))
-        )
+        return printer_sync.filament_for(printer_sync.ToolWrite(tool, spool, uuid_value))
 
     def _cannot_write(self, tool: int, spool: Spool) -> str | None:
         """Return why `spool` can't be written to the printer, or None if it can."""
         try:
-            self._write_lines(tool, spool, spool.instance_uuid)
+            self._filament(tool, spool, spool.instance_uuid)
         except printer_sync.CannotSync as e:
             return str(e)
         return None
@@ -1095,7 +1089,7 @@ class PrinterBridge:
                 st,
                 needs_sync=True,
                 sync_attempts=st.sync_attempts + 1,
-                written="\n".join(printer_sync.filament_lines(w)),
+                written=printer_sync.filament_for(w),
             )
         self._pending_writes = []
         self._last_state = "BUSY"  # The job is starting; poll again soon to verify it.

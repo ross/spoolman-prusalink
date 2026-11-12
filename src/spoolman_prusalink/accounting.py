@@ -61,6 +61,7 @@ from dataclasses import dataclass, field, fields, replace
 from enum import Enum, StrEnum, auto
 
 from .models import ToolReading
+from .printer_sync import WrittenFilament
 
 
 class Report(Enum):
@@ -195,10 +196,10 @@ class ToolState:
     # active spool changes or the tool unloads (a menu load drops color and UUID).
     needs_sync: bool = False
     sync_attempts: int = 0
-    # The `M865` lines last written to the printer for this tool, so an edit in Spoolman
+    # What the bridge last wrote to the printer for this tool, so an edit in Spoolman
     # can be told apart from a change on the printer. None when the bridge hasn't
     # written this tool.
-    written: str | None = None
+    written: WrittenFilament | None = None
     # Usage held in raw extruded mm, charged to the next spool that becomes active in this
     # tool: after the active spool was deleted in Spoolman (`deleted_spool` is that
     # spool), or carried over a reboot (`deleted_spool` is None).
@@ -242,7 +243,7 @@ class ToolState:
             "notice": _notice_json(self.notice),
             "needs_sync": self.needs_sync,
             "sync_attempts": self.sync_attempts,
-            "written": self.written,
+            "written": None if self.written is None else self.written.to_json(),
             "held_mm": self.held_mm,
             "deleted_spool": self.deleted_spool,
             "staged_notice": _notice_json(self.staged_notice),
@@ -282,7 +283,7 @@ class ToolState:
             notice=_notice_from_json(data["notice"]),
             needs_sync=bool(data["needs_sync"]),
             sync_attempts=int(data["sync_attempts"]),
-            written=data["written"],
+            written=None if data["written"] is None else WrittenFilament.from_json(data["written"]),
             held_mm=int(data["held_mm"]),
             deleted_spool=data["deleted_spool"],
             staged_notice=_notice_from_json(data["staged_notice"]),

@@ -219,15 +219,94 @@ class ToolWrite:
     uuid: str | None  # Instance UUID to write, on tool 0 only.
 
 
-def filament_lines(write: ToolWrite) -> list[str]:
-    """Return the `M865`/`M865.1` lines that load `write.spool` as an ad-hoc filament.
+@dataclass(frozen=True)
+class WrittenFilament:
+    """Every parameter one write sets on a tool, as `M865` and `M865.1` take them.
 
-    `R` resets every parameter, so the line gives them all: from the material's
-    firmware preset, with Spoolman's extruder and bed temperatures taking priority.
-    A material that isn't a preset needs both temperatures in Spoolman. PPS and PPA
-    can't be written at all.
+    The bridge saves this as its last write to the tool. Comparing it with the write a
+    spool needs now shows an edit in Spoolman, and comparing it with what the printer
+    reports shows a change made on the printer.
     """
-    spool, tool = write.spool, write.tool
+
+    name: str
+    nozzle: int
+    bed: int
+    preheat: int | None = None  # None isn't written, which leaves `DEFAULT_PREHEAT`.
+    chamber: tuple[int, int, int] | None = None  # (target, min, max), from a preset.
+    filtration: bool = False
+    flexible: bool = False
+    color: str | None = None  # As "#rrggbb".
+    uuid: str | None = None  # The instance UUID, in lowercase. On `UUID_TOOL` only.
+
+    @property
+    def temperatures(self) -> Temperatures:
+        """The temperatures the printer reports after this write."""
+        preheat = DEFAULT_PREHEAT if self.preheat is None else self.preheat
+        return Temperatures(self.nozzle, preheat, self.bed)
+
+    def lines(self, tool: int) -> list[str]:
+        """Return the G-code lines that write this filament to `tool`.
+
+        `R` resets every parameter, so the first line gives them all.
+        """
+        parts = ["M865 X R", f'N"{self.name}"', f"T{self.nozzle}", f"B{self.bed}"]
+        if self.preheat is not None:
+            parts.append(f"P{self.preheat}")
+        if self.chamber is not None:
+            target, low, high = self.chamber
+            parts.append(f"C{target} D{low} E{high}")
+        if self.filtration:
+            parts.append("F1")
+        if self.flexible:
+            parts.append("G1")
+        if self.color:
+            parts.append(f'O"{self.color}"')
+        parts.append(f"L{tool}")
+        lines = [" ".join(parts)]
+        if self.uuid:
+            lines.append(f'M865.1 I{UUID_TOOL} C"{self.uuid}"')
+        return lines
+
+    def to_json(self) -> dict:
+        return {
+            "name": self.name,
+            "nozzle": self.nozzle,
+            "bed": self.bed,
+            "preheat": self.preheat,
+            "chamber": None if self.chamber is None else list(self.chamber),
+            "filtration": self.filtration,
+            "flexible": self.flexible,
+            "color": self.color,
+            "uuid": self.uuid,
+        }
+
+    @classmethod
+    def from_json(cls, data: dict) -> WrittenFilament:
+        chamber = data["chamber"]
+        if chamber is not None:
+            target, low, high = chamber
+            chamber = (int(target), int(low), int(high))
+        return cls(
+            name=data["name"],
+            nozzle=int(data["nozzle"]),
+            bed=int(data["bed"]),
+            preheat=None if data["preheat"] is None else int(data["preheat"]),
+            chamber=chamber,
+            filtration=bool(data["filtration"]),
+            flexible=bool(data["flexible"]),
+            color=data["color"],
+            uuid=data["uuid"],
+        )
+
+
+def filament_for(write: ToolWrite) -> WrittenFilament:
+    """Return what loading `write.spool` as an ad-hoc filament sets on the tool.
+
+    The values come from the material's firmware preset, with Spoolman's extruder and
+    bed temperatures taking priority. A material that isn't a preset needs both
+    temperatures in Spoolman. PPS and PPA can't be written at all.
+    """
+    spool = write.spool
     name = printer_name(spool)
     if name is None:
         raise CannotSync(f"spool {spool.id} has no material or name to write")
@@ -240,23 +319,22 @@ def filament_lines(write: ToolWrite) -> list[str]:
     temps = temperatures(spool)
     key = preset_for(spool)
     preset = PRESETS.get(key) if key else None
-    parts = ["M865 X R", f'N"{name}"', f"T{temps.nozzle}", f"B{temps.bed}"]
-    if preset:
-        parts.append(f"P{temps.preheat}")
-        target, low, high = preset.chamber
-        parts.append(f"C{target} D{low} E{high}")
-        if preset.filtration:
-            parts.append("F1")
-        if preset.flexible:
-            parts.append("G1")
-    color = _color(spool)
-    if color:
-        parts.append(f'O"{color}"')
-    parts.append(f"L{tool}")
-    lines = [" ".join(parts)]
-    if tool == UUID_TOOL and write.uuid:
-        lines.append(f'M865.1 I0 C"{_uuid(spool, write.uuid)}"')
-    return lines
+    return WrittenFilament(
+        name=name,
+        nozzle=temps.nozzle,
+        bed=temps.bed,
+        preheat=temps.preheat if preset else None,
+        chamber=preset.chamber if preset else None,
+        filtration=bool(preset and preset.filtration),
+        flexible=bool(preset and preset.flexible),
+        color=_color(spool),
+        uuid=_uuid(spool, write.uuid) if write.tool == UUID_TOOL and write.uuid else None,
+    )
+
+
+def filament_lines(write: ToolWrite) -> list[str]:
+    """Return the `M865`/`M865.1` lines that load `write.spool` as an ad-hoc filament."""
+    return filament_for(write).lines(write.tool)
 
 
 def _uuid(spool: Spool, value: str) -> str:
@@ -276,38 +354,18 @@ def _uuid(spool: Spool, value: str) -> str:
     return canonical
 
 
-def printer_matches_write(material: Material, written: str, uuids: bool) -> bool:
-    """Whether the printer still reports what `written` (from `filament_lines`) set.
+def printer_matches_write(material: Material, written: WrittenFilament, uuids: bool) -> bool:
+    """Whether the printer still reports what the bridge's last write set.
 
     Compares what the printer reports: name, color, temperatures and UUID.
     """
-    name = re.search(r'\bN"([^"]*)"', written)
-    color = re.search(r'\bO"(#[0-9a-f]{6})"', written)
-    uuid = re.search(r'^M865\.1 I0 C"([^"]+)"', written, re.MULTILINE)
-    if name is None or material.name.casefold() != name.group(1).casefold():
+    if material.name.casefold() != written.name.casefold():
         return False
-    if not same_color(material.color, color.group(1) if color else None):
+    if not same_color(material.color, written.color):
         return False
-    if _written_temperatures(written) != _reported_temperatures(material):
+    if written.temperatures != _reported_temperatures(material):
         return False
-    if uuids:
-        want = uuid.group(1).lower() if uuid else ""
-        if (material.instance_uuid or "").lower() != want:
-            return False
-    return True
-
-
-def _written_temperatures(written: str) -> Temperatures:
-    line = written.splitlines()[0]
-    nozzle = re.search(r"\sT(\d+)\b", line)
-    bed = re.search(r"\sB(\d+)\b", line)
-    preheat = re.search(r"\sP(\d+)\b", line)
-    assert nozzle and bed  # The first line always has both.
-    return Temperatures(
-        int(nozzle.group(1)),
-        int(preheat.group(1)) if preheat else DEFAULT_PREHEAT,
-        int(bed.group(1)),
-    )
+    return not uuids or (material.instance_uuid or "").lower() == (written.uuid or "")
 
 
 def _reported_temperatures(material: Material) -> Temperatures:

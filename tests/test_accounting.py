@@ -18,6 +18,7 @@ from spoolman_prusalink.accounting import (
 from spoolman_prusalink.accounting import account as _account
 from spoolman_prusalink.accounting import hold_deleted as _hold_deleted
 from spoolman_prusalink.models import Material, ToolReading
+from spoolman_prusalink.printer_sync import WrittenFilament
 
 # What the printer reports for the PLA preset, which `spool()` writes.
 PLA_TEMPS = {"nozzle_temperature": 215, "preheat_temperature": 170, "bed_temperature": 60}
@@ -1044,7 +1045,17 @@ def test_state_round_trip():
         notice=Notice(7, EventKind.STAGED_AT_PRINT, "staged"),
         needs_sync=True,
         sync_attempts=2,
-        written='M865 P0 F"PLA"',
+        written=WrittenFilament(
+            "FLEX",
+            240,
+            50,
+            preheat=210,
+            chamber=(25, 15, 40),
+            filtration=True,
+            flexible=True,
+            color="#8c9099",
+            uuid="44c406a5-c6f5-4440-bfba-e8060564b717",
+        ),
         held_mm=30,
         deleted_spool=19,
         staged_notice=Notice(8, EventKind.STAGED_AT_REBOOT, "rebooted"),

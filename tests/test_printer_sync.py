@@ -1,3 +1,4 @@
+import json
 from dataclasses import replace
 
 import pytest
@@ -8,8 +9,10 @@ from spoolman_prusalink.printer_sync import (
     CannotSync,
     Temperatures,
     ToolWrite,
+    WrittenFilament,
     build_job,
     default_preamble,
+    filament_for,
     filament_lines,
     model_problem,
     printer_matches_write,
@@ -144,7 +147,7 @@ def reported(name, color, nozzle, preheat, bed):
 @pytest.mark.parametrize("material", ["PLA", "PLA-CF"])
 def test_printer_matches_write_compares_temperatures(material):
     s = spool(material=material, extruder_temp=225, bed_temp=65)
-    written = "\n".join(filament_lines(ToolWrite(0, s, None)))
+    written = filament_for(ToolWrite(0, s, None))
     assert printer_matches_write(reported(material, "#8c9099", 225, 170, 65), written, False)
     assert not printer_matches_write(reported(material, "#8c9099", 230, 170, 65), written, False)
     assert not printer_matches_write(reported(material, "#8c9099", 225, 160, 65), written, False)
@@ -160,7 +163,7 @@ UUID = "44c406a5-c6f5-4440-bfba-e8060564b717"
 
 
 def test_printer_matches_write_notices_each_difference():
-    written = "\n".join(filament_lines(ToolWrite(0, spool(), UUID)))
+    written = filament_for(ToolWrite(0, spool(), UUID))
     ok = Material(
         "PLA",
         "#8c9099",
@@ -177,3 +180,31 @@ def test_printer_matches_write_notices_each_difference():
     assert not printer_matches_write(other, written, True)
     # With UUIDs off, the printer's UUID isn't compared.
     assert printer_matches_write(other, written, False)
+
+
+def test_written_filament_holds_every_parameter_of_the_write():
+    s = spool(material="TPU", extruder_temp=230)
+    written = filament_for(ToolWrite(0, s, UUID.upper()))
+    assert written == WrittenFilament(
+        name="TPU",
+        nozzle=230,
+        bed=50,
+        preheat=210,
+        chamber=(25, 15, 40),
+        filtration=True,
+        flexible=True,
+        color="#8c9099",
+        uuid=UUID,
+    )
+    assert written.lines(0) == filament_lines(ToolWrite(0, s, UUID))
+    assert WrittenFilament.from_json(json.loads(json.dumps(written.to_json()))) == written
+
+
+def test_written_filament_without_a_preset_leaves_the_rest_unset():
+    s = spool(material="PLA-CF", extruder_temp=225, bed_temp=65, color_hex=None)
+    written = filament_for(ToolWrite(1, s, UUID))
+    # No preset, so no preheat, chamber, filtration or flexible; no UUID off tool 0.
+    assert written == WrittenFilament(name="PLA-CF", nozzle=225, bed=65)
+    assert written.lines(1) == ['M865 X R N"PLA-CF" T225 B65 L1']
+    assert written.temperatures == Temperatures(225, 170, 65)
+    assert WrittenFilament.from_json(json.loads(json.dumps(written.to_json()))) == written
