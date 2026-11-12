@@ -812,12 +812,10 @@ def test_restore_refuses_other_printers():
 
 def test_events_log_actions_and_state_changes():
     sim, p = make()
-    queue = sim.subscribe()
     p.unload(0)
     kinds = [e.kind for e in sim.events]
     assert kinds == ["action", "state"]
     assert sim.events[-1].text == "IDLE -> BUSY"
-    assert not queue.empty()
 
 
 def test_idle_sensor_clear_after_a_sync_job_writes_an_empty_tool():
@@ -903,14 +901,6 @@ def test_sync_job_progress_moves_with_time():
     assert p.job.phase is JobPhase.RUN and p.job.progress() == 0
     sim.tick(1.5)
     assert p.job.progress() == 50
-
-
-def test_subscriber_queue_drops_the_oldest():
-    sim, p = make()
-    queue = sim.subscribe()
-    for i in range(1500):
-        sim.push(("n", i))
-    assert queue.qsize() == 1000 and queue.get_nowait() == ("n", 500)
 
 
 def test_home_sets_the_flag_only_when_idle():

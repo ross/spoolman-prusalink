@@ -10,12 +10,13 @@ from pathlib import Path
 
 from aiohttp import web
 
-from simulator.model import SNAPSHOT_NAME, Busy, Invalid, PrintSpec, Simulation
+from simulator.model import SNAPSHOT_NAME, Busy, Event, Invalid, PrintSpec, Simulation
 
 STATIC = Path(__file__).parent / "static"
 STATE_INTERVAL = 0.1  # at most ten state events a second per client
 ADVANCE_LIMIT = 24 * 3600.0  # one jump at most a day, in simulated seconds
 HEARTBEAT = 15.0
+QUEUE_LIMIT = 1000  # items per SSE client before the oldest are dropped
 
 ACTIONS = frozenset(
     {
@@ -46,6 +47,46 @@ ACTIONS = frozenset(
         "tap_through",
     }
 )
+
+
+class Stream:
+    """The page's server-sent events: a queue per client of ("log", Event) and ("state", None).
+
+    Every event queues a log item and a state item, since an event comes with a change; so
+    does a tick that moved anything.
+    """
+
+    def __init__(self, sim: Simulation) -> None:
+        self._queues: list[asyncio.Queue] = []
+        sim.listeners.append(self._event)
+        sim.watchers.append(self.changed)
+
+    def subscribe(self) -> asyncio.Queue:
+        """A queue for one client. It's bounded so a client that stops reading costs a fixed
+        amount of memory: `push` drops the oldest item to make room."""
+        queue: asyncio.Queue = asyncio.Queue(maxsize=QUEUE_LIMIT)
+        self._queues.append(queue)
+        return queue
+
+    def unsubscribe(self, queue: asyncio.Queue) -> None:
+        if queue in self._queues:
+            self._queues.remove(queue)
+
+    def push(self, item: tuple) -> None:
+        for queue in self._queues:
+            if queue.full():
+                queue.get_nowait()
+            queue.put_nowait(item)
+
+    def changed(self) -> None:
+        self.push(("state", None))
+
+    def _event(self, event: Event) -> None:
+        self.push(("log", event))
+        self.changed()
+
+
+STREAM = web.AppKey("stream", Stream)
 
 
 def _error(message: str, status: int) -> web.Response:
@@ -83,6 +124,8 @@ def _call(sim: Simulation, name: str, action: str, body: dict) -> None:
 
 
 def make_app(sim: Simulation) -> web.Application:
+    stream = Stream(sim)
+
     async def index(request: web.Request) -> web.StreamResponse:
         page = STATIC / "index.html"
         if not page.is_file():
@@ -104,7 +147,7 @@ def make_app(sim: Simulation) -> web.Application:
             headers={"Content-Type": "text/event-stream", "Cache-Control": "no-cache"}
         )
         await resp.prepare(request)
-        queue = sim.subscribe()
+        queue = stream.subscribe()
         try:
             await _send(resp, "state", sim.to_json(events=False))
             while True:
@@ -128,7 +171,7 @@ def make_app(sim: Simulation) -> web.Application:
         except ConnectionResetError:
             pass
         finally:
-            sim.unsubscribe(queue)
+            stream.unsubscribe(queue)
         return resp
 
     async def action(request: web.Request) -> web.Response:
@@ -198,9 +241,10 @@ def make_app(sim: Simulation) -> web.Application:
         return web.json_response(sim.snapshot_names())
 
     async def close_streams(app: web.Application) -> None:
-        sim.push(("close", None))
+        stream.push(("close", None))
 
     app = web.Application()
+    app[STREAM] = stream
     app.on_shutdown.append(close_streams)
     app.router.add_get("/", index)
     app.router.add_get("/static/{path:.+}", static)

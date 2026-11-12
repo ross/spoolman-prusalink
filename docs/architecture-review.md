@@ -376,12 +376,6 @@ interpreter in its own module, and input checks in the control layer.
 
 Size: large.
 
-### S6. Smaller items
-
-- `Simulation` mixes the clock with web streaming, and `log()` always calls
-  `changed()` (`model.py`). `Station.requests` (`integration/station.py`)
-  and `jobs` (`tests/harness.py`) find requests by parsing log text.
-
 ## Order and dependencies
 
 | # | Workstream | Findings | Depends on |
@@ -390,7 +384,7 @@ Size: large.
 | 3 | Conditions and saved facts | B2, B3, B5, B7, T1 (rest) | Workstreams 2 and 10. B7 changes the part of `account()` that B9 part 1 restructures |
 | 4 | Typed records | B6, B9 (part 2), T7 | Workstream 10. Easier after 3 |
 | 5 | Narrow the bridge boundary | B4 | Workstreams 2 and 3 |
-| 8 | Simulator state | S6, then S2, S4 | Nothing. S4 continues the move that put the PrusaLink routing in `prusalink.serve` |
+| 8 | Simulator state | S2, then S4 | Nothing. S4 continues the move that put the PrusaLink routing in `prusalink.serve` |
 | 10 | Accounting state | B9 (part 1), B10 | Nothing |
 
 Workstream 10 is independent and can run at any time. T3

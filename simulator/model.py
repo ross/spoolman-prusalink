@@ -6,7 +6,6 @@ it directly and the server calls it with scaled real time.
 
 from __future__ import annotations
 
-import asyncio
 import random
 import re
 import sys
@@ -20,7 +19,6 @@ from typing import Any, ClassVar
 from simulator import gcode
 
 EVENT_LIMIT = 2000
-QUEUE_LIMIT = 1000  # items per SSE client before the oldest are dropped
 SNAPSHOT_NAME = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
 EPSILON = 1e-9
 UUID_TOOL = 0  # the one tool that keeps tag UUIDs, on a model that has them
@@ -941,7 +939,11 @@ class SimPrinter:
         job.enter(JobPhase.SCANNING)
         job.remaining = self.settings.scan_seconds
         self.job = job
-        self._log("job", f"job {job.id} ({job.kind}) {job.name} started")
+        self._log(
+            "job",
+            f"job {job.id} ({job.kind}) {job.name} started",
+            {"started": job.id, "kind": job.kind},
+        )
         self._show_state()
 
     def pause(self) -> None:
@@ -1679,8 +1681,8 @@ class Simulation:
         self.events: list[Event] = []
         self.now = 0.0
         self.data_dir = Path(data_dir) if data_dir else None
-        self.listeners: list[Callable[[Event], None]] = []
-        self._queues: list[asyncio.Queue] = []
+        self.listeners: list[Callable[[Event], None]] = []  # called with each event
+        self.watchers: list[Callable[[], None]] = []  # called when a tick changed something
         for p in printers or []:
             self.add(p)
 
@@ -1697,32 +1699,7 @@ class Simulation:
         del self.events[:-EVENT_LIMIT]
         for listener in self.listeners:
             listener(event)
-        self.push(("log", event))
-        self.changed()
         return event
-
-    def subscribe(self) -> asyncio.Queue:
-        """A queue of ("log", Event) and ("state", None) items for one SSE client.
-
-        It's bounded so a client that stops reading costs a fixed amount of memory: `push`
-        drops the oldest item to make room.
-        """
-        queue: asyncio.Queue = asyncio.Queue(maxsize=QUEUE_LIMIT)
-        self._queues.append(queue)
-        return queue
-
-    def unsubscribe(self, queue: asyncio.Queue) -> None:
-        if queue in self._queues:
-            self._queues.remove(queue)
-
-    def push(self, item: tuple) -> None:
-        for queue in self._queues:
-            if queue.full():
-                queue.get_nowait()
-            queue.put_nowait(item)
-
-    def changed(self) -> None:
-        self.push(("state", None))
 
     def tick(self, dt: float) -> None:
         if dt <= 0:
@@ -1730,7 +1707,8 @@ class Simulation:
         self.now += dt
         active = [p.tick(dt) for p in self.printers.values()]
         if any(active):
-            self.changed()
+            for watcher in self.watchers:
+                watcher()
 
     def advance(self, seconds: float, step: float = 0.1) -> None:
         """Tick through `seconds` in the clock task's steps, so phases end in order."""

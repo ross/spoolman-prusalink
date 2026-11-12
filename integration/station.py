@@ -92,7 +92,7 @@ class Station:
         return [
             e
             for e in self.sim.events
-            if e.kind == "request" and e.printer == self.printer.name and e.text.startswith(method)
+            if e.kind == "request" and e.printer == self.printer.name and e.data["method"] == method
         ]
 
     def advance(self, seconds: float) -> None:

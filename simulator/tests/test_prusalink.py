@@ -64,7 +64,13 @@ async def test_requests_are_logged(setup):
     requests = [e for e in sim.events if e.kind == "request"]
     assert requests[0].text == "GET /api/v1/status 200"
     assert requests[1].text == "PUT /api/v1/files/usb/a.gcode 201"
-    assert requests[1].data == {"body": "M117 x\n"}
+    assert requests[0].data == {"method": "GET", "path": "/api/v1/status", "status": 200}
+    assert requests[1].data == {
+        "method": "PUT",
+        "path": "/api/v1/files/usb/a.gcode",
+        "status": 201,
+        "body": "M117 x\n",
+    }
 
 
 async def test_bad_key_and_faults(setup):
@@ -257,7 +263,7 @@ async def test_transport_serves_the_printer_in_process():
         assert (await client.get("/api/v1/status", headers={"X-Api-Key": "no"})).status_code == 401
     requests = [e for e in sim.events if e.kind == "request"]
     assert requests[2].text == "PUT /api/v1/files/usb/s.gcode 201"
-    assert requests[2].data == {"body": JOB}
+    assert requests[2].data["body"] == JOB
 
 
 async def test_transport_raises_when_the_printer_gives_no_answer():
