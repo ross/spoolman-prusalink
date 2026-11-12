@@ -84,16 +84,24 @@ coverage out of the unit suite to remove it.
 ### T1. Tests pin the bridge's private state
 
 Tests read, set, or call private attributes of the bridge in about 45
-places. The most used are `_adopt_uuid` (13), `_mint_uuid` (8),
-`_check_shared` (7), and `_archived` (7). The rest are the bridge's problem
-records, such as `_negative`, `_flag_failing`, `_evict_failing`, and the two
-`Reachability` fields.
+places. They fall into two groups:
 
-All of them belong to the spool-keyed owners in B4: the UUID registry, the
-archived-spool cache, and the flags. Their tests move when those owners get
-public methods.
+- **The spool-keyed concerns in B4:** `_adopt_uuid` (13), `_mint_uuid` (8),
+  `_check_shared` (7), `_archived` (7), `_refused_uuids`, `_unowned_uuids`,
+  and `_flag_failing`. Their tests move when B4 gives the UUID registry, the
+  archived-spool cache, and the flags public methods.
+- **Problem records that B4's owners don't hold**, about ten uses:
+  `PrinterBridge._printer_reach` and `Bridge._spoolman_reach`, which track
+  whether the printer and Spoolman can be reached, `_negative`,
+  `_evict_failing`, and `_unusable_fields`. Each test reads one to check that
+  a problem started or ended.
 
-Size: medium. Do it with B4.
+Shape: for the first group, test through B4's public methods. For the
+second, check what the bridge logs or does, as the tests around them do, or
+give each side a public read, such as whether it's reachable.
+
+Size: medium. Do it with B4, and don't count T1 as done until the second
+group is gone too.
 
 ### T3. A behavior change is made in two suites
 
