@@ -9,6 +9,7 @@ from spoolman_prusalink.printer_sync import (
     CannotSync,
     Temperatures,
     ToolWrite,
+    WriteState,
     WrittenFilament,
     build_job,
     default_preamble,
@@ -208,3 +209,13 @@ def test_written_filament_without_a_preset_leaves_the_rest_unset():
     assert written.lines(1) == ['M865 X R N"PLA-CF" T225 B65 L1']
     assert written.temperatures == Temperatures(225, 170, 65)
     assert WrittenFilament.from_json(json.loads(json.dumps(written.to_json()))) == written
+
+
+def test_write_state_transitions():
+    filament = WrittenFilament("PLA", 215, 60)
+    # Each job counts, and the write stays due until the printer is seen to match.
+    wrote = WriteState().resync().wrote(filament).wrote(filament)
+    assert wrote == WriteState(due=True, attempts=2, written=filament)
+    # A new reason to write starts the count again, and keeps what was last written.
+    assert wrote.resync() == WriteState(due=True, attempts=0, written=filament)
+    assert wrote.settled() == WriteState(due=False, attempts=0, written=filament)
