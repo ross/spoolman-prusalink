@@ -7,7 +7,17 @@ from dataclasses import replace
 
 import httpx
 import pytest
-from test_writes import LOC, jobs, levels, make, restart, spool, swap_to_spool_20, two_printers
+from test_writes import (
+    LOC,
+    jobs,
+    levels,
+    make,
+    restart,
+    spool,
+    spool_x,
+    swap_to_spool_20,
+    two_printers,
+)
 
 from spoolman_prusalink.accounting import EventKind
 from spoolman_prusalink.db import read_state
@@ -17,6 +27,11 @@ TAG = "91da34d9-c1c1-470f-bac7-185a2346f86a"
 
 def count(caplog, text):
     return caplog.text.count(text)
+
+
+def records(caplog):
+    """(level, message) of each record at INFO and above."""
+    return [(r.levelname, r.getMessage()) for r in caplog.records if r.levelno >= logging.INFO]
 
 
 def stored_uuid(fake, spool_id):
@@ -96,19 +111,23 @@ async def test_sync_job_busy_and_failing_ends_with_one_line(tmp_path, caplog):
     bridge, fake, printer = make(tmp_path, [spool(19)])
     caplog.set_level("INFO")
     await bridge.poll()
-    problems, name = bridge._problems, bridge.printers[0]._key
+    printer_bridge = bridge.printers[0]
     # A 409 left the job waiting, then a later attempt failed outright.
-    problems.fail((name, "sync busy"), "409", "busy", level=logging.INFO)
-    problems.fail((name, "sync failed"), "500", "failed")
+    printer_bridge._sync_busy, printer_bridge._sync_failed = "409", "500"
     caplog.clear()
     await bridge.poll()  # Nothing to write any more.
     assert levels(caplog, "sync job no longer needed") == ["WARNING"]
-    assert problems._seen == {}
 
-    problems.fail((name, "sync busy"), "409", "busy", level=logging.INFO)
+    printer_bridge._sync_busy = "409"
     caplog.clear()
     await bridge.poll()
     assert levels(caplog, "sync job no longer needed") == ["INFO"]
+
+    printer_bridge._sync_delaying = True  # A delay wait ends without a line.
+    caplog.clear()
+    await bridge.poll()
+    await bridge.poll()
+    assert count(caplog, "sync job no longer needed") == 0
     await bridge.aclose()
 
 
@@ -125,7 +144,6 @@ async def test_evicted_spool_that_already_left_clears_the_eviction_problem(tmp_p
     tool = bridge.printers[0].tools[0]
     assert tool.evict == (19,)
     assert count(caplog, "can't move spool 19 out") == 1
-    assert ("evict", 19) in bridge._problems._seen
 
     # With a unreachable, its accounting doesn't run to drop the eviction. The user moves
     # the spool out themselves meanwhile, so the bridge finds nothing left to do.
@@ -134,11 +152,11 @@ async def test_evicted_spool_that_already_left_clears_the_eviction_problem(tmp_p
     fake.spools[19]["location"] = "Shelf"
     await bridge.poll()
     assert bridge.printers[0].tools[0].evict == (19,)
-    assert ("evict", 19) not in bridge._problems._seen
+    assert levels(caplog, "[Tool a] spool 19 is out of the location now") == ["INFO"]
     assert fake.spools[19]["location"] == "Shelf"
     assert [w for w in fake.writes if w[0] == "location"] == []
     assert count(caplog, "can't move spool 19 out") == 1
-    assert levels(caplog, "[Tool a] spool 19 is out of the location now") == ["WARNING"]
+    assert levels(caplog, "[Tool a] spool 19 is out of the location now") == ["INFO"]
     await bridge.aclose()
 
 
@@ -189,11 +207,12 @@ async def test_failed_archived_check_adopts_nothing_and_logs_once(uuid_bridge, c
     assert fake.writes == []
     assert (19, TAG) not in bridge._refused_uuids  # Not a refusal: it's tried again.
 
+    assert levels(caplog, "can't check spool 19's tag UUID") == ["WARNING"]
     fake.fail_read = None
+    caplog.clear()
     assert await bridge._adopt_uuid(19, TAG) is True
     assert stored_uuid(fake, 19) == TAG
-    assert ("uuid", 19) not in bridge._problems._seen
-    assert levels(caplog, "gave spool 19 its tag's instance UUID") == ["WARNING"]
+    assert records(caplog) == [("INFO", f"gave spool 19 its tag's instance UUID {TAG}")]
     await bridge.aclose()
 
 
@@ -203,9 +222,10 @@ async def test_failed_check_of_a_kept_uuid_logs_its_recovery(uuid_bridge, caplog
     fake.fail_read = 500
     assert await bridge._adopt_uuid(19, TAG, store=False) is False
     fake.fail_read = None
+    caplog.clear()
     assert await bridge._adopt_uuid(19, TAG, store=False) is True
-    assert levels(caplog, f"checked spool 19's tag UUID {TAG}: no other spool has it") == [
-        "WARNING"
+    assert records(caplog) == [
+        ("INFO", f"checked spool 19's tag UUID {TAG}: no other spool has it")
     ]
     assert fake.writes == []
     await bridge.aclose()
@@ -219,13 +239,29 @@ async def test_failed_store_of_an_adopted_uuid_logs_once_and_retries(uuid_bridge
     assert await bridge._adopt_uuid(19, TAG) is False
     assert count(caplog, "can't store an instance UUID on spool 19") == 1
     assert "instance_uuid" not in fake.spools[19]["extra"]
-    assert ("uuid", 19) in bridge._problems._seen
 
+    assert levels(caplog, "can't store an instance UUID on spool 19") == ["WARNING"]
     fake.fail_patch = None
+    caplog.clear()
     assert await bridge._adopt_uuid(19, TAG) is True
     assert stored_uuid(fake, 19) == TAG
-    assert ("uuid", 19) not in bridge._problems._seen
-    assert levels(caplog, "gave spool 19 its tag's instance UUID") == ["WARNING"]
+    assert records(caplog) == [("INFO", f"gave spool 19 its tag's instance UUID {TAG}")]
+    await bridge.aclose()
+
+
+async def test_failed_store_of_a_minted_uuid_logs_once_and_retries(uuid_bridge, caplog):
+    bridge, fake, printer = uuid_bridge
+    caplog.set_level("INFO")
+    target = (await bridge.spoolman.spools())[0]
+    fake.fail_patch = 500
+    assert await bridge._mint_uuid(target) is None
+    assert await bridge._mint_uuid(target) is None
+    assert levels(caplog, "can't store an instance UUID on spool 19") == ["WARNING"]
+    fake.fail_patch = None
+    caplog.clear()
+    minted = await bridge._mint_uuid(target)
+    assert minted and stored_uuid(fake, 19) == minted
+    assert records(caplog) == [("INFO", f"gave spool 19 instance UUID {minted}")]
     await bridge.aclose()
 
 
@@ -293,18 +329,35 @@ async def test_a_tool_note_with_new_detail_is_logged_without_an_end_line(tmp_pat
     await bridge.aclose()
 
 
-async def test_printer_named_like_a_spool_problem_keeps_its_own_problems(tmp_path, caplog):
+async def test_eviction_no_longer_needed_logs_only_after_a_failure(tmp_path, caplog):
     bridge, fake, printer = make(tmp_path, [spool(19)])
     caplog.set_level("INFO")
-    printer_bridge = bridge.printers[0]
-    printer_bridge.config = replace(printer_bridge.config, name="evict")
-    problems = bridge._problems
-    problems.fail((printer_bridge._key, "read"), "500", "evict read failed")
-    problems.fail(("evict", 19), "500", "can't move spool 19 out")
-    await bridge.evict([])  # Spool 19 is in no tool's evict list.
-    assert (printer_bridge._key, "read") in problems._seen
-    assert ("evict", 19) not in problems._seen
-    assert levels(caplog, "spool 19 no longer needs moving out") == ["WARNING"]
+    await bridge.evict([])  # Spool 19 isn't in any tool's evict list, and never failed.
+    assert count(caplog, "no longer needs moving out") == 0
+    bridge._evict_failing[19] = "500"
+    await bridge.evict([])
+    await bridge.evict([])
+    assert levels(caplog, "spool 19 no longer needs moving out") == ["INFO"]
+    await bridge.aclose()
+
+
+async def test_evict_failing_then_moved_logs_warning_then_info(tmp_path, caplog):
+    bridge, fake, printer = make(tmp_path, [spool(19)])
+    caplog.set_level("DEBUG", "spoolman_prusalink")
+    await bridge.poll()
+    fake.spools[20] = spool_x(20)
+    await bridge.poll()
+    printer.unloads, printer.at_unload, printer.material = 1, 1000, None
+    fake.fail_patch = 500
+    for _ in range(3):
+        await bridge.poll()
+    assert levels(caplog, "move spool 19 out") == ["WARNING", "DEBUG", "DEBUG"]
+    fake.fail_patch = 503  # A different error is logged again.
+    await bridge.poll()
+    assert levels(caplog, "move spool 19 out")[-1] == "WARNING"
+    fake.fail_patch = None
+    await bridge.poll()
+    assert levels(caplog, "moved spool 19 to no location") == ["INFO"]
     await bridge.aclose()
 
 

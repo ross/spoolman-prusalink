@@ -1,6 +1,7 @@
 """Phase 2: charges and flags written to a fake Spoolman."""
 
 import json
+import logging
 import math
 import re
 import sqlite3
@@ -982,7 +983,7 @@ async def test_printer_read_error_logged_once(tmp_path, caplog):
     printer.error = None
     for _ in range(2):
         await bridge.poll()
-    assert levels(caplog, "printer reads working again") == ["WARNING"]
+    assert levels(caplog, "printer reads working again after") == ["WARNING"]
     await bridge.aclose()
 
 
@@ -998,12 +999,12 @@ async def test_spoolman_read_problems_logged_once(tmp_path, caplog):
     fake.fail_read = 500
     for _ in range(3):
         await bridge.poll()
-    assert levels(caplog, "Spoolman reachable again") == ["WARNING"]
-    assert caplog.text.count("Spoolman read failed") == 1
+    assert "Spoolman reachable again" not in caplog.text  # It answers, badly.
+    assert levels(caplog, "Spoolman read failed") == ["WARNING"]
     fake.fail_read = None
     for _ in range(2):
         await bridge.poll()
-    assert levels(caplog, "Spoolman reads working again") == ["WARNING"]
+    assert levels(caplog, "Spoolman reads working again after") == ["WARNING"]
     await bridge.aclose()
 
 
@@ -1025,6 +1026,41 @@ async def test_charge_failures_logged_once(tmp_path, caplog):
     await bridge.aclose()
 
 
+async def test_charge_catching_up_after_a_failure_logs_at_warning(tmp_path, caplog):
+    bridge, fake, printer = make(tmp_path, [spool(19)])
+    caplog.set_level("DEBUG", "spoolman_prusalink")
+    await bridge.poll()
+    printer.extruded = 1500
+    fake.fail_use = [503, 503, 500]  # The same error twice, then a different one.
+    for _ in range(3):
+        await bridge.poll()
+    assert levels(caplog, "charge to spool 19") == ["WARNING", "DEBUG", "WARNING"]
+    await bridge.poll()
+    assert levels(caplog, "sent 1 queued charge(s)") == ["WARNING"]
+    await bridge.aclose()
+
+
+async def test_charges_flushing_with_no_failure_log_no_catch_up(tmp_path, caplog):
+    bridge, fake, printer = make(tmp_path, [spool(19)])
+    caplog.set_level("DEBUG", "spoolman_prusalink")
+    await bridge.poll()
+    printer.extruded = 1500
+    await bridge.poll()
+    assert fake.used == {19: [500.0]}
+    assert levels(caplog, "queued charge") == []
+    assert levels(caplog, "charge to spool 19") == []
+    await bridge.aclose()
+
+
+def lines(caplog, spool_id):
+    """(level, message) of each record at INFO and above that names the spool."""
+    return [
+        (r.levelname, r.getMessage())
+        for r in caplog.records
+        if r.levelno >= logging.INFO and f"spool {spool_id}" in r.getMessage()
+    ]
+
+
 async def test_evict_failure_logged_once(tmp_path, caplog):
     bridge, fake, printer = make(tmp_path, [spool(19)])
     caplog.set_level("INFO")
@@ -1039,10 +1075,11 @@ async def test_evict_failure_logged_once(tmp_path, caplog):
     assert caplog.text.count("can't move spool 19 out") == 1
     assert caplog.text.count("can't update the flag on spool 19") <= 1
     fake.fail_patch = None
+    caplog.clear()
     await bridge.poll()
     assert fake.spools[19]["location"] is None
-    # The move that ends the problem is its recovery line, at the problem's level.
-    assert levels(caplog, f"[{LOC}] moved spool 19 to no location") == ["WARNING"]
+    # A move is a one-time action, so it logs one INFO line even after a failure.
+    assert lines(caplog, 19) == [("INFO", f"[{LOC}] moved spool 19 to no location")]
     await bridge.aclose()
 
 
@@ -1061,8 +1098,7 @@ async def test_failed_eviction_ends_when_the_spool_is_moved_by_hand(tmp_path, ca
     for _ in range(2):
         await bridge.poll()
     assert bridge.printers[0].tools[0].evict == ()
-    assert ("evict", 19) not in bridge._problems._seen
-    assert levels(caplog, "spool 19 no longer needs moving out") == ["WARNING"]
+    assert levels(caplog, "spool 19 no longer needs moving out") == ["INFO"]
     await bridge.aclose()
 
 
@@ -1096,10 +1132,11 @@ async def test_flag_failure_logged_once(tmp_path, caplog):
         await bridge.poll()
     assert caplog.text.count("can't update the flag on spool 19") == 1
     fake.fail_patch = None
+    caplog.clear()
     await bridge.poll()
-    assert "unloaded with no Spoolman change" in fake.flag(19)
-    assert caplog.text.count("can't update the flag on spool 19") == 1
-    assert levels(caplog, "set flag on spool 19") == ["WARNING"]
+    flag = fake.flag(19)
+    assert "unloaded with no Spoolman change" in flag
+    assert lines(caplog, 19) == [("INFO", f"set flag on spool 19: {flag}")]
     await bridge.aclose()
 
 
@@ -1114,8 +1151,7 @@ async def test_flag_failure_ends_when_spoolman_already_matches(tmp_path, caplog)
     # The user writes the same flag themselves, so there's nothing left to update.
     fake.spools[19]["extra"]["bridge_flag"] = json.dumps(bridge._flags[19])
     await bridge.poll()
-    assert levels(caplog, "flag on spool 19 is up to date") == ["WARNING"]
-    assert ("flag", 19) not in bridge._problems._seen
+    assert levels(caplog, "flag on spool 19 is up to date") == ["INFO"]
     await bridge.aclose()
 
 
@@ -1311,6 +1347,20 @@ async def test_print_started_during_the_poll_holds_the_sync_job(tmp_path, caplog
     assert len(jobs(printer)) == 1
     # The wait ends with the job, which its own line reports: no separate recovery line.
     assert caplog.text.count("ran printer job") == 1
+    assert "no longer needed" not in caplog.text
+    await bridge.aclose()
+
+
+async def test_sync_job_waiting_on_the_same_busy_state_logs_once(tmp_path, caplog):
+    caplog.set_level("INFO")
+    bridge, fake, printer = make(tmp_path, [spool(19)], uuid_field="instance_uuid")
+    printer.states = ["IDLE"] * 4 + ["PRINTING", "IDLE", "PRINTING"]  # Re-checks: 5th, 7th.
+    await swap_to_spool_20(bridge, fake, printer)
+    await bridge.poll()
+    assert jobs(printer) == []
+    assert levels(caplog, "became PRINTING; sync job waits") == ["INFO"]
+    await bridge.poll()
+    assert len(jobs(printer)) == 1
     assert "no longer needed" not in caplog.text
     await bridge.aclose()
 
@@ -1677,6 +1727,36 @@ async def test_negative_remaining_is_logged_once(tmp_path, caplog):
     await bridge.aclose()
 
 
+async def test_negative_remaining_that_recovers_while_loaded_logs_both_at_info(tmp_path, caplog):
+    caplog.set_level("INFO")
+    bridge, fake, printer = make(tmp_path, [spool(19)])
+    await bridge.poll()
+    assert "remaining" not in caplog.text
+    weighted(fake.spools[19], -3.0)
+    for _ in range(2):
+        await bridge.poll()
+    assert levels(caplog, "spool 19 shows -3 g remaining") == ["INFO"]
+    weighted(fake.spools[19], 40.0)
+    for _ in range(2):
+        await bridge.poll()
+    assert levels(caplog, "spool 19 no longer shows a negative weight") == ["INFO"]
+    assert bridge._negative == set()
+    await bridge.aclose()
+
+
+async def test_negative_spool_that_leaves_and_rejoins_the_list_logs_one_start(tmp_path, caplog):
+    caplog.set_level("INFO")
+    bridge, fake, printer = make(tmp_path, [weighted(spool(19), -12.0)])
+    await bridge.poll()
+    fake.spools[19]["archived"] = True  # Spoolman's list leaves it out.
+    await bridge.poll()
+    fake.spools[19]["archived"] = False
+    await bridge.poll()
+    assert levels(caplog, "shows -12 g remaining") == ["INFO"]
+    assert "no longer shows a negative" not in caplog.text
+    await bridge.aclose()
+
+
 async def test_negative_remaining_ends_when_the_spool_is_unloaded(tmp_path, caplog):
     caplog.set_level("INFO")
     bridge, fake, printer = make(tmp_path, [weighted(spool(19), -12.0)])
@@ -1688,8 +1768,9 @@ async def test_negative_remaining_ends_when_the_spool_is_unloaded(tmp_path, capl
     for _ in range(2):
         await bridge.poll()
     assert bridge.printers[0].tools[0].active == 20
-    assert ("negative", 19) not in bridge._problems._seen
-    assert levels(caplog, "spool 19 with a negative weight is unloaded") == ["INFO"]
+    assert bridge._negative == set()
+    assert "negative weight" not in caplog.text
+    assert levels(caplog, "shows -12 g remaining") == ["INFO"]
     await bridge.aclose()
 
 
@@ -1770,6 +1851,33 @@ async def test_deleted_spool_holds_usage_for_the_next_spool(tmp_path, caplog):
     await bridge.aclose()
 
 
+async def test_deleted_spool_hold_that_ends_and_starts_again_logs_each(tmp_path, caplog):
+    bridge, fake, printer = make(tmp_path, [spool(19)])
+    caplog.set_level("INFO")
+    await bridge.poll()
+    printer.extruded = 1500
+    await bridge.poll()
+    del fake.spools[19]
+    printer.extruded = 1700
+    await bridge.poll()
+    fake.spools[20] = spool(20)  # Takes the held usage, which ends the hold.
+    await bridge.poll()
+    await bridge.poll()
+    del fake.spools[20]
+    printer.extruded = 1900
+    await bridge.poll()
+    printer.extruded = 2000
+    await bridge.poll()
+    messages = [
+        r.getMessage()
+        for r in caplog.records
+        if "was deleted in Spoolman" in r.getMessage() or "no longer holding" in r.getMessage()
+    ]
+    assert [m.split("] ")[1].split(" ")[0] for m in messages] == ["spool", "no", "spool"]
+    assert "spool 19 was deleted" in messages[0] and "spool 20 was deleted" in messages[2]
+    await bridge.aclose()
+
+
 def restart(bridge, **cfg):
     """A new bridge on the same printers, Spoolman and database, which the old one lets go."""
     bridge.db.close()
@@ -1809,6 +1917,42 @@ async def test_deleted_spool_hold_restored_after_a_restart_is_logged_and_ends(tm
     await bridge.poll()
     assert fake.used[20][0] == 500.0
     assert levels(caplog, "no longer holding usage for a deleted spool") == ["WARNING"]
+    await bridge.aclose()
+
+
+async def test_deleted_spool_hold_restored_after_a_restart_is_logged_once(tmp_path, caplog):
+    bridge, fake, printer = make(tmp_path, [spool(19)])
+    await bridge.poll()
+    printer.extruded = 1500
+    await bridge.poll()
+    del fake.spools[19]
+    printer.extruded = 1700
+    await bridge.poll()
+    caplog.set_level("INFO")
+    caplog.clear()
+    bridge = restart(bridge)
+    for extruded in (1800, 1900, 2000):
+        printer.extruded = extruded
+        await bridge.poll()
+    assert levels(caplog, "spool 19 was deleted in Spoolman") == ["WARNING"]
+    await bridge.aclose()
+
+
+async def test_deleted_spool_hold_moving_to_another_spool_logs_again(tmp_path, caplog):
+    bridge, fake, printer = make(tmp_path, [spool(19)])
+    await bridge.poll()
+    printer.extruded = 1500
+    await bridge.poll()
+    del fake.spools[19]
+    printer.extruded = 1700
+    await bridge.poll()
+    caplog.set_level("INFO")
+    caplog.clear()
+    bridge.printers[0].tools[0] = replace(bridge.printers[0].tools[0], deleted_spool=21)
+    await bridge.poll()
+    await bridge.poll()
+    assert levels(caplog, "spool 21 was deleted in Spoolman") == ["WARNING"]
+    assert "no longer holding" not in caplog.text
     await bridge.aclose()
 
 
@@ -2084,17 +2228,16 @@ async def test_failed_lookup_of_a_spool_missing_from_the_list_is_logged_once(
     assert fake.used == {19: [100.0, 100.0, 100.0]}
     charged = [r for r in ledger(tmp_path) if r.get("spool_id") == 19 and "use_length" in r]
     assert [r["grams"] for r in charged] == [None] * 3
-    # Once the lookup works again the problem clears, with one line at the problem's
-    # level, so a new failure is logged afresh.
+    # Once the lookup works again the problem clears with one INFO line, so a new
+    # failure is logged afresh.
     fake.fail_lookup, fake.garble_lookup = None, False
     caplog.clear()
     printer.extruded = 1400
     await bridge.poll()
     assert fake.lookups == [19] * 4
-    assert bridge._problems._seen == {}
     recovered = [r for r in caplog.records if "look up" in r.getMessage()]
     assert [(r.levelname, r.getMessage()) for r in recovered] == [
-        ("WARNING", f"[{LOC}] can look up spool 19 again")
+        ("INFO", f"[{LOC}] can look up spool 19 again")
     ]
     # The same failure again is a new problem, so it's logged again.
     if failure == "http":
@@ -2119,8 +2262,7 @@ async def test_failed_lookup_ends_when_the_spool_is_listed_again(tmp_path, caplo
     printer.extruded = 1200
     await bridge.poll()
     assert fake.lookups == [19]
-    assert bridge._problems._seen == {}
-    assert levels(caplog, "spool 19 no longer needs looking up") == ["WARNING"]
+    assert levels(caplog, "spool 19 no longer needs looking up") == ["INFO"]
     await bridge.aclose()
 
 
@@ -2240,6 +2382,21 @@ async def test_claim_outside_tool_location_is_flagged_until_moved_in(tmp_path, c
     await bridge.aclose()
 
 
+async def test_claim_outside_tool_location_logs_again_when_the_location_changes(tmp_path, caplog):
+    bridge, fake, printer = make(tmp_path, [spool(19)])
+    caplog.set_level("INFO")
+    fake.spools[20] = spool_x(20, location="Shelf", extra=dict(CLAIMED))
+    await bridge.poll()
+    await bridge.poll()
+    fake.spools[20]["location"] = "Drawer"
+    await bridge.poll()
+    await bridge.poll()
+    waiting = "spool 20 is claimed but isn't in a tool's location"
+    assert levels(caplog, waiting) == ["WARNING", "WARNING"]
+    assert "'Drawer'" in caplog.text
+    await bridge.aclose()
+
+
 async def test_several_claims_pick_the_most_recently_used(tmp_path, caplog):
     bridge, fake, printer = make(tmp_path, [spool(19)])
     caplog.set_level("INFO")
@@ -2293,11 +2450,25 @@ async def test_claim_failing_to_clear_is_handled_once(tmp_path, caplog):
     assert caplog.text.count("claimed in place of spool 19") == 1
     assert caplog.text.count("can't clear the claim on spool 20") == 1
     fake.fail_patch = None
+    caplog.clear()
     await bridge.poll()
     assert claim_box(fake, 20) is False
-    assert levels(caplog, "cleared the claim on spool 20") == ["WARNING"]
+    assert lines(caplog, 20) == [("INFO", "cleared the claim on spool 20")]
     await bridge.poll()
     assert read_state(tmp_path / "bridge.db").claimed == []
+    await bridge.aclose()
+
+
+async def test_claim_unticked_without_a_failure_logs_nothing(tmp_path, caplog):
+    bridge, fake, printer = make(tmp_path, [spool(19)])
+    caplog.set_level("INFO")
+    await bridge.poll()
+    fake.spools[20] = spool_x(20, extra=dict(CLAIMED))
+    await bridge.poll()
+    bridge.state.claimed.append(20)  # Handled, but Spoolman shows it clear.
+    fake.spools[20]["extra"]["bridge_claim"] = "false"
+    await bridge.poll()
+    assert "no longer needs its claim cleared" not in caplog.text
     await bridge.aclose()
 
 
@@ -2314,8 +2485,7 @@ async def test_claim_failing_to_clear_ends_when_the_user_unticks_it(tmp_path, ca
     for _ in range(2):
         await bridge.poll()
     assert read_state(tmp_path / "bridge.db").claimed == []
-    assert ("unclaim", 20) not in bridge._problems._seen
-    assert levels(caplog, "spool 20 no longer needs its claim cleared") == ["WARNING"]
+    assert levels(caplog, "spool 20 no longer needs its claim cleared") == ["INFO"]
     assert "cleared the claim on spool 20" not in caplog.text
     await bridge.aclose()
 

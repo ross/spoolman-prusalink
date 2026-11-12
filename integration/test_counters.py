@@ -83,7 +83,7 @@ async def test_c2_printer_off_for_hours(world: World, caplog: pytest.LogCaptureF
     w = world
     # The outage clock runs on simulated time, offset so that it starts large, as a
     # monotonic clock does: a reminder measured from zero would show up here too.
-    w.bridge.printers[0]._printer_outage.clock = lambda: w.sim.now + 1e6
+    w.bridge.printers[0]._printer_reach.clock = lambda: w.sim.now + 1e6
     await baseline(w)
     w.printer.extrude(0, 10)
     records = await w.poll()
@@ -302,8 +302,7 @@ async def test_c9_printer_answers_with_an_error(world: World, caplog: pytest.Log
     w.printer.set_fault("none")
     records = await w.poll()
     records += await w.poll()
-    assert messages(caplog, "printer reads working again", logging.WARNING) == [
-        "printer reads working again"
-    ]
+    back = messages(caplog, "printer reads working again", logging.WARNING)
+    assert [m.split(" after ")[0] for m in back] == ["printer reads working again"]
     assert events(records) == []
     assert [(r["use_length"], r["reason"]) for r in charges(records)] == [(30, "extruded")]

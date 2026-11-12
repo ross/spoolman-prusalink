@@ -14,7 +14,7 @@ from spoolman_prusalink import __main__ as main_module
 from spoolman_prusalink import printer_sync
 from spoolman_prusalink.__main__ import main
 from spoolman_prusalink.accounting import Provisional, SwapFlag, ToolState
-from spoolman_prusalink.app import Bridge, Once
+from spoolman_prusalink.app import Bridge, Reachability, _log_failed, _log_ok, _record
 from spoolman_prusalink.config import Config, ConfigError, PrinterConfig, load
 from spoolman_prusalink.db import Database, DatabaseError, read_ledger, read_state
 from spoolman_prusalink.models import Material
@@ -326,7 +326,7 @@ async def test_printer_outage_logged_on_change(tmp_path, caplog):
     bridge = Bridge(
         cfg, Spoolman("http://s", transport=t), {"default": PrusaLink("http://p", "k", transport=t)}
     )
-    bridge.printers[0]._printer_outage.clock = lambda: now["v"]
+    bridge.printers[0]._printer_reach.clock = lambda: now["v"]
     caplog.set_level("INFO")
 
     for _ in range(5):
@@ -342,18 +342,68 @@ async def test_printer_outage_logged_on_change(tmp_path, caplog):
 
     up["v"] = True
     await bridge.poll()
-    # The outage and its end show at the same level; the reminder in between is INFO.
+    # The printer now answers, badly: the trouble changes kind, which logs at WARNING.
     outage = [
         (r.levelname, r.getMessage().split(":")[0])
         for r in caplog.records
-        if "reachable" in r.getMessage() and r.levelno >= logging.INFO
+        if r.getMessage().startswith("printer") and r.levelno >= logging.INFO
     ]
     assert outage == [
         ("WARNING", "printer unreachable"),
         ("INFO", "printer still unreachable after 3h 00m"),
-        ("WARNING", "printer reachable again after 3h 00m"),
+        ("WARNING", "printer read failed, skipping poll"),
     ]
-    assert not bridge.printers[0]._printer_outage.down
+    assert not bridge.printers[0]._printer_reach.down
+    await bridge.aclose()
+
+
+async def test_printer_kind_change_and_bad_answer_reporting(tmp_path, caplog):
+    mode = {"v": "refuse"}
+    now = {"v": 0.0}
+
+    def handler(request):
+        if mode["v"] == "refuse":
+            raise httpx.ConnectError("refused")
+        return httpx.Response(401)
+
+    cfg = make_config(tmp_path)
+    t = httpx.MockTransport(handler)
+    bridge = Bridge(
+        cfg, Spoolman("http://s", transport=t), {"default": PrusaLink("http://p", "k", transport=t)}
+    )
+    reach = bridge.printers[0]._printer_reach
+    reach.clock = lambda: now["v"]
+    caplog.set_level("DEBUG")
+
+    def lines(text):
+        return [
+            (r.levelname, r.getMessage().split(":")[0])
+            for r in caplog.records
+            if text in r.getMessage()
+        ]
+
+    await bridge.poll()
+    assert reach.down
+    mode["v"] = "bad"  # Answering badly is a new kind of trouble, and counts as up.
+    await bridge.poll()
+    assert not reach.down
+    assert bridge.interval() == cfg.poll_printing  # Up, and not yet read.
+    now["v"] += 60
+    await bridge.poll()  # Same kind again: DEBUG.
+    now["v"] += 3600
+    await bridge.poll()  # An hour on: the reminder.
+    mode["v"] = "refuse"
+    await bridge.poll()
+    mode["v"] = "bad"
+    await bridge.poll()
+    assert [x for x in lines("printer") if x[0] != "DEBUG"] == [
+        ("WARNING", "printer unreachable"),
+        ("WARNING", "printer read failed, skipping poll"),
+        ("INFO", "printer still giving bad answers after 1h 01m"),
+        ("WARNING", "printer unreachable"),
+        ("WARNING", "printer read failed, skipping poll"),
+    ]
+    assert ("DEBUG", "printer read failed, skipping poll") in lines("skipping")
     await bridge.aclose()
 
 
@@ -1181,79 +1231,64 @@ async def test_bridge_without_a_database_charges_and_saves_nothing(tmp_path):
     await bridge.aclose()
 
 
-# Once: each problem logged once, and its end logged at the problem's level
+# _record: a failing dict keeps the last error logged for each key
 
 
-def once_records(caplog):
-    return [(r.levelname, r.getMessage()) for r in caplog.records]
+def test_record_says_whether_an_error_is_new_or_changed():
+    failing: dict[int, str] = {}
+    assert _record(failing, 7, "boom") is True
+    assert _record(failing, 7, "boom") is False
+    assert _record(failing, 7, "bang") is True
+    assert _record(failing, 8, "bang") is True
+    assert failing == {7: "bang", 8: "bang"}
 
 
-@pytest.mark.parametrize("level", [logging.WARNING, logging.INFO])
-def test_once_logs_recovery_at_the_level_the_problem_was_reported_at(caplog, level):
-    caplog.set_level(logging.DEBUG, "spoolman_prusalink")
-    once = Once()
-    once.fail("k", "boom", "thing failed: %s", "boom", level=level)
-    once.fail("k", "boom", "thing failed: %s", "boom", level=level)
-    assert once.clear("k", "thing working again") is True
-    name = logging.getLevelName(level)
-    assert once_records(caplog) == [
-        (name, "thing failed: boom"),
-        ("DEBUG", "thing failed: boom"),
-        (name, "thing working again"),
+def test_record_compares_the_error_text():
+    failing: dict[int, str] = {}
+    assert _record(failing, 7, ValueError("boom")) is True
+    assert _record(failing, 7, KeyError("boom")) is True  # Its text is "'boom'".
+    assert _record(failing, 7, KeyError("boom")) is False
+
+
+def reach_lines(caplog):
+    return [
+        (r.levelname, r.getMessage().split(":")[0])
+        for r in caplog.records
+        if r.name == "spoolman_prusalink" and r.levelno >= logging.INFO
     ]
 
 
-def test_once_recovery_takes_the_level_of_the_last_logged_failure(caplog):
-    caplog.set_level(logging.DEBUG, "spoolman_prusalink")
-    once = Once()
-    once.fail("k", "a", "first")
-    once.fail("k", "b", "second", level=logging.INFO)
-    once.fail("k", "b", "second again", level=logging.ERROR)  # A repeat: DEBUG, kept INFO.
-    once.clear("k", "recovered")
-    assert once_records(caplog)[-1] == ("INFO", "recovered")
-
-
-def test_once_clearing_a_key_that_never_failed_logs_nothing(caplog):
-    caplog.set_level(logging.DEBUG, "spoolman_prusalink")
-    once = Once()
-    assert once.clear("k", "thing working again") is False
-    once.fail("k", "boom", "thing failed")
-    once.clear("k", "thing working again")
-    assert once.clear("k", "thing working again") is False  # Already cleared.
-    assert [m for _, m in once_records(caplog)] == ["thing failed", "thing working again"]
-
-
-def test_once_clear_without_a_message_is_silent(caplog):
-    caplog.set_level(logging.DEBUG, "spoolman_prusalink")
-    once = Once()
-    once.fail("k", "waiting", "waiting", level=logging.INFO)
-    assert once.clear("k") is True
-    assert once_records(caplog) == [("INFO", "waiting")]
-
-
-def test_once_failure_after_recovery_is_logged_afresh(caplog):
-    caplog.set_level(logging.DEBUG, "spoolman_prusalink")
-    once = Once()
-    assert once.fail("k", "boom", "thing failed") is True
-    once.clear("k", "thing working again")
-    assert once.fail("k", "boom", "thing failed") is True
-    assert once_records(caplog) == [
-        ("WARNING", "thing failed"),
-        ("WARNING", "thing working again"),
-        ("WARNING", "thing failed"),
+def test_kind_change_restarts_the_clock(caplog):
+    now = {"v": 0.0}
+    reach = Reachability("svc", clock=lambda: now["v"])
+    caplog.set_level("INFO")
+    for t, unreachable in [(0, True), (3600, True), (7000, False), (7200, False)]:
+        now["v"] = t
+        _log_failed(reach, ValueError("boom"), unreachable=unreachable)
+    now["v"] = 7260
+    _log_ok(reach)
+    assert reach_lines(caplog) == [
+        ("WARNING", "svc unreachable"),
+        ("INFO", "svc still unreachable after 1h 00m"),
+        ("WARNING", "svc read failed, skipping poll"),
+        ("WARNING", "svc reads working again after 4m"),
     ]
 
 
-def test_once_done_logs_at_info_unless_it_ends_a_problem(caplog):
-    caplog.set_level(logging.DEBUG, "spoolman_prusalink")
-    once = Once()
-    once.done("k", "moved spool %d", 19)
-    once.fail("k", "boom", "can't move spool %d", 19)
-    once.done("k", "moved spool %d", 19)
-    once.done("k", "moved spool %d", 19)
-    assert once_records(caplog) == [
-        ("INFO", "moved spool 19"),
-        ("WARNING", "can't move spool 19"),
-        ("WARNING", "moved spool 19"),
-        ("INFO", "moved spool 19"),
+def test_bad_answers_then_unreachable_measures_the_unreachable_span(caplog):
+    now = {"v": 0.0}
+    reach = Reachability("svc", clock=lambda: now["v"])
+    caplog.set_level("INFO")
+    _log_failed(reach, ValueError("boom"), unreachable=False)
+    now["v"] = 3 * 3600
+    _log_failed(reach, ValueError("boom"), unreachable=False)  # The reminder.
+    now["v"] += 10
+    _log_failed(reach, OSError("off"), unreachable=True)
+    now["v"] += 60
+    _log_ok(reach)
+    assert reach_lines(caplog) == [
+        ("WARNING", "svc read failed, skipping poll"),
+        ("INFO", "svc still giving bad answers after 3h 00m"),
+        ("WARNING", "svc unreachable"),
+        ("WARNING", "svc reachable again after 1m"),
     ]
