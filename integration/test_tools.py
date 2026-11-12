@@ -243,11 +243,15 @@ async def test_t7_reboot_restarts_every_tool(world: World):
     records = await w.poll()
     assert w.charged(records, "A") == 10 and w.charged(records, "D") == 20
 
+    old_boot = w.printer.boot_id
     w.printer.reboot()
     assert w.counter_at(0) == 0 and w.counter_at(1) == 0
     records = await w.poll()
     reboots = events(records, "reboot")
     assert [e["tool"] for e in reboots] == [0, 1]
+    # Every poll charged its usage, so nothing was held to keep.
+    reboot = {"from_boot": old_boot, "to_boot": w.printer.boot_id, "kept_mm": 0}
+    assert event_fields(records, "reboot") == [reboot, reboot]
     assert charges(records) == []
     assert events(records, "unload") == []
 

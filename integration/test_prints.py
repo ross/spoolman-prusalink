@@ -334,14 +334,17 @@ async def test_p12_power_panic_resume_keeps_the_job(world: World, caplog: pytest
     assert logged(caplog, logging.WARNING, "unreachable")
     w.advance(3.0)
 
+    old_boot = w.printer.boot_id
     w.printer.set_power("on", resume=True)
     # Recovery: BUSY with the nozzle clean's 25 mm purge, PAUSED while unparking, PRINTING.
     records = await w.run_until(lambda: w.printer.state is not State.BUSY, poll_every=0.5)
     assert w.printer.state is State.PAUSED and w.counter == 25
     records += await w.run_until(lambda: w.printer.state is State.PRINTING, poll_every=0.5)
     assert w.printer.job.id == job
-    reboots = events(records, "reboot")
-    assert len(reboots) == 1
+    # The printing the bridge never saw is lost with the counter, not held.
+    assert event_fields(records, "reboot") == [
+        {"from_boot": old_boot, "to_boot": w.printer.boot_id, "kept_mm": 0}
+    ]
     assert logged(caplog, logging.WARNING, "reachable again")
     assert events(records, "staged_at_print") == []
     # The reboot flags the staged spool, as row S9 says.
