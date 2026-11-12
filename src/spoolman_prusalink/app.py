@@ -133,10 +133,9 @@ class Reachability:
         return _duration(self.clock() - self.since)
 
 
-def _log_failed(reach: Reachability, error: Exception, *, unreachable: bool) -> None:
+def _log_failed(reach: Reachability, error: ServiceError, *, unreachable: bool) -> None:
     """Record a failed read and log what it changed."""
-    # The printer client still raises httpx errors, which have no summary.
-    trouble = reach.failed(unreachable, getattr(error, "summary", str(error)))
+    trouble = reach.failed(unreachable, error.summary)
     if trouble in (Trouble.STARTED, Trouble.CHANGED):
         if unreachable:
             log.warning("%s unreachable: %s; logging again when it's back", reach.name, error)
@@ -441,7 +440,8 @@ class PrinterBridge:
         try:
             printer_type = await self.client.printer_type()
         except ServiceError as e:
-            error = f"can't read the printer model ({e})"
+            # The summary, not the body: this is a flag's text too.
+            error = f"can't read the printer model ({e.summary})"
             if error != self._model_error:
                 log.warning("%s%s; printer writes are off until it can", self._prefix, error)
             self._model_error = error
@@ -1210,9 +1210,9 @@ class PrinterBridge:
             self._sync_busy = "409"
             return
         except ServiceError as e:
-            if self._sync_failed != str(e):
+            if self._sync_failed != e.summary:
                 log.warning("%s sync job failed: %s", self.label, e)
-            self._sync_failed = str(e)
+            self._sync_failed = e.summary
             return
         if self._sync_failed is not None:
             log.warning("%s sync job working again", self.label)
