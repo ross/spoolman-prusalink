@@ -80,6 +80,14 @@ def test_decide(material, spools, inputs, want):
     assert run(WATCHED, material, active, spools=spools, **inputs)[1] is want
 
 
+def test_an_uncertain_spool_does_not_trust_a_tag_that_appeared():
+    """A tag the bridge already trusts isn't adopted, or a conflict, while the active
+    spool is uncertain."""
+    seen = SeenTag(TAG, 7, appeared=True)
+    for active in (spool(7), spool(7, "other")):
+        assert run(seen, tag_material(), active, certain=False) == (seen, Decision.NONE)
+
+
 def test_decide_records_the_uuid_seen_with_a_certain_spool():
     seen, _ = run(WATCHED, tag_material(TAG.upper()), spool(7))
     assert seen == SeenTag(TAG, 7, appeared=True)
