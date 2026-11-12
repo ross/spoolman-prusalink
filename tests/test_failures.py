@@ -189,6 +189,21 @@ async def test_failed_uuid_field_setup_mints_nothing(uuid_bridge, caplog):
     await bridge.aclose()
 
 
+async def test_uuid_field_of_another_type_is_known_until_set_up(uuid_bridge, caplog):
+    bridge, fake, printer = uuid_bridge
+    caplog.set_level("INFO")
+    fake.fields.append({"key": "instance_uuid", "name": "UUID", "field_type": "integer"})
+    target = (await bridge.spoolman.spools())[0]
+    assert await bridge._mint_uuid(target) is None
+    assert bridge._wrong_type_fields == {"instance_uuid"}
+
+    fake.fields = []  # Someone deletes the field, so the bridge can set it up.
+    assert await bridge._mint_uuid(target)
+    assert bridge._wrong_type_fields == set()
+    assert count(caplog, "'instance_uuid' spool field is set up") == 1
+    await bridge.aclose()
+
+
 async def test_failed_uuid_field_setup_adopts_nothing(uuid_bridge, caplog):
     bridge, fake, printer = uuid_bridge
     caplog.set_level("INFO")

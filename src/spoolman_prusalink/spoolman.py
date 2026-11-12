@@ -10,6 +10,10 @@ import httpx
 from .models import Spool
 
 
+class FieldTypeError(ValueError):
+    """A spool extra field's key exists in Spoolman with another type."""
+
+
 def _extra_str(extra: dict | None, key: str | None) -> str | None:
     """Decode a text extra field. Spoolman stores extra values JSON-encoded."""
     if not key or not extra or key not in extra:
@@ -147,7 +151,7 @@ class Spoolman:
         for f in resp.json():
             if f.get("key") == key:
                 if f.get("field_type") != field_type:
-                    raise ValueError(
+                    raise FieldTypeError(
                         f"spool extra field {key!r} exists but isn't a {field_type} field"
                     )
                 return
