@@ -1279,6 +1279,9 @@ class SimPrinter:
             "runout": lambda: self._check_runout(t),
             "jam": lambda: self._check_runout(t),
             "select_tool": lambda: self._check_select(t),
+            # The fault switches take any enabled tool, in any state.
+            "set_sensor_fault": lambda: None,
+            "set_stuck_write": lambda: None,
         }
         if not t.enabled:
             refused = {name: f"tool {t.index} is disabled" for name in checks}

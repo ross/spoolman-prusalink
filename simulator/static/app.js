@@ -177,7 +177,6 @@ function renderTool(p, t) {
   const proc = t.process;
   const i = t.index;
   const a = t.actions || {};
-  const tdis = !t.enabled; // a disabled tool takes only Enable/Disable
   const canKeep = a.keep == null;
   // Load opens the form when either a fresh load or the runout's reload can run.
   const loadGate = canKeep ? {} : gate(a, 'load');
@@ -212,8 +211,8 @@ function renderTool(p, t) {
     '<label title="unload on jam"><input type="checkbox" data-k="jam' + i + '"' +
     (getv(p.name, 'jam' + i, true) ? ' checked' : '') + '>unload</label>' +
     btn('Select', 'select_tool', gate(a, 'select_tool', { tool: i })) +
-    btn('Sensor fault', 'sensor_fault', { tool: i, dis: tdis, cls: t.sensor_fault ? 'on' : '' }) +
-    btn('Stuck write', 'stuck_write', { tool: i, dis: tdis, cls: t.stuck_write ? 'on' : '' }) +
+    btn('Sensor fault', 'sensor_fault', gate(a, 'set_sensor_fault', { tool: i, cls: t.sensor_fault ? 'on' : '' })) +
+    btn('Stuck write', 'stuck_write', gate(a, 'set_stuck_write', { tool: i, cls: t.stuck_write ? 'on' : '' })) +
     btn(t.enabled ? 'Disable' : 'Enable', 'tool_enabled', gate(a, 'set_tool_enabled', { tool: i })) +
     '</div>';
 
@@ -230,7 +229,7 @@ function renderTool(p, t) {
       '<label>uuid' + inp(p, 'load' + i + '.uuid', '', 'type="text" size="36"') + '</label>' +
       '<label>feed mm' + inp(p, 'load' + i + '.feed', '', 'type="number" step="any"') + '</label>' +
       '<label>purge mm' + inp(p, 'load' + i + '.purge', '', 'type="number" step="any"') + '</label>' +
-      btn('Start load', 'load_submit', { tool: i, dis: tdis || (needName && !nm) }) + '</div>';
+      btn('Start load', 'load_submit', { tool: i, dis: needName && !nm }) + '</div>';
   }
   return h + '</td></tr>';
 }

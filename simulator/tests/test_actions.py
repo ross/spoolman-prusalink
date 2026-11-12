@@ -31,6 +31,8 @@ TOOL_CALLS: dict[str, Callable[[SimPrinter, int], None]] = {
     "runout": lambda p, i: p.runout(i),
     "jam": lambda p, i: p.jam(i),
     "select_tool": lambda p, i: p.select_tool(i),
+    "set_sensor_fault": lambda p, i: p.set_sensor_fault(i, True),
+    "set_stuck_write": lambda p, i: p.set_stuck_write(i, True),
     "set_tool_enabled": lambda p, i: p.set_tool_enabled(i, not p.tools[i].enabled),
 }
 
