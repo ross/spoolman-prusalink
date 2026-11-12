@@ -29,7 +29,7 @@ from .config import Config, PrinterConfig
 from .db import Database
 from .models import FilamentReading, Material, Spool
 from .prusalink import BUSY_STATES, IDLE_STATES, NoFilamentEndpoint, PrinterStatus, PrusaLink
-from .spoolman import Spoolman
+from .spoolman import FieldTypeError, Spoolman
 from .state import PrinterState, Runout, State
 
 log = logging.getLogger("spoolman_prusalink")
@@ -1150,10 +1150,14 @@ class PrinterBridge:
                     uuid_value = adopted[1]
                 else:
                     uuid_value = await self.bridge._mint_uuid(spool)
-                    if uuid_value is None:
-                        # The spool gets its UUID first (W1). Written without one, the
+                    if uuid_value is None and self.bridge.config.uuid_field not in (
+                        self.bridge._wrong_type_fields
+                    ):
+                        # The spool gets its UUID first (W1): written without one, the
                         # printer would match the write and no later poll would mint
                         # again. The write stays due, and the next poll retries the mint.
+                        # Only a UUID key of another type doesn't hold the write, since
+                        # it won't fix itself: the spool is written without a UUID.
                         minting = True
                         continue
             writes.append(printer_sync.ToolWrite(tool, spool, uuid_value))
@@ -1275,6 +1279,8 @@ class Bridge:
     state: State = field(default_factory=State)
     printers: list[PrinterBridge] = field(init=False, default_factory=list)
     _ready_fields: set[str] = field(default_factory=set)
+    # Field keys found with another type and not set up since.
+    _wrong_type_fields: set[str] = field(default_factory=set)
     _flags: dict[int, str] = field(default_factory=dict)  # Desired flags from the last poll.
     _spoolman_reach: Reachability = field(default_factory=lambda: Reachability("Spoolman"))
     # What's failing now, by spool, with the last error logged for each.
@@ -1812,6 +1818,8 @@ class Bridge:
         try:
             await self.spoolman.ensure_field(key, name, field_type)
         except (httpx.HTTPError, ValueError) as e:
+            if isinstance(e, FieldTypeError):
+                self._wrong_type_fields.add(key)
             if _record(self._field_failing, key, e):
                 log.warning("can't set up the %r spool field: %s", key, e)
             else:
@@ -1819,7 +1827,20 @@ class Bridge:
             return False
         if self._field_failing.pop(key, None) is not None:
             log.info("%r spool field is set up", key)
+        self._wrong_type_fields.discard(key)
         self._ready_fields.add(key)
+        return True
+
+    def _flag_spool_deleted(self, spool_id: int) -> bool:
+        """Forget a deleted spool's flag, and end a failing update on it.
+
+        Returns whether `State.flagged` changed.
+        """
+        if self._flag_failing.pop(spool_id, None) is not None:
+            log.info("spool %d was deleted; its flag no longer needs updating", spool_id)
+        if spool_id not in self.state.flagged:
+            return False
+        self.state.flagged.remove(spool_id)
         return True
 
     async def sync_flags(self, spools: list[Spool]) -> None:
@@ -1850,12 +1871,7 @@ class Bridge:
                         log.debug("can't look up flagged spool %d: %s", spool_id, e)
                     continue
                 if found is None:
-                    self.state.flagged.remove(spool_id)  # Deleted, so there's no flag left.
-                    changed = True
-                    if self._flag_failing.pop(spool_id, None) is not None:
-                        log.info(
-                            "spool %d was deleted; its flag no longer needs updating", spool_id
-                        )
+                    changed |= self._flag_spool_deleted(spool_id)
                     continue
                 if found.archived:
                     self._archived[spool_id] = found
@@ -1867,6 +1883,12 @@ class Bridge:
                 try:
                     await self.spoolman.set_extra_text(spool_id, key, want)
                 except httpx.HTTPError as e:
+                    if isinstance(e, httpx.HTTPStatusError) and e.response.status_code == 404:
+                        # Deleted since it was listed or cached. An active spool that
+                        # was cached as archived is looked up again, as deleted.
+                        self._archived.pop(spool_id, None)
+                        changed |= self._flag_spool_deleted(spool_id)
+                        continue
                     if _record(self._flag_failing, spool_id, e):
                         log.warning("can't update the flag on spool %d: %s", spool_id, e)
                     else:
