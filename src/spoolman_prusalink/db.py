@@ -33,7 +33,7 @@ CREATE TABLE conditions (
     data TEXT NOT NULL,
     PRIMARY KEY (printer, tool)
 );
-CREATE TABLE seen_uuids (
+CREATE TABLE seen_tags (
     printer TEXT NOT NULL,
     tool INTEGER NOT NULL,
     uuid TEXT NOT NULL,
@@ -86,7 +86,7 @@ CREATE INDEX ledger_printer_time ON ledger (printer, time);
 _KEYED = {
     "tools": (("printer", "tool"), ("data",)),
     "conditions": (("printer", "tool"), ("data",)),
-    "seen_uuids": (("printer", "tool"), ("uuid", "spool_id", "runout")),
+    "seen_tags": (("printer", "tool"), ("uuid", "spool_id", "runout")),
     "writes": (("printer", "tool"), ("due", "attempts", "written")),
     "flagged": (("spool_id",), ()),
     "claimed": (("spool_id",), ()),
@@ -389,7 +389,7 @@ def _rows(state: State) -> Rows:
         for tool, seen in p.seen_tags.items():
             # What the bridge watched isn't saved (see `SeenTag`).
             if seen.uuid is not None:
-                rows["seen_uuids"][(name, tool)] = (seen.uuid, seen.spool_id, int(seen.runout))
+                rows["seen_tags"][(name, tool)] = (seen.uuid, seen.spool_id, int(seen.runout))
         for tool, w in p.writes.items():
             written = None if w.written is None else _canonical(w.written.to_json())
             rows["writes"][(name, tool)] = (int(w.due), w.attempts, written)
@@ -431,7 +431,7 @@ def _read(conn: sqlite3.Connection) -> tuple[State, Rows]:
                 f"conditions row ({printer!r}, {tool}): a value of the wrong type"
             ) from e
         state.printers.setdefault(printer, PrinterState()).conditions[tool] = found
-    for (printer, tool), (uuid, spool_id, runout) in rows["seen_uuids"].items():
+    for (printer, tool), (uuid, spool_id, runout) in rows["seen_tags"].items():
         seen = state.printers.setdefault(printer, PrinterState()).seen_tags
         seen[tool] = SeenTag(uuid, spool_id, runout=bool(runout))
     for (printer, tool), (due, attempts, written) in rows["writes"].items():
