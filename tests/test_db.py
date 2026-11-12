@@ -464,7 +464,8 @@ def test_a_lock_that_fails_for_another_reason_lets_go_of_the_file(path, monkeypa
     [
         (lambda d: d.pop("extruded"), "missing key 'extruded'"),
         (lambda d: d["swap"].pop("mm"), "missing key 'mm'"),
-        (lambda d: d.update(evict=None), "a null where a value belongs"),
+        (lambda d: d.update(evict=None), "a value of the wrong type"),
+        (lambda d: d.update(since_load=None), "a value of the wrong type"),
     ],
 )
 def test_a_tools_row_missing_a_key_is_a_database_error(path, edit, message):
