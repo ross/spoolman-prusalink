@@ -28,6 +28,19 @@ SPOOLMAN_URL=http://127.0.0.1:7912 script/integration
 
 Without `SPOOLMAN_URL`, a plain `pytest integration` skips every test.
 
+### Coverage
+
+CI reports how much of the bridge the integration tests run, in the job log
+and the run summary. There's no floor, and the number doesn't count toward
+the unit suite's. A miss in `app.py`, `accounting.py` or `printer_sync.py`
+is bridge behavior that unit tests cover but no scenario runs end to end.
+Some misses are fine: config parsing and the command line are out of scope
+because the tests build `Config` directly. To see the report locally:
+
+```sh
+script/integration --cov=spoolman_prusalink --cov-fail-under=0
+```
+
 ## What they assume
 
 - **A Spoolman you can share.** Each test makes its own vendor, filaments and
