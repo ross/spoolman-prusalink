@@ -1514,7 +1514,7 @@ class Bridge:
                     f"'{CLAIM_FIELD_NAME}' is ticked, but this spool isn't in a printer "
                     "tool's location. Move it into the location of the tool it's loaded in."
                 )
-                if self._unplaced.get(spool.id, "") != spool.location:
+                if spool.id not in self._unplaced or self._unplaced[spool.id] != spool.location:
                     log.warning(
                         "spool %d is claimed but isn't in a tool's location (it's in %s); "
                         "waiting until it is",
