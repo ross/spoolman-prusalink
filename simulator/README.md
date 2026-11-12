@@ -99,6 +99,10 @@ Actions: `load`, `unload`, `extrude`, `retract`, `select_tool`,
 those names in `model.py`. An action the printer can't do now answers 409
 with the reason; bad parameters answer 400.
 
+The state lists each printer's and each tool's actions under `actions`, each
+with null when the printer would take it now or the reason it would answer
+409, so a script can check before it asks.
+
 `GET /api/state` is everything the page shows, `GET /api/events` streams it
 as server-sent events, `POST /api/settings` changes a setting, and
 `POST /api/snapshot/<name>` and `POST /api/restore/<name>` save and load the

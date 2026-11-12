@@ -273,7 +273,7 @@ def test_runout_and_jam_need_a_print_with_a_loaded_selected_tool():
     with pytest.raises(Busy, match="T0 has no filament"):
         p.jam(0)
     p.set_power("off")
-    with pytest.raises(Busy, match="needs a print in progress"):
+    with pytest.raises(Busy, match="p is off"):
         p.runout(0)
 
 
