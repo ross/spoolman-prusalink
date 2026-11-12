@@ -99,7 +99,9 @@ For multi-tool printers and the other settings, mount a config file based on
 `[[tools]]` entries, because the file's tools take precedence. In the file,
 `[printer]` also takes `api_key`, or `api_key_env` naming the variable that
 holds the key, and an optional `name` (`default` if unset) that keys the
-printer's state and appears in ledger records. `compose.example.yaml` runs
+printer's state and appears in ledger records. The settings that describe a
+printer (writes to it, drift, `length_factor`) go in `[printer]` too; under
+`[bridge]` they're an error. `compose.example.yaml` runs
 the bridge next to Spoolman.
 
 To verify, look for a `baseline` line for each tool in the log. After the
@@ -118,7 +120,10 @@ To serve several printers from one bridge, replace `[printer]` and `[[tools]]`
 in the config file with a `[[printers]]` list. Each entry has a `name`, a
 `url`, the API key as `api_key` or as `api_key_env` naming the environment
 variable that holds it, its own `[[printers.tools]]` entries, and any of
-`gcode_preamble`, `sync_storage` and `sync_file`:
+the other `[printer]` settings: `gcode_preamble`, `sync_storage`,
+`sync_file`, `printer_sync`, `sync_delay`, `sync_drift`, `flag_drift` and
+`length_factor`. Each printer has its own value, and an entry that doesn't set
+one takes the default:
 
 ```toml
 [[printers]]
@@ -268,10 +273,10 @@ Claiming the spool that's already active confirms it, and nothing moves.
 
 Each charge is saved to the database before it's sent to Spoolman, in the
 same transaction as the counters it came from, and removed once
-Spoolman accepts it, in the same transaction as its ledger record. If Spoolman is unreachable or returns a server error,
-charges stay queued and are retried in order on the next poll, including
-after a restart. If Spoolman rejects a charge with a client error (4xx), the
-bridge logs an error, records it in the ledger with `failed`, and drops it.
+Spoolman accepts it, in the same transaction as its ledger record. If Spoolman is unreachable or returns a server error, a timeout (408), or a
+rate limit (429), charges stay queued and are retried in order on the next
+poll, including after a restart. If Spoolman rejects a charge with any other
+client error (4xx), the bridge logs an error, records it in the ledger with `failed`, and drops it.
 The exception is a 404 on a charge to the tool's active spool, or to a spool
 already found deleted, described next.
 
@@ -459,6 +464,13 @@ sqlite3 /data/bridge.db \
 
 Compare that against the slicer's `filament used [mm]` to validate the
 counts.
+
+The ledger grows with printing time, not with idle printers: while a tool
+prints, it adds about one charge row per `poll_printing` (30 seconds by
+default), plus a few event rows per print. A row takes about 300 bytes with
+its indexes, so a tool that prints around the clock adds about 300 MB a year,
+and one that prints 5 hours a day adds about 65 MB. The bridge keeps every
+row.
 
 ## Simulator
 

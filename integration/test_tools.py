@@ -10,7 +10,15 @@ import logging
 
 import pytest
 
-from integration.conftest import ASA, LOAD_MM, World, charges, events, logged
+from integration.conftest import (
+    ASA,
+    LOAD_MM,
+    World,
+    baseline,
+    charges,
+    events,
+    logged,
+)
 from simulator.model import PrintSpec, Segment, State
 
 pytestmark = pytest.mark.parametrize("world_tools", [2], indirect=True)
@@ -31,15 +39,6 @@ def two_tool_print() -> PrintSpec:
 def counted(w: World, slicer_mm: float) -> float:
     """What the printer counts for `slicer_mm` of print moves."""
     return slicer_mm * w.sim.settings.feed_ratio
-
-
-async def baseline(w: World) -> None:
-    records = await w.poll()
-    assert [(e["tool"], e["event"]) for e in events(records)] == [
-        (0, "baseline"),
-        (1, "baseline"),
-    ]
-    assert charges(records) == []
 
 
 async def finish(w: World) -> list[dict]:

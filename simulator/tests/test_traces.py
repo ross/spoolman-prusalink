@@ -33,7 +33,7 @@ TAGGED = Material(
 # The bridge's job for TAGGED's spool with no temperatures in Spoolman, which writes the
 # PETG preset's, built by the bridge so a change to its job shows up here.
 SYNC_JOB = printer_sync.build_job(
-    printer_sync.COREONEL_PREAMBLE,
+    printer_sync.default_preamble(printer_sync.PRINTER_MODELS["8.1.0"]),
     [
         printer_sync.ToolWrite(
             0,

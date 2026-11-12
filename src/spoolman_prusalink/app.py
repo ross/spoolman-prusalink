@@ -14,7 +14,7 @@ from datetime import UTC, datetime
 from enum import Enum
 from typing import NamedTuple
 
-import httpx
+import httpx  # For the transport types `from_config` takes; errors come from .errors.
 
 from . import drift, printer_sync
 from .accounting import (
@@ -27,9 +27,10 @@ from .accounting import (
 )
 from .config import Config, PrinterConfig
 from .db import Database
+from .errors import Busy, NotFound, Rejected, ServiceError, Unreachable
 from .models import FilamentReading, Material, Spool
 from .prusalink import BUSY_STATES, IDLE_STATES, NoFilamentEndpoint, PrinterStatus, PrusaLink
-from .spoolman import FieldTypeError, Spoolman
+from .spoolman import Spoolman
 from .state import PrinterState, Runout, State
 
 log = logging.getLogger("spoolman_prusalink")
@@ -126,9 +127,9 @@ class Reachability:
         return _duration(self.clock() - self.since)
 
 
-def _log_failed(reach: Reachability, error: Exception, *, unreachable: bool) -> None:
+def _log_failed(reach: Reachability, error: ServiceError, *, unreachable: bool) -> None:
     """Record a failed read and log what it changed."""
-    trouble = reach.failed(unreachable, str(error))
+    trouble = reach.failed(unreachable, error.summary)
     if trouble in (Trouble.STARTED, Trouble.CHANGED):
         if unreachable:
             log.warning("%s unreachable: %s; logging again when it's back", reach.name, error)
@@ -155,26 +156,12 @@ def _log_ok(reach: Reachability) -> None:
         log.warning("%s reads working again after %s", reach.name, _duration(recovery.lasted))
 
 
-def _record(failing: dict, key: Hashable, error: object) -> bool:
+def _record(failing: dict, key: Hashable, error: ServiceError) -> bool:
     """Note `error` as what's failing at `key`. Returns whether it's new or changed."""
-    text = str(error)
+    text = error.summary
     new = failing.get(key) != text
     failing[key] = text
     return new
-
-
-def _unusable(error: Exception) -> bool:
-    """Whether a field setup failure lasts until someone fixes it.
-
-    That's a key of another type, or a client error from the fields API, such as a
-    proxy refusing it or a Spoolman without it. A server error, a transport error, a
-    body that can't be read, a timeout (408) or a rate limit (429) may pass.
-    """
-    return isinstance(error, FieldTypeError) or (
-        isinstance(error, httpx.HTTPStatusError)
-        and error.response.is_client_error
-        and error.response.status_code not in (408, 429)
-    )
 
 
 # A mid-print unload with more than this fraction of the net weight left in Spoolman
@@ -282,11 +269,6 @@ class PrinterBridge:
         return self.config.name
 
     @property
-    def _prefix(self) -> str:
-        """`"printer NAME: "` when several printers share the log, else nothing."""
-        return f"{self.label}: " if self.label != "printer" else ""
-
-    @property
     def tools(self) -> dict[int, ToolState]:
         return self.bridge.state.tools(self.name)
 
@@ -300,7 +282,7 @@ class PrinterBridge:
             self._last_state = status.state  # Known even when the counters can't be read.
             reading = await self.client.filament()
             job_id = await self._user_job_id(status)
-        except httpx.TransportError as e:
+        except Unreachable as e:
             # Connection refused, timeouts and the like: most often the printer is off.
             _log_failed(self._printer_reach, e, unreachable=True)
             self._idle_since = None
@@ -311,13 +293,13 @@ class PrinterBridge:
             if not self._unsupported:
                 self._unsupported = True
                 log.error(
-                    "%s%s; this firmware isn't supported, so nothing is charged. "
+                    "%s: %s; this firmware isn't supported, so nothing is charged. "
                     "Checking again each poll.",
-                    self._prefix,
+                    self.label,
                     e,
                 )
             return None
-        except (httpx.HTTPError, ValueError, KeyError) as e:
+        except ServiceError as e:
             _log_failed(self._printer_reach, e, unreachable=False)
             self._idle_since = None
             return None
@@ -365,7 +347,7 @@ class PrinterBridge:
         for spool_id in list(self._lookup_failing):
             if spool_id not in missing:
                 del self._lookup_failing[spool_id]
-                log.info("%sspool %d no longer needs looking up", self._prefix, spool_id)
+                log.info("%s: spool %d no longer needs looking up", self.label, spool_id)
         for tool, st in list(self.tools.items()):
             spool_id = st.active
             if spool_id not in missing:
@@ -373,7 +355,7 @@ class PrinterBridge:
             location = self.config.tools.get(tool, str(tool))
             try:
                 found = await self.bridge.spoolman.spool(spool_id)
-            except (httpx.HTTPError, ValueError, KeyError) as e:
+            except ServiceError as e:
                 if _record(self._lookup_failing, spool_id, e):
                     log.warning(
                         "[%s] can't look up spool %d, which is missing from Spoolman's list: %s",
@@ -447,10 +429,15 @@ class PrinterBridge:
         """Look up the printer's model; if the bridge can't write to it, writes stay off."""
         try:
             printer_type = await self.client.printer_type()
-        except (httpx.HTTPError, ValueError) as e:
-            error = f"can't read the printer model ({e})"
+        except ServiceError as e:
+            # The summary, not the body: this is a flag's text too. The log has the body.
+            error = f"can't read the printer model ({e.summary})"
             if error != self._model_error:
-                log.warning("%s%s; printer writes are off until it can", self._prefix, error)
+                log.warning(
+                    "%s: can't read the printer model (%s); printer writes are off until it can",
+                    self.label,
+                    e,
+                )
             self._model_error = error
             return
         self._model_boot = boot_id
@@ -475,6 +462,14 @@ class PrinterBridge:
     def _tag_reader(self) -> bool:
         """Whether the model reads tags and reports their UUIDs on tool 0."""
         return self._model is not None and self._model.uuids
+
+    def _tag_tool(self, tool: int) -> bool:
+        """Whether this tool can report a tag's UUID: the tag reader's tool."""
+        return self._tag_reader and tool == printer_sync.UUID_TOOL
+
+    def _uuid_tool(self, tool: int) -> bool:
+        """Whether to write and store this tool's instance UUID."""
+        return self._uuids and tool == printer_sync.UUID_TOOL
 
     @property
     def _uuids(self) -> bool:
@@ -589,7 +584,7 @@ class PrinterBridge:
             for c in result.charges:
                 # An archived spool is still charged until the next unload, but isn't listed.
                 spool = by_id.get(c.spool_id) or self.bridge._archived.get(c.spool_id)
-                length = round(c.mm * self.bridge.config.length_factor, 1)
+                length = round(c.mm * self.config.length_factor, 1)
                 grams = spool.mm_to_grams(length) if spool else None
                 log.info(
                     "[%s] %s spool %d (%s): %+g mm%s (%s)",
@@ -627,7 +622,7 @@ class PrinterBridge:
                 self.bridge.state.runouts.pop(active.id, None)
             tag = None
             compared: dict[int, list[str]] = {}
-            if tool == 0 and (material is None or not material.instance_uuid):
+            if tool == printer_sync.UUID_TOOL and (material is None or not material.instance_uuid):
                 self._uuid_gap.add(tool)
             if not result.skipped and material is not None and active is not None:
                 tag = self._tag_uuid(tool, st, material, active, spools)
@@ -805,7 +800,7 @@ class PrinterBridge:
         runout leftover, the spool before's tag kept by a reload, isn't the loaded
         spool's, so it's written over as any other type is.
         """
-        if not (self._tag_reader and tool == 0 and material.from_tag):
+        if not (self._tag_tool(tool) and material.from_tag):
             return False
         value = material.instance_uuid
         return not (value and self._leftover(tool, value, active))
@@ -856,7 +851,7 @@ class PrinterBridge:
         is found with UUIDs off too. Everything else needs them on.
         """
         value = material.instance_uuid
-        if not (self._tag_reader and tool == 0 and value):
+        if not (self._tag_tool(tool) and value):
             return None
         value = value.lower()
         if self._leftover(tool, value, active):
@@ -965,9 +960,7 @@ class PrinterBridge:
             spool.id,
             spool.remaining_weight,
         )
-        self.bridge.state.runouts[spool.id] = Runout(
-            text, spool.net_weight, spool.used_weight, self.name
-        )
+        self.bridge.state.runouts[spool.id] = Runout(text, spool.net_weight, spool.used_weight)
 
     def _claim_handled(self, location: str, claim: int, others: list[int]) -> None:
         """Record a handled claim and the claims it beat, so their boxes are cleared."""
@@ -990,7 +983,7 @@ class PrinterBridge:
         shown = self._provisional_shown.get(tool)
         if shown is None or shown[0] != key or status.job_id is None:
             shown = self._provisional_shown[tool] = (key, p.mm)
-        length = round(shown[1] * self.bridge.config.length_factor, 1)
+        length = round(shown[1] * self.config.length_factor, 1)
         grams = spool.mm_to_grams(length) if spool else None
         amount = f"{length:g} mm" + (f" (≈ {grams:.0f} g)" if grams is not None else "")
         how = (
@@ -1028,7 +1021,7 @@ class PrinterBridge:
         return "spool changed in Spoolman since the last write"
 
     def _write_lines(self, tool: int, spool: Spool, uuid_value: str | None) -> str:
-        uuid_value = uuid_value if tool == 0 and self._uuids else None
+        uuid_value = uuid_value if self._uuid_tool(tool) else None
         return "\n".join(
             printer_sync.filament_lines(printer_sync.ToolWrite(tool, spool, uuid_value))
         )
@@ -1048,14 +1041,12 @@ class PrinterBridge:
         detail = "; ".join(diffs)
         # With the location emptied, the active spool is still loaded but is leaving:
         # don't write it, report the mismatch as drift.
-        expected = st.assigned is not None and (
-            st.needs_sync or self.bridge.config.sync_drift or edited
-        )
+        expected = st.assigned is not None and (st.needs_sync or self.config.sync_drift or edited)
         # Wait while a swap is staged: the active spool is about to change. During an
         # unconfirmed swap, write the assigned spool: the printer then shows what Spoolman
         # thinks is loaded, and confirming a different spool rewrites it.
         settled = st.assigned == st.active
-        if self.bridge.config.printer_sync and expected and st.sync_attempts < MAX_SYNC_ATTEMPTS:
+        if self.config.printer_sync and expected and st.sync_attempts < MAX_SYNC_ATTEMPTS:
             if settled and self._model_error:
                 notes.append(
                     (
@@ -1097,7 +1088,7 @@ class PrinterBridge:
                     )
                 )
             return
-        if self.bridge.config.printer_sync and expected:
+        if self.config.printer_sync and expected:
             notes.append(
                 (
                     ("printer", active.id),
@@ -1126,7 +1117,7 @@ class PrinterBridge:
                 f"[{location}] printer differs from spool {active.id}: {detail}",
             )
         )
-        if self.bridge.config.flag_drift:
+        if self.config.flag_drift:
             flags.setdefault(active.id, []).append(
                 f"{location}: printer filament differs: {detail}"
             )
@@ -1144,7 +1135,7 @@ class PrinterBridge:
             if spool is None:
                 continue
             uuid_value = None
-            if tool == 0 and self._uuids:
+            if self._uuid_tool(tool):
                 adopted = self._adopts.get(tool)
                 if spool.instance_uuid:
                     uuid_value = spool.instance_uuid
@@ -1176,15 +1167,15 @@ class PrinterBridge:
             self._sync_delaying = False
             self._sync_busy = self._sync_failed = None
             return
-        delay = self.bridge.config.sync_delay
+        delay = self.config.sync_delay
         idle_for = 0.0 if self._idle_since is None else self.bridge.clock() - self._idle_since
         if idle_for < delay:
             # The printer may have only just become idle, with someone at it about to
             # start a print. Give them time before taking it over.
             if not self._sync_delaying:
                 log.info(
-                    "%ssync job waits until the printer has been idle for %gs",
-                    self._prefix,
+                    "%s sync job waits until the printer has been idle for %gs",
+                    self.label,
                     delay,
                 )
             self._sync_delaying = True
@@ -1206,26 +1197,15 @@ class PrinterBridge:
             await self.client.upload_and_print(
                 self.config.sync_storage, self.config.sync_file, gcode
             )
-        except httpx.HTTPStatusError as e:
-            if e.response.status_code == 409:
-                if self._sync_busy != "409":
-                    log.info("%s busy; sync job waits for the next idle poll", self.label)
-                self._sync_busy = "409"
-            else:
-                detail = f"{e.response.status_code} {e.response.text[:200]}"
-                if self._sync_failed != detail:
-                    log.warning(
-                        "%s sync job failed (%d): %s",
-                        self.label,
-                        e.response.status_code,
-                        e.response.text[:200],
-                    )
-                self._sync_failed = detail
+        except Busy:
+            if self._sync_busy != "409":
+                log.info("%s busy; sync job waits for the next idle poll", self.label)
+            self._sync_busy = "409"
             return
-        except (httpx.HTTPError, ValueError, KeyError) as e:
-            if self._sync_failed != str(e):
+        except ServiceError as e:
+            if self._sync_failed != e.summary:
                 log.warning("%s sync job failed: %s", self.label, e)
-            self._sync_failed = str(e)
+            self._sync_failed = e.summary
             return
         if self._sync_failed is not None:
             log.warning("%s sync job working again", self.label)
@@ -1281,7 +1261,7 @@ class Bridge:
     state: State = field(default_factory=State)
     printers: list[PrinterBridge] = field(init=False, default_factory=list)
     _ready_fields: set[str] = field(default_factory=set)
-    # Field keys whose last setup failure needs someone to fix it (`_unusable`).
+    # Field keys whose last setup failure was `Rejected`: it needs someone to fix it.
     _unusable_fields: set[str] = field(default_factory=set)
     _flags: dict[int, str] = field(default_factory=dict)  # Desired flags from the last poll.
     _spoolman_reach: Reachability = field(init=False)
@@ -1398,10 +1378,10 @@ class Bridge:
             return
         try:
             spools = await self.spoolman.spools()
-        except httpx.TransportError as e:
+        except Unreachable as e:
             _log_failed(self._spoolman_reach, e, unreachable=True)
             return
-        except (httpx.HTTPError, ValueError, KeyError) as e:
+        except ServiceError as e:
             _log_failed(self._spoolman_reach, e, unreachable=False)
             return
         _log_ok(self._spoolman_reach)
@@ -1624,7 +1604,7 @@ class Bridge:
         for spool_id in list(self.state.claimed):
             try:
                 await self.spoolman.set_extra(spool_id, key, False)
-            except httpx.HTTPError as e:
+            except ServiceError as e:
                 if _record(self._unclaim_failing, spool_id, e):
                     log.warning("can't clear the claim on spool %d: %s", spool_id, e)
                 else:
@@ -1643,7 +1623,8 @@ class Bridge:
         A charge leaves the outbox only once Spoolman accepts it, so a crash or an
         outage delays charges instead of dropping them. A 404 for the tool's active (or
         already deleted) spool means it was deleted: the charge is held for the tool's
-        next spool. Any other 4xx drops the charge with an error so it can't block the rest.
+        next spool. Any other 4xx except a timeout (408) or a rate limit (429) drops the
+        charge with an error so it can't block the rest.
         """
         outbox = self.state.outbox
         sent = held = dropped = 0
@@ -1654,32 +1635,27 @@ class Bridge:
                 rec = {**rec, "applied": _now()}
                 self._follow_runout_charge(rec, used)
                 sent += 1
-            except httpx.HTTPStatusError as e:
-                code = e.response.status_code
-                if code >= 500:
-                    self._charge_stuck(rec["spool_id"], code, len(outbox))
-                    return False
+            except Rejected as e:
                 mm = int(rec.get("extruded_mm", 0))
                 printer = self._printer(rec.get("printer"))
                 if (
-                    code == 404
+                    isinstance(e, NotFound)
                     and mm > 0
                     and printer is not None
                     and printer._hold_deleted(rec.get("tool", -1), rec["spool_id"], mm)
                 ):
-                    rec = {**rec, "failed": f"{code}", "held": True}
+                    rec = {**rec, "failed": f"{e.status}", "held": True}
                     held += 1
                 else:
                     log.error(
-                        "Spoolman rejected a %+g mm charge to spool %d (%d %s); dropping it",
+                        "Spoolman rejected a %+g mm charge to spool %d (%s); dropping it",
                         rec["use_length"],
                         rec["spool_id"],
-                        code,
-                        e.response.text[:200],
+                        e,
                     )
-                    rec = {**rec, "failed": f"{code}"}
+                    rec = {**rec, "failed": f"{e.status}"}
                     dropped += 1
-            except httpx.HTTPError as e:
+            except ServiceError as e:
                 self._charge_stuck(rec["spool_id"], e, len(outbox))
                 return False
             outbox.pop(0)
@@ -1689,18 +1665,18 @@ class Bridge:
             log.warning("%s", _outbox_outcome(sent, held, dropped))
         return True
 
-    def _charge_stuck(self, spool_id: int, error: object, queued: int) -> None:
+    def _charge_stuck(self, spool_id: int, error: ServiceError, queued: int) -> None:
         """Log a charge that's stuck, once per distinct error."""
-        detail = str(error)
+        detail = error.summary
         if self._charge_failing != detail:
             log.warning(
-                "charge to spool %d failed (%s); %d queued, retrying", spool_id, detail, queued
+                "charge to spool %d failed (%s); %d queued, retrying", spool_id, error, queued
             )
         else:
             log.debug(
                 "charge to spool %d still failing (%s); %d queued, retrying",
                 spool_id,
-                detail,
+                error,
                 queued,
             )
         self._charge_failing = detail
@@ -1737,7 +1713,7 @@ class Bridge:
                             self._evict_gone(location, spool_id)
                             continue
                         await self.spoolman.set_location(spool_id, target)
-                    except (httpx.HTTPError, ValueError, KeyError) as e:
+                    except ServiceError as e:
                         if _record(self._evict_failing, spool_id, e):
                             log.warning("[%s] can't move spool %d out: %s", location, spool_id, e)
                         else:
@@ -1764,8 +1740,8 @@ class Bridge:
         if not await self._ensure_field(key, UUID_FIELD_NAME):
             return None
         try:
-            await self.spoolman.set_extra_text(spool.id, key, value)
-        except httpx.HTTPError as e:
+            await self.spoolman.set_extra(spool.id, key, value)
+        except ServiceError as e:
             self._uuid_trouble(spool.id, e, "can't store an instance UUID on spool %d: %s")
             return None
         self._uuid_failing.pop(spool.id, None)
@@ -1786,7 +1762,7 @@ class Bridge:
             return True
         try:
             every = await self.spoolman.spools(archived=True)
-        except (httpx.HTTPError, ValueError, KeyError) as e:
+        except ServiceError as e:
             self._uuid_trouble(spool_id, e, "can't check spool %d's tag UUID: %s")
             return False
         owner = next(
@@ -1816,8 +1792,8 @@ class Bridge:
         if not await self._ensure_field(key, UUID_FIELD_NAME):
             return False
         try:
-            await self.spoolman.set_extra_text(spool_id, key, value)
-        except httpx.HTTPError as e:
+            await self.spoolman.set_extra(spool_id, key, value)
+        except ServiceError as e:
             self._uuid_trouble(spool_id, e, "can't store an instance UUID on spool %d: %s")
             return False
         self._uuid_failing.pop(spool_id, None)
@@ -1836,8 +1812,10 @@ class Bridge:
             return True
         try:
             await self.spoolman.ensure_field(key, name, field_type)
-        except (httpx.HTTPError, ValueError) as e:
-            if _unusable(e):
+        except ServiceError as e:
+            # A refusal, such as a key of another type, a proxy refusing the fields API or
+            # a Spoolman without it, lasts until someone fixes it. Anything else may pass.
+            if isinstance(e, Rejected):
                 self._unusable_fields.add(key)
             else:
                 self._unusable_fields.discard(key)  # Passing, whatever failed before.
@@ -1885,7 +1863,7 @@ class Bridge:
                 # and a stale one is cleared.
                 try:
                     found = await self.spoolman.spool(spool_id)
-                except (httpx.HTTPError, ValueError, KeyError) as e:
+                except ServiceError as e:
                     if _record(self._flag_failing, spool_id, e):
                         log.warning("can't look up flagged spool %d: %s", spool_id, e)
                     else:
@@ -1902,14 +1880,14 @@ class Bridge:
                 continue  # Not listed, and the bridge never flagged it: leave it alone.
             if current[spool_id] != want:
                 try:
-                    await self.spoolman.set_extra_text(spool_id, key, want)
-                except httpx.HTTPError as e:
-                    if isinstance(e, httpx.HTTPStatusError) and e.response.status_code == 404:
-                        # Deleted since it was listed or cached. An active spool that
-                        # was cached as archived is looked up again, as deleted.
-                        self._archived.pop(spool_id, None)
-                        changed |= self._flag_spool_deleted(spool_id)
-                        continue
+                    await self.spoolman.set_extra(spool_id, key, want)
+                except NotFound:
+                    # Deleted since it was listed or cached. An active spool that was
+                    # cached as archived is looked up again, as deleted.
+                    self._archived.pop(spool_id, None)
+                    changed |= self._flag_spool_deleted(spool_id)
+                    continue
+                except ServiceError as e:
                     if _record(self._flag_failing, spool_id, e):
                         log.warning("can't update the flag on spool %d: %s", spool_id, e)
                     else:
