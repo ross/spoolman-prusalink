@@ -416,6 +416,63 @@ async def test_s5_claim_after_printing_on_the_wrong_spool(
     assert w.material() == (PETG[0], PETG[1], minted)
 
 
+async def test_s5_correction_after_printing_on_the_wrong_spool(
+    world: World, caplog: pytest.LogCaptureFixture
+):
+    """Print charged provisionally to the old spool: moving in the tagged one moves it (#107)."""
+    caplog.set_level(logging.INFO, logger="spoolman_prusalink")
+    w = world
+    a, b = w.spools["A"], w.spools["B"]
+    uuid_b = "5d0c8a2e-7b1f-4e3a-9c6d-8f2b1a0e4c7d"
+    await set_extra_text(w.spoolman.client, b, UUID_FIELD, uuid_b)
+    await baseline(w)
+    unloaded = await unconfirmed_swap(w)
+    at_unload = w.tool.extruded_at_unload
+
+    # B goes in from its tag, Spoolman is forgotten, and a print starts.
+    await w.swap_cycle(poll_every=0.3, source="tag", name=PETG[0], color=PETG[1], uuid=uuid_b)
+    await w.poll()
+    await w.run_until(lambda: w.printer.job is None)
+    records = await w.start_print(print_spec())
+    assert len(events(records, "swap_assumed")) == 1
+    flag = await w.flag("A")
+    assert flag is not None and "charged to it provisionally" in flag
+    assert f"the loaded tag is spool {b}'s" in flag  # Drift until Spoolman agrees (W9).
+    assert charged(w.since(unloaded), b) == 0
+
+    # The user moves B into the location and ticks nothing. The printer reports B's
+    # UUID, so that's a correction, and it settles which spool went in at the unload.
+    moved = w.counter - at_unload
+    await w.move("B", w.tool_location)
+    w.advance(0.3)
+    records = await w.poll()
+    assert w.counter > at_unload + moved
+    msg = (
+        f"printer already has spool {b}'s filament; switching from spool {a} now and "
+        f"moving {moved} mm from spool {a} (usage since the last unload)"
+    )
+    assert [e["message"] for e in events(records, "correction")] == [msg]
+    assert logged(caplog, logging.INFO, f"[{w.tool_location}] {msg}")
+    assert events(records, "provisional_kept") == []
+    assert events(records, "claimed") == []
+    since_unload = w.since(unloaded)
+    assert charged(since_unload, a) == 0
+    assert charged(since_unload, b) == w.counter - at_unload  # Counted once.
+    assert await w.spoolman.location(a) is None  # Evicted, as for a claim.
+    assert await w.flag("A") is None
+    assert await w.flag("B") is None
+
+    # The rest of the print is B's, and the tag isn't written over (Q11).
+    at_correction = w.counter
+    records = await w.finish_print()
+    assert w.charged(records, "A") == 0
+    assert w.charged(records, "B") == w.counter - at_correction
+    w.advance(1.5)
+    await w.poll()
+    assert w.requests("PUT") == []
+    assert w.material() == (PETG[0], PETG[1], uuid_b)
+
+
 async def test_s13_staged_spool_claimed(world: World, caplog: pytest.LogCaptureFixture):
     """Staged spool, no unload: a claim moves the usage since the reboot and makes it active."""
     caplog.set_level(logging.INFO, logger="spoolman_prusalink")

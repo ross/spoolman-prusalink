@@ -109,6 +109,7 @@ current and that the scenario rows name their tests.
 | S4 | `test_swaps.py::test_s4_claiming_the_reloaded_spool_confirms_it` | S4's provisional charge, then the reloaded spool claimed: confirmed, nothing moves. |
 | S4 | `test_swaps.py::test_s4_same_spool_reloaded_then_print` | Same spool unloaded and reloaded, then a print: provisional charge, kept at the unload. |
 | S5 | `test_swaps.py::test_s5_claim_after_printing_on_the_wrong_spool` | Print charged provisionally to the old spool: claiming the loaded one moves it there. |
+| S5 | `test_swaps.py::test_s5_correction_after_printing_on_the_wrong_spool` | Print charged provisionally to the old spool: moving in the tagged one moves it (#107). |
 | S6 | `test_swaps.py::test_s6_unload_with_nothing_assigned` | Unload with nothing assigned: the usage before it is lost, the usage after it held. |
 | S7 | `test_swaps.py::test_s7_old_spool_out_new_in_then_unload` | Old spool out, new one in, then unload: the old one charged until the unload, new staged. |
 | S8 | `test_swaps.py::test_s8_staged_spool_moved_back_out` | Staged spool moved back out before an unload: staging cancelled, old spool charged. |
