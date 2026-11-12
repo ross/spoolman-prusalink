@@ -477,7 +477,7 @@ class SimPrinter:
         if tool.material is not None and empty:
             self._count_unload(tool, "idle sensor clear")
 
-    # PrusaLink views.
+    # Job state rules.
 
     def job_visible(self) -> bool:
         job = self.job

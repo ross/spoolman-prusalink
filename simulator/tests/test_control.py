@@ -235,8 +235,8 @@ def test_a_stream_queue_drops_the_oldest():
             {"tool": 0, "value": "3"},
             "set_extruded_at_unload value must be an integer, got '3'",
         ),
-        ("extrude", {"tool": 0, "mm": "5"}, "extrude mm must be a number, got '5'"),
-        ("extrude", {"tool": 0, "mm": False}, "extrude mm must be a number, got False"),
+        ("extrude", {"tool": 0, "mm": "5"}, "extrude mm must be a finite number, got '5'"),
+        ("extrude", {"tool": 0, "mm": False}, "extrude mm must be a finite number, got False"),
         ("load", {"tool": 0, "source": "preset", "name": 7}, "load name must be a string, got 7"),
         (
             "load",
@@ -263,7 +263,17 @@ def test_a_stream_queue_drops_the_oldest():
         (
             "start_print",
             {"segments": [{"tool": 0, "slicer_mm": 1}], "preheat_s": "9"},
-            "start_print preheat_s must be a number, got '9'",
+            "start_print preheat_s must be a finite number, got '9'",
+        ),
+        (
+            "start_print",
+            {"segments": [], "name": False},
+            "start_print name must be a string, got False",
+        ),
+        (
+            "start_print",
+            {"segments": [], "color_changes_mm": 0},
+            "start_print color_changes_mm must be a list, got 0",
         ),
         (
             "start_print",
@@ -297,3 +307,15 @@ async def test_checked_parameters_reach_the_action_as_their_types(setup):
 def test_an_unknown_hint_is_a_bug():
     with pytest.raises(TypeError, match="no input check"):
         control._check("x", 1, dict)
+
+
+@pytest.mark.parametrize("raw", ["NaN", "Infinity", "-Infinity"])
+async def test_a_number_that_isnt_finite_is_refused(setup, raw):
+    sim, p, client = setup
+    resp = await client.post(
+        "/api/printers/p/extrude",
+        data='{"tool": 0, "mm": ' + raw + "}",
+        headers={"Content-Type": "application/json"},
+    )
+    assert resp.status == 400
+    assert (await resp.json())["error"].startswith("extrude mm must be a finite number")

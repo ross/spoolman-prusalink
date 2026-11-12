@@ -6,6 +6,7 @@ import asyncio
 import enum
 import inspect
 import json
+import math
 import types
 from dataclasses import asdict, fields
 from pathlib import Path
@@ -109,7 +110,7 @@ async def _body(request: web.Request) -> dict:
     return data
 
 
-_KINDS = {bool: "true or false", int: "an integer", float: "a number", str: "a string"}
+_KINDS = {bool: "true or false", int: "an integer", float: "a finite number", str: "a string"}
 
 
 def _check(where: str, value: Any, hint: Any) -> Any:
@@ -145,6 +146,8 @@ def _check(where: str, value: Any, hint: Any) -> Any:
         ok = isinstance(value, int | float if hint is float else int) and not isinstance(
             value, bool
         )
+        # Python's json reads NaN and Infinity, which no length or time can be.
+        ok = ok and math.isfinite(value)
     if not ok:
         raise Invalid(f"{where} must be {_KINDS[hint]}, got {value!r}")
     return float(value) if hint is float else value
@@ -177,10 +180,12 @@ def _print_spec(body: dict) -> PrintSpec:
         ],
         duration_s=_check("start_print duration_s", body.get("duration_s"), float | None),
         preheat_s=_check("start_print preheat_s", body.get("preheat_s"), float | None),
+        # Check before the default, so a falsy value of the wrong type is refused too.
         color_changes_mm=_check(
-            "start_print color_changes_mm", body.get("color_changes_mm") or [], list[float]
-        ),
-        name=_check("start_print name", body.get("name") or "part.bgcode", str),
+            "start_print color_changes_mm", body.get("color_changes_mm"), list[float] | None
+        )
+        or [],
+        name=_check("start_print name", body.get("name"), str | None) or "part.bgcode",
     )
 
 
