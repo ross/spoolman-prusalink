@@ -501,7 +501,7 @@ def _positive(value: Any, what: str) -> float:
 
 
 def check_name(name: Any) -> str:
-    if not isinstance(name, str) or not gcode.NAME_RE.match(name):
+    if not isinstance(name, str) or not gcode.NAME_RE.fullmatch(name):
         raise Invalid(f"filament name {name!r} must be 1 to 7 of A-Z a-z 0-9 _ -")
     return name
 
@@ -516,7 +516,7 @@ def _check_temperatures(temps: Any) -> tuple[int, int, int]:
 def check_color(color: Any) -> str | None:
     if color is None or color == "":
         return None
-    if not isinstance(color, str) or not gcode.COLOR_RE.match(color):
+    if not isinstance(color, str) or not gcode.COLOR_RE.fullmatch(color):
         raise Invalid(f"color {color!r} must look like #rrggbb")
     return color.lower()
 

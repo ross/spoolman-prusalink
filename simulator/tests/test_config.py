@@ -133,6 +133,14 @@ BAD = {
         printer(tool('index = 0\nmaterial = { name = "PLA", color = "red" }')),
         "material.color: color 'red' must look like #rrggbb",
     ),
+    "name ending in a newline": (
+        printer(tool('index = 0\nmaterial = { name = "PLA\\n" }')),
+        "material.name: filament name 'PLA\\n' must be 1 to 7",
+    ),
+    "color ending in a newline": (
+        printer(tool('index = 0\nmaterial = { name = "PLA", color = "#abcdef\\n" }')),
+        "material.color: color '#abcdef\\n' must look like #rrggbb",
+    ),
     "bad uuid": (
         printer(tool('index = 0\nmaterial = { name = "PLA", instance_uuid = "x" }')),
         "material.instance_uuid: 'x' isn't a UUID",
