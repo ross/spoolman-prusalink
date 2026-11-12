@@ -50,6 +50,7 @@ class FakeSpoolman:
         self.writes = []
         self.down = False  # Refuse connections.
         self.fail_read = None  # Status code for spool reads.
+        self.fail_archived = None  # Status code for spool reads that ask for archived ones.
         self.fail_patch = None  # Status code for spool PATCHes.
         self.fail_uuid = None  # Status code for PATCHes that store an instance UUID.
         self.fail_field = None  # Status code for field reads.
@@ -65,12 +66,15 @@ class FakeSpoolman:
         if path == "/api/v1/spool" and method == "GET":
             if self.fail_read:
                 return httpx.Response(self.fail_read, text="oops")
+            archived = request.url.params.get("allow_archived") == "true"
+            if archived and self.fail_archived:
+                return httpx.Response(self.fail_archived, text="oops")
             return httpx.Response(
                 200,
                 json=[
                     s
                     for s in self.spools.values()
-                    if not s.get("archived") and s["id"] not in self.unlisted
+                    if (archived or not s.get("archived")) and s["id"] not in self.unlisted
                 ],
             )
         if path.startswith("/api/v1/spool/") and method == "GET":
