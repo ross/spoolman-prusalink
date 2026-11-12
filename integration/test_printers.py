@@ -67,16 +67,12 @@ async def load_a_at_b(w: World) -> list[dict]:
 
 
 def bridge_for(w: World, cfg) -> Bridge:
-    """A new bridge on `cfg` with the simulator's clock, replacing `w.bridge`.
+    """A new bridge on `cfg`, replacing `w.bridge`.
 
     The caller closes the old bridge first; the world closes every bridge it started at
     the end.
     """
-    bridge = Bridge.from_config(cfg)
-    bridge.clock = lambda: w.sim.now
-    w.bridge = bridge
-    w.bridges.append(bridge)
-    return bridge
+    return w.start_bridge(cfg)
 
 
 @pytest.mark.parametrize("b_first", [False, True], ids=["a-first", "b-first"])
@@ -282,6 +278,7 @@ async def test_x4a_eviction_rereads_the_spool(world: World):
 
     faults = w.spoolman_faults
     faults.hook = race
+    faults.requests.clear()  # Only this poll's requests, for the order check below.
     records = await w.poll()
     assert kinds(records) == [(IT, "unload"), (IT, "swap_committed")]
     assert it.state.active == c and it.state.evict == (a,)

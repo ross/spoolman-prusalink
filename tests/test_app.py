@@ -340,8 +340,8 @@ async def test_printer_outage_logged_on_change(tmp_path, caplog):
         Spoolman("http://s", transport=t),
         {"default": PrusaLink("http://p", "k", transport=t)},
         Database.open(cfg.db_file),
+        clock=lambda: now["v"],
     )
-    bridge.printers[0]._printer_reach.clock = lambda: now["v"]
     caplog.set_level("INFO")
 
     for _ in range(5):
@@ -388,9 +388,9 @@ async def test_printer_kind_change_and_bad_answer_reporting(tmp_path, caplog):
         Spoolman("http://s", transport=t),
         {"default": PrusaLink("http://p", "k", transport=t)},
         Database.open(cfg.db_file),
+        clock=lambda: now["v"],
     )
     reach = bridge.printers[0]._printer_reach
-    reach.clock = lambda: now["v"]
     caplog.set_level("DEBUG")
 
     def lines(text):
@@ -1253,6 +1253,34 @@ async def test_from_config_opens_the_database_and_builds_the_clients(tmp_path):
     finally:
         await bridge.aclose()
     Database.open(cfg.db_file).close()
+
+
+async def test_from_config_passes_the_clock_and_transports(tmp_path):
+    cfg = make_config(tmp_path)
+    seen: list[str] = []
+
+    def refuse(name):
+        def handler(request):
+            seen.append(name)
+            raise httpx.ConnectError("refused")
+
+        return httpx.MockTransport(handler)
+
+    bridge = Bridge.from_config(
+        cfg,
+        clock=lambda: 3600.0,
+        spoolman_transport=refuse("spoolman"),
+        printer_transports={"default": refuse("printer")},
+    )
+    try:
+        await bridge.poll()  # The printer read fails, so Spoolman isn't read.
+        assert seen == ["printer"]
+        assert bridge.printers[0]._printer_reach.since == 3600.0
+        with pytest.raises(httpx.ConnectError):
+            await bridge.spoolman.spools()
+        assert seen == ["printer", "spoolman"]
+    finally:
+        await bridge.aclose()
 
 
 # _record: a failing dict keeps the last error logged for each key

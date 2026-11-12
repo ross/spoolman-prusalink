@@ -306,9 +306,9 @@ archiving and unarchiving a spool, writing a text field, and renaming a location
 To make the printer fail one request, set `w.before_request`, a function that gets
 the method and path of each request before the simulator serves it. It can change
 the printer between two of the bridge's requests, as W3 starts a print before the
-upload. It can also return an aiohttp response to send instead, such as a 500 for
-`/api/version` or a 204 for `/api/v1/job`, or `simulator.prusalink.DROP` to close
-the connection with no answer. Returning None serves the request as usual.
+upload. It can also return a `simulator.prusalink.Answer` to send instead, such as a
+500 for `/api/version` or a 204 for `/api/v1/job`, or `simulator.prusalink.DROP` to
+close the connection with no answer. Returning None serves the request as usual.
 
 Poll where a real bridge would have polled. Some behaviour depends on what two
 polls in a row see: the bridge counts a print as started only when the counter

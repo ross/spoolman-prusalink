@@ -7,7 +7,6 @@ import uuid
 from dataclasses import replace
 
 import pytest
-from aiohttp import web
 
 from integration.conftest import (
     ASA,
@@ -24,7 +23,7 @@ from integration.conftest import (
 from integration.faults import set_extra_text
 from integration.temperatures import TEMPERATURES, WRITTEN
 from simulator.model import MODELS, JobPhase, Material, ModelInfo, State
-from simulator.prusalink import DROP, Reply
+from simulator.prusalink import DROP, Answer, Reply
 from spoolman_prusalink.printer_sync import PRINTER_MODELS, default_preamble
 
 COREONEL_PREAMBLE = default_preamble(PRINTER_MODELS["8.1.0"])
@@ -698,7 +697,7 @@ async def test_w15_upload_fails(world: World, caplog: pytest.LogCaptureFixture, 
         failed += 1
         if failure == "drop":
             return DROP
-        return web.json_response({"message": "storage error"}, status=500)
+        return Answer(500, {"message": "storage error"})
 
     w.before_request = fail_uploads
     for _ in range(3):
@@ -782,7 +781,7 @@ async def test_w10_model_unreadable_until_it_answers(
 
     def no_version(method: str, path: str) -> Reply:
         if path == "/api/version":
-            return web.json_response({"message": "Internal Server Error"}, status=500)
+            return Answer(500, {"message": "Internal Server Error"})
         return None
 
     w.before_request = no_version
@@ -881,7 +880,7 @@ async def test_w9_malformed_color_is_drift(world: World, caplog: pytest.LogCaptu
         data = w.printer.filament_json()
         assert data is not None
         data["tools"][0]["material"]["color"] = "#7g737b"
-        return web.json_response(data)
+        return Answer(200, data)
 
     w.before_request = bad_color
     for _ in range(3):
