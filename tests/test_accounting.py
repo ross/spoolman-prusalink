@@ -42,6 +42,10 @@ def run(steps, state=None, matches=lambda _id: False):
     for step in steps:
         boot, reading, ids, *job = step
         res = account(state, boot, reading, ids, job[0] if job else None, matches)
+        # A provisional charge is only ever on the active spool: whatever changes the
+        # active spool resolves it first.
+        p = res.state.provisional
+        assert p is None or p.spool_id == res.state.active, (step, res.state)
         charges += res.charges
         kinds += [e.kind for e in res.events]
         state = res.state
