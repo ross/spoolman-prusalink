@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import json
 import logging
 
+import httpx
 import pytest
 
 from integration.conftest import (
@@ -18,7 +20,13 @@ from integration.conftest import (
     logged,
     print_spec,
 )
-from integration.faults import archive_spool, delete_spool, rename_location, set_extra_text
+from integration.faults import (
+    archive_spool,
+    delete_spool,
+    rename_location,
+    set_extra_text,
+    unarchive_spool,
+)
 from simulator.model import State
 
 
@@ -591,3 +599,409 @@ async def test_m7_density_edit_applies_to_later_charges(world: World):
     await w.poll()
     assert w.bridge.state.outbox == []
     assert await w.used("A") == pytest.approx(6 * before, abs=0.01)
+
+
+@pytest.mark.parametrize(
+    "status, body",
+    [(500, None), (200, "<html>not JSON</html>")],
+    ids=["5xx", "bad-json"],
+)
+async def test_m1_spool_list_fails(
+    world: World, caplog: pytest.LogCaptureFixture, status: int, body: str | None
+):
+    """Spool list answers 5xx or bad JSON: polls skip, logged once, not as an outage."""
+    caplog.set_level(logging.DEBUG, logger="spoolman_prusalink")
+    w = world
+    faults = w.spoolman_faults
+    await baseline(w)
+    charged_at = w.bridge.printers[0].tools[0].charged
+
+    # Spoolman answers, badly: each poll stops after reading the list, and the tool's
+    # counter isn't advanced, so nothing is lost.
+    faults.answer("GET", "/api/v1/spool", status, body, times=None)
+    faults.requests.clear()
+    for _ in range(3):
+        w.printer.extrude(0, 20)
+        assert await w.poll() == []
+    assert w.bridge.printers[0].tools[0].charged == charged_at
+    assert not w.bridge._spoolman_reach.down
+    assert faults.requests.count(f"GET /api/v1/spool {status}") == 3
+    failed = "Spoolman read failed, skipping poll"
+    assert count(caplog, logging.WARNING, failed) == 1
+    assert count(caplog, logging.DEBUG, failed) == 2
+    assert not logged(caplog, logging.WARNING, "unreachable")
+
+    # It answers properly again: one line says so, and the usage since goes in one charge.
+    faults.restore()
+    records = await w.poll()
+    assert [r["use_length"] for r in charges(records)] == [60.0]
+    await w.poll()
+    assert count(caplog, logging.WARNING, "Spoolman reads working again after") == 1
+    assert count(caplog, logging.WARNING, failed) == 1
+    assert not logged(caplog, logging.WARNING, "reachable again")
+
+
+@pytest.mark.parametrize("ends", ["looked-up", "listed-again"])
+async def test_m3_lookup_of_a_missing_spool_fails(
+    world: World, caplog: pytest.LogCaptureFixture, ends: str
+):
+    """Active spool missing from the list and its lookup fails: charged, logged once."""
+    caplog.set_level(logging.DEBUG, logger="spoolman_prusalink")
+    w = world
+    a = w.spools["A"]
+    faults = w.spoolman_faults
+    await baseline(w)
+
+    # A is archived, so it drops out of the list, and the lookup that would say so fails.
+    await archive_spool(w.spoolman.client, a)
+    faults.answer("GET", f"/api/v1/spool/{a}", 500, times=None)
+    mark = w.mark()
+    for _ in range(3):
+        w.printer.extrude(0, 10)
+        await w.poll()
+    records = w.since(mark)
+    assert w.charged(records, "A") == 30
+    assert w.bridge.printers[0].tools[0].active == a
+    cant = f"[{w.tool_location}] can't look up spool {a}, which is missing from Spoolman's list"
+    assert count(caplog, logging.WARNING, cant) == 1
+    assert count(caplog, logging.DEBUG, f"still can't look up spool {a}") == 2
+    assert faults.requests.count(f"GET /api/v1/spool/{a} 500") == 3
+
+    if ends == "looked-up":
+        # The lookup works again: A is found archived, said once, and flagged.
+        faults.restore()
+        for _ in range(2):
+            w.printer.extrude(0, 10)
+            await w.poll()
+        assert count(caplog, logging.INFO, f"[{w.tool_location}] can look up spool {a} again") == 1
+        archived = f"spool {a} is archived but still loaded"
+        assert count(caplog, logging.WARNING, archived) == 1
+        assert await w.flag("A") == f"{w.tool_location}: spool is archived but still loaded"
+    else:
+        # A is unarchived, so the list has it again and no lookup is needed.
+        await unarchive_spool(w.spoolman.client, a)
+        for _ in range(2):
+            w.printer.extrude(0, 10)
+            await w.poll()
+        assert count(caplog, logging.INFO, f"spool {a} no longer needs looking up") == 1
+        assert faults.requests.count(f"GET /api/v1/spool/{a} 500") == 3
+    assert w.charged(w.since(mark), "A") == 50
+    assert count(caplog, logging.WARNING, cant) == 1
+
+
+def refuse_flag(w: World, name: str) -> None:
+    """Make Spoolman refuse every write to a spool's flag field with a 500."""
+    path = f"/api/v1/spool/{w.spools[name]}"
+    w.spoolman_faults.answer("PATCH", path, 500, times=None, containing=FLAG_FIELD.encode())
+
+
+async def test_m6_flag_write_fails(world: World, caplog: pytest.LogCaptureFixture):
+    """Writing a flag fails: logged once, retried each poll, and the write logged when it works."""
+    caplog.set_level(logging.DEBUG, logger="spoolman_prusalink")
+    w = world
+    a = w.spools["A"]
+    await baseline(w)
+
+    refuse_flag(w, "A")
+    w.printer.extrude(0, 30)
+    await w.unload()
+    records = await w.poll()
+    assert len(events(records, "swap_unconfirmed")) == 1
+    await w.poll()
+    assert await w.flag("A") is None
+    assert w.spoolman_faults.requests.count(f"PATCH /api/v1/spool/{a} 500") == 2
+    cant = f"can't update the flag on spool {a}"
+    assert count(caplog, logging.WARNING, cant) == 1
+    assert count(caplog, logging.DEBUG, cant) == 1
+
+    w.spoolman_faults.restore()
+    await w.poll()
+    await w.poll()
+    flag = await w.flag("A")
+    assert flag is not None and "unloaded with no Spoolman change" in flag
+    assert count(caplog, logging.INFO, f"set flag on spool {a}") == 1
+    assert count(caplog, logging.WARNING, cant) == 1
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="a failing flag update on a spool that leaves Spoolman's list never logs its end (#120)",
+)
+@pytest.mark.parametrize("gone", ["deleted", "archived"])
+async def test_m6_flagged_spool_gone_while_its_flag_fails(
+    world: World, caplog: pytest.LogCaptureFixture, gone: str
+):
+    """Spool deleted or archived while its flag fails: end logged once; stale flag open (#120).
+
+    Whether an archived spool's stale flag is cleared later is an open question (#120),
+    so this doesn't check it either way.
+    """
+    caplog.set_level(logging.DEBUG, logger="spoolman_prusalink")
+    w = world
+    a = w.spools["A"]
+    await baseline(w)
+
+    # S2 flags A; then Spoolman is updated, but clearing A's flag fails.
+    w.printer.extrude(0, 30)
+    await w.unload()
+    await w.poll()
+    assert await w.flag("A") is not None
+    assert w.bridge.state.flagged == [a]
+    refuse_flag(w, "A")
+    await w.move("A", w.shelf)
+    await w.move("B", w.tool_location)
+    records = await w.poll()
+    assert len(events(records, "swap_confirmed")) == 1
+    await w.poll()
+    assert await w.flag("A") is not None
+    cant = f"can't update the flag on spool {a}"
+    assert count(caplog, logging.WARNING, cant) == 1
+
+    # A leaves Spoolman's list, and Spoolman takes writes again, so clearing an archived
+    # spool's flag (#120) would work too. Either way the failure is over: one INFO line.
+    logged_before = len(caplog.records)
+    if gone == "deleted":
+        await delete_spool(w.spoolman.client, a)
+    else:
+        await archive_spool(w.spoolman.client, a)
+    w.spoolman_faults.restore()
+    for _ in range(2):
+        await w.poll()
+    ended = [r for r in caplog.records[logged_before:] if r.levelno >= logging.INFO]
+    assert [r.levelno for r in ended] == [logging.INFO], [r.getMessage() for r in ended]
+
+    # Later polls say nothing more about it.
+    logged_before = len(caplog.records)
+    for _ in range(2):
+        await w.poll()
+    later = caplog.records[logged_before:]
+    assert [r.getMessage() for r in later if r.levelno >= logging.INFO] == []
+    assert not any(cant in r.getMessage() for r in later)
+    assert count(caplog, logging.WARNING, cant) == 1
+
+
+async def test_m2_charge_accepted_with_an_unreadable_reply(
+    world: World, caplog: pytest.LogCaptureFixture
+):
+    """Spoolman applies a charge but its 200 reply isn't JSON: the charge counts as sent."""
+    caplog.set_level(logging.INFO, logger="spoolman_prusalink")
+    w = world
+    a = w.spools["A"]
+    await baseline(w)
+
+    # The charge reaches Spoolman, and the reply the bridge gets back isn't JSON.
+    async def unreadable(request: httpx.Request) -> httpx.Response | None:
+        if request.method == "PUT" and request.url.path == use_path(a):
+            resp = await w.spoolman.client.put(use_path(a), json=json.loads(request.content))
+            resp.raise_for_status()
+            return httpx.Response(200, text="OK", request=request)
+        return None
+
+    w.spoolman_faults.hook = unreadable
+    w.printer.extrude(0, 50)
+    records = await w.poll()
+    assert [r["use_length"] for r in charges(records, a)] == [50.0]
+    assert w.bridge.state.outbox == []
+    used = await w.used("A")
+    assert used == pytest.approx(charges(records, a)[0]["grams"], abs=0.01)
+
+    # The next charge goes on its own: the first isn't sent again.
+    w.spoolman_faults.hook = None
+    w.printer.extrude(0, 20)
+    records = await w.poll()
+    assert [r["use_length"] for r in charges(records, a)] == [20.0]
+    assert await w.used("A") == pytest.approx(used + charges(records, a)[0]["grams"], abs=0.01)
+    assert not any(r.levelno >= logging.WARNING for r in caplog.records)
+
+
+async def runout_flagged(w: World) -> None:
+    """M5a: A runs out mid-print with plenty left, so it's flagged."""
+    await baseline(w)
+    await w.start_print(print_spec())
+    w.printer.runout(0)
+    records = await w.poll()
+    assert len(events(records, "swap_unconfirmed")) == 1
+    assert w.spools["A"] in w.bridge.state.runouts
+
+
+async def test_m5a_weight_edited_before_a_charge(world: World, caplog: pytest.LogCaptureFixture):
+    """A weight edited between the poll's spool read and a charge still clears the runout flag."""
+    caplog.set_level(logging.INFO, logger="spoolman_prusalink")
+    w = world
+    a = w.spools["A"]
+    mid_print = f"{w.tool_location}: unloaded mid-print with"
+    await runout_flagged(w)
+    w.printer.load(0)
+    await w.run_until(lambda: w.printer.state is State.PAUSED, poll_every=1.0)
+    w.printer.resume()
+
+    # The user corrects A's weight just before the bridge's next charge to A lands.
+    edited: list[bool] = []
+
+    async def edit_first(request: httpx.Request) -> None:
+        if not edited and request.method == "PUT" and request.url.path == use_path(a):
+            edited.append(True)
+            await set_used(w, "A", 500.0)
+
+    w.spoolman_faults.hook = edit_first
+    records = await w.run_until(lambda: bool(edited), poll_every=1.0)
+    w.spoolman_faults.hook = None
+    assert w.charged(records, "A") > 0
+    # The charge's reply includes the edit, so the flag's weight isn't moved on to it.
+    assert a in w.bridge.state.runouts
+    assert w.bridge.state.runouts[a].used < 500
+
+    # The next read sees the edit.
+    await w.poll()
+    assert w.bridge.state.runouts == {}
+    assert mid_print not in (await w.flag("A") or "")
+    edit = f"spool {a}'s weight was edited in Spoolman; clearing its runout flag"
+    assert count(caplog, logging.INFO, edit) == 1
+    await w.run_until(lambda: w.printer.job is None, poll_every=1.0)
+    assert count(caplog, logging.INFO, edit) == 1
+
+
+async def test_m5a_runout_spool_archived_before_its_refund(world: World):
+    """Runout spool archived before a refund to it: the flag follows the refund, no false edit."""
+    w = world
+    a = w.spools["A"]
+    mid_print = f"{w.tool_location}: unloaded mid-print with"
+    await runout_flagged(w)
+
+    # B goes in by the menu during the pause, charged to A as the open swap's usage.
+    w.printer.load(0, source="preset", name=PETG[0])
+    await w.run_until(lambda: w.printer.state is State.PAUSED, poll_every=1.0)
+    swap_mm = w.bridge.printers[0].tools[0].swap.mm
+    assert swap_mm > 0
+    used = await w.used("A")
+
+    # A is archived, then Spoolman is updated: the swap confirms and A is refunded.
+    await archive_spool(w.spoolman.client, a)
+    await w.move("A", w.shelf)
+    await w.move("B", w.tool_location)
+    records = await w.poll()
+    assert len(events(records, "swap_confirmed")) == 1
+    assert w.charged(records, "A") == -swap_mm
+    assert await w.used("A") < used
+    assert w.bridge.state.runouts[a].used == pytest.approx(await w.used("A"), abs=0.01)
+
+    # Unarchived later, A's weight matches what the bridge followed: the flag stays.
+    await unarchive_spool(w.spoolman.client, a)
+    await w.poll()
+    assert a in w.bridge.state.runouts
+    assert mid_print in (await w.flag("A") or "")
+
+
+# --- Notes and flags for M3 and M5 (#111) ---
+
+
+async def test_m3_staged_spool_flag_and_unload(world: World, caplog: pytest.LogCaptureFixture):
+    """Active spool deleted with B staged: B's flag says why, and the unload gives B the usage."""
+    caplog.set_level(logging.INFO, logger="spoolman_prusalink")
+    w = world
+    a, b = w.spools["A"], w.spools["B"]
+    await baseline(w)
+    await w.move("B", w.tool_location)
+    records = await w.poll()
+    assert len(events(records, "swap_staged")) == 1
+
+    await delete_spool(w.spoolman.client, a)
+    w.printer.extrude(0, 20)
+    await w.poll()
+    w.printer.extrude(0, 10)
+    await w.poll()
+    loc = w.tool_location
+    assert await w.flag("B") == (
+        f"{loc}: usage is being held because spool {a} was deleted. It goes to this spool "
+        "at the next unload or print start, or when this spool is claimed."
+    )
+    found = f"[{loc}] spool {a} was deleted in Spoolman; holding its usage"
+    assert count(caplog, logging.WARNING, found) == 1
+    assert count(caplog, logging.INFO, f"set flag on spool {b}") == 1
+
+    # The unload makes B active: it takes the 30 mm held, and the hold and flag end once.
+    await w.unload()
+    records = await w.poll()
+    assert [e["message"] for e in events(records, "held_charged")] == [
+        f"spool {b} is active; charged it 30 mm held after spool {a} was deleted"
+    ]
+    assert w.charged(records, "B") == 30
+    tool = w.bridge.printers[0].tools[0]
+    assert tool.active == b and tool.deleted_spool is None and tool.held_mm == 0
+    await w.poll()
+    assert await w.flag("B") is None
+    ended = f"[{loc}] no longer holding usage for a deleted spool"
+    assert count(caplog, logging.WARNING, ended) == 1
+    assert count(caplog, logging.INFO, f"cleared flag on spool {b}") == 1
+    assert count(caplog, logging.WARNING, found) == 1
+
+
+async def test_m3_deleted_spool_replaced_with_nothing_held(
+    world: World, caplog: pytest.LogCaptureFixture
+):
+    """Active spool deleted, then B moved in before any use: B is active with nothing to charge."""
+    caplog.set_level(logging.INFO, logger="spoolman_prusalink")
+    w = world
+    a, b = w.spools["A"], w.spools["B"]
+    await baseline(w)
+
+    await delete_spool(w.spoolman.client, a)
+    await w.poll()
+    loc = w.tool_location
+    found = f"[{loc}] spool {a} was deleted in Spoolman; holding its usage"
+    assert count(caplog, logging.WARNING, found) == 1
+    assert w.bridge.printers[0].tools[0].held_mm == 0
+
+    await w.move("B", loc)
+    records = await w.poll()
+    assert [e["message"] for e in events(records)] == [f"spool {b} is active"]
+    assert charges(records) == []
+    tool = w.bridge.printers[0].tools[0]
+    assert tool.active == b and tool.deleted_spool is None
+    ended = f"[{loc}] no longer holding usage for a deleted spool"
+    assert count(caplog, logging.WARNING, ended) == 1
+
+    # The printer still shows A's PLA, so B is written to it; then B's use is charged.
+    await w.run_until(lambda: w.printer.job is None)
+    w.printer.extrude(0, 10)
+    records = await w.poll()
+    assert w.charged(records, "B") == 10
+    assert count(caplog, logging.WARNING, found) == 1
+    assert count(caplog, logging.WARNING, ended) == 1
+
+
+@pytest.mark.parametrize("end", ["edit", "unload"])
+async def test_m5_negative_weight_ends(world: World, caplog: pytest.LogCaptureFixture, end: str):
+    """A negative weight ends with one line when edited, and silently when the spool unloads."""
+    caplog.set_level(logging.INFO, logger="spoolman_prusalink")
+    w = world
+    a = w.spools["A"]
+    await baseline(w)
+    await set_used(w, "A", 999.0)
+    w.printer.extrude(0, 1000)
+    await w.poll()
+    await w.poll()  # Spoolman's list is read before the poll's charge is sent.
+    negative = f"spool {a} shows -"
+    recovered = f"spool {a} no longer shows a negative weight remaining in Spoolman"
+    assert count(caplog, logging.INFO, negative) == 1
+
+    if end == "edit":
+        await set_used(w, "A", 500.0)
+        await w.poll()
+        assert count(caplog, logging.INFO, recovered) == 1
+    else:
+        # S1 to B: A is unloaded and moved out, still negative.
+        await w.move("B", w.tool_location)
+        await w.poll()
+        await w.unload()
+        records = await w.poll()
+        assert len(events(records, "swap_committed")) == 1
+        await w.swap_cycle(source="tag", name=PETG[0], color=PETG[1])
+        assert not logged(caplog, logging.INFO, recovered)
+    assert w.bridge._negative == set()
+
+    for _ in range(2):
+        w.printer.extrude(0, 10)
+        await w.poll()
+    assert count(caplog, logging.INFO, negative) == 1
+    assert count(caplog, logging.INFO, recovered) == (1 if end == "edit" else 0)

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
+from typing import Literal
 
 from aiohttp import web
 
@@ -11,18 +12,25 @@ from simulator.model import Busy, Fault, Power, SimPrinter, Simulation
 
 TRUE_HEADERS = ("?1", "1", "true")
 
+# What a `before_request` hook returns: None to serve the request as usual, a response
+# to send instead, or DROP to close the connection without an answer.
+DROP: Literal["drop"] = "drop"
+Reply = web.StreamResponse | Literal["drop"] | None
+
 
 def _json(data: dict | None, status: int = 200) -> web.Response:
     return web.json_response(data, status=status)
 
 
 def make_app(
-    sim: Simulation, name: str, before_request: Callable[[str, str], None] | None = None
+    sim: Simulation, name: str, before_request: Callable[[str, str], Reply] | None = None
 ) -> web.Application:
     """Build the app for printer `name`, looked up per request so a restore takes effect.
 
     `before_request(method, path)` runs before each request is served, so a test can
-    change the printer between two requests of one poll.
+    change the printer between two requests of one poll. It can also answer the request
+    itself: a response it returns is sent instead of the printer's, and `DROP` closes
+    the connection with no answer, as a dropped link would.
     """
 
     def printer() -> SimPrinter:
@@ -30,16 +38,17 @@ def make_app(
 
     @web.middleware
     async def gate(request: web.Request, handler) -> web.StreamResponse:
-        if before_request is not None:
-            before_request(request.method, request.path)
+        reply = None if before_request is None else before_request(request.method, request.path)
         p = printer()
-        if p.power is not Power.ON:
+        if p.power is not Power.ON or reply == DROP:
             await _no_reply(request, printer)
         body = None
         if request.method == "PUT":
             body = await request.text()  # aiohttp keeps it, so the handler reads it again
-        if p.fault is Fault.BAD_KEY or request.headers.get("X-Api-Key") != p.api_key:
-            resp: web.StreamResponse = _json({"message": "Unauthorized"}, 401)
+        if isinstance(reply, web.StreamResponse):
+            resp: web.StreamResponse = reply
+        elif p.fault is Fault.BAD_KEY or request.headers.get("X-Api-Key") != p.api_key:
+            resp = _json({"message": "Unauthorized"}, 401)
         elif p.fault is Fault.ERROR:
             resp = _json({"message": "Internal Server Error"}, 500)
         else:

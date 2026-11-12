@@ -25,6 +25,9 @@ from integration.conftest import (
     logged,
     print_spec,
 )
+from integration.conftest import (
+    count as count_at,
+)
 from integration.printers import printer_of
 from spoolman_prusalink.app import Bridge
 from spoolman_prusalink.db import read_state
@@ -473,6 +476,85 @@ async def test_x8_one_printer_off(world: World, caplog: pytest.LogCaptureFixture
     assert it.state.active == w.spools["B"]
     assert logged(caplog, logging.WARNING, "printer it reachable again")
     assert count(caplog, "printer it unreachable") == 1
+
+
+async def failing_eviction(w: World, caplog: pytest.LogCaptureFixture) -> str:
+    """S1 on it, C for A, with Spoolman refusing to move A out; return the logged failure."""
+    it = w.at(IT)
+    a = w.spools["A"]
+    await baseline(w)
+    await w.move("C", it.location)
+    await w.poll()
+    it.extrude(20)
+    await it.unload()
+    await it.swap_cycle(source="preset", name=ASA[0])
+    faults = w.spoolman_faults
+    faults.answer("PATCH", f"/api/v1/spool/{a}", 503, "busy", times=None, containing=b'"location"')
+    records = await w.poll()
+    assert kinds(records) == [(IT, "unload"), (IT, "swap_committed")]
+    await settle(w)
+    for _ in range(2):
+        await w.poll()
+    assert it.state.evict == (a,)
+    assert await w.spoolman.location(a) == it.location
+    assert faults.requests.count(f"PATCH /api/v1/spool/{a} 503") == 3
+    cant = f"[{it.location}] can't move spool {a} out: "
+    assert count_at(caplog, logging.WARNING, cant) == 1
+    assert count_at(caplog, logging.DEBUG, f"still can't move spool {a} out: ") == 2
+    return cant
+
+
+async def test_x4_failing_eviction_ends_when_the_spool_is_moved(
+    world: World, caplog: pytest.LogCaptureFixture
+):
+    """An eviction Spoolman keeps refusing ends, said once, when the user moves the spool to B."""
+    caplog.set_level(logging.DEBUG, logger="spoolman_prusalink")
+    w = world
+    it, b = w.at(IT), w.at(B)
+    a = w.spools["A"]
+    cant = await failing_eviction(w, caplog)
+
+    # The user moves A into LB: it drops the eviction, and b stages A.
+    await w.move("A", b.location)
+    records = await w.poll()
+    assert kinds(records) == [(B, "swap_staged")]
+    assert it.state.evict == ()
+    await w.poll()
+    assert await w.spoolman.location(a) == b.location
+    assert count_at(caplog, logging.INFO, f"spool {a} no longer needs moving out") == 1
+    assert count_at(caplog, logging.WARNING, cant) == 1
+    assert w.spoolman_faults.requests.count(f"PATCH /api/v1/spool/{a} 503") == 3
+
+
+async def test_x8_failing_eviction_ends_while_the_printer_is_off(
+    world: World, caplog: pytest.LogCaptureFixture
+):
+    """A's eviction keeps failing, A goes off, the user moves the spool out: ended once."""
+    caplog.set_level(logging.DEBUG, logger="spoolman_prusalink")
+    w = world
+    it = w.at(IT)
+    a = w.spools["A"]
+    cant = await failing_eviction(w, caplog)
+
+    # it is off, so its state still has the eviction, but A has left LA.
+    it.printer.set_power("off")
+    await w.move("A", w.shelf)
+    for _ in range(2):
+        await w.poll()
+    assert it.state.evict == (a,)
+    out = f"[{it.location}] spool {a} is out of the location now"
+    assert count_at(caplog, logging.INFO, out) == 1
+    assert w.spoolman_faults.requests.count(f"PATCH /api/v1/spool/{a} 503") == 3
+
+    # it comes back and drops the eviction, with nothing more said about it.
+    it.printer.set_power("on")
+    for _ in range(2):
+        await w.poll()
+    assert it.state.evict == ()
+    assert await w.spoolman.location(a) == w.shelf
+    assert count_at(caplog, logging.INFO, out) == 1
+    assert not logged(caplog, logging.INFO, f"spool {a} no longer needs moving out")
+    assert count_at(caplog, logging.WARNING, cant) == 1
 
 
 async def test_x9_spoolman_unreachable(world: World, caplog: pytest.LogCaptureFixture):

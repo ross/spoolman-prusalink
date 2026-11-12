@@ -5,11 +5,12 @@ from __future__ import annotations
 import asyncio
 
 import aiohttp
+import aiohttp.web
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
 from simulator import prusalink
-from simulator.model import SimTool, State
+from simulator.model import PrintSpec, Segment, SimTool, State
 from simulator.tests.util import KEY, PLA, make
 
 AUTH = {"X-Api-Key": KEY}
@@ -173,6 +174,28 @@ async def test_before_request_sees_each_request_and_may_change_the_printer():
         assert (await client.get("/api/v1/status", headers=AUTH)).status == 200
         assert (await client.get("/api/v1/filament", headers=AUTH)).status == 404
     assert seen == [("GET", "/api/v1/status"), ("GET", "/api/v1/filament")]
+
+
+async def test_before_request_may_answer_or_drop_a_request():
+    sim, p = make()
+
+    def hook(method: str, path: str) -> prusalink.Reply:
+        if path == "/api/v1/job":
+            return aiohttp.web.Response(status=204)
+        if path == "/api/version":
+            return prusalink.DROP
+        return None
+
+    async with TestClient(TestServer(prusalink.make_app(sim, "p", hook))) as client:
+        p.start_print(PrintSpec([Segment(0, 100)], duration_s=10))
+        assert p.job_json() is not None
+        assert (await client.get("/api/v1/status", headers=AUTH)).status == 200
+        # The printer has a job, but the hook's answer is the one sent, and logged.
+        assert (await client.get("/api/v1/job", headers=AUTH)).status == 204
+        with pytest.raises(aiohttp.ClientConnectionError):
+            await client.get("/api/version", headers=AUTH)
+    requests = [e.text for e in sim.events if e.kind == "request"]
+    assert requests == ["GET /api/v1/status 200", "GET /api/v1/job 204"]
 
 
 async def test_off_printer_drops_the_connection(setup):

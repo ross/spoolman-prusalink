@@ -10,7 +10,7 @@ requests or to answer one itself.
 asks for it, so worlds that don't ask talk to Spoolman directly.
 
 The rest are changes a user makes in Spoolman's UI that the conftest helper doesn't
-cover: deleting or archiving a spool, writing a text field, renaming a location.
+cover: deleting, archiving or unarchiving a spool, writing a text field, renaming a location.
 """
 
 from __future__ import annotations
@@ -146,6 +146,11 @@ async def delete_spool(client: httpx.AsyncClient, spool_id: int) -> None:
 
 async def archive_spool(client: httpx.AsyncClient, spool_id: int) -> None:
     resp = await client.patch(f"/api/v1/spool/{spool_id}", json={"archived": True})
+    resp.raise_for_status()
+
+
+async def unarchive_spool(client: httpx.AsyncClient, spool_id: int) -> None:
+    resp = await client.patch(f"/api/v1/spool/{spool_id}", json={"archived": False})
     resp.raise_for_status()
 
 

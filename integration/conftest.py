@@ -3,7 +3,7 @@
 Nothing here waits on the wall clock. The simulator's time moves only when a test ticks
 it, and the bridge polls only when a test calls `poll()`, so every scenario reads the
 same way each run. Spoolman is the one external piece: its URL comes from
-`SPOOLMAN_URL`, and every test without it is skipped.
+`INTEGRATION_SPOOLMAN_URL`, and every test without it is skipped.
 """
 
 from __future__ import annotations
@@ -32,7 +32,7 @@ from simulator.model import (
     Simulation,
     State,
 )
-from simulator.prusalink import make_app
+from simulator.prusalink import Reply, make_app
 from spoolman_prusalink.app import Bridge
 from spoolman_prusalink.config import Config, PrinterConfig
 from spoolman_prusalink.db import read_ledger
@@ -73,10 +73,11 @@ WORLD_MODELS = {1: "8.1.0", 2: "8.10.0"}
 @pytest.fixture(scope="session")
 def spoolman_url() -> str:
     """The Spoolman under test, or a skip that says how to provide one."""
-    url = os.environ.get("SPOOLMAN_URL")
+    url = os.environ.get("INTEGRATION_SPOOLMAN_URL")
     if not url:
         pytest.skip(
-            "integration tests need a Spoolman: set SPOOLMAN_URL (see integration/README.md)"
+            "integration tests need a Spoolman: set INTEGRATION_SPOOLMAN_URL "
+            "(see integration/README.md)"
         )
     return url.rstrip("/")
 
@@ -309,8 +310,10 @@ class World:
     fields: dict[str, str] = field(
         default_factory=lambda: {"uuid": UUID_FIELD, "flag": FLAG_FIELD, "claim": CLAIM_FIELD}
     )
-    # Runs before the simulator serves each request, with its method and path.
-    before_request: Callable[[str, str], None] | None = None
+    # Runs before the simulator serves each request, with its method and path. It can
+    # return a response to send instead, or `simulator.prusalink.DROP` to drop the
+    # connection; None serves the request as usual.
+    before_request: Callable[[str, str], Reply] | None = None
     # --- Several printers (world_printers; see integration/printers.py) ---
     # Printers other than "it", by name.
     others: dict[str, Station] = field(default_factory=dict)
@@ -488,6 +491,31 @@ def world_tools(request: pytest.FixtureRequest) -> int:
 
 
 @pytest.fixture
+def world_model(request: pytest.FixtureRequest, world_tools: int) -> str:
+    """The printer type code `world`'s printer reports, such as `1.4.0` for an MK4.
+
+    By default it follows `world_tools`. A test asks for a single-tool model that has no
+    tag reader, such as an MK4 (`1.4.0`) or an MK3.9 (`1.3.9`), with
+    `@pytest.mark.parametrize("world_model", ["1.4.0"], indirect=True)`. Neither the
+    printer nor spool A has a UUID then, as with `world_fields` "fresh".
+    """
+    code = getattr(request, "param", WORLD_MODELS[world_tools])
+    assert code in MODELS, f"world_model {code!r} isn't a simulated model"
+    assert world_tools == 1 or code == WORLD_MODELS[world_tools]
+    return code
+
+
+@pytest.fixture
+def world_printer(request: pytest.FixtureRequest) -> dict:
+    """Settings `world` overrides in printer "it"'s `PrinterConfig`, such as `uuids=False`.
+
+    None by default. A test sets them with
+    `@pytest.mark.parametrize("world_printer", [dict(...)], indirect=True)`.
+    """
+    return getattr(request, "param", {})
+
+
+@pytest.fixture
 def world_fields(request: pytest.FixtureRequest) -> str:
     """Whether `world` registers the bridge's extra fields first: "shared" or "fresh".
 
@@ -533,6 +561,8 @@ async def world(
     world_tools: int,
     world_printers: int,
     world_fields: str,
+    world_model: str,
+    world_printer: dict,
 ):
     """The starting point every scenario shares.
 
@@ -556,6 +586,9 @@ async def world(
     if world_tools == 2:
         locations[1] = f"{prefix} T1"
     fresh = world_fields == "fresh"
+    # No UUID on spool A or the printer: a fresh Spoolman, or a model other than the
+    # defaults, which are the ones with a tag reader or a test of their own.
+    bare = fresh or world_model not in WORLD_MODELS.values()
     keys = {"uuid": UUID_FIELD, "flag": FLAG_FIELD, "claim": CLAIM_FIELD}
     if fresh:
         own = prefix.replace("-", "_")
@@ -572,26 +605,25 @@ async def world(
     for name, (material, color), location in setup:
         filament = await spoolman.filament(vendor, material, color)
         spools[name] = await spoolman.spool(
-            filament, location, name, uuid_a if name == "A" and not fresh else None
+            filament, location, name, uuid_a if name == "A" and not bare else None
         )
 
     sim = Simulation(Settings(**SETTINGS))
-    a = Material(PLA[0], PLA[1], None if fresh else uuid_a, **WRITTEN)
+    a = Material(PLA[0], PLA[1], None if bare else uuid_a, **WRITTEN)
     tools = {0: SimTool(0, loaded=True, material=replace(a), previous=replace(a), extruded=1000.0)}
     if world_tools == 2:
         d = Material(*PETG_GREEN, **WRITTEN)
         tools[1] = SimTool(1, loaded=True, material=replace(d), previous=replace(d), extruded=500.0)
-    printer = SimPrinter("it", 0, KEY, MODELS[WORLD_MODELS[world_tools]], tools=tools)
+    printer = SimPrinter("it", 0, KEY, MODELS[world_model], tools=tools)
     sim.add(printer)
     w: World
 
-    def before_request(method: str, path: str) -> None:
-        if w.before_request is not None:
-            w.before_request(method, path)
+    def before_request(method: str, path: str) -> Reply:
+        return None if w.before_request is None else w.before_request(method, path)
 
     server = TestServer(make_app(sim, printer.name, before_request))
     await server.start_server()
-    uuids = {} if fresh else {"A": uuid_a}
+    uuids = {} if bare else {"A": uuid_a}
     others = await add_printers(world_printers, sim, spoolman, vendor, prefix, KEY, spools, uuids)
     cfg = Config(
         spoolman_url=str(spoolman.client.base_url).rstrip("/"),
@@ -601,7 +633,7 @@ async def world(
                 url=f"http://{server.host}:{server.port}",
                 api_key=KEY,
                 tools=dict(locations),
-                uuids=True,
+                **{"uuids": True, **world_printer},
             ),
             *(other[-1] for other in others),
         ),
