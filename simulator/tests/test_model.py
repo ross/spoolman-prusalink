@@ -566,8 +566,6 @@ def test_filament_json_no_counters_and_no_endpoint():
     }
     p.set_firmware(Firmware.NO_ENDPOINT)
     assert prusalink.filament(p) is None
-    with pytest.raises(Invalid):
-        p.set_firmware("bogus")
 
 
 def test_filament_json_multi_tool_skips_disabled_and_hides_uuids():

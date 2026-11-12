@@ -11,7 +11,7 @@ from aiohttp.test_utils import TestClient, TestServer
 from yarl import URL
 
 from simulator import control
-from simulator.model import State
+from simulator.model import Fault, PrintSpec, Segment, State
 from simulator.tests.util import make
 
 
@@ -147,7 +147,9 @@ async def test_the_body_must_be_a_json_object(setup):
 async def test_an_action_the_printer_has_no_method_for_is_refused(setup):
     sim, p, client = setup
     resp = await client.post("/api/printers/p/start_print", json={"segments": "x"})
-    assert resp.status == 400 and (await resp.json())["error"].startswith("bad print")
+    assert resp.status == 400 and (await resp.json())["error"].startswith(
+        "start_print needs segments"
+    )
     resp = await client.post("/api/printers/p/unload", json={})
     assert resp.status == 400 and "bad parameters for unload" in (await resp.json())["error"]
     resp = await client.post("/api/printers/p/_log", json={})
@@ -210,3 +212,88 @@ def test_a_stream_queue_drops_the_oldest():
     for i in range(1500):
         stream.push(("n", i))
     assert queue.qsize() == 1000 and queue.get_nowait() == ("n", 500)
+
+
+@pytest.mark.parametrize(
+    ("action", "body", "error"),
+    [
+        (
+            "set_sensor_fault",
+            {"tool": 0, "value": "x"},
+            "set_sensor_fault value must be true or false, got 'x'",
+        ),
+        ("set_auto_accept", {"value": 1}, "set_auto_accept value must be true or false, got 1"),
+        ("unload", {"tool": True}, "unload tool must be an integer, got True"),
+        ("unload", {"tool": 0.0}, "unload tool must be an integer, got 0.0"),
+        (
+            "set_extruded_at_unload",
+            {"tool": 0, "value": 1.5},
+            "set_extruded_at_unload value must be an integer, got 1.5",
+        ),
+        (
+            "set_extruded_at_unload",
+            {"tool": 0, "value": "3"},
+            "set_extruded_at_unload value must be an integer, got '3'",
+        ),
+        ("extrude", {"tool": 0, "mm": "5"}, "extrude mm must be a number, got '5'"),
+        ("extrude", {"tool": 0, "mm": False}, "extrude mm must be a number, got False"),
+        ("load", {"tool": 0, "source": "preset", "name": 7}, "load name must be a string, got 7"),
+        (
+            "load",
+            {"tool": 0, "temperatures": [215, "170", 60]},
+            "load temperatures[1] must be an integer, got '170'",
+        ),
+        ("load", {"tool": 0, "temperatures": 215}, "load temperatures must be a list, got 215"),
+        (
+            "set_firmware",
+            {"firmware": "bogus"},
+            "set_firmware firmware must be one of full, no_counters, no_endpoint, got 'bogus'",
+        ),
+        (
+            "start_print",
+            {},
+            'start_print needs segments, a list of {"tool": T, "slicer_mm": MM}, got None',
+        ),
+        ("start_print", {"segments": [{"tool": 0}]}, "start_print needs segments"),
+        (
+            "start_print",
+            {"segments": [{"tool": "x", "slicer_mm": 1}]},
+            "start_print segments[0] tool must be an integer, got 'x'",
+        ),
+        (
+            "start_print",
+            {"segments": [{"tool": 0, "slicer_mm": 1}], "preheat_s": "9"},
+            "start_print preheat_s must be a number, got '9'",
+        ),
+        (
+            "start_print",
+            {"segments": [], "speed": 2},
+            "start_print takes color_changes_mm, duration_s, name, preheat_s, segments, not speed",
+        ),
+    ],
+)
+async def test_parameters_are_checked_against_the_action_types(setup, action, body, error):
+    sim, p, client = setup
+    before = sim.to_json(events=False)
+    resp = await client.post(f"/api/printers/p/{action}", json=body)
+    assert resp.status == 400 and (await resp.json())["error"].startswith(error)
+    assert sim.to_json(events=False) == before
+
+
+async def test_checked_parameters_reach_the_action_as_their_types(setup):
+    sim, p, client = setup
+    body = {"segments": [{"tool": 0, "slicer_mm": 5}], "duration_s": 9, "color_changes_mm": [2]}
+    assert (await client.post("/api/printers/p/start_print", json=body)).status == 200
+    assert p.job.spec == PrintSpec([Segment(0, 5.0)], duration_s=9.0, color_changes_mm=[2.0])
+    assert p.job.spec.name == "part.bgcode"
+    assert (await client.post("/api/printers/p/set_fault", json={"fault": "error"})).status == 200
+    assert p.fault is Fault.ERROR
+    assert (
+        await client.post("/api/printers/p/set_auto_accept", json={"value": None})
+    ).status == 200
+    assert p.auto_accept_model_check is None
+
+
+def test_an_unknown_hint_is_a_bug():
+    with pytest.raises(TypeError, match="no input check"):
+        control._check("x", 1, dict)

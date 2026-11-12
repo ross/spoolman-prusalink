@@ -253,17 +253,6 @@ def test_start_print_validation():
     assert p.job is None and p.state is State.IDLE
 
 
-def test_print_spec_from_dict():
-    spec = PrintSpec.from_dict(
-        {"segments": [{"tool": 1, "slicer_mm": 5}], "duration_s": 9, "color_changes_mm": [2]}
-    )
-    assert spec == PrintSpec([Segment(1, 5.0)], duration_s=9.0, color_changes_mm=[2.0])
-    assert spec.name == "part.bgcode"
-    for bad in ({}, {"segments": [{"tool": 0}]}, {"segments": [{"tool": "x", "slicer_mm": 1}]}):
-        with pytest.raises(Invalid, match="bad print"):
-            PrintSpec.from_dict(bad)
-
-
 def test_runout_and_jam_need_a_print_with_a_loaded_selected_tool():
     sim, p = make()
     with pytest.raises(Busy, match="needs a print in progress"):
@@ -286,15 +275,6 @@ def test_clear_jam_and_tap_through_without_anything_to_answer():
         p.clear_jam()
     with pytest.raises(Busy, match="nothing to tap through"):
         p.tap_through()
-
-
-def test_extruded_at_unload_must_be_an_integer():
-    sim, p = make()
-    for bad in (1.5, "3", True):
-        with pytest.raises(Invalid, match="value must be an integer"):
-            p.set_extruded_at_unload(0, bad)
-    p.set_extruded_at_unload(0, 7)
-    assert tool0(p).extruded_at_unload == 7
 
 
 def test_settings_update_validates_before_changing_anything():

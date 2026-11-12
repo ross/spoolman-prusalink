@@ -260,24 +260,6 @@ class PrintSpec:
     def total_mm(self) -> float:
         return sum(s.slicer_mm for s in self.segments)
 
-    @classmethod
-    def from_dict(cls, data: dict) -> PrintSpec:
-        try:
-            segments = [Segment(int(s["tool"]), float(s["slicer_mm"])) for s in data["segments"]]
-            return cls(
-                segments=segments,
-                duration_s=_opt_float(data.get("duration_s")),
-                preheat_s=_opt_float(data.get("preheat_s")),
-                color_changes_mm=[float(x) for x in data.get("color_changes_mm") or []],
-                name=str(data.get("name") or "part.bgcode"),
-            )
-        except (KeyError, TypeError, ValueError) as e:
-            raise Invalid(f"bad print: {e}") from None
-
-
-def _opt_float(value: Any) -> float | None:
-    return None if value is None else float(value)
-
 
 @dataclass(kw_only=True)
 class SimJob:
@@ -460,8 +442,8 @@ class SimPrinter:
             self._log("state", f"{self._shown} -> {state}")
             self._shown = state
 
-    def _tool(self, index: Any, *, enabled: bool = True) -> SimTool:
-        tool = self.tools.get(index) if isinstance(index, int) else None
+    def _tool(self, index: int, *, enabled: bool = True) -> SimTool:
+        tool = self.tools.get(index)
         if tool is None:
             raise Invalid(f"{self.name} has no tool {index!r}")
         if enabled and not tool.enabled:
@@ -554,7 +536,7 @@ class SimPrinter:
         uuid: str | None = None,
         feed_mm: float | None = None,
         purge_mm: float | None = None,
-        temperatures: Any = None,
+        temperatures: list[int] | None = None,
     ) -> None:
         """Load filament into a tool: feed over the gap, counted feed, set the type, purge.
 
@@ -634,7 +616,7 @@ class SimPrinter:
         self.screen = State.IDLE  # using the menu dismisses a finished or stopped screen
         self._show_state()
 
-    def _manual_move(self, tool: int, mm: Any) -> tuple[SimTool, float]:
+    def _manual_move(self, tool: int, mm: float) -> tuple[SimTool, float]:
         t = self._tool(tool)
         mm = _positive(mm, "mm")
         self._check_move(t)
@@ -868,39 +850,39 @@ class SimPrinter:
             _feed(tool, self.settings.panic_purge_mm)
             self._log("job", f"nozzle clean purged {self.settings.panic_purge_mm:g} mm")
 
-    def set_power(self, power: str, *, resume: bool = False, cold_bed: bool = False) -> None:
+    def set_power(self, power: Power, *, resume: bool = False, cold_bed: bool = False) -> None:
         """Off freezes the printer; leaving off boots it, which drops any job unless `resume`."""
-        power = _enum(Power, power)
+        power = Power(power)
         old, self.power = self.power, power
         self._log("action", f"power {power}")
         if old is Power.OFF and power is not Power.OFF:
             self._reboot(resume, cold_bed)
 
-    def set_fault(self, fault: str) -> None:
-        self.fault = _enum(Fault, fault)
+    def set_fault(self, fault: Fault) -> None:
+        self.fault = Fault(fault)
         self._log("action", f"fault {self.fault}")
 
-    def set_firmware(self, firmware: str) -> None:
-        self.firmware = _enum(Firmware, firmware)
+    def set_firmware(self, firmware: Firmware) -> None:
+        self.firmware = Firmware(firmware)
         self._log("action", f"firmware {self.firmware}")
 
     def set_sensor_fault(self, tool: int, value: bool) -> None:
-        self._tool(tool).sensor_fault = bool(value)
+        self._tool(tool).sensor_fault = value
         self._log("action", f"T{tool} sensor fault {'on' if value else 'off'}")
 
     def set_stuck_write(self, tool: int, value: bool) -> None:
-        self._tool(tool).stuck_write = bool(value)
+        self._tool(tool).stuck_write = value
         self._log("action", f"T{tool} stuck write {'on' if value else 'off'}")
 
     def set_tool_enabled(self, tool: int, value: bool) -> None:
         t = self._tool(tool, enabled=False)
         if not value:
             self._check_disable(t)
-        t.enabled = bool(value)
+        t.enabled = value
         self._log("action", f"T{tool} {'enabled' if value else 'disabled'}")
 
     def set_auto_accept(self, value: bool | None) -> None:
-        self.auto_accept_model_check = None if value is None else bool(value)
+        self.auto_accept_model_check = value
         self._log("action", f"auto-accept model check {value}")
 
     def counter_step_back(self, tool: int, mm: float) -> None:
@@ -909,8 +891,6 @@ class SimPrinter:
         self._log("action", f"T{tool} extruded stepped back to {int(t.extruded)}")
 
     def set_extruded_at_unload(self, tool: int, value: int) -> None:
-        if isinstance(value, bool) or not isinstance(value, int):
-            raise Invalid("value must be an integer")
         self._tool(tool).extruded_at_unload = value
         self._log("action", f"T{tool} extruded_at_unload set to {value}")
 
@@ -1349,14 +1329,6 @@ def _tool_json(t: SimTool) -> dict:
     else:
         out["process"] = {"kind": "unload", "phase": "UNLOAD", "remaining_s": p.remaining}
     return out
-
-
-def _enum(cls: type, value: Any) -> Any:
-    try:
-        return cls(value)
-    except ValueError:
-        known = ", ".join(v.value for v in cls)
-        raise Invalid(f"{value!r} isn't one of {known}") from None
 
 
 # Snapshots: asdict() out, explicit reconstruction in.
