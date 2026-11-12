@@ -85,13 +85,14 @@ class Recovery(NamedTuple):
 class Reachability:
     """Track whether a service can be read, and for how long it hasn't been.
 
-        The trouble is "unreachable" (a transport error) or a "bad answer" (the service
-        replied, but badly). A bad answer with a different error is a change too, since a
-        wrong key and a server error need different fixes. A transport error's text isn't:
-        refusals and timeouts come and go while a printer is off. This class holds state
-        only. `failed()` and `ok()` report what changed, and the caller logs it. A change
-    starts the clock again, so a reminder or recovery line gives the length of the
-    current trouble.
+    The trouble is "unreachable" (a transport error) or a "bad answer" (the service
+    replied, but badly). A bad answer with a different error is a change too, since a
+    wrong key and a server error need different fixes. A transport error's text isn't:
+    refusals and timeouts come and go while a printer is off. A change starts the clock
+    again, so a reminder or recovery line gives the length of the current trouble.
+
+    This class holds state only. `failed()` and `ok()` report what changed, and the
+    caller logs it.
     """
 
     name: str

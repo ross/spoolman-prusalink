@@ -158,8 +158,8 @@ and then hourly; one that answers with an error is logged the same way, and
 again when the error changes. Either way it's skipped until it can be read, its
 flags in Spoolman stay as they were, and the others carry on. When a printer
 or Spoolman can be read again, one warning says so and how long the trouble
-lasted. Other logged problems end with one line at the level they were logged at. Log lines about a tool
-keep the `[location]` prefix; lines about a whole printer name it when there
+lasted. Other logged problems end with one line at the level they were logged
+at. Log lines about a tool keep the `[location]` prefix; lines about a whole printer name it when there
 are several. A spool active in two tools at once, which happens when one
 printer misses an unload across a reboot, is logged once and flagged on the
 spool naming both locations.
