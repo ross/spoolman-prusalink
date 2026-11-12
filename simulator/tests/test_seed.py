@@ -58,9 +58,9 @@ class FakeSpoolman:
 
 
 LOCATIONS = [
-    Location("core", 0, "core", True),
-    Location("indx", 0, "indx T1", False),
-    Location("indx", 1, "indx T2", False),
+    Location("core", 0, "core", True, True),
+    Location("indx", 0, "indx T1", False, False),
+    Location("indx", 1, "indx T2", False, False),
 ]
 
 
@@ -181,7 +181,7 @@ async def _seed_one(*locations: Location) -> tuple[dict[str, dict], dict[int, st
 
 async def test_seed_gives_the_tool_its_configured_material_and_uuid():
     configured = "44c406a5-c6f5-4440-bfba-e8060564b717"
-    spools, names = await _seed_one(Location("core", 0, "core", True, "PETG", configured))
+    spools, names = await _seed_one(Location("core", 0, "core", True, True, "PETG", configured))
     loaded = spools["sim: core loaded"]
     assert names[loaded["filament_id"]] == "PETG"
     assert json.loads(loaded["extra"]["instance_uuid"]) == configured
@@ -191,27 +191,27 @@ async def test_seed_gives_the_tool_its_configured_material_and_uuid():
 
 async def test_seed_falls_back_to_the_cycle_for_an_unknown_or_missing_material():
     spools, names = await _seed_one(
-        Location("a", 1, "a T2", False, "Unobtainium"),
-        Location("b", 2, "b T3", False),
+        Location("a", 1, "a T2", False, False, "Unobtainium"),
+        Location("b", 2, "b T3", False, False),
     )
     assert names[spools["sim: a T2 loaded"]["filament_id"]] == "PETG"
     assert names[spools["sim: b T3 loaded"]["filament_id"]] == "ASA"
 
 
 async def test_seed_mints_a_uuid_when_no_material_is_configured():
-    spools, _ = await _seed_one(Location("core", 0, "core", True))
+    spools, _ = await _seed_one(Location("core", 0, "core", True, True))
     assert len(json.loads(spools["sim: core loaded"]["extra"]["instance_uuid"])) == 36
 
 
 async def test_seed_writes_no_uuid_for_a_material_configured_without_one():
-    spools, _ = await _seed_one(Location("core", 0, "core", True, "PLA"))
+    spools, _ = await _seed_one(Location("core", 0, "core", True, True, "PLA"))
     assert "extra" not in spools["sim: core loaded"]
 
 
 async def test_seed_matches_the_material_the_bridge_compares():
     spools, names = await _seed_one(
-        Location("a", 0, "a", False, "NYLONX"),
-        Location("b", 1, "b T2", False, "pla"),
+        Location("a", 0, "a", False, False, "NYLONX"),
+        Location("b", 1, "b T2", False, False, "pla"),
     )
     assert names[spools["sim: a loaded"]["filament_id"]] == "Nylon-X"
     assert names[spools["sim: b T2 loaded"]["filament_id"]] == "PLA"

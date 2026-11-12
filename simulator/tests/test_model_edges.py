@@ -71,7 +71,7 @@ def test_m865_with_nothing_to_write_changes_nothing():
 
 def test_m865_copy_onto_tool_0_of_a_tag_model_keeps_the_uuids():
     sim, p = make("8.1.0", [SimTool(0)])
-    p.apply(gcode.parse('M865 X R N"PETG" O"#1f6fb2" L0'))
+    p.apply(gcode.parse('M865 X R N"PETG" O"#186bb5" L0'))
     p.apply(gcode.parse(f'M865.1 I0 C"{TAG}"'))
     uuids = tool0(p).material.instance_uuid
     assert uuids == TAG
@@ -81,7 +81,7 @@ def test_m865_copy_onto_tool_0_of_a_tag_model_keeps_the_uuids():
 
 
 def test_m865_copy_onto_another_tool_drops_the_uuids():
-    tagged = Material("PETG", "#1f6fb2", TAG, True, material_uuid=TAG, package_uuid=TAG)
+    tagged = Material("PETG", "#186bb5", TAG, True, material_uuid=TAG, package_uuid=TAG)
     sim, p = make("1.4.1", [loaded(0, tagged)])
     p.tools[1] = SimTool(1, enabled=False)
     p.model = type(p.model)("x", "X", uuids=True, max_tools=2)  # only tool 0 holds UUIDs
@@ -130,10 +130,10 @@ def test_tag_load_validates_its_fields():
 
 def test_tag_load_on_another_tool_than_0_has_no_product_uuids():
     sim, p = make("8.1.0", [SimTool(0), SimTool(1)])
-    p.load(1, source="tag", name="PETG", color="#1F6FB2", uuid=TAG)
+    p.load(1, source="tag", name="PETG", color="#186BB5", uuid=TAG)
     sim.tick(100)
     m = p.tools[1].material
-    assert (m.name, m.color) == ("PETG", "#1f6fb2")
+    assert (m.name, m.color) == ("PETG", "#186bb5")
     assert m.instance_uuid is None and m.material_uuid is None and m.package_uuid is None
 
 

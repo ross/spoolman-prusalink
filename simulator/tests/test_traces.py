@@ -12,7 +12,6 @@ probe would to check that a correct simulator passes at any polling interval.
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -28,7 +27,7 @@ STEP = 0.1
 LEAD = 2.5
 PETG = Material("PETG", None, None)
 TAGGED = Material(
-    "PETG", "#1f6fb2", "7b3d2d5e-1f7a-4d8c-9a1e-2c3b4d5e6f70", nozzle=230, preheat=170, bed=85
+    "PETG", "#186bb5", "7b3d2d5e-1f7a-4d8c-9a1e-2c3b4d5e6f70", nozzle=230, preheat=170, bed=85
 )
 # The bridge's job for TAGGED's spool with no temperatures in Spoolman, which writes the
 # PETG preset's, built by the bridge so a change to its job shows up here.
@@ -240,7 +239,7 @@ def f10b_sync_job_rewrite(rec: Recorder) -> None:
     """The bridge's job written by hand with the spool already loaded, from the FINISHED
     screen: the slot's values don't change, so no material event."""
     tool = rec.printer.tools[0]
-    tool.material = tool.previous = replace(TAGGED)
+    tool.fill(TAGGED)
     rec.printer.screen = State.FINISHED
     rec.reset()
     rec.advance(LEAD)
@@ -253,7 +252,7 @@ def f10c_sync_job_rewrite_idle(rec: Recorder) -> None:
     """As F10b, but from IDLE after a boot, with Z not homed: `G28 O` homes first, so the
     job runs much longer on the printer, which the comparison doesn't time."""
     tool = rec.printer.tools[0]
-    tool.material = tool.previous = replace(TAGGED)
+    tool.fill(TAGGED)
     rec.printer.homed = False
     rec.reset()
     rec.advance(LEAD)

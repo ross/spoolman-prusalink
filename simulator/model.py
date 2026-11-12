@@ -26,6 +26,7 @@ EVENT_LIMIT = 2000
 QUEUE_LIMIT = 1000  # items per SSE client before the oldest are dropped
 SNAPSHOT_NAME = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
 EPSILON = 1e-9
+UUID_TOOL = 0  # the one tool that keeps tag UUIDs, on a model that has them
 
 
 class State(StrEnum):
@@ -153,6 +154,14 @@ class ModelInfo:
     max_tools: int = 1
     counters: bool = True
 
+    def holds_uuid(self, tool: int) -> bool:
+        """Whether `tool` keeps tag UUIDs: tool 0 of a model with a tag reader (F21).
+
+        `M865.1 I0` writes the instance UUID there, and only the Core One and Core One L
+        build `M865.1` and the tag reader.
+        """
+        return self.uuids and tool == UUID_TOOL
+
 
 def _models(*infos: ModelInfo) -> dict[str, ModelInfo]:
     return {m.code: m for m in infos}
@@ -221,6 +230,18 @@ class Material:
         """Return the nozzle, preheat and bed temperatures the printer reports."""
         set_ = (self.nozzle, self.preheat, self.bed)
         return tuple(d if v is None else v for v, d in zip(set_, DEFAULT_TEMPERATURES, strict=True))
+
+
+def color555(color: str | None) -> str | None:
+    """Round `#rrggbb` to what the firmware stores: 5 bits a channel, widened back to 8.
+
+    `Color555::from_rgb` keeps each channel's top 5 bits, and `to_color` widens them as
+    `(v << 3) | (v >> 2)` (`src/common/utils/color555.hpp:23-54` at 2db93db5).
+    """
+    if color is None:
+        return None
+    channels = (int(color[i : i + 2], 16) >> 3 for i in (1, 3, 5))
+    return "#" + "".join(f"{(v << 3) | (v >> 2):02x}" for v in channels)
 
 
 def preset_temperatures(name: str) -> dict[str, int]:
@@ -317,8 +338,43 @@ class SimTool:
     gap: float = 0.0
     sensor_fault: bool = False
     stuck_write: bool = False
-    temps: dict[str, int] = field(default_factory=dict)
     process: LoadProcess | UnloadProcess | None = None
+
+    # The stored type, the ad-hoc slot and the kept type change only through these methods.
+
+    @classmethod
+    def loaded_with(cls, index: int, material: Material | None, **kw: Any) -> SimTool:
+        """A tool as a finished load of `material` leaves it, or empty for None."""
+        tool = cls(index, **kw)
+        tool.fill(material)
+        return tool
+
+    def fill(self, material: Material | None) -> None:
+        """Leave the tool as a finished load of `material` leaves it, or a finished unload for
+        None. Nothing is counted: this is setup, and a load by hand while the printer is off.
+        """
+        self.loaded = material is not None
+        self.store(material)
+
+    def store(self, material: Material | None) -> None:
+        """Write the stored type. An ad-hoc type also fills the ad-hoc slot (`previous`).
+
+        The slot keeps a color in 5 bits per channel, so the color reads back rounded (F25).
+        """
+        if material is not None:
+            material = replace(material, color=color555(material.color))
+        self.material = material
+        if material is not None and material.adhoc:
+            self.previous = replace(material)
+
+    def clear_type(self) -> None:
+        """The firmware writes "none": the type goes, and a runout reload can restore it."""
+        self.kept_type, self.material = self.material, None
+
+    def kept(self) -> Material | None:
+        """The type a load without a source restores: the one the unload left, else the slot."""
+        kept = self.kept_type or self.previous
+        return None if kept is None else replace(kept)
 
 
 @dataclass
@@ -558,17 +614,6 @@ class SimPrinter:
         if self.power is Power.OFF:
             raise Busy(f"{self.name} is off")
 
-    def _set_material(self, tool: SimTool, material: Material | None) -> None:
-        """Write the stored type. An ad-hoc type also fills the ad-hoc slot (`previous`)."""
-        tool.material = material
-        if material is not None and material.adhoc:
-            tool.previous = replace(material)
-
-    def _kept(self, tool: SimTool) -> Material | None:
-        """The type a load without a source restores: the one the unload left, else the slot."""
-        kept = tool.kept_type or tool.previous
-        return None if kept is None else replace(kept)
-
     def _count_unload(self, tool: SimTool, why: str) -> None:
         # The firmware counts a write of "none" over a stored type, nothing else.
         if tool.material is None:
@@ -576,7 +621,7 @@ class SimPrinter:
             return
         tool.unload_count += 1
         tool.extruded_at_unload = int(tool.extruded)
-        tool.kept_type, tool.material = tool.material, None
+        tool.clear_type()
         self._log(
             "unload",
             f"T{tool.index} {why}: unload_count {tool.unload_count} at {tool.extruded_at_unload}",
@@ -665,7 +710,7 @@ class SimPrinter:
         }
         if m.color:
             out["color"] = m.color
-        if self.model.uuids and tool.index == 0:
+        if self.model.holds_uuid(tool.index):
             for key in ("material_uuid", "package_uuid", "instance_uuid"):
                 if value := getattr(m, key):
                     out[key] = value
@@ -765,8 +810,7 @@ class SimPrinter:
         waiting = job is not None and job.wait_tool == tool
         if source is None and not waiting:
             raise Invalid("a load needs a source, tag or preset, outside a runout reload")
-        kept = t.kept_type or t.previous
-        what = f"{source} {_describe(material)}" if source else f"keep {_describe(kept)}"
+        what = f"{source} {_describe(material)}" if source else f"keep {_describe(t.kept())}"
         if self.power is Power.OFF:
             self._hand_load(t, material)
             return
@@ -805,7 +849,7 @@ class SimPrinter:
         tag_temps = preset_temperatures(name)
         if temps is not None:
             tag_temps = dict(zip(tag_temps, _check_temperatures(temps), strict=True))
-        if t.index != 0:
+        if not self.model.holds_uuid(t.index):
             return Material(name, color, **tag_temps)
         # A real tag carries its product's UUIDs; derive stable ones from the name and color.
         return Material(
@@ -820,10 +864,8 @@ class SimPrinter:
     def _hand_load(self, t: SimTool, material: Material | None) -> None:
         if t.process is not None:
             raise Busy("a load or unload is already running")
-        if material is None:
-            material = self._kept(t)
-        self._set_material(t, material)
-        t.loaded, t.gap = True, 0.0
+        t.fill(t.kept() if material is None else material)
+        t.gap = 0.0
         self._log("load", f"T{t.index} loaded by hand while off: {_describe(material)}")
 
     def unload(self, tool: int) -> None:
@@ -1203,8 +1245,8 @@ class SimPrinter:
         if p.phase == "FEED_GAP":
             p.phase, p.remaining, t.gap = "FEED", p.feed_mm, 0.0
         elif p.phase == "FEED":
-            material = p.material if p.material is not None else self._kept(t)
-            self._set_material(t, material)
+            material = p.material if p.material is not None else t.kept()
+            t.store(material)
             self._log("load", f"T{t.index} type set to {_describe(material)}")
             p.phase, p.remaining = "PURGE", p.purge_mm
         else:
@@ -1442,14 +1484,11 @@ class SimPrinter:
                 nozzle, preheat, bed = DEFAULT_TEMPERATURES
                 name = c.name or (old.name if old else "Custom")
                 material = Material(name, nozzle=nozzle, preheat=preheat, bed=bed)
-                temps: dict[str, int] = {}
             else:
-                material, temps = replace(old, adhoc=True), dict(t.temps)
+                material = replace(old, adhoc=True)
             material.name = c.name or material.name
             material.color = c.color or material.color
             _apply_temperatures(material, c.temps)
-            temps.update(c.temps)
-            t.temps = temps
         elif c.name:
             # A preset write: the firmware ignores every parameter but the type.
             material = Material(c.name, adhoc=False, **preset_temperatures(c.name))
@@ -1462,35 +1501,33 @@ class SimPrinter:
                 return
             material = replace(t.material, color=c.color or t.material.color)
             _apply_temperatures(material, c.temps)
-            t.temps = {**t.temps, **c.temps}
         else:
             self._log("gcode", f"M865 L{c.tool}: nothing to write")
             return
-        self._set_material(t, material)
-        self._log("gcode", f"M865 T{c.tool} set to {_describe(material)}")
+        t.store(material)
+        self._log("gcode", f"M865 T{c.tool} set to {_describe(t.material)}")
 
     def _copy_filament(self, t: SimTool, source: SimTool) -> None:
         if source.material is None:
             self._count_unload(t, f"M865 copied empty T{source.index}")
             return
         material = replace(source.material)
-        if not (self.model.uuids and t.index == 0):
+        if not self.model.holds_uuid(t.index):
             material.instance_uuid = material.material_uuid = material.package_uuid = None
-        self._set_material(t, material)
+        t.store(material)
         self._log("gcode", f"M865 T{t.index} copied from T{source.index}: {_describe(material)}")
 
     def _apply_uuid(self, c: gcode.SetUuid) -> None:
         t = self.tools.get(c.tool)
-        usable = self.model.uuids and c.tool == 0 and t is not None and t.material is not None
+        usable = self.model.holds_uuid(c.tool) and t is not None and t.material is not None
         if not usable or t.stuck_write:
             self._log("gcode", f"M865.1 I{c.tool} dropped")
             return
         if not t.material.adhoc:
-            self._log("gcode", f"M865.1 I0 ignored on preset {t.material.name}")
+            self._log("gcode", f"M865.1 I{c.tool} ignored on preset {t.material.name}")
             return
-        t.material.instance_uuid = c.uuid
-        t.previous = replace(t.material)
-        self._log("gcode", f"M865.1 T0 instance UUID {c.uuid}")
+        t.store(replace(t.material, instance_uuid=c.uuid))
+        self._log("gcode", f"M865.1 T{c.tool} instance UUID {c.uuid}")
 
     # The page's view.
 
@@ -1794,12 +1831,10 @@ def _tool_from_config(tc: Any) -> SimTool:
             adhoc,
             **preset_temperatures(m["name"]),
         )
-    return SimTool(
-        index=tc.index,
+    return SimTool.loaded_with(
+        tc.index,
+        material,
         enabled=tc.enabled,
-        loaded=material is not None,
-        material=material,
-        previous=replace(material) if material and material.adhoc else None,
         extruded=float(tc.extruded),
         unload_count=tc.unload_count,
         extruded_at_unload=tc.extruded_at_unload,

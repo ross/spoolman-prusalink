@@ -23,7 +23,7 @@ from simulator.model import (
 )
 from simulator.tests.util import PLA, loaded, make, run
 
-PETG = Material("PETG", "#1f6fb2")
+PETG = Material("PETG", "#186bb5")
 
 
 def tool0(printer):
@@ -116,12 +116,12 @@ def test_one_tick_runs_a_whole_load():
     sim, p = make()
     p.unload(0)
     sim.tick(3.0)
-    p.load(0, source="preset", name="ASA", color="#D9342B")
+    p.load(0, source="preset", name="ASA", color="#DE3129")
     sim.tick(100.0)
     t = tool0(p)
     assert t.loaded and t.process is None and p.state is State.IDLE
     assert t.extruded == pytest.approx(76)
-    assert t.material == Material("ASA", "#d9342b", **preset_temperatures("ASA"))
+    assert t.material == Material("ASA", "#de3129", **preset_temperatures("ASA"))
 
 
 def test_menu_load_clears_color_and_uuid():
@@ -160,15 +160,15 @@ def test_tag_load_sets_uuid_on_uuids_model_only():
     sim, p = make()
     p.unload(0)
     sim.tick(3)
-    p.load(0, source="tag", name="PETG", color="#1F6FB2", uuid=uuid.upper())
+    p.load(0, source="tag", name="PETG", color="#186BB5", uuid=uuid.upper())
     sim.tick(20)
     tag = shown(p)
     assert tag.pop("material_uuid") and tag.pop("package_uuid")
-    assert tag == {"name": "PETG", "color": "#1f6fb2", "instance_uuid": uuid}
+    assert tag == {"name": "PETG", "color": "#186bb5", "instance_uuid": uuid}
 
     # The bridge's write starts the type afresh: only its own instance UUID is left.
-    p.apply(gcode.parse(f'M865 X R N"PETG" O"#1f6fb2" L0\nM865.1 I0 C"{uuid}"'))
-    assert shown(p) == {"name": "PETG", "color": "#1f6fb2", "instance_uuid": uuid}
+    p.apply(gcode.parse(f'M865 X R N"PETG" O"#186bb5" L0\nM865.1 I0 C"{uuid}"'))
+    assert shown(p) == {"name": "PETG", "color": "#186bb5", "instance_uuid": uuid}
 
     sim, mk4 = make("1.4.1", [SimTool(0)])
     with pytest.raises(Invalid):
@@ -592,7 +592,7 @@ JOB = """M862.3 P "COREONEL" ; printer model check
 M862.5 P2 ; g-code level check
 M862.6 P"Input shaper" ; FW feature check
 G28 O ; home only if not homed
-M865 X R N"PETG" T230 B85 P170 C30 D15 E45 O"#1F6FB2" L0
+M865 X R N"PETG" T230 B85 P170 C30 D15 E45 O"#186BB5" L0
 M865.1 I0 C"8B6A3E3E-3F6C-4D7B-9A43-6C1F0E7D2A11"
 M117 Spoolman: test
 """
@@ -613,8 +613,7 @@ def test_sync_job_applies_and_finishes():
     assert p.state is State.PRINTING and p.job_json() is not None
     m = tool0(p).material
     uuid = "8b6a3e3e-3f6c-4d7b-9a43-6c1f0e7d2a11"
-    assert m == Material("PETG", "#1f6fb2", uuid, nozzle=230, preheat=170, bed=85)
-    assert tool0(p).temps["nozzle"] == 230 and tool0(p).temps["chamber_max"] == 45
+    assert m == Material("PETG", "#186bb5", uuid, nozzle=230, preheat=170, bed=85)
     assert p.message == "Spoolman: test" and p.homed
     sim.tick(3 + 1)
     assert p.state is State.FINISHED and p.job is None and p.job_counter == 1
@@ -690,8 +689,8 @@ def test_m865_on_missing_tool_is_a_parse_error():
 
 def test_m865_reset_clears_uuid_and_preset_write_ignores_parameters():
     sim, p = make()
-    p.apply(gcode.parse('M865 X R N"ASA" O"#d9342b" L0'))
-    assert tool0(p).material == Material("ASA", "#d9342b", **RESET)
+    p.apply(gcode.parse('M865 X R N"ASA" O"#de3129" L0'))
+    assert tool0(p).material == Material("ASA", "#de3129", **RESET)
     p.apply(gcode.parse('M865.1 I0 C"8b6a3e3e-3f6c-4d7b-9a43-6c1f0e7d2a11"'))
     assert tool0(p).material.instance_uuid
     p.apply(gcode.parse('M865 X O"#000000" L0'))  # ad-hoc edit keeps the UUID
@@ -711,7 +710,7 @@ def test_preset_ignores_edits_and_adhoc_write_edits_the_slot():
     p.apply(gcode.parse('M865 X O"#000000" L0'))  # the slot is the base, not the preset
     assert tool0(p).material == replace(PLA, color="#000000")
     p.apply(gcode.parse('M865 O"#111111" L0'))  # an ad-hoc type takes an edit
-    assert tool0(p).material.color == "#111111"
+    assert tool0(p).material.color == "#101010"  # stored in 5 bits a channel (F25)
 
 
 def test_m865_writes_disabled_and_unconfigured_tools():
@@ -768,7 +767,6 @@ def test_stuck_write_ignores_m865():
 def test_snapshot_round_trip_mid_print_and_mid_load():
     tools = [loaded(0, PETG), SimTool(1, material=None), loaded(2, PETG)]
     sim, p = make("8.10.0", tools)
-    p.tools[0].temps = {"nozzle": 230}
     p.start_print(PrintSpec([Segment(0, 100), Segment(2, 50)], color_changes_mm=[80]))
     p.upload("x.gcode", "M117 x\n", print_after=False, overwrite=False)
     sim.tick(0.8 + 5 + 3)
@@ -1036,3 +1034,16 @@ def test_temperatures_are_set_when_the_material_is_built():
     p.load(0, source="tag", name="petg", uuid="8b6a3e3e-3f6c-4d7b-9a43-6c1f0e7d2a11")
     sim.tick(100.0)
     assert temperatures(p) == (215, 170, 60)
+
+
+def test_a_written_color_reads_back_in_5_bits_a_channel():
+    """F25: the firmware stores a color as Color555, so `#73767d` reads back `#73737b`."""
+    sim, p = make()
+    p.apply(gcode.parse('M865 X R N"PLA" O"#73767d" L0\n'))
+    assert p.filament_json()["tools"][0]["material"]["color"] == "#73737b"
+    assert tool0(p).previous.color == "#73737b"
+    p.unload(0)
+    run(sim, 3.1)
+    p.load(0, source="preset", name="PLA", color="#73767d")
+    run(sim, 20)
+    assert tool0(p).material.color == "#73737b"

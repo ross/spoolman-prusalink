@@ -28,7 +28,7 @@ def test_tool_with_color_and_uuid_is_adhoc(tmp_path):
     text = printer(
         tool(
             "index = 0\nextruded = 4310.5\nunload_count = 2\nextruded_at_unload = 4000\n"
-            'material = { name = "PETG", color = "#1F6FB2", '
+            'material = { name = "PETG", color = "#186BB5", '
             'instance_uuid = "7B3D2D5E-1F7A-4D8C-9A1E-2C3B4D5E6F70" }'
         )
     )
@@ -39,7 +39,7 @@ def test_tool_with_color_and_uuid_is_adhoc(tmp_path):
     # A color or UUID can only come from an ad-hoc type, which also fills the ad-hoc slot.
     assert t.material == Material(
         "PETG",
-        "#1f6fb2",
+        "#186bb5",
         "7b3d2d5e-1f7a-4d8c-9a1e-2c3b4d5e6f70",
         True,
         **preset_temperatures("PETG"),

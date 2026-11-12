@@ -173,10 +173,7 @@ def fill(tool, material):
 
     Only the filament and its stored type change. The test sets the counters itself.
     """
-    tool.material = None if material is None else replace(material)
-    tool.loaded = material is not None
-    if material is not None and material.adhoc:
-        tool.previous = replace(material)
+    tool.fill(material)
 
 
 def add_station(sim, name="default"):

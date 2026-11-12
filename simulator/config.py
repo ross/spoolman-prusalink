@@ -67,8 +67,9 @@ class Location:
     printer: str
     tool: int
     location: str
-    # Whether the printer's model holds an instance UUID (tool 0 only).
+    # Whether the printer's model has a tag reader, and whether this tool keeps tag UUIDs.
     uuids: bool
+    holds_uuid: bool
     # The tool's configured material name and instance UUID, if any.
     material: str | None = None
     instance_uuid: str | None = None
@@ -119,7 +120,7 @@ def _unknown(table: dict, allowed: set[str], prefix: str) -> None:
             raise ConfigError(f"{where} isn't a known key")
 
 
-def _material(value: object, prefix: str, uuids: bool, tool: int) -> dict:
+def _material(value: object, prefix: str, holds_uuid: bool) -> dict:
     name = f"{prefix}.material"
     if not isinstance(value, dict):
         raise ConfigError(f"{name} must be a table with a name, got {value!r}")
@@ -142,7 +143,7 @@ def _material(value: object, prefix: str, uuids: bool, tool: int) -> dict:
             instance_uuid = str(uuid.UUID(raw))
         except ValueError as e:
             raise ConfigError(f"{name}.instance_uuid isn't a UUID, got {raw!r}") from e
-        if not uuids or tool != 0:
+        if not holds_uuid:
             raise ConfigError(f"{name}.instance_uuid needs a model that holds UUIDs, on tool 0")
     return {"name": material_name, "color": color, "instance_uuid": instance_uuid}
 
@@ -163,7 +164,7 @@ def _tool(entry: object, prefix: str, model_code: str) -> ToolConfig:
     enabled = _bool(entry.get("enabled", True), f"{prefix}.enabled")
     material = None
     if "material" in entry:
-        material = _material(entry["material"], prefix, info.uuids, index)
+        material = _material(entry["material"], prefix, info.holds_uuid(index))
     extruded = _number(entry.get("extruded", 0), f"{prefix}.extruded", 0)
     unload_count = _int(entry.get("unload_count", 0), f"{prefix}.unload_count", 0)
     at_unload = _int(entry.get("extruded_at_unload", 0), f"{prefix}.extruded_at_unload", 0)
@@ -298,6 +299,7 @@ def locations(cfg: SimConfig) -> list[Location]:
             t.index,
             _location(p, t),
             MODELS[p.model].uuids,
+            MODELS[p.model].holds_uuid(t.index),
             t.material["name"] if t.material else None,
             t.material["instance_uuid"] if t.material else None,
         )

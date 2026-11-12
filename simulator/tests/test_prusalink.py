@@ -15,7 +15,7 @@ from simulator.tests.util import KEY, PLA, make
 
 AUTH = {"X-Api-Key": KEY}
 UPLOAD = {**AUTH, "Print-After-Upload": "?1", "Overwrite": "?1", "Content-Type": "text/x.gcode"}
-JOB = 'M862.3 P "COREONEL"\nM865 X R N"PETG" O"#1f6fb2" L0\nM117 Spoolman: test\n'
+JOB = 'M862.3 P "COREONEL"\nM865 X R N"PETG" O"#186bb5" L0\nM117 Spoolman: test\n'
 
 
 @pytest.fixture
@@ -107,7 +107,7 @@ async def test_sync_job_upload_runs_to_finished(setup):
         "nozzle_temperature": 215,
         "preheat_temperature": 170,
         "bed_temperature": 60,
-        "color": "#1f6fb2",
+        "color": "#186bb5",
     }
     sim.tick(10)
     status = await (await client.get("/api/v1/status", headers=AUTH)).json()
