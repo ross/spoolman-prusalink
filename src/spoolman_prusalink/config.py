@@ -56,7 +56,7 @@ class Config:
     poll_idle: float = 60.0
     # Spool extra field that holds the OpenPrintTag instance UUID; None disables it.
     uuid_field: str | None = "instance_uuid"
-    # Where an evicted spool goes; "" means no location. Used from phase 3.
+    # Where an evicted spool goes; "" means no location.
     eviction_location: str = ""
     # Spool extra field (type text) the bridge writes flags to; None disables flags.
     flag_field: str | None = "bridge_flag"

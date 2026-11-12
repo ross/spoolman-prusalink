@@ -25,8 +25,9 @@ from integration.faults import set_extra_text
 from integration.temperatures import TEMPERATURES, WRITTEN
 from simulator.model import MODELS, JobPhase, Material, ModelInfo, State
 from simulator.prusalink import DROP, Reply
-from spoolman_prusalink.printer_sync import COREONEL_PREAMBLE
+from spoolman_prusalink.printer_sync import PRINTER_MODELS, default_preamble
 
+COREONEL_PREAMBLE = default_preamble(PRINTER_MODELS["8.1.0"])
 SYNC_FILE = "spoolman-sync.gcode"
 
 

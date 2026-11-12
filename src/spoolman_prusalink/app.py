@@ -483,6 +483,14 @@ class PrinterBridge:
         """Whether the model reads tags and reports their UUIDs on tool 0."""
         return self._model is not None and self._model.uuids
 
+    def _tag_tool(self, tool: int) -> bool:
+        """Whether this tool can report a tag's UUID: the tag reader's tool."""
+        return self._tag_reader and tool == printer_sync.UUID_TOOL
+
+    def _uuid_tool(self, tool: int) -> bool:
+        """Whether to write and store this tool's instance UUID."""
+        return self._uuids and tool == printer_sync.UUID_TOOL
+
     @property
     def _uuids(self) -> bool:
         """Whether to write and compare instance UUIDs: configured with a Spoolman field to
@@ -634,7 +642,7 @@ class PrinterBridge:
                 self.bridge.state.runouts.pop(active.id, None)
             tag = None
             compared: dict[int, list[str]] = {}
-            if tool == 0 and (material is None or not material.instance_uuid):
+            if tool == printer_sync.UUID_TOOL and (material is None or not material.instance_uuid):
                 self._uuid_gap.add(tool)
             if not result.skipped and material is not None and active is not None:
                 tag = self._tag_uuid(tool, st, material, active, spools)
@@ -812,7 +820,7 @@ class PrinterBridge:
         runout leftover, the spool before's tag kept by a reload, isn't the loaded
         spool's, so it's written over as any other type is.
         """
-        if not (self._tag_reader and tool == 0 and material.from_tag):
+        if not (self._tag_tool(tool) and material.from_tag):
             return False
         value = material.instance_uuid
         return not (value and self._leftover(tool, value, active))
@@ -863,7 +871,7 @@ class PrinterBridge:
         is found with UUIDs off too. Everything else needs them on.
         """
         value = material.instance_uuid
-        if not (self._tag_reader and tool == 0 and value):
+        if not (self._tag_tool(tool) and value):
             return None
         value = value.lower()
         if self._leftover(tool, value, active):
@@ -972,9 +980,7 @@ class PrinterBridge:
             spool.id,
             spool.remaining_weight,
         )
-        self.bridge.state.runouts[spool.id] = Runout(
-            text, spool.net_weight, spool.used_weight, self.name
-        )
+        self.bridge.state.runouts[spool.id] = Runout(text, spool.net_weight, spool.used_weight)
 
     def _claim_handled(self, location: str, claim: int, others: list[int]) -> None:
         """Record a handled claim and the claims it beat, so their boxes are cleared."""
@@ -1035,7 +1041,7 @@ class PrinterBridge:
         return "spool changed in Spoolman since the last write"
 
     def _write_lines(self, tool: int, spool: Spool, uuid_value: str | None) -> str:
-        uuid_value = uuid_value if tool == 0 and self._uuids else None
+        uuid_value = uuid_value if self._uuid_tool(tool) else None
         return "\n".join(
             printer_sync.filament_lines(printer_sync.ToolWrite(tool, spool, uuid_value))
         )
@@ -1149,7 +1155,7 @@ class PrinterBridge:
             if spool is None:
                 continue
             uuid_value = None
-            if tool == 0 and self._uuids:
+            if self._uuid_tool(tool):
                 adopted = self._adopts.get(tool)
                 if spool.instance_uuid:
                     uuid_value = spool.instance_uuid
@@ -1752,7 +1758,7 @@ class Bridge:
         if not await self._ensure_field(key, UUID_FIELD_NAME):
             return None
         try:
-            await self.spoolman.set_extra_text(spool.id, key, value)
+            await self.spoolman.set_extra(spool.id, key, value)
         except httpx.HTTPError as e:
             self._uuid_trouble(spool.id, e, "can't store an instance UUID on spool %d: %s")
             return None
@@ -1804,7 +1810,7 @@ class Bridge:
         if not await self._ensure_field(key, UUID_FIELD_NAME):
             return False
         try:
-            await self.spoolman.set_extra_text(spool_id, key, value)
+            await self.spoolman.set_extra(spool_id, key, value)
         except httpx.HTTPError as e:
             self._uuid_trouble(spool_id, e, "can't store an instance UUID on spool %d: %s")
             return False
@@ -1890,7 +1896,7 @@ class Bridge:
                 continue  # Not listed, and the bridge never flagged it: leave it alone.
             if current[spool_id] != want:
                 try:
-                    await self.spoolman.set_extra_text(spool_id, key, want)
+                    await self.spoolman.set_extra(spool_id, key, want)
                 except httpx.HTTPError as e:
                     if isinstance(e, httpx.HTTPStatusError) and e.response.status_code == 404:
                         # Deleted since it was listed or cached. An active spool that

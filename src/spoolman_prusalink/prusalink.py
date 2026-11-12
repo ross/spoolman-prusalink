@@ -8,7 +8,7 @@ import httpx
 
 from .models import FilamentReading, Material, ToolReading
 
-# Printer states in which a job file can start (used by phase 3 writes).
+# Printer states in which a job file can start, such as the sync job.
 IDLE_STATES = frozenset({"IDLE", "FINISHED", "READY", "STOPPED"})
 BUSY_STATES = frozenset({"PRINTING", "PAUSED", "BUSY", "ATTENTION"})
 

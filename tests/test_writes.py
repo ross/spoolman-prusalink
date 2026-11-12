@@ -15,9 +15,11 @@ from spoolman_prusalink.app import Bridge
 from spoolman_prusalink.color import quantize
 from spoolman_prusalink.config import Config, PrinterConfig
 from spoolman_prusalink.db import Database, read_ledger, read_state
-from spoolman_prusalink.printer_sync import COREONEL_PREAMBLE, PRESETS
+from spoolman_prusalink.printer_sync import PRESETS, PRINTER_MODELS, default_preamble
 from spoolman_prusalink.prusalink import PrusaLink
 from spoolman_prusalink.spoolman import Spoolman
+
+COREONEL_PREAMBLE = default_preamble(PRINTER_MODELS["8.1.0"])
 
 LOC = "Core One L+"
 
