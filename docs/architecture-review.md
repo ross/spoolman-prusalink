@@ -232,19 +232,13 @@ catches the client errors only.
 
 Size: small to medium. Independent of the rest.
 
-### B9. `account()` mixes last poll's state with this poll's
+### B9. `account()` keeps its tallies, legal states, and event kinds by convention
 
-`account()` (`accounting.py`) is 490 lines: six numbered steps, about
-ten mutable locals, and five closures, two of which use `nonlocal`. It's
-pure, well documented, and has 94 tests through its public signature. The order of the
-steps is real: unload, claim, assignment, print start, usage. The length
-isn't the problem. These are:
+`account()` (`accounting.py`) is about 500 lines in six numbered steps.
+It's pure, well documented, and has 94 tests through its public signature.
+The order of the steps is real: unload, claim, assignment, print start,
+usage. The length isn't the problem. These are:
 
-- **`s` is half last poll and half this poll.** `s.active`, `s.assigned`,
-  and `s.job_id` are the previous poll's values, compared with the new
-  locals. `s.charged`, `s.unload_count`, `s.boot_id`, and `s.evict` have
-  already been advanced with `replace`. The reader has to know which, field
-  by field.
 - **The usage tallies are kept by hand.** `swap.mm` and `provisional.mm`
   track what's been charged to their spool. Three charge sites each update
   them: `charge_held`, the unload in step 1, and the usage in step 5. A new
@@ -266,16 +260,6 @@ tests are the check.
 
 Part 1, a small stack of its own:
 
-- **Two states.** `last` is the state passed in. It's frozen and never
-  reassigned, so `last.x` always means the previous poll. `current` holds
-  this poll's values: every step writes to it, and at the end it's the
-  result. Nothing else carries tool state, so the loose locals go away.
-
-  Start `current` as a copy of `last`, not empty. Most fields carry over
-  unchanged on most polls, and with an empty start a field that a step
-  forgets to copy is silently reset. The early returns for a first poll and
-  an ambiguous location build their own state today and have the same
-  risk.
 - **One charge helper owns the tallies.** A charge to a spool updates
   `swap.mm` and `provisional.mm` when they're on that spool, in the helper,
   not at each call. Before changing it, trace the refund paths: a claim and
