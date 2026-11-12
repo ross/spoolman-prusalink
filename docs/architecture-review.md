@@ -515,7 +515,7 @@ The simulator review read every file in `simulator/`.
 
 ### S1. Printer state is stored beside the job phase
 
-`simulator/model.py` has 27 `_set_state()` calls, nearly all paired with a
+`simulator/model.py` has 26 `_set_state()` calls, nearly all paired with a
 `job.phase = ...` write. While a job exists, the state follows from the
 phase. The `HOLD` phase covers three situations, told apart by `job.jam`,
 `job.id is None`, and comparing `attention` with the text `"model check"`.
@@ -598,7 +598,8 @@ Size: medium.
 - "UUIDs only on tool 0 of a model that holds them" is written in about
   seven places in `model.py`, `config.py`, and `seed.py`.
 - Snapshots are a dump of the internal dataclasses, with shims for older
-  snapshots in `_process_from` and in `Material`'s optional temperatures.
+  snapshots in `_process_from`, `_tool_from` (`kept_type`), and `Material`'s
+  optional temperatures.
 - `seed` picks spool materials from `CYCLE[tool % 3]` (`seed.py`) and
   mints a random UUID, so the demo printer's preloaded tag UUID never
   matches its seeded spool, and the demo starts with UUID drift (#135).
