@@ -528,6 +528,7 @@ def test_config_rejects_bad_values(tmp_path, text, error):
     "text, error",
     [
         ("[printer\n", "can't parse"),
+        ("[bridge]\nlength_factor = 1" + "0" * 5000 + "\n", "can't parse"),
         (
             '[printer]\nurl = "http://p"\n[spoolman]\nurl = "http://s"\n'
             '[[tools]]\nlocation = "A"\n',

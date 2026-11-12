@@ -320,7 +320,9 @@ def load(path: str | os.PathLike | None, env: dict[str, str] | None = None) -> C
         with open(path, "rb") as f:
             try:
                 raw = tomllib.load(f)
-            except (tomllib.TOMLDecodeError, UnicodeDecodeError) as e:
+            # ValueError covers TOMLDecodeError, UnicodeDecodeError, and an int too long
+            # to convert, which tomllib raises bare.
+            except ValueError as e:
                 raise ConfigError(f"can't parse {path}: {e}") from e
 
     # The one-printer form's checks run in the order they always have: the printer's
