@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import logging
 from dataclasses import replace
 
 import httpx
@@ -26,6 +27,11 @@ TAG = "91da34d9-c1c1-470f-bac7-185a2346f86a"
 
 def count(caplog, text):
     return caplog.text.count(text)
+
+
+def records(caplog):
+    """(level, message) of each record at INFO and above."""
+    return [(r.levelname, r.getMessage()) for r in caplog.records if r.levelno >= logging.INFO]
 
 
 def stored_uuid(fake, spool_id):
@@ -201,11 +207,12 @@ async def test_failed_archived_check_adopts_nothing_and_logs_once(uuid_bridge, c
     assert fake.writes == []
     assert (19, TAG) not in bridge._refused_uuids  # Not a refusal: it's tried again.
 
+    assert levels(caplog, "can't check spool 19's tag UUID") == ["WARNING"]
     fake.fail_read = None
+    caplog.clear()
     assert await bridge._adopt_uuid(19, TAG) is True
     assert stored_uuid(fake, 19) == TAG
-    assert levels(caplog, "can't check spool 19's tag UUID") == ["WARNING"]
-    assert levels(caplog, "gave spool 19 its tag's instance UUID") == ["INFO"]
+    assert records(caplog) == [("INFO", f"gave spool 19 its tag's instance UUID {TAG}")]
     await bridge.aclose()
 
 
@@ -215,8 +222,11 @@ async def test_failed_check_of_a_kept_uuid_logs_its_recovery(uuid_bridge, caplog
     fake.fail_read = 500
     assert await bridge._adopt_uuid(19, TAG, store=False) is False
     fake.fail_read = None
+    caplog.clear()
     assert await bridge._adopt_uuid(19, TAG, store=False) is True
-    assert levels(caplog, f"checked spool 19's tag UUID {TAG}: no other spool has it") == ["INFO"]
+    assert records(caplog) == [
+        ("INFO", f"checked spool 19's tag UUID {TAG}: no other spool has it")
+    ]
     assert fake.writes == []
     await bridge.aclose()
 
@@ -230,11 +240,28 @@ async def test_failed_store_of_an_adopted_uuid_logs_once_and_retries(uuid_bridge
     assert count(caplog, "can't store an instance UUID on spool 19") == 1
     assert "instance_uuid" not in fake.spools[19]["extra"]
 
+    assert levels(caplog, "can't store an instance UUID on spool 19") == ["WARNING"]
     fake.fail_patch = None
+    caplog.clear()
     assert await bridge._adopt_uuid(19, TAG) is True
     assert stored_uuid(fake, 19) == TAG
+    assert records(caplog) == [("INFO", f"gave spool 19 its tag's instance UUID {TAG}")]
+    await bridge.aclose()
+
+
+async def test_failed_store_of_a_minted_uuid_logs_once_and_retries(uuid_bridge, caplog):
+    bridge, fake, printer = uuid_bridge
+    caplog.set_level("INFO")
+    target = (await bridge.spoolman.spools())[0]
+    fake.fail_patch = 500
+    assert await bridge._mint_uuid(target) is None
+    assert await bridge._mint_uuid(target) is None
     assert levels(caplog, "can't store an instance UUID on spool 19") == ["WARNING"]
-    assert levels(caplog, "gave spool 19 its tag's instance UUID") == ["INFO"]
+    fake.fail_patch = None
+    caplog.clear()
+    minted = await bridge._mint_uuid(target)
+    assert minted and stored_uuid(fake, 19) == minted
+    assert records(caplog) == [("INFO", f"gave spool 19 instance UUID {minted}")]
     await bridge.aclose()
 
 

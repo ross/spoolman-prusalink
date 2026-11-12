@@ -1,6 +1,7 @@
 """Phase 2: charges and flags written to a fake Spoolman."""
 
 import json
+import logging
 import math
 import re
 import sqlite3
@@ -1051,6 +1052,15 @@ async def test_charges_flushing_with_no_failure_log_no_catch_up(tmp_path, caplog
     await bridge.aclose()
 
 
+def lines(caplog, spool_id):
+    """(level, message) of each record at INFO and above that names the spool."""
+    return [
+        (r.levelname, r.getMessage())
+        for r in caplog.records
+        if r.levelno >= logging.INFO and f"spool {spool_id}" in r.getMessage()
+    ]
+
+
 async def test_evict_failure_logged_once(tmp_path, caplog):
     bridge, fake, printer = make(tmp_path, [spool(19)])
     caplog.set_level("INFO")
@@ -1065,10 +1075,11 @@ async def test_evict_failure_logged_once(tmp_path, caplog):
     assert caplog.text.count("can't move spool 19 out") == 1
     assert caplog.text.count("can't update the flag on spool 19") <= 1
     fake.fail_patch = None
+    caplog.clear()
     await bridge.poll()
     assert fake.spools[19]["location"] is None
-    # A move is a one-time action, so it logs at INFO even after a failure.
-    assert levels(caplog, f"[{LOC}] moved spool 19 to no location") == ["INFO"]
+    # A move is a one-time action, so it logs one INFO line even after a failure.
+    assert lines(caplog, 19) == [("INFO", f"[{LOC}] moved spool 19 to no location")]
     await bridge.aclose()
 
 
@@ -1121,10 +1132,11 @@ async def test_flag_failure_logged_once(tmp_path, caplog):
         await bridge.poll()
     assert caplog.text.count("can't update the flag on spool 19") == 1
     fake.fail_patch = None
+    caplog.clear()
     await bridge.poll()
-    assert "unloaded with no Spoolman change" in fake.flag(19)
-    assert caplog.text.count("can't update the flag on spool 19") == 1
-    assert levels(caplog, "set flag on spool 19") == ["INFO"]
+    flag = fake.flag(19)
+    assert "unloaded with no Spoolman change" in flag
+    assert lines(caplog, 19) == [("INFO", f"set flag on spool 19: {flag}")]
     await bridge.aclose()
 
 
@@ -2438,9 +2450,10 @@ async def test_claim_failing_to_clear_is_handled_once(tmp_path, caplog):
     assert caplog.text.count("claimed in place of spool 19") == 1
     assert caplog.text.count("can't clear the claim on spool 20") == 1
     fake.fail_patch = None
+    caplog.clear()
     await bridge.poll()
     assert claim_box(fake, 20) is False
-    assert levels(caplog, "cleared the claim on spool 20") == ["INFO"]
+    assert lines(caplog, 20) == [("INFO", "cleared the claim on spool 20")]
     await bridge.poll()
     assert read_state(tmp_path / "bridge.db").claimed == []
     await bridge.aclose()
