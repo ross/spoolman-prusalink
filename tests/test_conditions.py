@@ -29,7 +29,14 @@ from spoolman_prusalink.conditions import (
     standing,
 )
 from spoolman_prusalink.drift import Difference, What
-from spoolman_prusalink.events import Ambiguous, EventKind, HoldEmpty, StagedAtPrint, StagedAtReboot
+from spoolman_prusalink.events import (
+    Ambiguous,
+    Claimed,
+    EventKind,
+    HoldEmpty,
+    StagedAtPrint,
+    StagedAtReboot,
+)
 from spoolman_prusalink.models import Spool
 
 W = logging.WARNING
@@ -244,7 +251,7 @@ def test_changes_are_logged_once_at_the_conditions_level(caplog):
             "[Core] printer will be set to spool 7 when idle: name printer='PETG' spoolman='PLA'",
         )
     ]
-    # Its end is logged at the level it started at.
+    # Its end is logged at the level its text was logged at.
     assert log_changes(logged, [], CTX) == {}
     assert messages(caplog) == [
         (
@@ -285,3 +292,22 @@ def test_a_poll_that_cant_compare_ends_only_what_it_could_have_found(caplog):
     assert flags(kept, replace(CTX, flag_drift=True)) == {
         7: [f"Core: printer filament differs: {DETAIL}"]
     }
+
+
+def test_an_end_is_logged_at_the_level_the_text_was_logged_at(caplog):
+    caplog.set_level(logging.INFO)
+    logged = log_changes({}, [ToolNotReported(1, level=W)], CTX)
+    # The same text found at another level isn't logged again, so its level stands.
+    logged = log_changes(logged, [ToolNotReported(1, level=logging.INFO)], CTX)
+    log_changes(logged, [], CTX)
+    assert messages(caplog) == [
+        (W, "[Core] printer doesn't report tool index 1"),
+        (W, "[Core] no longer: printer doesn't report tool index 1"),
+    ]
+
+
+def test_an_events_nested_sequences_load_as_tuples():
+    lasting = Lasting(Claimed(7, None, None, ((1, 2), (3, 4)), "unload"), level=W)
+    loaded = Condition.from_json(json.loads(json.dumps(lasting.to_json())))
+    assert loaded == lasting
+    assert hash(loaded) == hash(lasting)

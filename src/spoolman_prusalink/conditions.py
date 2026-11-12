@@ -94,9 +94,16 @@ class Condition:
             event = dict(values["event"])
             kind = EventKind(event.pop("kind"))
             # JSON has no tuples, and an event's sequences are all tuples.
-            event = {k: tuple(v) if isinstance(v, list) else v for k, v in event.items()}
+            event = {k: _tuples(v) for k, v in event.items()}
             values["event"] = Event.classes[kind](**event)
         return cls(**values)
+
+
+def _tuples(value: object) -> object:
+    """Return `value` with every list in it, at any depth, as a tuple."""
+    if isinstance(value, list):
+        return tuple(_tuples(v) for v in value)
+    return value
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -390,14 +397,17 @@ LoggedTexts = dict[Hashable, tuple[int, str]]
 def log_changes(last: LoggedTexts, conditions: Iterable[Condition], ctx: Context) -> LoggedTexts:
     """Log each condition that's new or changed since `last`, and each that's gone.
 
-    Each is logged at its own level, and its end at the level it started at. Returns
-    what to pass as `last` at the next poll.
+    Each is logged at its own level, and its end at the level its text was last logged
+    at. Returns what to pass as `last` at the next poll.
     """
     now: LoggedTexts = {}
     for c in conditions:
         text = c.log(ctx)
-        if text is not None:
-            now[c.key] = (c.level, text)
+        if text is None:
+            continue
+        logged = last.get(c.key)
+        # An unchanged text keeps the level it was logged at, which its end then uses.
+        now[c.key] = logged if logged is not None and logged[1] == text else (c.level, text)
     for key, (level, text) in last.items():
         if key not in now:
             log.log(level, "[%s] no longer: %s", ctx.location, text)

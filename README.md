@@ -417,8 +417,9 @@ The bridge's own job doesn't count as a print start: it's recognized by
 The `/data` volume holds these files:
 
 - `bridge.db` is an SQLite database that stores each printer's tools, by
-  printer name, with their counters and swap state, the queue of charges not
-  yet accepted by Spoolman, the spools the bridge has flagged, and the ledger.
+  printer name, with their counters and swap state, what the bridge last wrote
+  to each, the conditions it's reporting, the queue of charges not yet
+  accepted by Spoolman, the spools the bridge has flagged, and the ledger.
   Keep it across restarts: without it, the bridge takes a new baseline, drops
   queued charges, loses track of open swaps, and starts a new ledger. SQLite
   keeps `bridge.db-wal` and `bridge.db-shm` beside it while it's open; keep

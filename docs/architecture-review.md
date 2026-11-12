@@ -21,9 +21,9 @@ Counts are as of `9402330`.
   last one goes, delete the document.
 
 What was checked: every file in `src/spoolman_prusalink` was read in full,
-and the bridge findings (B1 to B11) come from that reading. The test (T1 to
-T8) and simulator (S1 to S6) findings come from two separate reviews. A
-second pass then checked every finding against the code.
+and the bridge findings (B1 to B11, of which B4 is left) come from that
+reading. The test (T1 to T8) and simulator (S1 to S6) findings come from two
+separate reviews. A second pass then checked every finding against the code.
 
 ## The common pattern
 
