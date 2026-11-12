@@ -49,7 +49,7 @@ printer, one state file, and one deploy.
 Add a `[[printers]]` array. Each entry has a `name`, `url`, an `api_key` or
 an `api_key_env` naming the environment variable that holds it, the settings
 that are per printer today (`gcode_preamble`, `sync_storage`,
-`sync_file`, `uuids`), and its own `tools` entries:
+`sync_file`), and its own `tools` entries:
 
 ```toml
 [[printers]]

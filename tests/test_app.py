@@ -341,8 +341,8 @@ async def test_printer_outage_logged_on_change(tmp_path, caplog):
         Spoolman("http://s", transport=t),
         {"default": PrusaLink("http://p", "k", transport=t)},
         Database.open(cfg.db_file),
+        clock=lambda: now["v"],
     )
-    bridge.printers[0]._printer_reach.clock = lambda: now["v"]
     caplog.set_level("INFO")
 
     for _ in range(5):
@@ -389,9 +389,9 @@ async def test_printer_kind_change_and_bad_answer_reporting(tmp_path, caplog):
         Spoolman("http://s", transport=t),
         {"default": PrusaLink("http://p", "k", transport=t)},
         Database.open(cfg.db_file),
+        clock=lambda: now["v"],
     )
     reach = bridge.printers[0]._printer_reach
-    reach.clock = lambda: now["v"]
     caplog.set_level("DEBUG")
 
     def lines(text):
@@ -472,7 +472,6 @@ CONFIG_BASE = (
         ('[bridge]\nprinter_sync = "false"\n', "bridge.printer_sync must be true or false"),
         ('[bridge]\nflag_drift = "no"\n', "bridge.flag_drift must be true or false"),
         ("[bridge]\nsync_drift = 1\n", "bridge.sync_drift must be true or false"),
-        ('[printer]\nuuids = "false"\n', "printer.uuids must be true or false"),
         ('[printer]\ngcode_preamble = "M862.3"\n', "gcode_preamble must be a list of strings"),
         ('[printer]\ngcode_preamble = ["M862.3", 1]\n', "gcode_preamble must be a list of strings"),
         ("[bridge]\npoll_idle = 0\n", "bridge.poll_idle must be a number greater than 0"),
@@ -596,12 +595,12 @@ def test_config_accepts_booleans_and_preamble_list(tmp_path):
     p.write_text(
         CONFIG_BASE.replace(
             "[printer]\n",
-            '[printer]\nuuids = false\ngcode_preamble = ["M862.3 P \\"COREONEL\\""]\n',
+            '[printer]\ngcode_preamble = ["M862.3 P \\"COREONEL\\""]\n',
         )
         + "[bridge]\nprinter_sync = false\npoll_idle = 0.5\n"
     )
     cfg = load(p, env={"PRUSALINK_API_KEY": "k"})
-    assert cfg.printer_sync is False and cfg.printers[0].uuids is False
+    assert cfg.printer_sync is False
     assert cfg.printers[0].gcode_preamble == ('M862.3 P "COREONEL"',)
     assert cfg.poll_idle == 0.5
 
@@ -644,7 +643,7 @@ PRINTERS_BASE = (
     '[spoolman]\nurl = "http://s"\n'
     '[[printers]]\nname = "core"\nurl = "http://a"\napi_key_env = "CORE_KEY"\n'
     '[[printers.tools]]\nindex = 0\nlocation = "Core One L+"\n'
-    '[[printers]]\nname = "mk4s"\nurl = "http://b/"\napi_key = "kb"\nuuids = false\n'
+    '[[printers]]\nname = "mk4s"\nurl = "http://b/"\napi_key = "kb"\n'
     '[[printers.tools]]\nindex = 0\nlocation = "MK4S"\n'
 )
 MK4S_TOOL = '[[printers.tools]]\nindex = 0\nlocation = "MK4S"\n'
@@ -654,19 +653,17 @@ def test_config_lists_several_printers(tmp_path):
     p = tmp_path / "c.toml"
     p.write_text(PRINTERS_BASE)
     core, mk4s = load(p, env={"CORE_KEY": "ka"}).printers
-    assert (core.name, core.url, core.api_key, core.tools, core.uuids) == (
+    assert (core.name, core.url, core.api_key, core.tools) == (
         "core",
         "http://a",
         "ka",
         {0: "Core One L+"},
-        True,
     )
-    assert (mk4s.name, mk4s.url, mk4s.api_key, mk4s.tools, mk4s.uuids) == (
+    assert (mk4s.name, mk4s.url, mk4s.api_key, mk4s.tools) == (
         "mk4s",
         "http://b/",
         "kb",
         {0: "MK4S"},
-        False,
     )
 
 
@@ -718,7 +715,6 @@ def test_config_lists_several_printers(tmp_path):
         ),
         (("[spoolman]\n", '[printer]\nurl = "http://p"\n[spoolman]\n'), "not both"),
         (("[spoolman]\n", '[[tools]]\nindex = 0\nlocation = "X"\n[spoolman]\n'), "not both"),
-        (("uuids = false\n", 'uuids = "no"\n'), "printers[mk4s].uuids must be true or false"),
     ],
 )
 def test_config_rejects_bad_printer_lists(tmp_path, edit, error):
@@ -1225,6 +1221,34 @@ async def test_from_config_opens_the_database_and_builds_the_clients(tmp_path):
     finally:
         await bridge.aclose()
     Database.open(cfg.db_file).close()
+
+
+async def test_from_config_passes_the_clock_and_transports(tmp_path):
+    cfg = make_config(tmp_path)
+    seen: list[str] = []
+
+    def refuse(name):
+        def handler(request):
+            seen.append(name)
+            raise httpx.ConnectError("refused")
+
+        return httpx.MockTransport(handler)
+
+    bridge = Bridge.from_config(
+        cfg,
+        clock=lambda: 3600.0,
+        spoolman_transport=refuse("spoolman"),
+        printer_transports={"default": refuse("printer")},
+    )
+    try:
+        await bridge.poll()  # The printer read fails, so Spoolman isn't read.
+        assert seen == ["printer"]
+        assert bridge.printers[0]._printer_reach.since == 3600.0
+        with pytest.raises(httpx.ConnectError):
+            await bridge.spoolman.spools()
+        assert seen == ["printer", "spoolman"]
+    finally:
+        await bridge.aclose()
 
 
 # _record: a failing dict keeps the last error logged for each key
