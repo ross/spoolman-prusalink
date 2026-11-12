@@ -212,26 +212,6 @@ tool state.
 
 Size: small to medium. Do it with B3, which reshapes `written`.
 
-### B9. `account()` is one function of six steps
-
-`account()` (`accounting.py`) is about 500 lines in six numbered steps.
-It's pure, well documented, and tested through its public signature. The
-order of the steps is real: unload, claim, assignment, print start, usage.
-Step 3 is a 13-branch `elif` chain where order is priority.
-
-Shape: each numbered step becomes a function over `last` and `current`,
-the two states `account()` already keeps. It doesn't change behavior, and
-the existing tests are the check.
-
-Not planned: a formal state machine, with a named mode per tool and defined
-transitions. The conditions overlap (a provisional charge with a staged
-spool, a deleted spool with a staged spool), so the modes multiply.
-`violations()` in `accounting.py` lists the rules for a legal state, which
-is what such a machine would be derived from. Reconsider it against those
-rules.
-
-Size: medium.
-
 ### B10. Smaller items
 
 - The `tools` table holds a JSON blob per tool, `printer_flags` holds JSON,
@@ -381,7 +361,7 @@ Size: medium.
 | --- | --- | --- | --- |
 | 2 | Tag-UUID owner | B1, T1 (UUID tests) | Nothing |
 | 3 | Conditions and saved facts | B2, B3, B5, B7, T1 (rest) | Workstream 2 |
-| 4 | Typed records | B6, B9 | Nothing. Easier after 3 |
+| 4 | Typed records | B6 | Nothing. Easier after 3 |
 | 5 | Narrow the bridge boundary | B4 | Workstreams 2 and 3 |
 | 8 | Simulator state | S1, S5, S6, then S2, S4 | Nothing. S4 continues the move that put the PrusaLink routing in `prusalink.serve` |
 | 10 | Accounting state | B10 | Nothing |
