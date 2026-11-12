@@ -303,22 +303,8 @@ Size: small for part 1, medium for part 2.
 
 - The `tools` table holds a JSON blob per tool, `printer_flags` holds JSON,
   and `seen_uuids` has columns. `SCHEMA_VERSION` doesn't cover the blob's
-  shape.
-- "Only tool 0 holds a UUID" is written as `tool == 0` in seven places in
-  `app.py`, `drift.py`, and `printer_sync.py`.
-- `Runout.printer` is saved and never read.
-- `Spoolman.set_extra_text` and `drift.printer_name` only call another
-  function.
-- `COREONEL_PREAMBLE` is used only by tests.
-- Stale comments: "Used from phase 3" (`config.py`), "used by phase 3
-  writes" (`prusalink.py`), "Pending firmware fields" (`models.py`).
-- `config.py` has three near-identical number parsers (`_number`,
-  `_interval`, `_delay`), and `load()` keeps the single-printer checks "in
-  the order they always have".
-- Log lines name a printer three ways: `label`, `_prefix`, and
-  `[location]`.
-- `docs/sqlite.md` and `docs/multi-printer.md` describe plans that have
-  merged, in the future tense.
+  shape. The blob is `ToolState.to_json` in `accounting.py`, so this waits
+  for workstream 10, which owns that file.
 
 ## Tests and tooling
 
@@ -464,18 +450,6 @@ About 78 integration lines compare an event's message exactly, and over
 300 lines across both suites match log text. B6
 removes the cause for events. Keep one prose check per event kind.
 
-### T8. Scripts and scenario table
-
-- `script/demo` and `script/integration` each detect the container engine,
-  pin `ghcr.io/donkie/spoolman:0.27.1`, and wait for health.
-  `compose.example.yaml` uses `:latest`, a version CI doesn't test.
-- The Status column of `docs/scenarios.md` names 157 tests by hand, in 88
-  rows.
-  `tests/test_integration_table.py` checks them, so the cost is the editing,
-  not drift.
-
-Size: small.
-
 ## Simulator
 
 The simulator review read every file in `simulator/`.
@@ -571,10 +545,10 @@ Size: medium.
 | 6 | Client errors | B8 | Nothing |
 | 7 | Unit suite on the simulator | T2, T6 | Nothing. Before workstreams 2 and 3 if possible, so their tests are ported once |
 | 8 | Simulator state | S1, S5, S6, then S2, S4 | Workstream 7 for S4, which continues the routing move in T2 |
-| 9 | Small items | B10, T8 | Nothing |
+| 9 | Small items | B10 (the `tools` blob) | Workstream 10 |
 | 10 | Accounting state | B9 (part 1) | Nothing |
 
-Workstreams 1, 6, 9, and 10 are independent and can run at any time. T3
+Workstreams 1, 6, and 10 are independent and can run at any time. T3
 has no work, so it isn't in a workstream.
 Of the large ones, workstream 7 is best first, because workstreams 2 and 3
 rewrite many of the same tests and would otherwise port them twice. Then
