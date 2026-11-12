@@ -45,14 +45,14 @@ To point the bridge at the simulated printers:
 
 `seed` creates a vendor, a few filaments, and two spools per tool in Spoolman:
 one in the tool's location and a spare on the `shelf`. A tool's spool gets the
-material and instance UUID the tool is configured with, so the demo starts in
-agreement when the tool's material and color match one of `seed`'s filaments, as
-in `sim.example.toml`. A tool with a material but no UUID gets no UUID. A material
-`seed` has no filament for gets one from a fixed cycle instead, and a tool with no
-material gets a new UUID. It never deletes or
-moves anything, and running it again changes nothing, so a Spoolman seeded
-earlier keeps its old spools and UUIDs. `bridge-config` prints
-the bridge's `[[printers]]` list with the same locations. Add `[spoolman]`
+tool's configured material and instance UUID, so the demo starts in agreement, as
+with `sim.example.toml`. That holds when the material and color match one of
+`seed`'s filaments other than Nylon-X, whose temperatures differ from the
+simulator's defaults. A material `seed` has no filament for gets one from a fixed
+cycle instead. On tool 0 of a model that holds UUIDs, a tool with no material
+gets a new UUID. It never deletes or moves anything, and running it again
+changes nothing, so a Spoolman seeded earlier keeps its old spools and UUIDs.
+`bridge-config` prints the bridge's `[[printers]]` list with the same locations. Add `[spoolman]`
 and `[bridge]` tables to it, with short poll intervals, and run the bridge:
 
 ```toml
