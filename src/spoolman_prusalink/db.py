@@ -51,8 +51,7 @@ CREATE TABLE runouts (
     spool_id INTEGER PRIMARY KEY,
     text TEXT NOT NULL,
     net REAL,
-    used REAL,
-    printer TEXT
+    used REAL
 );
 CREATE TABLE ledger (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -77,7 +76,7 @@ _KEYED = {
     "seen_uuids": (("printer", "tool"), ("uuid", "spool_id", "runout")),
     "flagged": (("spool_id",), ()),
     "claimed": (("spool_id",), ()),
-    "runouts": (("spool_id",), ("text", "net", "used", "printer")),
+    "runouts": (("spool_id",), ("text", "net", "used")),
 }
 # Outbox columns copied out of each record; the `record` column holds the rest.
 _OUTBOX_COLUMNS = ("printer", "tool", "spool_id", "use_length")
@@ -393,7 +392,7 @@ def _rows(state: State) -> Rows:
     for spool_id in state.claimed:
         rows["claimed"][(spool_id,)] = ()
     for spool_id, r in state.runouts.items():
-        rows["runouts"][(spool_id,)] = (r.text, r.net, r.used, r.printer)
+        rows["runouts"][(spool_id,)] = (r.text, r.net, r.used)
     return rows
 
 

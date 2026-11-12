@@ -178,10 +178,6 @@ class Spoolman:
         )
         check(resp)
 
-    async def set_extra_text(self, spool_id: int, key: str, value: str | None) -> None:
-        """Set a text extra field, or delete it with None. Other extra fields are kept."""
-        await self.set_extra(spool_id, key, value)
-
     async def set_extra(self, spool_id: int, key: str, value: object) -> None:
         """Set an extra field to a JSON value, or delete it with None."""
         resp = await send(
