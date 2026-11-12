@@ -339,7 +339,16 @@ async def test_eviction_no_longer_needed_logs_only_after_a_failure(tmp_path, cap
     caplog.set_level("INFO")
     await bridge.evict([])  # Spool 19 isn't in any tool's evict list, and never failed.
     assert count(caplog, "no longer needs moving out") == 0
-    bridge._evict_failing[19] = "500"
+    await bridge.poll()
+    fake.spools[20] = spool_x(20)
+    await bridge.poll()
+    station.tool.unload_count, station.tool.extruded_at_unload = 1, 1000
+    fill(station.tool, None)
+    fake.fail_patch = 500
+    await bridge.poll()
+    assert levels(caplog, "can't move spool 19 out") == ["WARNING"]
+    printer = bridge.printers[0]
+    printer.tools[0] = replace(printer.tools[0], evict=())  # Dropped some other way.
     await bridge.evict([])
     await bridge.evict([])
     assert levels(caplog, "spool 19 no longer needs moving out") == ["INFO"]

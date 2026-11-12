@@ -375,7 +375,7 @@ async def test_printer_outage_logged_on_change(tmp_path, caplog):
         ("INFO", "printer still unreachable after 3h 00m"),
         ("WARNING", "printer read failed, skipping poll"),
     ]
-    assert not bridge.printers[0]._printer_reach.down
+    assert bridge.printers[0].reachable
     await bridge.aclose()
 
 
@@ -397,7 +397,7 @@ async def test_printer_kind_change_and_bad_answer_reporting(tmp_path, caplog):
         Database.open(cfg.db_file),
         clock=lambda: now["v"],
     )
-    reach = bridge.printers[0]._printer_reach
+    printer = bridge.printers[0]
     caplog.set_level("DEBUG")
 
     def lines(text):
@@ -408,10 +408,10 @@ async def test_printer_kind_change_and_bad_answer_reporting(tmp_path, caplog):
         ]
 
     await bridge.poll()
-    assert reach.down
+    assert not printer.reachable
     mode["v"] = "bad"  # Answering badly is a new kind of trouble, and counts as up.
     await bridge.poll()
-    assert not reach.down
+    assert printer.reachable
     assert bridge.interval() == cfg.poll_printing  # Up, and not yet read.
     now["v"] += 60
     await bridge.poll()  # Same kind again: DEBUG.
@@ -1045,9 +1045,10 @@ async def test_from_config_opens_the_database_and_builds_the_clients(tmp_path):
     Database.open(cfg.db_file).close()
 
 
-async def test_from_config_passes_the_clock_and_transports(tmp_path):
+async def test_from_config_passes_the_clock_and_transports(tmp_path, caplog):
     cfg = make_config(tmp_path)
     seen: list[str] = []
+    now = [3600.0]
 
     def refuse(name):
         def handler(request):
@@ -1058,17 +1059,20 @@ async def test_from_config_passes_the_clock_and_transports(tmp_path):
 
     bridge = Bridge.from_config(
         cfg,
-        clock=lambda: 3600.0,
+        clock=lambda: now[0],
         spoolman_transport=refuse("spoolman"),
         printer_transports={"default": refuse("printer")},
     )
     try:
         await bridge.poll()  # The printer read fails, so Spoolman isn't read.
         assert seen == ["printer"]
-        assert bridge.printers[0]._printer_reach.since == 3600.0
+        now[0] += 3600  # An hour on, by the clock passed in: the reminder.
+        caplog.set_level("INFO")
+        await bridge.poll()
+        assert "printer still unreachable after 1h 00m" in caplog.text
         with pytest.raises(Unreachable):
             await bridge.spoolman.spools()
-        assert seen == ["printer", "spoolman"]
+        assert seen == ["printer", "printer", "spoolman"]
     finally:
         await bridge.aclose()
 

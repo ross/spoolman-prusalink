@@ -21,9 +21,9 @@ Counts are as of `9402330`.
   last one goes, delete the document.
 
 What was checked: every file in `src/spoolman_prusalink` was read in full,
-and the bridge findings (B1 to B11, of which B4 is left) come from that
-reading. The test (T1 to T8) and simulator (S1 to S6) findings come from two
-separate reviews. A second pass then checked every finding against the code.
+and the bridge findings (B1 to B11, all fixed) came from that reading. The
+test (T1 to T8) and simulator (S1 to S6) findings come from two separate
+reviews. A second pass then checked every finding against the code.
 
 ## The common pattern
 
@@ -40,31 +40,6 @@ The rule from #105 still applies to every rework here: state lives at the
 code that owns it, and the call site that detects a change logs it with a
 literal level. Don't add a central object that owns levels.
 
-## Bridge
-
-### B4. The `Bridge` and `PrinterBridge` boundary leaks both ways
-
-The split is "keyed by tool" against "keyed by spool", but each side works
-on the other's private fields:
-
-- `PrinterBridge` rebuilds `bridge._archived` in `check_missing`, once per
-  printer per poll. `Bridge.sync_flags` writes the same cache. The printer
-  also reads `bridge._refused_uuids` and `bridge._unusable_fields`, and
-  calls `bridge._save`, `bridge._mint_uuid`, and `bridge._adopt_uuid`. It
-  writes `bridge.state.runouts`, `bridge.state.claimed`, and
-  `bridge.state.outbox`.
-- `Bridge` sets `p._idle_since` in `poll`, calls `p._hold_deleted` from
-  `flush`, reads `p._printer_reach.down` in `interval`, and assigns
-  `printer.tools[tool]` in `evict`.
-
-Shape: small owners for the spool-keyed concerns, each with public methods:
-the archived-spool cache, the UUID registry (mint, adopt, refused, unowned),
-and the flags. `PrinterBridge` gets the few it needs instead of a
-back-reference to the whole `Bridge`. `Bridge` asks a printer for what it
-needs through public methods.
-
-Size: medium.
-
 ## Tests and tooling
 
 ### The test layers
@@ -80,28 +55,6 @@ judged against these roles.
 
 Some scenarios are tested in both suites. That's accepted. Don't move
 coverage out of the unit suite to remove it.
-
-### T1. Tests pin the bridge's private state
-
-Tests read, set, or call private attributes of the bridge in about 45
-places. They fall into two groups:
-
-- **The spool-keyed concerns in B4:** `_adopt_uuid` (13), `_mint_uuid` (8),
-  `_check_shared` (7), `_archived` (7), `_refused_uuids`, `_unowned_uuids`,
-  and `_flag_failing`. Their tests move when B4 gives the UUID registry, the
-  archived-spool cache, and the flags public methods.
-- **Problem records that B4's owners don't hold**, about ten uses:
-  `PrinterBridge._printer_reach` and `Bridge._spoolman_reach`, which track
-  whether the printer and Spoolman can be reached, `_negative`,
-  `_evict_failing`, and `_unusable_fields`. Each test reads one to check that
-  a problem started or ended.
-
-Shape: for the first group, test through B4's public methods. For the
-second, check what the bridge logs or does, as the tests around them do, or
-give each side a public read, such as whether it's reachable.
-
-Size: medium. Do it with B4, and don't count T1 as done until the second
-group is gone too.
 
 ### T3. A behavior change is made in two suites
 
@@ -133,7 +86,6 @@ Size: large.
 
 | # | Workstream | Findings | Depends on |
 | --- | --- | --- | --- |
-| 5 | Narrow the bridge boundary | B4, T1 | Nothing |
 | 8 | Simulator state | S4 | Nothing. S4 continues the move that put the PrusaLink routing in `prusalink.serve` |
 
 T3 has no work, so it isn't in a workstream.

@@ -618,7 +618,7 @@ async def test_m1_spool_list_fails(
         w.printer.extrude(0, 20)
         assert await w.poll() == []
     assert w.bridge.printers[0].tools[0].charged == charged_at
-    assert not w.bridge._spoolman_reach.down
+    assert not logged(caplog, logging.WARNING, "Spoolman unreachable")  # A bad answer.
     assert faults.requests.count(f"GET /api/v1/spool {status}") == 3
     failed = "Spoolman read failed, skipping poll"
     assert logged_once(caplog, logging.WARNING, failed)
@@ -1088,7 +1088,6 @@ async def test_m5_negative_weight_ends(world: World, caplog: pytest.LogCaptureFi
         assert len(events(records, "swap_committed")) == 1
         await w.swap_cycle(source="tag", name=PETG[0], color=PETG[1])
         assert not logged(caplog, logging.INFO, recovered)
-    assert w.bridge._negative == set()
 
     for _ in range(2):
         w.printer.extrude(0, 10)

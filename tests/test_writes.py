@@ -1699,7 +1699,9 @@ async def test_negative_remaining_that_recovers_while_loaded_logs_both_at_info(t
     for _ in range(2):
         await bridge.poll()
     assert levels(caplog, "spool 19 no longer shows a negative weight") == ["INFO"]
-    assert bridge._negative == set()
+    weighted(fake.spools[19], -3.0)  # It ended, so going negative again is logged again.
+    await bridge.poll()
+    assert levels(caplog, "spool 19 shows -3 g remaining") == ["INFO", "INFO"]
     await bridge.aclose()
 
 
@@ -1728,7 +1730,6 @@ async def test_negative_remaining_ends_when_the_spool_is_unloaded(tmp_path, capl
         await bridge.poll()
         station.finish_job()
     assert bridge.printers[0].tools[0].active == 20
-    assert bridge._negative == set()
     assert "negative weight" not in caplog.text
     assert levels(caplog, "shows -12 g remaining") == ["INFO"]
     await bridge.aclose()

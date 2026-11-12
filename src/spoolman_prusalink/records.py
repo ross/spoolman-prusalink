@@ -78,6 +78,14 @@ class Outbox:
     def push(self, rec: ChargeRecord) -> None:
         self._new.append(rec)
 
+    def queued_mm(self, printer: str, tool: int, spool_id: int) -> int:
+        """Return the usage a tool's queued charges to a spool hold, refunds left out."""
+        return sum(
+            r.extruded_mm
+            for r in self
+            if (r.printer, r.tool, r.spool_id) == (printer, tool, spool_id) and r.extruded_mm > 0
+        )
+
     def front(self) -> ChargeRecord:
         return self._saved[0][1] if self._saved else self._new[0]
 

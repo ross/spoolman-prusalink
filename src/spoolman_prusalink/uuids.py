@@ -43,6 +43,11 @@ class UuidRegistry:
         self._failing: dict[int, str] = {}
 
     @property
+    def enabled(self) -> bool:
+        """Whether a Spoolman field is configured to keep the UUIDs in."""
+        return bool(self._key)
+
+    @property
     def refused(self) -> frozenset[tuple[int, str]]:
         """The (spool, UUID) pairs turned down because an archived spool has the UUID."""
         return frozenset(self._refused)
