@@ -26,6 +26,7 @@ from integration.conftest import (
     events,
     logged,
     logged_once,
+    messages,
     print_spec,
 )
 from integration.printers import printer_of
@@ -485,7 +486,7 @@ async def failing_eviction(w: World, caplog: pytest.LogCaptureFixture) -> str:
     assert await w.spoolman.location(a) == it.location
     assert faults.requests.count(f"PATCH /api/v1/spool/{a} 503") == 3
     cant = f"[{it.location}] can't move spool {a} out: "
-    assert count(caplog, logging.WARNING, cant) == 1
+    assert logged_once(caplog, logging.WARNING, cant)
     assert count(caplog, logging.DEBUG, f"still can't move spool {a} out: ") == 2
     return cant
 
@@ -507,8 +508,8 @@ async def test_x4_failing_eviction_ends_when_the_spool_is_moved(
     assert it.state.evict == ()
     await w.poll()
     assert await w.spoolman.location(a) == b.location
-    assert count(caplog, logging.INFO, f"spool {a} no longer needs moving out") == 1
-    assert count(caplog, logging.WARNING, cant) == 1
+    assert logged_once(caplog, logging.INFO, f"spool {a} no longer needs moving out")
+    assert logged_once(caplog, logging.WARNING, cant)
     assert w.spoolman_faults.requests.count(f"PATCH /api/v1/spool/{a} 503") == 3
 
 
@@ -529,7 +530,7 @@ async def test_x8_failing_eviction_ends_while_the_printer_is_off(
         await w.poll()
     assert it.state.evict == (a,)
     out = f"[{it.location}] spool {a} is out of the location now"
-    assert count(caplog, logging.INFO, out) == 1
+    assert logged_once(caplog, logging.INFO, out)
     assert w.spoolman_faults.requests.count(f"PATCH /api/v1/spool/{a} 503") == 3
 
     # it comes back and drops the eviction, with nothing more said about it.
@@ -538,9 +539,9 @@ async def test_x8_failing_eviction_ends_while_the_printer_is_off(
         await w.poll()
     assert it.state.evict == ()
     assert await w.spoolman.location(a) == w.shelf
-    assert count(caplog, logging.INFO, out) == 1
+    assert logged_once(caplog, logging.INFO, out)
     assert not logged(caplog, logging.INFO, f"spool {a} no longer needs moving out")
-    assert count(caplog, logging.WARNING, cant) == 1
+    assert logged_once(caplog, logging.WARNING, cant)
 
 
 async def test_x9_spoolman_unreachable(world: World, caplog: pytest.LogCaptureFixture):
@@ -748,6 +749,7 @@ async def test_x14_printer_renamed(world: World, caplog: pytest.LogCaptureFixtur
     await w.bridge.aclose()
 
     bridge_for(w, renamed)  # Warned at each start.
+    assert len(messages(caplog, None, warning)) == 2  # At any level.
     assert count(caplog, logging.WARNING, warning) == 2
 
 
