@@ -40,6 +40,7 @@ class FakeSpoolman:
         self.down = False  # Refuse connections.
         self.fail_read = None  # Status code for spool reads.
         self.fail_patch = None  # Status code for spool PATCHes.
+        self.fail_uuid = None  # Status code for PATCHes that store an instance UUID.
         self.fail_field = None  # Status code for field reads.
         self.fail_lookup = None  # Status code for one-at-a-time spool reads.
         self.garble_lookup = False  # Answer one-at-a-time spool reads with a body that isn't JSON.
@@ -102,7 +103,11 @@ class FakeSpoolman:
             if self.fail_patch:
                 return httpx.Response(self.fail_patch, text="oops")
             spool_id = int(path.rsplit("/", 1)[1])
+            if spool_id not in self.spools:
+                return httpx.Response(404, json={"message": "not found"})
             body = json.loads(request.content)
+            if self.fail_uuid and "instance_uuid" in body.get("extra", {}):
+                return httpx.Response(self.fail_uuid, text="oops")
             if "location" in body:
                 self.spools[spool_id]["location"] = body["location"]
                 self.writes.append(("location", spool_id, body["location"]))
@@ -158,6 +163,7 @@ class Printer:
         self.upload_error = None  # Status code for sync job uploads.
         self.counters = True  # MINI and MK3.5 firmware report only the material.
         self.states = []  # States the next status reads report, before the usual one.
+        self.hidden = False  # Report no tools, as with the tool disabled (T5).
 
     def handle(self, request: httpx.Request) -> httpx.Response:
         if self.down:
@@ -182,7 +188,8 @@ class Printer:
                 return httpx.Response(200, json={"tools": [tool]})
             if self.material:
                 tool["material"] = reported(self.material)
-            return httpx.Response(200, json={"boot_id": self.boot_id, "tools": [tool]})
+            tools = [] if self.hidden else [tool]
+            return httpx.Response(200, json={"boot_id": self.boot_id, "tools": tools})
         if request.url.path == "/api/v1/job":
             if not self.job:
                 return httpx.Response(204)
@@ -550,6 +557,60 @@ async def test_drift_flag_is_optional(tmp_path):
     await bridge.aclose()
 
 
+async def test_a_skipped_tool_keeps_its_drift_flag(tmp_path, caplog):
+    """While the location is ambiguous (S11), the drift flag stands, like the drift note."""
+    caplog.set_level("INFO")
+    bridge, fake, printer = make(
+        tmp_path, [spool(19), spool(20, location="Shelf"), spool(21, location="Shelf")]
+    )
+    printer.material = {"name": "PLA"}  # Menu load: color gone.
+    await bridge.poll()
+    flag = fake.flag(19)
+    assert "printer filament differs" in flag
+    patches = fake.writes.count(("patch", 19))
+    for spool_id in (20, 21):
+        fake.spools[spool_id]["location"] = LOC
+    for _ in range(2):
+        await bridge.poll()
+    assert "location holds spools" in caplog.text
+    assert fake.flag(19) == flag
+    for spool_id in (20, 21):
+        fake.spools[spool_id]["location"] = "Shelf"
+    await bridge.poll()
+    assert fake.flag(19) == flag
+    assert fake.writes.count(("patch", 19)) == patches
+    assert levels(caplog, "flag on spool 19") == ["INFO"]
+
+    # Compared again with the printer put back: the flag clears.
+    printer.material = {"name": "PLA", "color": "#73737b"}
+    await bridge.poll()
+    assert fake.flag(19) is None
+    await bridge.aclose()
+
+
+async def test_a_tool_the_printer_stops_reporting_keeps_its_flags(tmp_path, caplog):
+    """A tool the printer doesn't report (T5) keeps its state and drift flags meanwhile."""
+    caplog.set_level("INFO")
+    bridge, fake, printer = make(tmp_path, [spool(19)], printer_sync=False)
+    printer.material = {"name": "PLA"}
+    await bridge.poll()
+    printer.unloads, printer.at_unload = 1, 1000
+    await bridge.poll()
+    flag = fake.flag(19)
+    assert "unloaded with no Spoolman change" in flag and "printer filament differs" in flag
+    patches = fake.writes.count(("patch", 19))
+    printer.hidden = True
+    for _ in range(2):
+        await bridge.poll()
+    assert "doesn't report tool index 0" in caplog.text
+    assert fake.flag(19) == flag
+    printer.hidden = False
+    await bridge.poll()
+    assert fake.flag(19) == flag
+    assert fake.writes.count(("patch", 19)) == patches
+    await bridge.aclose()
+
+
 async def test_flags_written_by_others_are_left_alone(tmp_path):
     bridge, fake, _ = make(tmp_path, [spool(19), spool(5, location="Shelf", flag="mine")])
     await bridge.poll()
@@ -630,6 +691,160 @@ async def test_spoolman_first_swap_evicts_and_writes_printer(tmp_path):
     assert len(jobs(printer)) == 1
     assert bridge.printers[0].tools[0].needs_sync is False
     assert fake.flag(20) is None
+    await bridge.aclose()
+
+
+async def swap_to_menu_loaded_20(bridge, fake, printer):
+    """Spoolman first: spool 20 in, an unload, then a menu load. A write of 20 is due."""
+    await bridge.poll()
+    fake.spools[20] = spool_x(20)
+    await bridge.poll()
+    printer.unloads, printer.at_unload, printer.material = 1, 1000, None
+    await bridge.poll()
+    printer.extruded, printer.material = 1116, {"name": "PLA"}
+
+
+async def test_failed_uuid_mint_holds_the_write_until_stored(tmp_path, caplog):
+    """The spool gets its UUID before the printer gets the spool (W1, #119)."""
+    bridge, fake, printer = make(tmp_path, [spool(19)], uuid_field="instance_uuid")
+    caplog.set_level("DEBUG")
+    await swap_to_menu_loaded_20(bridge, fake, printer)
+    fake.fail_uuid = 500
+    for _ in range(3):
+        await bridge.poll()
+    assert jobs(printer) == []
+    assert stored_uuid(fake, 20) is None
+    assert bridge.printers[0].tools[0].needs_sync is True
+    assert levels(caplog, "can't store an instance UUID on spool 20") == [
+        "WARNING",
+        "DEBUG",
+        "DEBUG",
+    ]
+    assert caplog.text.count("printer will be set to spool 20 when idle") == 1
+
+    fake.fail_uuid = None
+    caplog.clear()
+    await bridge.poll()
+    minted = stored_uuid(fake, 20)
+    (gcode,) = jobs(printer)
+    assert f'M865.1 I0 C"{minted}"' in gcode
+    assert printer.material["instance_uuid"] == minted
+    assert lines(caplog, 20) == [("INFO", f"gave spool 20 instance UUID {minted}")]
+
+    caplog.clear()
+    await bridge.poll()  # The printer matches: nothing more to write or mint.
+    assert len(jobs(printer)) == 1
+    assert "instance UUID" not in caplog.text
+    assert fake.flag(20) is None
+    await bridge.aclose()
+
+
+async def test_uuid_field_of_another_type_writes_without_a_uuid(tmp_path, caplog):
+    """A UUID key that can't be set up doesn't hold the write: no UUID is written."""
+    bridge, fake, printer = make(tmp_path, [spool(19)], uuid_field="instance_uuid")
+    caplog.set_level("INFO")
+    fake.fields.append({"key": "instance_uuid", "name": "UUID", "field_type": "integer"})
+    await swap_to_menu_loaded_20(bridge, fake, printer)
+    await bridge.poll()
+    (gcode,) = jobs(printer)
+    assert 'M865 X R N"PLA"' in gcode and "M865.1" not in gcode
+    assert stored_uuid(fake, 20) is None
+    assert bridge.printers[0].tools[0].sync_attempts == 1
+    await bridge.poll()  # The printer matches: nothing held, nothing written again.
+    assert len(jobs(printer)) == 1
+    assert caplog.text.count("can't set up the 'instance_uuid' spool field") == 1
+    await bridge.aclose()
+
+
+@pytest.mark.parametrize("status", [500, 408, 429])
+async def test_uuid_field_setup_failing_holds_the_write_until_stored(tmp_path, caplog, status):
+    """A field read that fails passes: the write waits, then goes out with the UUID."""
+    bridge, fake, printer = make(tmp_path, [spool(19)], uuid_field="instance_uuid")
+    caplog.set_level("DEBUG")
+    await swap_to_menu_loaded_20(bridge, fake, printer)
+    fake.fail_field = status
+    for _ in range(2):
+        await bridge.poll()
+    assert jobs(printer) == []
+    assert levels(caplog, "can't set up the 'instance_uuid' spool field") == ["WARNING", "DEBUG"]
+
+    fake.fail_field = None
+    await bridge.poll()
+    minted = stored_uuid(fake, 20)
+    (gcode,) = jobs(printer)
+    assert minted is not None and f'M865.1 I0 C"{minted}"' in gcode
+    assert levels(caplog, "'instance_uuid' spool field is set up") == ["INFO"]
+    await bridge.aclose()
+
+
+async def test_uuid_field_refused_by_the_fields_api_writes_without_a_uuid(tmp_path, caplog):
+    """A 4xx from the fields API lasts, like a key of another type: no UUID is written."""
+    bridge, fake, printer = make(tmp_path, [spool(19)], uuid_field="instance_uuid")
+    caplog.set_level("DEBUG")
+    await swap_to_menu_loaded_20(bridge, fake, printer)
+    fake.fail_field = 403
+    for _ in range(2):
+        await bridge.poll()
+    (gcode,) = jobs(printer)
+    assert 'M865 X R N"PLA"' in gcode and "M865.1" not in gcode
+    assert stored_uuid(fake, 20) is None
+    assert levels(caplog, "can't set up the 'instance_uuid' spool field") == ["WARNING"]
+    await bridge.aclose()
+
+
+async def test_uuid_field_fixed_then_failing_holds_the_write(tmp_path, caplog):
+    """A key of another type writes without a UUID; once fixed, a 500 holds the write."""
+    bridge, fake, printer = make(tmp_path, [spool(19)], uuid_field="instance_uuid")
+    caplog.set_level("INFO")
+    wrong = {"key": "instance_uuid", "name": "UUID", "field_type": "integer"}
+    fake.fields.append(wrong)
+    await swap_to_menu_loaded_20(bridge, fake, printer)
+    await bridge.poll()
+    (gcode,) = jobs(printer)
+    assert "M865.1" not in gcode
+
+    # Someone deletes the wrong field and edits the spool, but the field read fails.
+    fake.fields.remove(wrong)
+    fake.spools[20]["filament"]["color_hex"] = "00ff00"
+    fake.fail_field = 500
+    for _ in range(2):
+        await bridge.poll()
+    assert len(jobs(printer)) == 1
+    assert stored_uuid(fake, 20) is None
+
+    fake.fail_field = None
+    await bridge.poll()
+    minted = stored_uuid(fake, 20)
+    assert minted is not None
+    assert len(jobs(printer)) == 2
+    assert 'O"#00ff00"' in jobs(printer)[-1]
+    assert f'M865.1 I0 C"{minted}"' in jobs(printer)[-1]
+    assert caplog.text.count("can't set up the 'instance_uuid' spool field") == 2
+    assert caplog.text.count("'instance_uuid' spool field is set up") == 1
+    await bridge.aclose()
+
+
+async def test_failed_uuid_mint_leaves_a_failing_sync_job_failing(tmp_path, caplog):
+    """A write waiting on the mint is still needed: the job's failure isn't over."""
+    bridge, fake, printer = make(tmp_path, [spool(19)], uuid_field="instance_uuid")
+    caplog.set_level("INFO")
+    await swap_to_menu_loaded_20(bridge, fake, printer)
+    printer.upload_error = 500
+    await bridge.poll()
+    assert caplog.text.count("sync job failed (500)") == 1
+
+    # Someone clears the UUID minted for the failed job, and Spoolman won't take another.
+    fake.spools[20]["extra"].pop("instance_uuid")
+    fake.fail_uuid = 500
+    await bridge.poll()
+    assert "sync job no longer needed" not in caplog.text
+
+    fake.fail_uuid = printer.upload_error = None
+    await bridge.poll()
+    (gcode,) = jobs(printer)
+    assert f'M865.1 I0 C"{stored_uuid(fake, 20)}"' in gcode
+    assert caplog.text.count("sync job working again") == 1
+    assert "sync job no longer needed" not in caplog.text
     await bridge.aclose()
 
 
@@ -2413,7 +2628,11 @@ async def test_claim_failing_to_clear_is_handled_once(tmp_path, caplog):
     caplog.clear()
     await bridge.poll()
     assert claim_box(fake, 20) is False
-    assert lines(caplog, 20) == [("INFO", "cleared the claim on spool 20")]
+    # The UUID mint failed with the claim, and its write waited for it (W1).
+    assert lines(caplog, 20) == [
+        ("INFO", "cleared the claim on spool 20"),
+        ("INFO", f"gave spool 20 instance UUID {stored_uuid(fake, 20)}"),
+    ]
     await bridge.poll()
     assert read_state(tmp_path / "bridge.db").claimed == []
     await bridge.aclose()
@@ -3051,6 +3270,50 @@ async def test_tag_of_another_spool_is_drift_not_a_write(tmp_path, caplog):
 def with_uuid(data, value):
     data["extra"]["instance_uuid"] = json.dumps(value)
     return data
+
+
+async def assert_flag_kept_while_ambiguous(bridge, fake, spool_id):
+    """Make the location ambiguous (S11) and back: the spool's flag stays, unwritten."""
+    flag = fake.flag(spool_id)
+    patches = fake.writes.count(("patch", spool_id))
+    for other in (30, 31):
+        fake.spools[other] = spool(other)
+    for _ in range(2):
+        await bridge.poll()
+    assert 0 in bridge.printers[0].tools and fake.flag(spool_id) == flag
+    for other in (30, 31):
+        fake.spools[other]["location"] = "Shelf"
+    await bridge.poll()
+    assert fake.flag(spool_id) == flag
+    assert fake.writes.count(("patch", spool_id)) == patches
+
+
+async def test_a_skipped_tool_keeps_its_tagged_drift_flag(tmp_path):
+    """A tag that's another spool's is drift (Q11); its flag stands through an S11 skip."""
+    other = spool(21, location="Shelf")
+    other["extra"]["instance_uuid"] = json.dumps(TAG_K)
+    bridge, fake, printer = make(tmp_path, [spool(20), other], uuid_field="instance_uuid")
+    await bridge.poll()  # baseline
+    printer.material = other_tag()
+    await bridge.poll()
+    assert (
+        fake.flag(20) == f"{LOC}: printer filament differs: the loaded tag is spool 21's ({TAG_K})"
+    )
+    await assert_flag_kept_while_ambiguous(bridge, fake, 20)
+    await bridge.aclose()
+
+
+async def test_a_skipped_tool_keeps_its_uuid_conflict_flag(tmp_path):
+    """A tag whose UUID differs from the spool's; the conflict flag stands through an S11 skip."""
+    bridge, fake, printer = make(
+        tmp_path, [with_uuid(spool(19), "1f0e7d2a-3f6c-4d7b-9a43-6c1f0e7d2a11")]
+    )
+    await bridge.poll()  # baseline: 19, with no UUID on the printer
+    printer.boot_id, printer.extruded, printer.material = 2, 0, other_tag()
+    await bridge.poll()
+    assert "the loaded tag's instance UUID is" in fake.flag(19)
+    await assert_flag_kept_while_ambiguous(bridge, fake, 19)
+    await bridge.aclose()
 
 
 async def test_claim_of_the_loaded_tags_spool_writes_nothing(tmp_path):

@@ -156,7 +156,7 @@ current and that the scenario rows name their tests.
 | W1 | `test_configs.py::test_w1_custom_preamble_is_written` | A custom preamble with the model's check, or its MMU3 name, starts the job as given. |
 | W1 | `test_configs.py::test_w1_write_content` | Flexible, colorless, materialless and RGBA filaments: the M865 line and no false drift. |
 | W1 | `test_configs.py::test_w1_write_without_uuids` | No UUIDs to write: an M865 line with no M865.1, and the spool isn't given a UUID. |
-| W1 | `test_writes.py::test_w1_uuid_mint_fails` | Storing a minted UUID fails: logged once, and B is written without a UUID. |
+| W1 | `test_writes.py::test_w1_uuid_mint_fails` | Storing a minted UUID fails: logged once, and B's write waits for its UUID (W1). |
 | W1 | `test_writes.py::test_w1_uuid_minted_once_spoolman_takes_it` | Storing a minted UUID fails, then works: B gets a UUID and the printer shows it (W1). |
 | W1 | `test_writes.py::test_w1_write_after_swap` | Menu load after a Spoolman-first swap: the bridge writes name, color and UUID. |
 | W2 | `test_writes.py::test_w2_write_waits_while_printing` | Write due when a print starts: nothing is written until the print ends. |
@@ -211,7 +211,7 @@ current and that the scenario rows name their tests.
 | M5a | `test_spoolman.py::test_m5a_weight_edited_before_a_charge` | A weight edited between the poll's spool read and a charge still clears the runout flag. |
 | M6 | `test_configs.py::test_m6_flag_field_off_leaves_every_note` | flag_field off: notes in the field stay on every spool, flagged or not. |
 | M6 | `test_spoolman.py::test_m6_flag_write_fails` | Writing a flag fails: logged once, retried each poll, and the write logged when it works. |
-| M6 | `test_spoolman.py::test_m6_flagged_spool_gone_while_its_flag_fails` | Spool deleted or archived while its flag fails: end logged once; stale flag open (#120). |
+| M6 | `test_spoolman.py::test_m6_flagged_spool_gone_while_its_flag_fails` | Spool deleted or archived while its flag fails: end logged once; archived flag cleared. |
 | M6 | `test_spoolman.py::test_m6_flags_by_others_left_alone` | A flag someone else wrote stays while the bridge sets and clears its own elsewhere. |
 | M7 | `test_spoolman.py::test_m7_density_edit_applies_to_later_charges` | Density edited in Spoolman: later charges use the new one, earlier aren't recalculated. |
 | K1 | `test_swaps.py::test_k1_claim_handled_once_when_clearing_fails` | Clearing a claim's box fails: the claim is handled once, and the failure logged once. |

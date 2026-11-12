@@ -29,7 +29,7 @@ from .config import Config, PrinterConfig
 from .db import Database
 from .models import FilamentReading, Material, Spool
 from .prusalink import BUSY_STATES, IDLE_STATES, NoFilamentEndpoint, PrinterStatus, PrusaLink
-from .spoolman import Spoolman
+from .spoolman import FieldTypeError, Spoolman
 from .state import PrinterState, Runout, State
 
 log = logging.getLogger("spoolman_prusalink")
@@ -171,6 +171,20 @@ def _record(failing: dict, key: Hashable, error: object) -> bool:
     return new
 
 
+def _unusable(error: Exception) -> bool:
+    """Whether a field setup failure lasts until someone fixes it.
+
+    That's a key of another type, or a client error from the fields API, such as a
+    proxy refusing it or a Spoolman without it. A server error, a transport error, a
+    body that can't be read, a timeout (408) or a rate limit (429) may pass.
+    """
+    return isinstance(error, FieldTypeError) or (
+        isinstance(error, httpx.HTTPStatusError)
+        and error.response.is_client_error
+        and error.response.status_code not in (408, 429)
+    )
+
+
 # A mid-print unload with more than this fraction of the net weight left in Spoolman
 # gets a flag.
 RUNOUT_LEFT = 0.05
@@ -260,6 +274,9 @@ class PrinterBridge:
     # Per tool: the spool whose write carries the printer's UUID this poll, that UUID,
     # and whether to store it on the spool (adopt) or only keep it on the printer.
     _adopts: dict[int, tuple[int, str, bool]] = field(default_factory=dict)
+    # Per tool: the flags from the last poll that compared the printer with the active
+    # spool, by spool. A poll that can't compare them keeps these, as it keeps the notes.
+    _compared_flags: dict[int, dict[int, list[str]]] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         self._printer_reach = Reachability(self.label)
@@ -527,6 +544,9 @@ class PrinterBridge:
                     [("index", f"[{location}] printer doesn't report tool index {tool}")],
                     compared=False,
                 )
+                if tool in self.tools:
+                    self._state_flags(tool, location, self.tools[tool], by_id, status, flags)
+                self._keep_compared(tool, flags)
                 continue
             location_ids = [s.id for s in spools if s.location == location]
             material = tool_reading.material
@@ -613,55 +633,18 @@ class PrinterBridge:
             # Also logs a hold restored from the database after a restart, since
             # nothing is logged for it yet.
             self._note_hold(tool)
-            if st.deleted_spool is not None and st.assigned is not None:
-                flags.setdefault(st.assigned, []).append(
-                    f"{location}: usage is being held because spool {st.deleted_spool} was "
-                    f"deleted. It goes to this spool at the next unload or print start, "
-                    f"or when this spool is claimed."
-                )
-            if st.active in self.bridge._archived:
-                flags.setdefault(st.active, []).append(
-                    f"{location}: spool is archived but still loaded"
-                )
-            if st.swap is not None and st.active is None:
-                flags.setdefault(st.swap.spool_id, []).append(
-                    f"{location}: filament was unloaded, then this spool was moved out. "
-                    f"Usage since the unload goes to the next spool moved into {location}."
-                )
-            elif st.swap is not None:
-                flags.setdefault(st.swap.spool_id, []).append(
-                    f"{location}: filament was unloaded with no Spoolman change. If a "
-                    f"different spool went in, move it into {location} before the next print."
-                )
-            if st.notice is not None:
-                flags.setdefault(st.notice.spool_id, []).append(f"{location}: {st.notice.message}.")
-            if st.staged_notice is not None:
-                hint = (
-                    f" If this spool is the one loaded, tick '{CLAIM_FIELD_NAME}' on it."
-                    if self.bridge.config.claim_field
-                    else ""
-                )
-                flags.setdefault(st.staged_notice.spool_id, []).append(
-                    f"{location}: {st.staged_notice.message}.{hint}"
-                )
-            if st.provisional is None:
-                self._provisional_shown.pop(tool, None)
-            else:
-                flags.setdefault(st.provisional.spool_id, []).append(
-                    self._provisional_flag(
-                        tool, location, st.provisional, by_id.get(st.provisional.spool_id), status
-                    )
-                )
+            self._state_flags(tool, location, st, by_id, status, flags)
             active = by_id.get(st.active) if st.active is not None else None
             if active is not None and active.id != before.active:
                 self.bridge.state.runouts.pop(active.id, None)
             tag = None
+            compared: dict[int, list[str]] = {}
             if tool == 0 and (material is None or not material.instance_uuid):
                 self._uuid_gap.add(tool)
             if not result.skipped and material is not None and active is not None:
                 tag = self._tag_uuid(tool, st, material, active, spools)
             if tag is not None and tag[0] == "conflict":
-                self._uuid_conflict(location, material, active, notes, flags)
+                self._uuid_conflict(location, material, active, notes, compared)
                 self._no_write(tool, st)
             elif not result.skipped and material is not None and active is not None:
                 if tag is not None:
@@ -687,7 +670,7 @@ class PrinterBridge:
                 if tagged:
                     self._no_write(tool, st)
                     if diffs:
-                        self._drift(location, active, "; ".join(diffs), notes, flags)
+                        self._drift(location, active, "; ".join(diffs), notes, compared)
                 elif not diffs and not edited:
                     self._no_write(tool, st)
                 else:
@@ -698,14 +681,75 @@ class PrinterBridge:
                         active,
                         diffs + ([edited] if edited else []),
                         notes,
-                        flags,
+                        compared,
                         edited=edited is not None,
                     )
+            if result.skipped:
+                self._keep_compared(tool, flags)
+            else:
+                self._compared_flags[tool] = compared
+                for spool_id, texts in compared.items():
+                    flags.setdefault(spool_id, []).extend(texts)
             self._notes(tool, notes, compared=not result.skipped)
 
         self.bridge.state.outbox.extend(charges)
         self.bridge._save(events)
         return events + charges
+
+    def _state_flags(
+        self,
+        tool: int,
+        location: str,
+        st: ToolState,
+        by_id: dict[int, Spool],
+        status: PrinterStatus,
+        flags: dict[int, list[str]],
+    ) -> None:
+        """Add the flags a tool's saved state asks for."""
+        if st.deleted_spool is not None and st.assigned is not None:
+            flags.setdefault(st.assigned, []).append(
+                f"{location}: usage is being held because spool {st.deleted_spool} was "
+                f"deleted. It goes to this spool at the next unload or print start, "
+                f"or when this spool is claimed."
+            )
+        if st.active in self.bridge._archived:
+            flags.setdefault(st.active, []).append(
+                f"{location}: spool is archived but still loaded"
+            )
+        if st.swap is not None and st.active is None:
+            flags.setdefault(st.swap.spool_id, []).append(
+                f"{location}: filament was unloaded, then this spool was moved out. "
+                f"Usage since the unload goes to the next spool moved into {location}."
+            )
+        elif st.swap is not None:
+            flags.setdefault(st.swap.spool_id, []).append(
+                f"{location}: filament was unloaded with no Spoolman change. If a "
+                f"different spool went in, move it into {location} before the next print."
+            )
+        if st.notice is not None:
+            flags.setdefault(st.notice.spool_id, []).append(f"{location}: {st.notice.message}.")
+        if st.staged_notice is not None:
+            hint = (
+                f" If this spool is the one loaded, tick '{CLAIM_FIELD_NAME}' on it."
+                if self.bridge.config.claim_field
+                else ""
+            )
+            flags.setdefault(st.staged_notice.spool_id, []).append(
+                f"{location}: {st.staged_notice.message}.{hint}"
+            )
+        if st.provisional is None:
+            self._provisional_shown.pop(tool, None)
+        else:
+            flags.setdefault(st.provisional.spool_id, []).append(
+                self._provisional_flag(
+                    tool, location, st.provisional, by_id.get(st.provisional.spool_id), status
+                )
+            )
+
+    def _keep_compared(self, tool: int, flags: dict[int, list[str]]) -> None:
+        """Keep the flags from the tool's last comparison, on a poll that can't compare."""
+        for spool_id, texts in self._compared_flags.get(tool, {}).items():
+            flags.setdefault(spool_id, []).extend(texts)
 
     def _no_write(self, tool: int, st: ToolState) -> None:
         """Drop any write still expected for a tool, so none fires later."""
@@ -1105,6 +1149,7 @@ class PrinterBridge:
             return
         by_id = {s.id: s for s in spools}
         writes: list[printer_sync.ToolWrite] = []
+        minting = False  # A tool's write waits for its spool's UUID to be stored.
         for tool in self._pending_writes:
             st = self.tools[tool]
             spool = by_id.get(st.active)
@@ -1119,8 +1164,20 @@ class PrinterBridge:
                     uuid_value = adopted[1]
                 else:
                     uuid_value = await self.bridge._mint_uuid(spool)
+                    if uuid_value is None and self.bridge.config.uuid_field not in (
+                        self.bridge._unusable_fields
+                    ):
+                        # The spool gets its UUID first (W1): written without one, the
+                        # printer would match the write and no later poll would mint
+                        # again. The write stays due, and the next poll retries the mint.
+                        # Only a UUID field that's unusable until someone fixes it doesn't
+                        # hold the write: the spool is written without a UUID.
+                        minting = True
+                        continue
             writes.append(printer_sync.ToolWrite(tool, spool, uuid_value))
 
+        if not writes and minting:
+            return  # The job is still needed: leave its waits and failures as they are.
         if not writes:
             # A wait for the delay ends silently. A job that was failing or waiting on a
             # busy printer says it's no longer needed.
@@ -1236,6 +1293,8 @@ class Bridge:
     state: State = field(default_factory=State)
     printers: list[PrinterBridge] = field(init=False, default_factory=list)
     _ready_fields: set[str] = field(default_factory=set)
+    # Field keys whose last setup failure needs someone to fix it (`_unusable`).
+    _unusable_fields: set[str] = field(default_factory=set)
     _flags: dict[int, str] = field(default_factory=dict)  # Desired flags from the last poll.
     _spoolman_reach: Reachability = field(default_factory=lambda: Reachability("Spoolman"))
     # What's failing now, by spool, with the last error logged for each.
@@ -1246,8 +1305,9 @@ class Bridge:
     _field_failing: dict[str, str] = field(default_factory=dict)
     # The status or error code of a charge that's stuck in the outbox, if one is.
     _charge_failing: str | None = None
-    # Active spools missing from Spoolman's list that turned out to be archived, looked
-    # up once each. Kept while active or flagged, so their flag can be set and cleared.
+    # Active or flagged spools missing from Spoolman's list that turned out to be
+    # archived, looked up once each. Kept while active or flagged, so their flag can be
+    # set and cleared.
     _archived: dict[int, Spool] = field(default_factory=dict)
     # Claimed spools outside every tool's location, with the location each was last
     # logged in.
@@ -1772,6 +1832,10 @@ class Bridge:
         try:
             await self.spoolman.ensure_field(key, name, field_type)
         except (httpx.HTTPError, ValueError) as e:
+            if _unusable(e):
+                self._unusable_fields.add(key)
+            else:
+                self._unusable_fields.discard(key)  # Passing, whatever failed before.
             if _record(self._field_failing, key, e):
                 log.warning("can't set up the %r spool field: %s", key, e)
             else:
@@ -1779,7 +1843,20 @@ class Bridge:
             return False
         if self._field_failing.pop(key, None) is not None:
             log.info("%r spool field is set up", key)
+        self._unusable_fields.discard(key)
         self._ready_fields.add(key)
+        return True
+
+    def _flag_spool_deleted(self, spool_id: int) -> bool:
+        """Forget a deleted spool's flag, and end a failing update on it.
+
+        Returns whether `State.flagged` changed.
+        """
+        if self._flag_failing.pop(spool_id, None) is not None:
+            log.info("spool %d was deleted; its flag no longer needs updating", spool_id)
+        if spool_id not in self.state.flagged:
+            return False
+        self.state.flagged.remove(spool_id)
         return True
 
     async def sync_flags(self, spools: list[Spool]) -> None:
@@ -1797,15 +1874,37 @@ class Bridge:
         changed = False
         for spool_id in sorted(set(self._flags) | set(self.state.flagged)):
             want = self._flags.get(spool_id)
+            if spool_id not in current and spool_id in self.state.flagged:
+                # A spool the bridge flagged left the list. An archived one is looked up
+                # once and kept, like an archived active spool, so its flag is kept current
+                # and a stale one is cleared.
+                try:
+                    found = await self.spoolman.spool(spool_id)
+                except (httpx.HTTPError, ValueError, KeyError) as e:
+                    if _record(self._flag_failing, spool_id, e):
+                        log.warning("can't look up flagged spool %d: %s", spool_id, e)
+                    else:
+                        log.debug("can't look up flagged spool %d: %s", spool_id, e)
+                    continue
+                if found is None:
+                    changed |= self._flag_spool_deleted(spool_id)
+                    continue
+                if found.archived:
+                    self._archived[spool_id] = found
+                # Otherwise it was unarchived since the list was read; next poll lists it.
+                current[spool_id] = found.flag
             if spool_id not in current:
-                if want is None:
-                    self.state.flagged.remove(spool_id)  # Spool deleted or archived.
-                    changed = True
-                continue
+                continue  # Not listed, and the bridge never flagged it: leave it alone.
             if current[spool_id] != want:
                 try:
                     await self.spoolman.set_extra_text(spool_id, key, want)
                 except httpx.HTTPError as e:
+                    if isinstance(e, httpx.HTTPStatusError) and e.response.status_code == 404:
+                        # Deleted since it was listed or cached. An active spool that
+                        # was cached as archived is looked up again, as deleted.
+                        self._archived.pop(spool_id, None)
+                        changed |= self._flag_spool_deleted(spool_id)
+                        continue
                     if _record(self._flag_failing, spool_id, e):
                         log.warning("can't update the flag on spool %d: %s", spool_id, e)
                     else:

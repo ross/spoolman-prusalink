@@ -723,18 +723,14 @@ async def test_m6_flag_write_fails(world: World, caplog: pytest.LogCaptureFixtur
     assert count(caplog, logging.WARNING, cant) == 1
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="a failing flag update on a spool that leaves Spoolman's list never logs its end (#120)",
-)
 @pytest.mark.parametrize("gone", ["deleted", "archived"])
 async def test_m6_flagged_spool_gone_while_its_flag_fails(
     world: World, caplog: pytest.LogCaptureFixture, gone: str
 ):
-    """Spool deleted or archived while its flag fails: end logged once; stale flag open (#120).
+    """Spool deleted or archived while its flag fails: end logged once; archived flag cleared.
 
-    Whether an archived spool's stale flag is cleared later is an open question (#120),
-    so this doesn't check it either way.
+    An archived spool's stale flag is retried until it's cleared, and the clear ends the
+    failure. A deleted spool has no flag left, so its failure just ends.
     """
     caplog.set_level(logging.DEBUG, logger="spoolman_prusalink")
     w = world
@@ -757,8 +753,8 @@ async def test_m6_flagged_spool_gone_while_its_flag_fails(
     cant = f"can't update the flag on spool {a}"
     assert count(caplog, logging.WARNING, cant) == 1
 
-    # A leaves Spoolman's list, and Spoolman takes writes again, so clearing an archived
-    # spool's flag (#120) would work too. Either way the failure is over: one INFO line.
+    # A leaves Spoolman's list, and Spoolman takes writes again. An archived A has its
+    # flag cleared, and a deleted A has none. Either way the failure is over: one INFO line.
     logged_before = len(caplog.records)
     if gone == "deleted":
         await delete_spool(w.spoolman.client, a)
@@ -769,6 +765,8 @@ async def test_m6_flagged_spool_gone_while_its_flag_fails(
         await w.poll()
     ended = [r for r in caplog.records[logged_before:] if r.levelno >= logging.INFO]
     assert [r.levelno for r in ended] == [logging.INFO], [r.getMessage() for r in ended]
+    if gone == "archived":
+        assert await w.flag("A") is None
 
     # Later polls say nothing more about it.
     logged_before = len(caplog.records)

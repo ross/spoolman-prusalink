@@ -729,7 +729,7 @@ def mint_refused(w: World) -> None:
 
 
 async def test_w1_uuid_mint_fails(world: World, caplog: pytest.LogCaptureFixture):
-    """Storing a minted UUID fails: logged once, and B is written without a UUID."""
+    """Storing a minted UUID fails: logged once, and B's write waits for its UUID (W1)."""
     caplog.set_level(logging.DEBUG, logger="spoolman_prusalink")
     w = world
     b = w.spools["B"]
@@ -740,18 +740,13 @@ async def test_w1_uuid_mint_fails(world: World, caplog: pytest.LogCaptureFixture
     for _ in range(3):
         w.advance(1.0)
         await w.poll()
-    assert len(w.requests("PUT")) == 1
-    assert w.material() == (*PETG, None)
+    assert w.requests("PUT") == []
+    assert w.material() == (PETG[0], None, None)
     assert await w.spoolman.extra(b, UUID_FIELD) is None
     assert count(caplog, logging.WARNING, f"can't store an instance UUID on spool {b}") == 1
     assert await w.flag("B") is None
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="a failed mint isn't retried: the write goes ahead without a UUID, and once the "
-    "printer matches it nothing is due, so B never gets one and the failure never ends",
-)
 async def test_w1_uuid_minted_once_spoolman_takes_it(
     world: World, caplog: pytest.LogCaptureFixture
 ):
