@@ -303,8 +303,8 @@ Size: small for part 1, medium for part 2.
 
 - The `tools` table holds a JSON blob per tool, `printer_flags` holds JSON,
   and `seen_uuids` has columns. `SCHEMA_VERSION` doesn't cover the blob's
-  shape. The blob is `ToolState.to_json` in `accounting.py`, so this waits
-  for workstream 10, which owns that file.
+  shape. The blob is `ToolState.to_json` in `accounting.py`, so it belongs
+  to workstream 10.
 
 ## Tests and tooling
 
@@ -545,8 +545,7 @@ Size: medium.
 | 6 | Client errors | B8 | Nothing |
 | 7 | Unit suite on the simulator | T2, T6 | Nothing. Before workstreams 2 and 3 if possible, so their tests are ported once |
 | 8 | Simulator state | S1, S5, S6, then S2, S4 | Workstream 7 for S4, which continues the routing move in T2 |
-| 9 | Small items | B10 (the `tools` blob) | Workstream 10 |
-| 10 | Accounting state | B9 (part 1) | Nothing |
+| 10 | Accounting state | B9 (part 1), B10 | Nothing |
 
 Workstreams 1, 6, and 10 are independent and can run at any time. T3
 has no work, so it isn't in a workstream.
