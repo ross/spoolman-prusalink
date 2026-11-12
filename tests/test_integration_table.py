@@ -1,6 +1,5 @@
 """Keep integration/README.md and docs/scenarios.md in step with the tests."""
 
-import re
 from pathlib import Path
 
 from integration import table
@@ -35,11 +34,4 @@ def test_every_test_row_is_end_to_end_in_scenarios():
             continue
         line = _status(t.row)
         assert line is not None, f"{t.name}: row {t.row} is not in docs/scenarios.md"
-        marker = f"end to end (`{t.function}`)"
-        assert marker in line, f"row {t.row}: Status should contain {marker}"
-
-
-def test_scenarios_mentions_name_existing_tests():
-    names = {t.function for t in table.tests()}
-    for m in re.finditer(r"end to end \(`(test_\w+)`\)", SCENARIOS):
-        assert m.group(1) in names, f"docs/scenarios.md names {m.group(1)}, which doesn't exist"
+        assert "end to end" in line, f"row {t.row}: Status should say end to end"

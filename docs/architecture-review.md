@@ -215,23 +215,6 @@ tool state.
 
 Size: small to medium. Do it with B3, which reshapes `written`.
 
-### B8. Raw `httpx` errors reach every layer
-
-`app.py` has 18 `except` sites that name `httpx` errors. Seven of them also
-catch `ValueError` and `KeyError`, because the caller has to know what the
-client's parsing can raise. Status codes are interpreted far from the
-client: 404 in `flush` and `sync_flags`, 409 in `sync_printer`, 5xx in
-`flush`, and the other 4xx codes in `_unusable`.
-
-Why it hurts: a `KeyError` from a bug in bridge code inside one of those
-`try` blocks is logged as a bad answer from the service.
-
-Shape: the clients raise their own errors: unreachable, bad answer, not
-found, busy. The clients catch parse errors where they parse. `app.py`
-catches the client errors only.
-
-Size: small to medium. Independent of the rest.
-
 ### B9. `account()` mixes last poll's state with this poll's
 
 `account()` (`accounting.py`) is 490 lines: six numbered steps, about
@@ -303,46 +286,8 @@ Size: small for part 1, medium for part 2.
 
 - The `tools` table holds a JSON blob per tool, `printer_flags` holds JSON,
   and `seen_uuids` has columns. `SCHEMA_VERSION` doesn't cover the blob's
-  shape.
-- "Only tool 0 holds a UUID" is written as `tool == 0` in seven places in
-  `app.py`, `drift.py`, and `printer_sync.py`.
-- `Runout.printer` is saved and never read.
-- `Spoolman.set_extra_text` and `drift.printer_name` only call another
-  function.
-- `COREONEL_PREAMBLE` is used only by tests.
-- Stale comments: "Used from phase 3" (`config.py`), "used by phase 3
-  writes" (`prusalink.py`), "Pending firmware fields" (`models.py`).
-- `config.py` has three near-identical number parsers (`_number`,
-  `_interval`, `_delay`), and `load()` keeps the single-printer checks "in
-  the order they always have".
-- Log lines name a printer three ways: `label`, `_prefix`, and
-  `[location]`.
-- `docs/sqlite.md` and `docs/multi-printer.md` describe plans that have
-  merged, in the future tense.
-
-### B11. Printer settings are configured globally
-
-A setup can mix printers, so a setting that describes a printer belongs to
-that printer's config entry. Five settings under `[bridge]` describe a
-printer and are read by `PrinterBridge` through `bridge.config`:
-
-| Setting | What it describes |
-| --- | --- |
-| `length_factor` | How far the printer's extruded length is from real usage. Two printers can need different factors, and today they share one. |
-| `printer_sync`, `sync_delay`, `sync_drift` | Whether and when the bridge writes to the printer |
-| `flag_drift` | Whether drift on the printer becomes a flag |
-
-`uuid_field`, `flag_field`, and `claim_field` name Spoolman fields and stay
-global.
-
-Shape: move the five settings to `PrinterConfig`, set in the `[printer]`
-table or in each `[[printers]]` entry, with no global default. One place
-per setting is less error prone than a default with overrides.
-`PrinterBridge` then reads them from its own config. It still reads
-`claim_field` and `uuid_field` through `bridge.config`, so this removes
-five of the reads that B4 lists, not the back-reference.
-
-Size: small.
+  shape. The blob is `ToolState.to_json` in `accounting.py`, so it belongs
+  to workstream 10.
 
 ## Tests and tooling
 
@@ -464,18 +409,6 @@ About 78 integration lines compare an event's message exactly, and over
 300 lines across both suites match log text. B6
 removes the cause for events. Keep one prose check per event kind.
 
-### T8. Scripts and scenario table
-
-- `script/demo` and `script/integration` each detect the container engine,
-  pin `ghcr.io/donkie/spoolman:0.27.1`, and wait for health.
-  `compose.example.yaml` uses `:latest`, a version CI doesn't test.
-- The Status column of `docs/scenarios.md` names 157 tests by hand, in 88
-  rows.
-  `tests/test_integration_table.py` checks them, so the cost is the editing,
-  not drift.
-
-Size: small.
-
 ## Simulator
 
 The simulator review read every file in `simulator/`.
@@ -566,14 +499,12 @@ Size: medium.
 | 2 | Tag-UUID owner | B1, T1 (UUID tests) | Nothing |
 | 3 | Conditions and saved facts | B2, B3, B5, B7, T1 (rest) | Workstreams 2 and 10. B7 changes the part of `account()` that B9 part 1 restructures |
 | 4 | Typed records | B6, B9 (part 2), T7 | Workstream 10. Easier after 3 |
-| 5 | Narrow the bridge boundary | B4 | Workstreams 2 and 3. Easier after B11 |
-| 6 | Client errors | B8 | Nothing |
+| 5 | Narrow the bridge boundary | B4 | Workstreams 2 and 3 |
 | 7 | Unit suite on the simulator | T2, T6 | Nothing. Before workstreams 2 and 3 if possible, so their tests are ported once |
 | 8 | Simulator state | S1, S5, S6, then S2, S4 | Workstream 7 for S4, which continues the routing move in T2 |
-| 9 | Small items | B10, B11, T8 | Nothing |
-| 10 | Accounting state | B9 (part 1) | Nothing |
+| 10 | Accounting state | B9 (part 1), B10 | Nothing |
 
-Workstreams 6, 9, and 10 are independent and can run at any time. T3
+Workstream 10 is independent and can run at any time. T3
 has no work, so it isn't in a workstream.
 Of the large ones, workstream 7 is best first, because workstreams 2 and 3
 rewrite many of the same tests and would otherwise port them twice. Then

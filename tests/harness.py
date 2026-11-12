@@ -6,7 +6,7 @@ directly, mostly tool 0's counters and filament, and time passes only when the t
 
 import json
 import math
-from dataclasses import replace
+from dataclasses import fields, replace
 
 import httpx
 
@@ -188,7 +188,7 @@ def add_station(sim, name="default"):
     return Station(sim, printer)
 
 
-PRINTER_KEYS = {"gcode_preamble", "sync_storage", "sync_file"}
+PRINTER_KEYS = {f.name for f in fields(PrinterConfig)}
 
 
 def make(tmp_path, spools, **cfg):

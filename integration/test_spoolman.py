@@ -78,7 +78,9 @@ async def test_m1_spoolman_unreachable(world: World, caplog: pytest.LogCaptureFi
     records = await w.poll()
     assert charges(records) == []
     assert [r["use_length"] for r in w.bridge.state.outbox] == [30.0]
-    assert logged(caplog, logging.WARNING, f"charge to spool {a} failed (503); 1 queued")
+    assert logged(
+        caplog, logging.WARNING, f"charge to spool {a} failed (503 Service Unavailable for PUT"
+    )
 
     # Spoolman goes down with it queued: each poll tries the outbox first and stops.
     faults.cut()
