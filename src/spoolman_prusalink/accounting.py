@@ -3,7 +3,7 @@
 `account()` is pure: it takes the stored state for one tool, the latest printer reading,
 the spools Spoolman has in the tool's location, the current print job, and any claim,
 and returns the charges to make, events to report, and the new state. The caller queues
-the charges for Spoolman, or only logs them in dry run, and persists the new state.
+the charges for Spoolman and persists the new state.
 
 Counter model:
 
@@ -162,7 +162,7 @@ class ToolState:
     active: int | None = None  # Spool physically in the tool, which gets charged.
     assigned: int | None = None  # Spoolman's assignment at the last poll.
     # Old spools still in the location after a swap, oldest first. More than one when an
-    # eviction hasn't happened yet (dry run, or Spoolman refused it) by the next swap.
+    # eviction hasn't happened yet (Spoolman refused it) by the next swap.
     evict: tuple[int, ...] = ()
     swap: SwapFlag | None = None
     job_id: int | None = None  # Last print job that started, to detect a print start.

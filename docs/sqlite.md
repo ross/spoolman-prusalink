@@ -58,7 +58,7 @@ needed.
 | `flagged` | `spool_id` | |
 | `claimed` | `spool_id` | |
 | `runouts` | `spool_id` | `text`, `net`, `used`, `printer` |
-| `ledger` | `id` | `time`, `printer`, `tool`, `kind`, `spool_id`, `use_length`, `applied`, `failed`, `dry_run`, `extra` (JSON) |
+| `ledger` | `id` | `time`, `printer`, `tool`, `kind`, `spool_id`, `use_length`, `applied`, `failed`, `extra` (JSON) |
 
 `ledger.kind` is `charge` or the event name. `extra` holds the remaining
 fields, such as `message`, `reason`, `boot_id`, and `extruded`. Indexes:
@@ -78,7 +78,6 @@ the same transaction:
   one transaction.
 - `flush()` deletes the outbox row, inserts the ledger record, and saves the
   state in one transaction per charge.
-- Dry run writes ledger rows only, as today.
 
 Sending a charge stays at-least-once. If the bridge crashes after Spoolman
 accepts a charge but before the transaction commits, the outbox row

@@ -64,7 +64,6 @@ CREATE TABLE ledger (
     use_length,
     applied TEXT,
     failed TEXT,
-    dry_run INTEGER,
     extra TEXT NOT NULL
 );
 CREATE INDEX ledger_spool_time ON ledger (spool_id, time);
@@ -94,7 +93,6 @@ _LEDGER_COLUMNS = {
     "use_length": (int, float),
     "applied": (str,),
     "failed": (str,),
-    "dry_run": (bool,),
 }
 # `ledger.kind` for a record that isn't an event.
 _CHARGE = "charge"
@@ -116,7 +114,7 @@ class Database:
 
     `save` writes only the state rows that changed since the last `load` or `save`, and
     any ledger records given, in one transaction, so a poll that changes nothing writes
-    nothing. `save_ledger` appends ledger records alone, for dry run.
+    nothing.
     """
 
     def __init__(self, path: Path, conn: sqlite3.Connection, lock_fd: int) -> None:
@@ -222,24 +220,6 @@ class Database:
             raise
         self._rows = rows
         self._outbox = self._outbox[gone:] + added
-        return True
-
-    def save_ledger(self, ledger: Sequence[dict]) -> bool:
-        """Append the `ledger` records and nothing else, in one transaction.
-
-        Dry run saves its records this way, leaving the state as the last live run saved
-        it. Return whether anything was written.
-        """
-        if not ledger:
-            return False
-        conn = self._conn
-        conn.execute("BEGIN IMMEDIATE")
-        try:
-            _insert_ledger(conn, ledger)
-            conn.execute("COMMIT")
-        except BaseException:
-            conn.execute("ROLLBACK")
-            raise
         return True
 
 
@@ -394,8 +374,6 @@ def _ledger_record(row: dict) -> dict:
     record = {k: row[k] for k in _LEDGER_COLUMNS if row[k] is not None}
     if row["kind"] != _CHARGE:
         record["event"] = row["kind"]
-    if "dry_run" in record:
-        record["dry_run"] = bool(record["dry_run"])
     record.update(json.loads(row["extra"]))
     return record
 

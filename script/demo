@@ -77,7 +77,6 @@ url = "$SPOOLMAN_URL"
 db_file = "$data/bridge.db"
 poll_printing = 2
 poll_idle = 3
-dry_run = false
 TOML
 } >"$bridge_config"
 

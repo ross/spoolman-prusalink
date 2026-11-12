@@ -253,7 +253,6 @@ def make(tmp_path, spools, **cfg):
         spoolman_url="http://spoolman",
         printers=(printer_cfg,),
         db_file=tmp_path / "bridge.db",
-        dry_run=False,
         **cfg,
     )
     db = Database.open(config.db_file)
@@ -288,7 +287,7 @@ async def test_charges_are_applied_and_recorded(tmp_path):
     await bridge.poll()
     assert fake.used == {19: [500.0]}
     applied = [r for r in ledger(tmp_path) if "use_length" in r]
-    assert len(applied) == 1 and applied[0]["applied"] and applied[0]["dry_run"] is False
+    assert len(applied) == 1 and applied[0]["applied"]
     assert read_state(tmp_path / "bridge.db").outbox == []
     await bridge.aclose()
 
@@ -438,29 +437,6 @@ async def test_a_failed_save_in_flush_keeps_the_charge_queued(tmp_path):
     assert fake.used == {19: [500.0, 500.0]}
     assert read_state(db).outbox == []
     assert [r["use_length"] for r in ledger(tmp_path) if r.get("applied")] == [500.0]
-    await bridge.aclose()
-
-
-async def test_dry_run_saves_records_and_not_state(tmp_path):
-    bridge, fake, printer = make(tmp_path, [spool(19)])
-    await bridge.poll()
-    printer.extruded = 1500
-    await bridge.poll()
-    db = tmp_path / "bridge.db"
-    state, records = read_state(db), ledger(tmp_path)
-    bridge = restart(bridge, dry_run=True)
-    printer.unloads, printer.at_unload, printer.extruded = 1, 1600, 1700
-    await bridge.poll()
-    assert read_state(db) == state
-    added = ledger(tmp_path)[len(records) :]
-    assert [(r.get("event"), r.get("use_length")) for r in added] == [
-        ("unload", None),
-        ("swap_unconfirmed", None),
-        (None, 100.0),
-        (None, 100.0),
-    ]
-    assert all(r["dry_run"] is True and "applied" not in r for r in added)
-    assert fake.used == {19: [500.0]}
     await bridge.aclose()
 
 
@@ -832,41 +808,6 @@ async def test_a_flag_runs_no_job(tmp_path):
     await bridge.aclose()
 
 
-async def test_dry_run_never_uploads(tmp_path, caplog):
-    bridge, fake, printer = make(tmp_path, [spool(19)], sync_drift=True)
-    bridge.config = __import__("dataclasses").replace(bridge.config, dry_run=True)
-    printer.material = {"name": "PLA"}
-    caplog.set_level("INFO")
-    await bridge.poll()
-    assert jobs(printer) == [] and "WOULD RUN printer job" in caplog.text
-    assert not [w for w in fake.writes if w[0] != "field"]
-    await bridge.aclose()
-
-
-async def test_dry_run_logs_a_pending_job_once(tmp_path, caplog):
-    bridge, fake, printer = make(tmp_path, [spool(19)], uuid_field="instance_uuid")
-    bridge.config = replace(bridge.config, dry_run=True)
-    caplog.set_level("INFO")
-    await bridge.poll()
-    fake.spools[20] = spool_x(20)  # S1: staged, then unload and load.
-    await bridge.poll()
-    printer.unloads, printer.at_unload, printer.material = 1, 1000, {"name": "PLA"}
-    fake.spools[19]["location"] = None  # Dry run doesn't evict it.
-    for _ in range(4):
-        await bridge.poll()
-    assert jobs(printer) == []
-    assert caplog.text.count("WOULD RUN printer job") == 1
-    assert caplog.text.count("would give spool 20 instance UUID") == 1
-
-    # A different job is logged again.
-    fake.spools[20] = spool_x(20, color="00ff00")
-    await bridge.poll()
-    await bridge.poll()
-    assert caplog.text.count("WOULD RUN printer job") == 2
-    assert caplog.text.count("would give spool 20 instance UUID") == 1
-    await bridge.aclose()
-
-
 async def test_unconfirmed_swap_still_writes_assigned_spool(tmp_path):
     # A jam: unload, reload the same spool from the menu (color dropped), no new print.
     bridge, fake, printer = make(tmp_path, [spool(19)])
@@ -1063,40 +1004,6 @@ async def test_spoolman_read_problems_logged_once(tmp_path, caplog):
     for _ in range(2):
         await bridge.poll()
     assert levels(caplog, "Spoolman reads working again") == ["WARNING"]
-    await bridge.aclose()
-
-
-async def test_live_ledger_records_are_marked_not_dry_run(tmp_path):
-    bridge, fake, printer = make(tmp_path, [spool(19)])
-    await bridge.poll()
-    printer.extruded = 1500
-    await bridge.poll()
-    records = ledger(tmp_path)
-    assert any("event" in r for r in records) and any("use_length" in r for r in records)
-    assert all(r["dry_run"] is False for r in records)
-    await bridge.aclose()
-
-
-async def test_dry_run_holds_queued_charges(tmp_path, caplog):
-    bridge, fake, printer = make(tmp_path, [spool(19)])
-    await bridge.poll()
-    printer.extruded = 1500
-    fake.fail_use = [503]
-    await bridge.poll()
-    assert len(bridge.state.outbox) == 1
-
-    # Restarted in dry run: the queued charge is neither sent nor dropped.
-    bridge.config = replace(bridge.config, dry_run=True)
-    caplog.set_level("INFO")
-    for _ in range(3):
-        await bridge.poll()
-    assert fake.used == {}
-    assert len(read_state(tmp_path / "bridge.db").outbox) == 1
-    assert caplog.text.count("1 queued charge(s) held until dry run is off") == 1
-
-    bridge.config = replace(bridge.config, dry_run=False)
-    await bridge.poll()
-    assert fake.used == {19: [500.0]} and bridge.state.outbox == []
     await bridge.aclose()
 
 
@@ -1905,28 +1812,19 @@ async def test_deleted_spool_hold_restored_after_a_restart_is_logged_and_ends(tm
     await bridge.aclose()
 
 
-async def test_dry_run_deleted_spool_is_charged_as_after_an_outage(tmp_path, caplog):
+async def test_spool_deleted_during_an_outage_is_charged_to_the_next(tmp_path):
     bridge, fake, printer = make(tmp_path, [spool(19)])
     await bridge.poll()
     printer.extruded = 1500
     await bridge.poll()
     assert fake.used == {19: [500.0]}
-    saved = read_state(tmp_path / "bridge.db")
 
-    # Restarted in dry run, the spool is deleted and printing goes on.
-    bridge = restart(bridge, dry_run=True)
-    caplog.set_level("INFO")
+    # Stopped while the spool is deleted and printing goes on.
     del fake.spools[19]
-    for extruded in (1700, 1800, 1900):
-        printer.extruded = extruded
-        await bridge.poll()
-    assert fake.lookups == [19]
-    assert caplog.text.count("spool 19 was deleted in Spoolman") == 1
-    assert read_state(tmp_path / "bridge.db") == saved
+    printer.extruded = 1900
 
-    # Live again, with a new spool moved in: it gets the 400 mm printed since the last
-    # live poll, as after an outage.
-    bridge = restart(bridge, dry_run=False)
+    # Back with a new spool moved in: it gets the 400 mm printed since the last poll.
+    bridge = restart(bridge)
     await bridge.poll()
     fake.spools[20] = spool(20)
     await bridge.poll()
@@ -1952,17 +1850,12 @@ async def held_live_for_deleted_spool(tmp_path):
     return bridge, fake, printer
 
 
-async def test_dry_run_leaves_usage_held_live_as_it_was(tmp_path):
+async def test_usage_held_before_an_outage_is_kept(tmp_path):
     bridge, fake, printer = await held_live_for_deleted_spool(tmp_path)
-    saved = read_state(tmp_path / "bridge.db")
-    bridge = restart(bridge, dry_run=True)
-    for extruded in (2000, 2100):  # 200 mm in dry run.
-        printer.extruded = extruded
-        await bridge.poll()
-    assert read_state(tmp_path / "bridge.db") == saved
+    printer.extruded = 2100  # 200 mm printed while stopped.
 
-    # The next spool gets the usage held live and the 200 mm, as after an outage.
-    bridge = restart(bridge, dry_run=False)
+    # The next spool gets the usage held before and the 200 mm.
+    bridge = restart(bridge)
     fake.spools[20] = spool(20)
     await bridge.poll()
     await bridge.poll()
@@ -1970,58 +1863,21 @@ async def test_dry_run_leaves_usage_held_live_as_it_was(tmp_path):
     await bridge.aclose()
 
 
-async def test_dry_run_keeps_usage_held_live(tmp_path, caplog):
-    bridge, fake, printer = await held_live_for_deleted_spool(tmp_path)
-    saved = read_state(tmp_path / "bridge.db")
-    bridge = restart(bridge, dry_run=True)
-    caplog.set_level("INFO")
-    fake.spools[20] = spool(20)  # Moved in during dry run.
-    for _ in range(3):
-        await bridge.poll()
-    assert caplog.text.count("WOULD CHARGE spool 20") == 1
-    assert read_state(tmp_path / "bridge.db") == saved
+async def assert_after_outage(tmp_path, live, middle, after, used):
+    """Run `live`, then `middle` with the bridge stopped, then `after` from a restart.
 
-    bridge = restart(bridge, dry_run=False)
-    await bridge.poll()
-    await bridge.poll()
-    assert fake.used == {19: [500.0], 20: [400.0]}
-    await bridge.aclose()
-
-
-async def dry_run_or_outage(tmp_path, dry, live, middle, after):
-    """Run `live`, then `middle` in dry run or with the bridge stopped, then `after` live.
-
-    Each step of `middle` changes the printer or Spoolman, and dry run polls twice after
-    each. Every phase starts with a restart that reloads the database, which dry run
-    must leave unchanged. Returns the fake Spoolman, the final state and the path.
+    Each step of `middle` changes the printer or Spoolman. Asserts what Spoolman was
+    charged, and returns the final state.
     """
-    path = tmp_path / ("dry" if dry else "outage")
-    bridge, fake, printer = make(path, [spool(19)])
+    bridge, fake, printer = make(tmp_path, [spool(19)])
     await live(bridge, fake, printer)
-    saved = read_state(path / "bridge.db")
-    bridge = restart(bridge, dry_run=True)
     for step in middle:
         step(fake, printer)
-        if dry:
-            await bridge.poll()
-            await bridge.poll()
-    assert read_state(path / "bridge.db") == saved
-    bridge = restart(bridge, dry_run=False)
+    bridge = restart(bridge)
     await after(bridge, fake, printer)
     await bridge.aclose()
-    return fake, read_state(path / "bridge.db"), path
-
-
-async def assert_like_outage(tmp_path, live, middle, after, used):
-    """Going live after a dry run charges what it would after an outage as long."""
-    dry_fake, dry_state, path = await dry_run_or_outage(tmp_path, True, live, middle, after)
-    out_fake, out_state, _ = await dry_run_or_outage(tmp_path, False, live, middle, after)
-    assert dry_fake.used == out_fake.used == used
-    # Each run mints its own instance UUID, which `written` holds.
-    assert replace(dry_state.tools("default")[0], written=None) == replace(
-        out_state.tools("default")[0], written=None
-    )
-    return dry_state, path
+    assert fake.used == used
+    return read_state(tmp_path / "bridge.db")
 
 
 def extrude(mm):
@@ -2031,7 +1887,7 @@ def extrude(mm):
     return step
 
 
-async def test_dry_run_leaves_an_open_swap_as_live_left_it(tmp_path):
+async def test_open_swap_survives_an_outage(tmp_path):
     async def live(bridge, fake, printer):
         await bridge.poll()
         printer.extruded = 1500
@@ -2041,12 +1897,12 @@ async def test_dry_run_leaves_an_open_swap_as_live_left_it(tmp_path):
         assert bridge.printers[0].tools[0].swap.mm == 100
 
     async def after(bridge, fake, printer):
-        await bridge.poll()  # The 200 mm printed in dry run, as after an outage.
+        await bridge.poll()  # The 200 mm printed while stopped.
         fake.spools[19]["location"] = None
         fake.spools[20] = spool(20)
         await bridge.poll()
 
-    await assert_like_outage(
+    await assert_after_outage(
         tmp_path,
         live,
         [extrude(1700), extrude(1800)],
@@ -2055,7 +1911,7 @@ async def test_dry_run_leaves_an_open_swap_as_live_left_it(tmp_path):
     )
 
 
-async def test_dry_run_leaves_the_claim_window_as_live_left_it(tmp_path):
+async def test_claim_window_survives_an_outage(tmp_path):
     async def live(bridge, fake, printer):
         await bridge.poll()
         printer.extruded = 1100
@@ -2066,7 +1922,7 @@ async def test_dry_run_leaves_the_claim_window_as_live_left_it(tmp_path):
         fake.spools[20] = spool_x(20, extra=dict(CLAIMED))
         await bridge.poll()
 
-    await assert_like_outage(
+    await assert_after_outage(
         tmp_path,
         live,
         [extrude(1200), extrude(1300)],
@@ -2075,7 +1931,7 @@ async def test_dry_run_leaves_the_claim_window_as_live_left_it(tmp_path):
     )
 
 
-async def test_dry_run_usage_held_then_charged_is_charged_once_live(tmp_path):
+async def test_usage_held_then_charged_during_an_outage_is_charged_once(tmp_path):
     async def live(bridge, fake, printer):
         await bridge.poll()
         printer.extruded = 1500
@@ -2091,16 +1947,12 @@ async def test_dry_run_usage_held_then_charged_is_charged_once_live(tmp_path):
         await bridge.poll()
         await bridge.poll()
 
-    _, path = await assert_like_outage(
+    await assert_after_outage(
         tmp_path, live, [no_filament, filament_back], after, {19: [500.0, 300.0]}
     )
-    # Dry run held the usage, then logged it as one charge.
-    assert [(r["spool_id"], r["extruded_mm"]) for r in ledger(path) if r.get("dry_run")] == [
-        (19, 300)
-    ]
 
 
-async def test_dry_run_leaves_a_provisional_charge_as_live_left_it(tmp_path):
+async def test_provisional_charge_survives_an_outage(tmp_path):
     async def live(bridge, fake, printer):
         await bridge.poll()
         printer.unloads, printer.at_unload, printer.extruded = 1, 1000, 1100
@@ -2114,13 +1966,13 @@ async def test_dry_run_leaves_a_provisional_charge_as_live_left_it(tmp_path):
     async def after(bridge, fake, printer):
         await bridge.poll()
 
-    state, _ = await assert_like_outage(
+    state = await assert_after_outage(
         tmp_path, live, [extrude(1300), extrude(1400)], after, {19: [100.0, 100.0, 200.0]}
     )
     assert state.tools("default")[0].provisional.mm == 400
 
 
-async def test_claim_in_dry_run_is_handled_live(tmp_path):
+async def test_claim_made_during_an_outage_is_handled(tmp_path):
     async def live(bridge, fake, printer):
         await bridge.poll()
         printer.extruded = 1100
@@ -2133,7 +1985,7 @@ async def test_claim_in_dry_run_is_handled_live(tmp_path):
         await bridge.poll()
         assert claim_box(fake, 20) is False
 
-    await assert_like_outage(tmp_path, live, [claim], after, {19: [100.0, -100.0], 20: [100.0]})
+    await assert_after_outage(tmp_path, live, [claim], after, {19: [100.0, -100.0], 20: [100.0]})
 
 
 async def test_404_in_flush_holds_the_charge(tmp_path, caplog):
@@ -2489,21 +2341,6 @@ async def test_claim_cleared_in_spoolman_is_dropped(tmp_path, caplog):
     assert caplog.text.count("spool 20 claimed: confirmed as loaded") == 1
     assert claim_box(fake, 20) is False
     assert caplog.text.count("cleared the claim on spool 20") == 1
-    await bridge.aclose()
-
-
-async def test_dry_run_handles_claim_once(tmp_path, caplog):
-    bridge, fake, printer = make(tmp_path, [spool(19)])
-    bridge.config = replace(bridge.config, dry_run=True)
-    caplog.set_level("INFO")
-    await bridge.poll()
-    fake.spools[20] = spool_x(20, extra=dict(CLAIMED))
-    for _ in range(3):
-        await bridge.poll()
-    assert bridge.printers[0].tools[0].active == 20
-    assert claim_box(fake, 20) is True
-    assert caplog.text.count("would clear the claim on spool 20") == 1
-    assert not [w for w in fake.writes if w[0] != "field"]
     await bridge.aclose()
 
 
@@ -2891,7 +2728,6 @@ def two_printers(tmp_path, spools, **cfg):
             for name in printers
         ),
         db_file=tmp_path / "bridge.db",
-        dry_run=False,
         **cfg,
     )
     db = Database.open(config.db_file)

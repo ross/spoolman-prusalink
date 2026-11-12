@@ -43,8 +43,8 @@ what the simulator is checked against and a log read by eye isn't.
 
 - **Run current `main` on whale**, and note the commit. The homelab deploy
   belongs to the `composed` session; ask it to redeploy.
-- **Run only the production bridge.** A second live bridge double-charges,
-  and a dry-run one muddies the logs. The probe in `simulator/probe.py` only
+- **Run only the production bridge.** A second bridge double-charges
+  and muddies the logs. The probe in `simulator/probe.py` only
   reads, so it can run beside the bridge.
 - **Use a cheap filament**, and a throwaway Spoolman spool where a check
   needs a record you can delete or archive. Move the usage back afterwards.

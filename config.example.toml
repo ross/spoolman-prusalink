@@ -77,9 +77,6 @@ flag_field = "bridge_flag"
 claim_field = "bridge_claim"
 # Also flag a spool when the printer's filament name, color or UUID doesn't match it.
 flag_drift = true
-# true logs and records what the bridge would do without writing anything. Set it to
-# false to charge usage, write flags and move spools in Spoolman, and write the printer.
-dry_run = true
 
 # Several printers: replace [printer] and [[tools]] with one [[printers]] entry per
 # printer. Each takes the [printer] settings above plus its own [[printers.tools]].

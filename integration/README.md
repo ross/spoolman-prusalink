@@ -169,7 +169,6 @@ current and that the scenario rows name their tests.
 | B1 | `test_bridge.py::test_b1_first_start` | First start: the counter is the baseline, and use before it isn't charged. |
 | B2 | `test_bridge.py::test_b2_restart_mid_print` | Restart mid-print: one catch-up charge, with no double charge and no loss. |
 | B4 | `test_bridge.py::test_b4_database_lost` | The database lost: a new baseline, use since the last poll lost, the swap forgotten. |
-| B6 | `test_bridge.py::test_b6_dry_run_then_live` | Dry run: charges only logged and recorded, then a live run catches up from its state. |
 <!-- table:end -->
 
 ## Add a scenario

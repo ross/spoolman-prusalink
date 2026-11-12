@@ -22,7 +22,6 @@ services:
       SPOOLMAN_URL: http://spoolman:8000
       # Ignored if a mounted config file has [[tools]] entries.
       SPOOLMAN_PRUSALINK_LOCATION: Core One L+
-      SPOOLMAN_PRUSALINK_DRY_RUN: "false"
     volumes:
       - bridge-data:/data
       # For more settings or several printers, mount a config file based on
