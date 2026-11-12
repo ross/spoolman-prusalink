@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-import math
 import os
 import re
+import sys
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
@@ -83,12 +83,20 @@ def _str(table: dict, key: str, default: str, name: str) -> str:
     return value
 
 
+def _finite(value: int | float) -> bool:
+    """Whether a number fits a float and isn't NaN or infinity.
+
+    A comparison, not math.isfinite, which overflows on an int too large for a float.
+    """
+    return -sys.float_info.max <= value <= sys.float_info.max
+
+
 def _number(table: dict, key: str, default: float, name: str) -> float:
     value = table.get(key, default)
     if isinstance(value, bool) or not isinstance(value, int | float):
         raise ConfigError(f"{name} must be a number, got {value!r}")
-    if not math.isfinite(value):
-        raise ConfigError(f"{name} must be a number, not nan or inf, got {value!r}")
+    if not _finite(value):
+        raise ConfigError(f"{name} must be a finite number, got {value!r}")
     return float(value)
 
 
@@ -97,7 +105,7 @@ def _interval(table: dict, key: str, default: float, name: str) -> float:
     if (
         isinstance(value, bool)
         or not isinstance(value, int | float)
-        or not math.isfinite(value)
+        or not _finite(value)
         or value <= 0
     ):
         raise ConfigError(f"{name} must be a number greater than 0, got {value!r}")
@@ -109,7 +117,7 @@ def _delay(table: dict, key: str, default: float, name: str) -> float:
     if (
         isinstance(value, bool)
         or not isinstance(value, int | float)
-        or not math.isfinite(value)
+        or not _finite(value)
         or value < 0
     ):
         raise ConfigError(f"{name} must be a number of seconds, 0 or more, got {value!r}")
