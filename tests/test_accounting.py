@@ -369,26 +369,60 @@ def test_correction_by_uuid_switches_immediately():
     assert (state.active, state.evict) == (9, (7,))
 
 
-def test_provisional_charge_stays_when_a_correction_switches_spools():
+PROVISIONAL_ON_7 = [
+    (BOOT, r(100), loc(7), None),
+    (BOOT, r(200, unloads=1, at_unload=100), loc(7), None),
+    (BOOT, r(200, unloads=1, at_unload=100), loc(7), 42),
+    (BOOT, r(300, unloads=1, at_unload=100), loc(7), 42),
+]
+
+
+def test_correction_moves_a_provisional_charge_like_a_claim():
     # The reloaded spool was assumed at the print start, then the printer reports the
-    # staged spool's UUID: the provisional charge stays on spool 7, with no refund.
-    charges, kinds, state = run(
-        [
-            (BOOT, r(100), loc(7), None),
-            (BOOT, r(200, unloads=1, at_unload=100), loc(7), None),
-            (BOOT, r(200, unloads=1, at_unload=100), loc(7), 42),
-            (BOOT, r(300, unloads=1, at_unload=100), loc(7), 42),
-            (BOOT, r(350, unloads=1, at_unload=100), loc(7, 9), 42),
-        ],
-        matches=lambda spool_id: spool_id == 9,
+    # staged spool's UUID: that settles which spool went in, so the usage since the
+    # unload moves to spool 9, as a claim would move it.
+    _, _, state = run(PROVISIONAL_ON_7)
+    assert state.provisional == Provisional(7, 200, 42)
+    res = account(state, BOOT, r(350, unloads=1, at_unload=100), loc(7, 9), 42, lambda i: i == 9)
+    assert [e.kind for e in res.events] == [EventKind.CORRECTION]
+    assert res.events[0].message == (
+        "printer already has spool 9's filament; switching from spool 7 now and moving "
+        "200 mm from spool 7 (usage since the last unload)"
     )
-    assert kinds[-2:] == [EventKind.CORRECTION, EventKind.PROVISIONAL_KEPT]
-    assert charges == [
-        Charge(7, 100, "extruded"),
-        Charge(7, 100, "extruded"),
+    assert res.charges == [
+        Charge(9, 200, "corrected usage since load"),
+        Charge(7, -200, "moved to corrected spool"),
         Charge(9, 50, "extruded"),
     ]
-    assert (state.active, state.provisional, state.evict) == (9, None, (7,))
+    assert not res.claimed
+    s = res.state
+    assert (s.active, s.assigned, s.evict, s.provisional) == (9, 9, (7,), None)
+    assert s.since_load == {7: 0, 9: 250}
+    assert s.needs_sync
+
+
+def test_correction_of_a_provisional_charge_with_the_old_spool_moved_out():
+    _, _, state = run(PROVISIONAL_ON_7)
+    res = account(state, BOOT, r(300, unloads=1, at_unload=100), loc(9), 42, lambda i: i == 9)
+    assert res.charges == [
+        Charge(9, 200, "corrected usage since load"),
+        Charge(7, -200, "moved to corrected spool"),
+    ]
+    assert (res.state.active, res.state.assigned, res.state.evict) == (9, 9, ())
+
+
+def test_correction_of_a_provisional_charge_moves_only_usage_since_a_reboot():
+    # An unload just before a reboot can be missed, so as for a claim, only usage since
+    # the reboot moves. The rest of the provisional charge stays on spool 7.
+    _, _, state = run([*PROVISIONAL_ON_7, (BOOT + 1, r(40), loc(7), 42)])
+    assert state.provisional == Provisional(7, 240, 42)
+    res = account(state, BOOT + 1, r(40), loc(7, 9), 42, lambda i: i == 9)
+    assert res.events[0].message.endswith("moving 40 mm from spool 7 (usage since the last reboot)")
+    assert res.charges == [
+        Charge(9, 40, "corrected usage since load"),
+        Charge(7, -40, "moved to corrected spool"),
+    ]
+    assert (res.state.active, res.state.provisional) == (9, None)
 
 
 def test_print_start_with_staged_swap_warns_and_keeps_old_spool():
