@@ -58,23 +58,48 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass, field, fields, replace
-from enum import StrEnum
+from enum import Enum, StrEnum, auto
 
 from .models import ToolReading
 
 
+class Report(Enum):
+    """How the bridge reports an event, by its kind."""
+
+    # Something that happened this poll: logged once and recorded in the ledger.
+    INFO = auto()
+    # The same, for an event that needs the user's attention.
+    WARNING = auto()
+    # A condition that `account()` repeats every poll while it lasts: logged when it
+    # starts, changes, and ends, and not recorded.
+    LASTING = auto()
+    # Not reported. It's only emitted on polls with usage, so the bridge reports the
+    # condition from the tool state instead.
+    STATE = auto()
+
+
 class EventKind(StrEnum):
+    """What an event is about, and how it's reported: `Report.INFO` unless it says."""
+
+    report: Report
+
+    def __new__(cls, value: str, report: Report = Report.INFO) -> EventKind:
+        kind = str.__new__(cls, value)
+        kind._value_ = value
+        kind.report = report
+        return kind
+
     BASELINE = "baseline"
     REBOOT = "reboot"
     UNLOAD = "unload"
-    AMBIGUOUS = "ambiguous"
+    AMBIGUOUS = "ambiguous", Report.LASTING
     SWAP_STAGED = "swap_staged"
     SWAP_COMMITTED = "swap_committed"
-    SWAP_UNCONFIRMED = "swap_unconfirmed"
+    SWAP_UNCONFIRMED = "swap_unconfirmed", Report.WARNING
     SWAP_CONFIRMED = "swap_confirmed"
-    SWAP_ASSUMED = "swap_assumed"
-    STAGED_AT_PRINT = "staged_at_print"
-    STAGED_AT_REBOOT = "staged_at_reboot"
+    SWAP_ASSUMED = "swap_assumed", Report.WARNING
+    STAGED_AT_PRINT = "staged_at_print", Report.WARNING
+    STAGED_AT_REBOOT = "staged_at_reboot", Report.WARNING
     PROVISIONAL_KEPT = "provisional_kept"
     CLAIMED = "claimed"
     CLAIM_CONFIRMED = "claim_confirmed"
@@ -82,26 +107,14 @@ class EventKind(StrEnum):
     STAGING_CANCELLED = "staging_cancelled"
     ACTIVE_UNASSIGNED = "active_unassigned"
     ASSIGNMENT_CHANGED = "assignment_changed"
-    HOLD_EMPTY = "hold_empty"
-    HOLD_UNASSIGNED = "hold_unassigned"
-    HOLD_DELETED = "hold_deleted"
+    HOLD_EMPTY = "hold_empty", Report.LASTING
+    HOLD_UNASSIGNED = "hold_unassigned", Report.LASTING
+    # The bridge logs when a hold for a deleted spool starts and ends, from
+    # `ToolState.deleted_spool`.
+    HOLD_DELETED = "hold_deleted", Report.STATE
     HELD_CHARGED = "held_charged"
-    LOST_UNASSIGNED = "lost_unassigned"
-    COUNTER_ANOMALY = "counter_anomaly"
-
-
-# Events that need the user's attention.
-WARNINGS = frozenset(
-    {
-        EventKind.AMBIGUOUS,
-        EventKind.SWAP_UNCONFIRMED,
-        EventKind.SWAP_ASSUMED,
-        EventKind.STAGED_AT_PRINT,
-        EventKind.STAGED_AT_REBOOT,
-        EventKind.LOST_UNASSIGNED,
-        EventKind.COUNTER_ANOMALY,
-    }
-)
+    LOST_UNASSIGNED = "lost_unassigned", Report.WARNING
+    COUNTER_ANOMALY = "counter_anomaly", Report.WARNING
 
 
 @dataclass(frozen=True)

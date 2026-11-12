@@ -18,9 +18,9 @@ import httpx
 
 from . import drift, printer_sync
 from .accounting import (
-    WARNINGS,
     EventKind,
     Provisional,
+    Report,
     ToolState,
     account,
     hold_deleted,
@@ -33,14 +33,6 @@ from .spoolman import FieldTypeError, Spoolman
 from .state import PrinterState, Runout, State
 
 log = logging.getLogger("spoolman_prusalink")
-
-# Events that repeat every poll while a condition lasts. Log them only when they change.
-_REPEATING = {
-    EventKind.HOLD_EMPTY,
-    EventKind.HOLD_UNASSIGNED,
-    EventKind.HOLD_DELETED,
-    EventKind.AMBIGUOUS,
-}
 
 # A tool note is (what it's about, text). A changed text for the same identity is the
 # same problem with new detail; a note ends when its identity goes away.
@@ -574,14 +566,14 @@ class PrinterBridge:
 
             notes: list[Note] = []
             for ev in result.events:
-                if ev.kind is EventKind.HOLD_DELETED:
-                    # Only reported on polls with usage to hold; _note_hold logs the
-                    # hold's start and end.
+                report = ev.kind.report
+                if report is Report.STATE:
                     continue
-                if ev.kind in _REPEATING:
+                if report is Report.LASTING:
+                    # Logged only when it starts, changes, and ends.
                     notes.append((ev.kind, f"[{location}] {ev.message}"))
                     continue
-                level = logging.WARNING if ev.kind in WARNINGS else logging.INFO
+                level = logging.WARNING if report is Report.WARNING else logging.INFO
                 log.log(level, "[%s] %s", location, ev.message)
                 events.append(
                     {

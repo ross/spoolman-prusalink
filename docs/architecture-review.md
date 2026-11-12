@@ -240,18 +240,16 @@ The order of the steps is real: unload, claim, assignment, print start,
 usage. The length isn't the problem. These are:
 
 - **Step 3 is a 13-branch `elif` chain** where order is priority.
-- **Event classification is split.** `WARNINGS` is in `accounting.py`,
-  `_REPEATING` is in `app.py`, and `process()` has a special case for
-  `HOLD_DELETED`. `ACTIVE_UNASSIGNED` is used for five different messages,
-  including "is back in the location", and `ASSIGNMENT_CHANGED` for two.
+- **Two event kinds are overloaded.** `ACTIVE_UNASSIGNED` is used for five
+  different messages, including "is back in the location", and
+  `ASSIGNMENT_CHANGED` for two.
 
 The rework is in two parts. Neither changes behavior, and the existing
 tests are the check.
 
 Part 1, a small stack of its own:
 
-- **One event table** gives each kind its severity and whether it repeats.
-  Split the overloaded kinds.
+- **Split the overloaded kinds**, so that a kind has one meaning.
 
 Part 2, with B6: each numbered step becomes a function over `last` and
 `current`. B6 gives events fields, which already rewrites every `event()`

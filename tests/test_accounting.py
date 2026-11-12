@@ -8,6 +8,7 @@ from spoolman_prusalink.accounting import (
     EventKind,
     Notice,
     Provisional,
+    Report,
     Result,
     SwapFlag,
     ToolState,
@@ -1687,3 +1688,16 @@ def test_hold_deleted_keeps_a_state_legal():
         _, _, state = run(steps)
         assert state.swap is not None or state.provisional is not None
         assert violations(hold_deleted(state, 7, 25)) == []
+
+
+# Event kinds
+
+
+def test_an_event_kind_says_how_it_is_reported():
+    assert EventKind.UNLOAD.report is Report.INFO  # The default.
+    assert EventKind.SWAP_UNCONFIRMED.report is Report.WARNING
+    assert EventKind.AMBIGUOUS.report is Report.LASTING
+    assert EventKind.HOLD_DELETED.report is Report.STATE
+    # The value is the name alone, as the ledger and saved notices store it.
+    assert EventKind("ambiguous") is EventKind.AMBIGUOUS
+    assert json.dumps(EventKind.AMBIGUOUS) == '"ambiguous"'
