@@ -177,10 +177,7 @@ def fill(tool, material):
 
     Only the filament and its stored type change. The test sets the counters itself.
     """
-    tool.material = None if material is None else replace(material)
-    tool.loaded = material is not None
-    if material is not None and material.adhoc:
-        tool.previous = replace(material)
+    tool.fill(material)
 
 
 def add_station(sim, name="default"):
@@ -286,10 +283,10 @@ def jobs(station):
     for e in station.sim.events:
         if e.printer != station.printer.name:
             continue
-        if e.kind == "job" and "(sync)" in e.text and e.text.endswith(" started"):
+        if e.kind == "job" and e.data and e.data["kind"] == "sync":
             started = True
-        elif e.kind == "request" and e.text.startswith("PUT"):
-            if started and e.text.endswith(" 201"):
+        elif e.kind == "request" and e.data["method"] == "PUT":
+            if started and e.data["status"] == 201:
                 found.append(e.data["body"])
             started = False
     return found
@@ -297,7 +294,7 @@ def jobs(station):
 
 def refused(station):
     """How many uploads the printer refused with 409."""
-    return sum(1 for e in station.requests("PUT") if e.text.endswith(" 409"))
+    return sum(1 for e in station.requests("PUT") if e.data["status"] == 409)
 
 
 def answer(status, method=None):

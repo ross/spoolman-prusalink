@@ -91,7 +91,7 @@ curl -X POST -H 'Content-Type: application/json' \
 ```
 
 Actions: `load`, `unload`, `extrude`, `retract`, `select_tool`,
-`start_print`, `pause`, `resume`, `cancel`, `dismiss`, `runout`, `jam`,
+`start_print`, `pause`, `resume`, `cancel`, `dismiss`, `home`, `runout`, `jam`,
 `clear_jam`, `reboot`, `set_power`, `set_fault`, `set_firmware`,
 `set_sensor_fault`, `set_stuck_write`, `set_tool_enabled`,
 `set_auto_accept`, `counter_step_back`, `set_extruded_at_unload`,
