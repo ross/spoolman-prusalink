@@ -120,7 +120,7 @@ To serve several printers from one bridge, replace `[printer]` and `[[tools]]`
 in the config file with a `[[printers]]` list. Each entry has a `name`, a
 `url`, the API key as `api_key` or as `api_key_env` naming the environment
 variable that holds it, its own `[[printers.tools]]` entries, and any of
-any of the other `[printer]` settings: `gcode_preamble`, `sync_storage`,
+the other `[printer]` settings: `gcode_preamble`, `sync_storage`,
 `sync_file`, `printer_sync`, `sync_delay`, `sync_drift`, `flag_drift` and
 `length_factor`. Each printer has its own value, and an entry that doesn't set
 one takes the default:
