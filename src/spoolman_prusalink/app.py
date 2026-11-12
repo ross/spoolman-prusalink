@@ -1246,8 +1246,9 @@ class Bridge:
     _field_failing: dict[str, str] = field(default_factory=dict)
     # The status or error code of a charge that's stuck in the outbox, if one is.
     _charge_failing: str | None = None
-    # Active spools missing from Spoolman's list that turned out to be archived, looked
-    # up once each. Kept while active or flagged, so their flag can be set and cleared.
+    # Active or flagged spools missing from Spoolman's list that turned out to be
+    # archived, looked up once each. Kept while active or flagged, so their flag can be
+    # set and cleared.
     _archived: dict[int, Spool] = field(default_factory=dict)
     # Claimed spools outside every tool's location, with the location each was last
     # logged in.
@@ -1797,11 +1798,32 @@ class Bridge:
         changed = False
         for spool_id in sorted(set(self._flags) | set(self.state.flagged)):
             want = self._flags.get(spool_id)
-            if spool_id not in current:
-                if want is None:
-                    self.state.flagged.remove(spool_id)  # Spool deleted or archived.
+            if spool_id not in current and spool_id in self.state.flagged:
+                # A spool the bridge flagged left the list. An archived one is looked up
+                # once and kept, like an archived active spool, so its flag is kept current
+                # and a stale one is cleared.
+                try:
+                    found = await self.spoolman.spool(spool_id)
+                except (httpx.HTTPError, ValueError, KeyError) as e:
+                    if _record(self._flag_failing, spool_id, e):
+                        log.warning("can't look up flagged spool %d: %s", spool_id, e)
+                    else:
+                        log.debug("can't look up flagged spool %d: %s", spool_id, e)
+                    continue
+                if found is None:
+                    self.state.flagged.remove(spool_id)  # Deleted, so there's no flag left.
                     changed = True
-                continue
+                    if self._flag_failing.pop(spool_id, None) is not None:
+                        log.info(
+                            "spool %d was deleted; its flag no longer needs updating", spool_id
+                        )
+                    continue
+                if found.archived:
+                    self._archived[spool_id] = found
+                # Otherwise it was unarchived since the list was read; next poll lists it.
+                current[spool_id] = found.flag
+            if spool_id not in current:
+                continue  # Not listed, and the bridge never flagged it: leave it alone.
             if current[spool_id] != want:
                 try:
                     await self.spoolman.set_extra_text(spool_id, key, want)

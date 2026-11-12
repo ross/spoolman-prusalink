@@ -211,7 +211,7 @@ current and that the scenario rows name their tests.
 | M5a | `test_spoolman.py::test_m5a_weight_edited_before_a_charge` | A weight edited between the poll's spool read and a charge still clears the runout flag. |
 | M6 | `test_configs.py::test_m6_flag_field_off_leaves_every_note` | flag_field off: notes in the field stay on every spool, flagged or not. |
 | M6 | `test_spoolman.py::test_m6_flag_write_fails` | Writing a flag fails: logged once, retried each poll, and the write logged when it works. |
-| M6 | `test_spoolman.py::test_m6_flagged_spool_gone_while_its_flag_fails` | Spool deleted or archived while its flag fails: end logged once; stale flag open (#120). |
+| M6 | `test_spoolman.py::test_m6_flagged_spool_gone_while_its_flag_fails` | Spool deleted or archived while its flag fails: end logged once; archived flag cleared. |
 | M6 | `test_spoolman.py::test_m6_flags_by_others_left_alone` | A flag someone else wrote stays while the bridge sets and clears its own elsewhere. |
 | M7 | `test_spoolman.py::test_m7_density_edit_applies_to_later_charges` | Density edited in Spoolman: later charges use the new one, earlier aren't recalculated. |
 | K1 | `test_swaps.py::test_k1_claim_handled_once_when_clearing_fails` | Clearing a claim's box fails: the claim is handled once, and the failure logged once. |
