@@ -311,7 +311,7 @@ class World:
         default_factory=lambda: {"uuid": UUID_FIELD, "flag": FLAG_FIELD, "claim": CLAIM_FIELD}
     )
     # Runs before the simulator serves each request, with its method and path. It can
-    # return a response to send instead, or `simulator.prusalink.DROP` to drop the
+    # return an `Answer` to send instead, or `simulator.prusalink.DROP` to drop the
     # connection; None serves the request as usual.
     before_request: Callable[[str, str], Reply] | None = None
     # --- Several printers (world_printers; see integration/printers.py) ---
