@@ -1,14 +1,16 @@
-"""Spool swaps and claims: docs/scenarios.md rows S1 to S14."""
+"""Spool swaps and claims: docs/scenarios.md rows S1 to S14, and the claim rows K1 and K2."""
 
 from __future__ import annotations
 
 import logging
 import uuid
+from datetime import datetime, timedelta
 
 import pytest
 
 from integration.conftest import (
     ASA,
+    CLAIM_FIELD,
     LOAD_MM,
     PETG,
     PLA,
@@ -21,7 +23,7 @@ from integration.conftest import (
     logged,
     print_spec,
 )
-from integration.faults import set_extra_text
+from integration.faults import archive_spool, set_extra_text
 from integration.temperatures import TEMPERATURES
 from simulator.model import State
 
@@ -231,6 +233,49 @@ async def test_s1_tag_uuid_conflict_is_flagged(world: World, caplog: pytest.LogC
     await w.poll()
     assert await w.flag("B") is None
     assert w.requests("PUT") == []
+
+
+async def test_s1_tag_uuid_of_an_archived_spool_is_refused(
+    world: World, caplog: pytest.LogCaptureFixture
+):
+    """The tag's UUID belongs to an archived spool: not adopted, logged once, not retried."""
+    caplog.set_level(logging.INFO, logger="spoolman_prusalink")
+    w = world
+    b, c = w.spools["B"], w.spools["C"]
+    tag = str(uuid.uuid4())
+    await set_extra_text(w.spoolman.client, c, UUID_FIELD, tag)
+    await archive_spool(w.spoolman.client, c)
+
+    # Count the bridge's reads of the archived spools, where it finds the UUID's owner.
+    archived_reads: list[str] = []
+
+    async def count_archived(request):
+        if request.method == "GET" and "allow_archived" in request.url.params:
+            archived_reads.append(str(request.url))
+        return None
+
+    w.spoolman_faults.hook = count_archived
+    await s1_swap_to_b(w)
+    records = await w.swap_cycle(
+        poll_every=0.3, source="tag", name=PETG[0], color=PETG[1], uuid=tag
+    )
+    records += await w.poll()
+    assert w.charged(records, "B") == LOAD_MM
+    refused = f"spool {b} can't take instance UUID {tag} from the printer: archived spool {c}"
+    assert count(caplog, logging.INFO, refused) == 1
+    assert len(archived_reads) == 1
+    assert await w.spoolman.extra(b, UUID_FIELD) is None
+    assert await w.spoolman.extra(c, UUID_FIELD) == tag
+
+    # Later polls don't look again, and the tagged tool still isn't written (Q11).
+    for _ in range(3):
+        w.advance(2.0)
+        await w.poll()
+    assert len(archived_reads) == 1
+    assert count(caplog, logging.INFO, refused) == 1
+    assert await w.spoolman.extra(b, UUID_FIELD) is None
+    assert w.requests("PUT") == []
+    assert w.material() == (PETG[0], PETG[1], tag)
 
 
 async def test_s2_filament_first_swap(world: World):
@@ -934,3 +979,179 @@ async def test_s12_spoolman_corrected_to_the_loaded_uuid(world: World):
     records = await w.poll()
     assert w.charged(records, "B") == 15
     assert w.requests("PUT") == []  # The printer already shows B.
+
+
+async def test_s4_claiming_the_reloaded_spool_confirms_it(
+    world: World, caplog: pytest.LogCaptureFixture
+):
+    """S4's provisional charge, then the reloaded spool claimed: confirmed, nothing moves."""
+    caplog.set_level(logging.INFO, logger="spoolman_prusalink")
+    w = world
+    a = w.spools["A"]
+    await baseline(w)
+    unloaded = await unconfirmed_swap(w)
+    at_unload = w.tool.extruded_at_unload
+
+    await w.swap_cycle(poll_every=0.3, source="tag", name=PLA[0], color=PLA[1], uuid=w.uuids["A"])
+    await w.poll()
+    await w.run_until(lambda: w.printer.job is None)
+    records = await w.start_print(print_spec())
+    assert len(events(records, "swap_assumed")) == 1
+    await w.finish_print()
+    provisional = w.counter - at_unload
+    flag = await w.flag("A")
+    assert flag is not None and f" {provisional} mm (≈ " in flag
+
+    # The user ticks the box on A, the spool already active: it's confirmed as loaded.
+    await w.claim("A")
+    records = await w.poll()
+    assert [e["message"] for e in events(records, "claim_confirmed")] == [
+        f"spool {a} claimed: confirmed as loaded, nothing moves; the {provisional} mm "
+        "provisional charge stays"
+    ]
+    assert events(records, "claimed") == []
+    assert charges(records) == []
+    assert w.bridge.printers[0].tools[0].provisional is None
+    assert await w.flag("A") is None
+    assert await w.spoolman.extra(a, CLAIM_FIELD) is None
+    assert count(caplog, logging.INFO, f"cleared the claim on spool {a}") == 1
+    assert await w.spoolman.location(a) == w.tool_location
+
+    # Nothing moved: everything since the unload stays on A.
+    assert charged(w.since(unloaded), a) == provisional
+    assert {r["spool_id"] for r in charges(w.since(unloaded))} == {a}
+
+
+async def test_k1_claim_handled_once_when_clearing_fails(
+    world: World, caplog: pytest.LogCaptureFixture
+):
+    """Clearing a claim's box fails: the claim is handled once, and the failure logged once."""
+    caplog.set_level(logging.DEBUG, logger="spoolman_prusalink")
+    w = world
+    a, b = w.spools["A"], w.spools["B"]
+    await baseline(w)
+    await stage_b(w, caplog)
+    w.printer.extrude(0, 30)
+    records = await w.poll()
+    assert w.charged(records, "A") == 30
+
+    # Spoolman refuses to clear B's box, poll after poll.
+    faults = w.spoolman_faults
+    clear = f"/api/v1/spool/{b}"
+    faults.answer("PATCH", clear, 500, times=None, containing=CLAIM_FIELD.encode())
+    await w.claim("B")
+    mark = w.mark()
+    for _ in range(2):
+        await w.poll()
+    records = w.since(mark)
+    assert [e["message"] for e in events(records, "claimed")] == [
+        f"spool {b} claimed in place of spool {a}: moved 30 mm from spool {a} "
+        "(usage since the last reboot)"
+    ]
+    assert [r["use_length"] for r in charges(records, b)] == [30.0]
+    assert w.charged(records, "A") == -30
+    assert await w.spoolman.extra(b, CLAIM_FIELD) is True
+    assert w.bridge.state.claimed == [b]
+    cant = f"can't clear the claim on spool {b}"
+    assert count(caplog, logging.WARNING, cant) == 1
+    assert count(caplog, logging.DEBUG, f"still {cant}") == 1
+    assert faults.requests.count(f"PATCH {clear} 500") == 2
+
+    # The user unticks the box by hand: the bridge lets the claim go, and says so once.
+    faults.restore()
+    resp = await w.spoolman.client.patch(clear, json={"extra": {CLAIM_FIELD: "false"}})
+    resp.raise_for_status()
+    await w.run_until(lambda: w.printer.job is None)  # The write of B queued at the claim.
+    w.printer.extrude(0, 10)
+    records = await w.poll()
+    records += await w.poll()
+    assert events(records, "claimed") == []
+    assert w.charged(records, "B") == 10
+    assert w.charged(records, "A") == 0
+    assert w.bridge.state.claimed == []
+    assert count(caplog, logging.INFO, f"spool {b} no longer needs its claim cleared") == 1
+    assert count(caplog, logging.WARNING, cant) == 1
+
+
+@pytest.mark.parametrize("newer", ["staged", "active"])
+async def test_k2_two_claims_in_one_tool(
+    world: World, caplog: pytest.LogCaptureFixture, newer: str
+):
+    """Two claims in one tool in one poll: the most recently used spool wins, once.
+
+    The staged spool B has the lower ID and the active spool C the higher, and either is
+    the one used last, so only `last_used` can make the choice.
+    """
+    caplog.set_level(logging.INFO, logger="spoolman_prusalink")
+    w = world
+    b, c = w.spools["B"], w.spools["C"]
+    await baseline(w)
+
+    # S1 to C: C is active, charged its load and some printing.
+    await w.move("C", w.tool_location)
+    await w.poll()
+    await w.unload()
+    records = await w.poll()
+    assert len(events(records, "swap_committed")) == 1
+    await w.swap_cycle(poll_every=0.3, source="tag", name=ASA[0], color=ASA[1])
+    await w.poll()
+    w.printer.extrude(0, 30)
+    records = await w.poll()
+    assert w.charged(records, "C") == 30
+    loaded = LOAD_MM + 30
+
+    # B goes into the location too, so it's staged. One of the two is used in Spoolman
+    # after C's last charge, then both boxes are ticked before the next poll.
+    await w.move("B", w.tool_location)
+    records = await w.poll()
+    assert len(events(records, "swap_staged")) == 1
+    winner, loser = (b, c) if newer == "staged" else (c, b)
+    last_used = datetime.fromisoformat((await w.spoolman.get(c))["last_used"])
+    later = (last_used + timedelta(minutes=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    resp = await w.spoolman.client.patch(f"/api/v1/spool/{winner}", json={"last_used": later})
+    resp.raise_for_status()
+    await w.claim("B")
+    await w.claim("C")
+    mark = w.mark()
+    records = await w.poll()
+    if newer == "staged":
+        assert [e["message"] for e in events(records, "claimed")] == [
+            f"spool {b} claimed in place of spool {c}: moved {loaded} mm from spool {c} "
+            "(usage since the last unload)"
+        ]
+        assert events(records, "claim_confirmed") == []
+        assert w.charged(records, "B") == loaded
+        assert w.charged(records, "C") == -loaded
+        assert await w.spoolman.location(c) != w.tool_location
+    else:
+        assert [e["message"] for e in events(records, "claim_confirmed")] == [
+            f"spool {c} claimed: confirmed as loaded, nothing moves"
+        ]
+        assert events(records, "claimed") == []
+        assert charges(records) == []
+        assert await w.spoolman.location(b) == w.tool_location  # Still staged.
+    chose = (
+        f"[{w.tool_location}] several spools claimed at once: chose spool {winner}, the most "
+        f"recently used, and clearing the claims on spools {loser}"
+    )
+    assert count(caplog, logging.WARNING, chose) == 1
+    assert await w.spoolman.extra(b, CLAIM_FIELD) is None
+    assert await w.spoolman.extra(c, CLAIM_FIELD) is None
+    assert w.bridge.printers[0].tools[0].active == winner
+
+    # Later polls see both boxes clear: nothing else moves, and nothing is logged again.
+    await w.run_until(lambda: w.printer.job is None)
+    w.printer.extrude(0, 10)
+    await w.poll()
+    await w.poll()
+    records = w.since(mark)
+    assert len(events(records, "claimed" if newer == "staged" else "claim_confirmed")) == 1
+    assert w.bridge.printers[0].tools[0].active == winner
+    if newer == "staged":
+        assert w.charged(records, "B") == loaded + 10
+        assert w.charged(records, "C") == -loaded
+    else:
+        assert w.charged(records, "C") == 10
+        assert w.charged(records, "B") == 0
+    assert w.bridge.state.claimed == []
+    assert count(caplog, logging.WARNING, "several spools claimed at once") == 1

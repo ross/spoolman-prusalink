@@ -54,7 +54,13 @@ script/integration --cov=spoolman_prusalink --cov-fail-under=0
   spool loses its location.
 - **Extra fields.** The tests register the `instance_uuid` text field if it's
   missing, because spool A is created with a UUID before the bridge runs. The
-  bridge creates `bridge_flag` and `bridge_claim` itself.
+  bridge creates `bridge_flag` and `bridge_claim` itself. A test that takes
+  `world_fields` as `"fresh"`
+  (`@pytest.mark.parametrize("world_fields", ["fresh"], indirect=True)`)
+  registers nothing, so the bridge sets up every field itself. Fields are
+  shared by every spool, so that world gives the bridge keys of the test's own,
+  such as `it_3fa2c1_flag`, in `w.fields`, and deletes them afterwards. Spool A
+  has no UUID there, in Spoolman or on the printer.
 - **A Core One L.** Every scenario starts with one simulated Core One L
   (`8.1.0`): tool 0 loaded with spool A's PLA and instance UUID, 1000 mm on the
   counter, spool A in the tool's location, and spools B (PETG) and C (ASA) on
@@ -92,6 +98,7 @@ current and that the scenario rows name their tests.
 | S1 | `test_swaps.py::test_s1_spoolman_first_swap` | Spoolman updated before the unload: the swap commits there, the load is the new spool's. |
 | S1 | `test_swaps.py::test_s1_tag_uuid_conflict_is_flagged` | The new spool has a different UUID in Spoolman: flagged, neither overwritten (#66). |
 | S1 | `test_swaps.py::test_s1_tag_uuid_is_adopted` | The new spool has no UUID: it takes the tag's, and nothing is written (#66). |
+| S1 | `test_swaps.py::test_s1_tag_uuid_of_an_archived_spool_is_refused` | The tag's UUID belongs to an archived spool: not adopted, logged once, not retried. |
 | S1 | `test_swaps.py::test_s1_tag_with_other_values_is_left_alone` | Spoolman first, and the tag differs in name, color and temperatures: not written (Q11). |
 | S1 | `test_swaps.py::test_s1_untrusted_tag_is_left_alone` | A tag the bridge didn't see load isn't adopted, written or minted over (#66, Q11). |
 | S2 | `test_swaps.py::test_s2_filament_first_swap` | Filament swapped first: the charge is held, then moves once Spoolman is updated. |
@@ -99,6 +106,7 @@ current and that the scenario rows name their tests.
 | S3 | `test_swaps.py::test_s3_old_spool_moved_back` | Old spool moved out and back: the swap stays open, or closes as of a print start. |
 | S3 | `test_swaps.py::test_s3_spoolman_changed_during_the_load` | Filament first, old spool out mid-load, new one in mid-print: the new spool takes it all. |
 | S3 | `test_swaps.py::test_s3_unload_while_the_location_is_empty` | Unload while the swap's location is empty: closed on the old spool, held usage lost. |
+| S4 | `test_swaps.py::test_s4_claiming_the_reloaded_spool_confirms_it` | S4's provisional charge, then the reloaded spool claimed: confirmed, nothing moves. |
 | S4 | `test_swaps.py::test_s4_same_spool_reloaded_then_print` | Same spool unloaded and reloaded, then a print: provisional charge, kept at the unload. |
 | S5 | `test_swaps.py::test_s5_claim_after_printing_on_the_wrong_spool` | Print charged provisionally to the old spool: claiming the loaded one moves it there. |
 | S5 | `test_swaps.py::test_s5_correction_after_printing_on_the_wrong_spool` | Print charged provisionally to the old spool: moving in the tagged one moves it (#107). |
@@ -139,17 +147,25 @@ current and that the scenario rows name their tests.
 | W11 | `test_writes.py::test_w11_unconfirmed_swap_writes_the_assigned_spool` | Unload with no Spoolman change, then a menu load: the printer gets A written back. |
 | W12 | `test_writes.py::test_w12_staged_spool_waits_for_the_unload` | Write of B due, then C staged: nothing is written until C is unloaded and loaded. |
 | W13 | `test_writes.py::test_w13_sync_job_homes_an_unhomed_printer` | Unhomed after a boot: the sync job homes with G28 O before it writes and ends. |
+| W14 | `test_writes.py::test_w14_edit_after_the_uuid_is_cleared_keeps_the_printers` | UUID cleared in Spoolman, then a color edit: the rewrite keeps the printer's UUID. |
 | W14 | `test_writes.py::test_w14_spoolman_edit_is_written` | A color edit in Spoolman is written to the printer; a name-only edit isn't. |
 | M1 | `test_spoolman.py::test_m1_spoolman_unreachable` | Spoolman unreachable: polls skip and log once; queued charges go in order when back. |
 | M2 | `test_spoolman.py::test_m2_rejected_charge_is_dropped` | A charge Spoolman rejects with a 4xx is dropped with an error; later ones go through. |
+| M3 | `test_spoolman.py::test_m3_404_for_a_spool_no_longer_active_is_dropped` | A 404 on a charge to a spool no longer active is dropped, not held for the next spool. |
 | M3 | `test_spoolman.py::test_m3_charge_to_deleted_spool_is_held` | A charge that 404s because the spool was deleted is held for the next spool. |
+| M3 | `test_spoolman.py::test_m3_delete_and_recreate` | Deleted spool re-created with the printer's UUID: a correction, charged the held usage. |
 | M3 | `test_spoolman.py::test_m3_deleted_active_spool_holds_usage` | Active spool deleted: its usage is held, then charged to the next spool made active. |
+| M3 | `test_spoolman.py::test_m3_deleted_during_an_unconfirmed_swap` | Active spool deleted with an unconfirmed swap open: the swap's usage is held once. |
+| M3 | `test_spoolman.py::test_m3_staged_spool_takes_held_usage_at_print_start` | Active spool deleted with another staged: a print start makes it active and charges it. |
+| M3 | `test_spoolman.py::test_m3_unload_with_no_poll_after_the_extrusion` | Deleted spool found, then extrusion and an unload in one poll: the extrusion is held. |
 | M3a | `test_spoolman.py::test_m3a_archived_active_spool` | Active spool archived: still charged and flagged until the next unload. |
 | M4 | `test_spoolman.py::test_m4_location_renamed` | Location renamed: the spool stays active until the next unload, then usage is held. |
 | M5 | `test_spoolman.py::test_m5_spool_used_past_empty` | Spool used past empty: still charged, a negative weight logged once, no flag. |
 | M5a | `test_spoolman.py::test_m5a_runout_with_plenty_left_is_flagged` | Runout in a started print with over 5% left flags the spool; a weight edit clears it. |
 | M6 | `test_spoolman.py::test_m6_flags_by_others_left_alone` | A flag someone else wrote stays while the bridge sets and clears its own elsewhere. |
 | M7 | `test_spoolman.py::test_m7_density_edit_applies_to_later_charges` | Density edited in Spoolman: later charges use the new one, earlier aren't recalculated. |
+| K1 | `test_swaps.py::test_k1_claim_handled_once_when_clearing_fails` | Clearing a claim's box fails: the claim is handled once, and the failure logged once. |
+| K2 | `test_swaps.py::test_k2_two_claims_in_one_tool` | Two claims in one tool in one poll: the most recently used spool wins, once. |
 | X1 | `test_printers.py::test_x1_spoolman_first_across_printers` | Spool moved LA to LB first: A charges it until its unload, B stages it until its own. |
 | X2 | `test_printers.py::test_x2_filament_first_across_printers` | Unload at A, load at B, then move the spool: B's swap confirms, A's stays open and holds. |
 | X3 | `test_printers.py::test_x3_spool_moved_but_never_loaded_elsewhere` | Spool moved LA to LB with no unload: A charges it, B stages it and flags it at a print. |
@@ -172,6 +188,7 @@ current and that the scenario rows name their tests.
 | T6 | `test_tools.py::test_t6_writes_on_a_multi_tool_model_are_refused` | Writes on a multi-tool model: warned at boot, and a due write flags the spool instead. |
 | T7 | `test_tools.py::test_t7_reboot_restarts_every_tool` | Reboot on a multi-tool printer: each tool's counter restarts, and nothing is charged. |
 | C1 | `test_counters.py::test_c1_reboot_keeps_usage_held_at_the_reboot` | Reboot between prints: usage held then is kept, and goes to the next active spool. |
+| C1 | `test_counters.py::test_c1_usage_held_over_a_reboot_joins_the_open_swap` | Usage held over a reboot with a swap open: charged to the old spool, moved with it. |
 | C2 | `test_counters.py::test_c2_printer_off_for_hours` | Printer off for hours: logged going, hourly and back, idle polls, nothing charged. |
 | C3 | `test_counters.py::test_c3_reboot_and_unload_in_one_poll` | Reboot and an unload in the same poll: the reboot is handled first, then the unload. |
 | C4 | `test_counters.py::test_c4_counter_goes_backward` | Counter goes backward within one boot: an anomaly, no charge, and later use charged. |
@@ -183,6 +200,8 @@ current and that the scenario rows name their tests.
 | B1 | `test_bridge.py::test_b1_first_start` | First start: the counter is the baseline, and use before it isn't charged. |
 | B2 | `test_bridge.py::test_b2_restart_mid_print` | Restart mid-print: one catch-up charge, with no double charge and no loss. |
 | B4 | `test_bridge.py::test_b4_database_lost` | The database lost: a new baseline, use since the last poll lost, the swap forgotten. |
+| B5 | `test_bridge.py::test_b5_field_with_the_wrong_type` | A field key taken by another type: logged once, no flag written, charging unaffected. |
+| B5 | `test_bridge.py::test_b5_fields_registered_on_a_fresh_spoolman` | Fresh Spoolman: the bridge registers its flag, claim and UUID fields as it needs them. |
 <!-- table:end -->
 
 ## Add a scenario

@@ -95,6 +95,9 @@ class SpoolmanHelper:
         self.spools: list[int] = []
         self.filaments: list[int] = []
         self.vendors: list[int] = []
+        # Extra field keys this test owns, deleted at teardown. Only per-test keys go
+        # here: deleting a field drops its values on every spool.
+        self.fields: list[str] = []
 
     async def _post(self, path: str, body: dict) -> dict:
         resp = await self.client.post(path, json=body)
@@ -115,6 +118,17 @@ class SpoolmanHelper:
 
     async def ensure_text_field(self, key: str, name: str) -> None:
         await self.ensure_field(key, name, "text")
+
+    async def fields_by_key(self) -> dict[str, str]:
+        """Every spool extra field Spoolman has, as key -> field type."""
+        resp = await self.client.get("/api/v1/field/spool")
+        resp.raise_for_status()
+        return {f["key"]: f["field_type"] for f in resp.json()}
+
+    async def create_field(self, key: str, name: str, field_type: str) -> None:
+        """Register one of this test's own fields, which teardown deletes."""
+        self.fields.append(key)
+        await self._post(f"/api/v1/field/spool/{key}", {"name": name, "field_type": field_type})
 
     async def vendor(self) -> int:
         data = await self._post("/api/v1/vendor", {"name": f"{self.prefix} vendor"})
@@ -207,6 +221,12 @@ class SpoolmanHelper:
                 resp = await self.client.delete(f"/api/v1/{path}/{i}")
                 if resp.status_code != 404:
                     resp.raise_for_status()
+        # Only this test's own fields: a test that let the bridge register them records
+        # the keys whether or not the bridge got that far.
+        for key in self.fields:
+            resp = await self.client.delete(f"/api/v1/field/spool/{key}")
+            if resp.status_code != 404:
+                resp.raise_for_status()
 
 
 @pytest.fixture
@@ -285,6 +305,10 @@ class World:
     uuids: dict[str, str] = field(default_factory=dict)
     # Tool index -> Spoolman location, as the bridge is configured. Tool 0's is `tool_location`.
     locations: dict[int, str] = field(default_factory=dict)
+    # The bridge's extra field keys: "uuid", "flag" and "claim". See `world_fields`.
+    fields: dict[str, str] = field(
+        default_factory=lambda: {"uuid": UUID_FIELD, "flag": FLAG_FIELD, "claim": CLAIM_FIELD}
+    )
     # Runs before the simulator serves each request, with its method and path.
     before_request: Callable[[str, str], None] | None = None
     # --- Several printers (world_printers; see integration/printers.py) ---
@@ -418,7 +442,7 @@ class World:
         return await self.spoolman.used(self.spools[name])
 
     async def flag(self, name: str) -> str | None:
-        return await self.spoolman.extra(self.spools[name], FLAG_FIELD)
+        return await self.spoolman.extra(self.spools[name], self.fields["flag"])
 
     def charged(self, records: list[dict], name: str) -> float:
         return charged(records, self.spools[name])
@@ -463,6 +487,27 @@ def world_tools(request: pytest.FixtureRequest) -> int:
     return tools
 
 
+@pytest.fixture
+def world_fields(request: pytest.FixtureRequest) -> str:
+    """Whether `world` registers the bridge's extra fields first: "shared" or "fresh".
+
+    "shared", the default, registers the `instance_uuid` field before the bridge runs,
+    because spool A is created with a UUID, and the bridge configured with the usual
+    keys finds `bridge_flag` and `bridge_claim` there from earlier tests.
+
+    "fresh" registers nothing, so the bridge's own field setup runs as on a new
+    Spoolman. Spoolman's fields are shared by every spool, and deleting one drops its
+    values everywhere, so the bridge gets keys of this test's own instead, such as
+    `it_3fa2c1_flag`, in `World.fields`. Spool A has no UUID, in Spoolman or on the
+    printer. Teardown deletes the fields, and any a test makes with
+    `SpoolmanHelper.create_field`. A test asks for it with
+    `@pytest.mark.parametrize("world_fields", ["fresh"], indirect=True)`.
+    """
+    fields = getattr(request, "param", "shared")
+    assert fields in ("shared", "fresh"), "world_fields must be 'shared' or 'fresh'"
+    return fields
+
+
 # --- Several printers (docs/scenarios.md X rows; see integration/printers.py) ---
 @pytest.fixture
 def world_printers(request: pytest.FixtureRequest) -> int:
@@ -487,6 +532,7 @@ async def world(
     world_config: dict,
     world_tools: int,
     world_printers: int,
+    world_fields: str,
 ):
     """The starting point every scenario shares.
 
@@ -509,7 +555,14 @@ async def world(
     locations = {0: tool_location}
     if world_tools == 2:
         locations[1] = f"{prefix} T1"
-    await spoolman.ensure_text_field(UUID_FIELD, "Instance UUID")
+    fresh = world_fields == "fresh"
+    keys = {"uuid": UUID_FIELD, "flag": FLAG_FIELD, "claim": CLAIM_FIELD}
+    if fresh:
+        own = prefix.replace("-", "_")
+        keys = {kind: f"{own}_{kind}" for kind in keys}
+        spoolman.fields.extend(keys.values())
+    else:
+        await spoolman.ensure_text_field(UUID_FIELD, "Instance UUID")
     vendor = await spoolman.vendor()
     uuid_a = str(uuid.uuid4())
     spools = {}
@@ -519,11 +572,11 @@ async def world(
     for name, (material, color), location in setup:
         filament = await spoolman.filament(vendor, material, color)
         spools[name] = await spoolman.spool(
-            filament, location, name, uuid_a if name == "A" else None
+            filament, location, name, uuid_a if name == "A" and not fresh else None
         )
 
     sim = Simulation(Settings(**SETTINGS))
-    a = Material(PLA[0], PLA[1], uuid_a, **WRITTEN)
+    a = Material(PLA[0], PLA[1], None if fresh else uuid_a, **WRITTEN)
     tools = {0: SimTool(0, loaded=True, material=replace(a), previous=replace(a), extruded=1000.0)}
     if world_tools == 2:
         d = Material(*PETG_GREEN, **WRITTEN)
@@ -538,7 +591,7 @@ async def world(
 
     server = TestServer(make_app(sim, printer.name, before_request))
     await server.start_server()
-    uuids = {"A": uuid_a}
+    uuids = {} if fresh else {"A": uuid_a}
     others = await add_printers(world_printers, sim, spoolman, vendor, prefix, KEY, spools, uuids)
     cfg = Config(
         spoolman_url=str(spoolman.client.base_url).rstrip("/"),
@@ -553,6 +606,11 @@ async def world(
             *(other[-1] for other in others),
         ),
         db_file=tmp_path / "bridge.db",
+        **(
+            {"uuid_field": keys["uuid"], "flag_field": keys["flag"], "claim_field": keys["claim"]}
+            if fresh
+            else {}
+        ),
         **world_config,
     )
     bridge = Bridge.from_config(cfg)
@@ -568,6 +626,7 @@ async def world(
         spools,
         uuids,
         locations=locations,
+        fields=keys,
     )
     for name, sim_printer, location, other_server, _ in others:
         w.others[name] = Station(w, name, sim_printer, location, other_server)

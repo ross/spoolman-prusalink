@@ -1,4 +1,4 @@
-"""The bridge itself: docs/scenarios.md rows B1, B2 and B4.
+"""The bridge itself: docs/scenarios.md rows B1, B2, B4 and B5.
 
 B3, a kill between a charge being accepted and the outbox being saved, is a known limit
 with no way in from outside the bridge, so it has no test here.
@@ -6,10 +6,13 @@ with no way in from outside the bridge, so it has no test here.
 
 from __future__ import annotations
 
+import logging
 import uuid
 from pathlib import Path
 
-from integration.conftest import PETG, World, charges, events, print_spec
+import pytest
+
+from integration.conftest import LOAD_MM, PETG, PLA, World, charges, count, events, print_spec
 from simulator.model import State
 
 
@@ -97,3 +100,99 @@ async def test_b4_database_lost(world: World):
     # UUID isn't A's. The tag's name and color aren't compared, since it isn't written.
     drift = await w.flag("A")
     assert drift is not None and "printer filament differs" in drift
+
+
+FRESH = pytest.mark.parametrize("world_fields", ["fresh"], indirect=True)
+
+
+@FRESH
+async def test_b5_fields_registered_on_a_fresh_spoolman(
+    world: World, caplog: pytest.LogCaptureFixture
+):
+    """Fresh Spoolman: the bridge registers its flag, claim and UUID fields as it needs them."""
+    caplog.set_level(logging.INFO, logger="spoolman_prusalink")
+    w = world
+    keys = w.fields
+    b = w.spools["B"]
+    assert not set(keys.values()) & set(await w.spoolman.fields_by_key())
+
+    # The first poll sets up the flag and claim fields, which it reads and clears every poll.
+    records = await w.poll()
+    assert len(events(records, "baseline")) == 1
+    fields = await w.spoolman.fields_by_key()
+    assert fields[keys["flag"]] == "text"
+    assert fields[keys["claim"]] == "boolean"
+    assert keys["uuid"] not in fields
+
+    # An unconfirmed swap's flag goes in the new field.
+    w.printer.extrude(0, 30)
+    await w.unload()
+    records = await w.poll()
+    assert len(events(records, "swap_unconfirmed")) == 1
+    assert w.charged(records, "A") == 30
+    flag = await w.flag("A")
+    assert flag is not None and "unloaded with no Spoolman change" in flag
+
+    # B confirmed and loaded from the menu: the write mints B a UUID, registering the field.
+    await w.move("A", w.shelf)
+    await w.move("B", w.tool_location)
+    await w.poll()
+    await w.swap_cycle(source="preset", name=PETG[0])
+    records = await w.poll()
+    assert w.charged(records, "B") == LOAD_MM
+    w.advance(1.5)
+    fields = await w.spoolman.fields_by_key()
+    assert fields[keys["uuid"]] == "text"
+    minted = await w.spoolman.extra(b, keys["uuid"])
+    assert minted is not None
+    assert w.material() == (PETG[0], PETG[1], minted)
+    assert await w.flag("A") is None
+    assert not logged_trouble(caplog)
+
+
+def logged_trouble(caplog: pytest.LogCaptureFixture) -> bool:
+    return any("spool field" in r.getMessage() for r in caplog.records)
+
+
+@FRESH
+async def test_b5_field_with_the_wrong_type(world: World, caplog: pytest.LogCaptureFixture):
+    """A field key taken by another type: logged once, no flag written, charging unaffected."""
+    caplog.set_level(logging.DEBUG, logger="spoolman_prusalink")
+    w = world
+    a = w.spools["A"]
+    key = w.fields["flag"]
+    await w.spoolman.create_field(key, "Not the bridge's", "integer")
+
+    # Record every request that would write the key, so the test sees the bridge never
+    # tried, not only that Spoolman refused.
+    writes: list[str] = []
+
+    async def note_writes(request):
+        if request.method == "PATCH" and key.encode() in request.content:
+            writes.append(str(request.url))
+        return None
+
+    w.spoolman_faults.hook = note_writes
+    await w.poll()
+    w.printer.extrude(0, 30)
+    await w.unload()
+    records = await w.poll()
+    assert len(events(records, "swap_unconfirmed")) == 1
+    # The same spool reloaded from the menu, still unconfirmed, written back (W11), used.
+    await w.swap_cycle(poll_every=0.3, source="preset", name=PLA[0])
+    await w.run_until(lambda: w.printer.job is None, poll_every=0.3)
+    for _ in range(3):
+        w.printer.extrude(0, 10)
+        await w.poll()
+    assert w.charged(w.since(0), "A") == w.counter - 1000 == 30 + LOAD_MM + 30
+    assert await w.used("A") > 0
+
+    # The bridge would flag A, but leaves the field alone, and says so once.
+    assert "unloaded with no Spoolman change" in w.bridge._flags.get(a, "")
+    assert key not in ((await w.spoolman.get(a)).get("extra") or {})
+    assert (await w.spoolman.fields_by_key())[key] == "integer"
+    trouble = f"can't set up the {key!r} spool field: spool extra field {key!r} exists"
+    assert count(caplog, logging.WARNING, trouble) == 1
+    assert not any(r.levelno > logging.WARNING for r in caplog.records)
+    assert writes == []
+    assert not any("can't update the flag" in r.getMessage() for r in caplog.records)
