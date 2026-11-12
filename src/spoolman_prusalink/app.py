@@ -11,6 +11,8 @@ import uuid
 from collections.abc import Callable, Hashable, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
+from enum import Enum
+from typing import NamedTuple
 
 import httpx
 
@@ -53,8 +55,8 @@ UUID_FIELD_NAME = "Instance UUID"
 CLAIM_FIELD_NAME = "Claim held usage"
 # Sorts a spool that's never been used before any that has.
 _NEVER = datetime.min.replace(tzinfo=UTC)
-# While a service stays unreachable, remind once per this many seconds.
-OUTAGE_REMINDER = 3600
+# While a service stays in trouble, remind once per this many seconds.
+REACH_REMINDER = 3600
 
 
 def _duration(seconds: float) -> str:
@@ -64,41 +66,95 @@ def _duration(seconds: float) -> str:
     return f"{minutes // 60}h {minutes % 60:02d}m"
 
 
-@dataclass
-class Outage:
-    """Log a service going unreachable and coming back, not every failed poll.
+class Trouble(Enum):
+    """What a failed read means for the log."""
 
-    A printer that's switched off is normal, so a connection failure logs once, then
-    an hourly reminder, then a line when the service answers again, at the level
-    the outage was reported at.
+    STARTED = "started"
+    # Unreachable became a bad answer, or the reverse, or a bad answer is a different error.
+    CHANGED = "changed"
+    REMINDER = "reminder"
+    REPEAT = "repeat"
+
+
+class Recovery(NamedTuple):
+    unreachable: bool  # The kind of trouble that ended.
+    lasted: float
+
+
+@dataclass
+class Reachability:
+    """Track whether a service can be read, and for how long it hasn't been.
+
+    The trouble is "unreachable" (a transport error) or a "bad answer" (the service
+    replied, but badly). A bad answer with a different error is a change too, since a
+    wrong key and a server error need different fixes. A transport error's text isn't:
+    refusals and timeouts come and go while a printer is off. This class holds state
+    only. `failed()` and `ok()` report what changed, and the caller logs it.
     """
 
     name: str
     clock: Callable[[], float] = time.monotonic
     since: float | None = None
+    unreachable: bool = False
+    error: str = ""  # The bad answer's error; unused while unreachable.
     _reminded: float = 0.0
 
     @property
     def down(self) -> bool:
-        return self.since is not None
+        """Whether the service is unreachable. A bad answer still counts as up."""
+        return self.since is not None and self.unreachable
 
-    def failed(self, error: Exception) -> None:
+    def failed(self, unreachable: bool, error: str = "") -> Trouble:
         now = self.clock()
+        error = "" if unreachable else error
         if self.since is None:
             self.since = self._reminded = now
-            log.warning("%s unreachable: %s; logging again when it's back", self.name, error)
-        elif now - self._reminded >= OUTAGE_REMINDER:
+            self.unreachable, self.error = unreachable, error
+            return Trouble.STARTED
+        if (unreachable, error) != (self.unreachable, self.error):
+            self.unreachable, self.error = unreachable, error
+            return Trouble.CHANGED
+        if now - self._reminded >= REACH_REMINDER:
             self._reminded = now
-            log.info("%s still unreachable after %s", self.name, _duration(now - self.since))
-        else:
-            log.debug("%s still unreachable: %s", self.name, error)
+            return Trouble.REMINDER
+        return Trouble.REPEAT
 
-    def ok(self) -> None:
-        if self.since is not None:
-            log.warning(
-                "%s reachable again after %s", self.name, _duration(self.clock() - self.since)
-            )
-            self.since = None
+    def ok(self) -> Recovery | None:
+        if self.since is None:
+            return None
+        recovery = Recovery(self.unreachable, self.clock() - self.since)
+        self.since = None
+        return recovery
+
+    def lasting(self) -> str:
+        assert self.since is not None
+        return _duration(self.clock() - self.since)
+
+
+def _log_failed(reach: Reachability, error: Exception, *, unreachable: bool) -> None:
+    """Record a failed read and log what it changed."""
+    trouble = reach.failed(unreachable, str(error))
+    if trouble in (Trouble.STARTED, Trouble.CHANGED):
+        if unreachable:
+            log.warning("%s unreachable: %s; logging again when it's back", reach.name, error)
+        else:
+            log.warning("%s read failed, skipping poll: %s", reach.name, error)
+    elif trouble is Trouble.REMINDER:
+        what = "unreachable" if unreachable else "giving bad answers"
+        log.info("%s still %s after %s", reach.name, what, reach.lasting())
+    else:
+        log.debug("%s read still failing: %s", reach.name, error)
+
+
+def _log_ok(reach: Reachability) -> None:
+    """Record a good read and log the end of any trouble."""
+    recovery = reach.ok()
+    if recovery is None:
+        return
+    if recovery.unreachable:
+        log.warning("%s reachable again after %s", reach.name, _duration(recovery.lasted))
+    else:
+        log.warning("%s reads working again after %s", reach.name, _duration(recovery.lasted))
 
 
 @dataclass
@@ -196,7 +252,7 @@ class PrinterBridge:
     bridge: Bridge
     # How log lines name this printer: "printer" alone when it's the only one.
     label: str = "printer"
-    _printer_outage: Outage = field(init=False)
+    _printer_reach: Reachability = field(init=False)
     _last_notes: dict[int, dict[Hashable, str]] = field(default_factory=dict)
     _last_state: str | None = None
     _pending_writes: list[int] = field(default_factory=list)  # Tools to write when idle.
@@ -234,7 +290,7 @@ class PrinterBridge:
     _adopts: dict[int, tuple[int, str, bool]] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        self._printer_outage = Outage(self.label)
+        self._printer_reach = Reachability(self.label)
         kept = self.bridge.state.printers.get(self.name)
         if kept is not None:
             self._seen_uuid = {t: (u, s, False, d) for t, (u, s, d) in kept.seen_uuids.items()}
@@ -269,11 +325,11 @@ class PrinterBridge:
             job_id = await self._user_job_id(status)
         except httpx.TransportError as e:
             # Connection refused, timeouts and the like: most often the printer is off.
-            self._printer_outage.failed(e)
+            _log_failed(self._printer_reach, e, unreachable=True)
             self._idle_since = None
             return None
         except NoFilamentEndpoint as e:
-            self._printer_outage.ok()
+            _log_ok(self._printer_reach)
             self._idle_since = None
             if not self._unsupported:
                 self._unsupported = True
@@ -285,14 +341,10 @@ class PrinterBridge:
                 )
             return None
         except (httpx.HTTPError, ValueError, KeyError) as e:
-            self._printer_outage.ok()  # It answered, even if badly.
-            self.bridge._problems.fail(
-                (self._key, "read"), e, "%s read failed, skipping poll: %s", self.label, e
-            )
+            _log_failed(self._printer_reach, e, unreachable=False)
             self._idle_since = None
             return None
-        self._printer_outage.ok()
-        self.bridge._problems.clear((self._key, "read"), "%s reads working again", self.label)
+        _log_ok(self._printer_reach)
         self._note_state(status.state)
         if self._unsupported:
             self._unsupported = False
@@ -1248,7 +1300,7 @@ class Bridge:
     printers: list[PrinterBridge] = field(init=False, default_factory=list)
     _ready_fields: set[str] = field(default_factory=set)
     _flags: dict[int, str] = field(default_factory=dict)  # Desired flags from the last poll.
-    _spoolman_outage: Outage = field(default_factory=lambda: Outage("Spoolman"))
+    _spoolman_reach: Reachability = field(default_factory=lambda: Reachability("Spoolman"))
     _problems: Once = field(default_factory=Once)
     # Active spools missing from Spoolman's list that turned out to be archived, looked
     # up once each. Kept while active or flagged, so their flag can be set and cleared.
@@ -1337,14 +1389,12 @@ class Bridge:
         try:
             spools = await self.spoolman.spools()
         except httpx.TransportError as e:
-            self._spoolman_outage.failed(e)
+            _log_failed(self._spoolman_reach, e, unreachable=True)
             return
         except (httpx.HTTPError, ValueError, KeyError) as e:
-            self._spoolman_outage.ok()  # It answered, even if badly.
-            self._problems.fail("Spoolman read", e, "Spoolman read failed, skipping poll: %s", e)
+            _log_failed(self._spoolman_reach, e, unreachable=False)
             return
-        self._spoolman_outage.ok()
-        self._problems.clear("Spoolman read", "Spoolman reads working again")
+        _log_ok(self._spoolman_reach)
         flags: dict[int, list[str]] = {}
         claims = self._claims(spools, flags)
         changed = False
@@ -1823,7 +1873,7 @@ class Bridge:
 
     def interval(self) -> float:
         """Poll at the printing rate while any reachable printer is busy or not yet read."""
-        up = [p for p in self.printers if not p._printer_outage.down]
+        up = [p for p in self.printers if not p._printer_reach.down]
         if any(p._last_state is None or p._last_state in BUSY_STATES for p in up):
             return self.config.poll_printing
         return self.config.poll_idle

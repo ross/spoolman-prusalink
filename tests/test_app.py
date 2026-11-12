@@ -326,7 +326,7 @@ async def test_printer_outage_logged_on_change(tmp_path, caplog):
     bridge = Bridge(
         cfg, Spoolman("http://s", transport=t), {"default": PrusaLink("http://p", "k", transport=t)}
     )
-    bridge.printers[0]._printer_outage.clock = lambda: now["v"]
+    bridge.printers[0]._printer_reach.clock = lambda: now["v"]
     caplog.set_level("INFO")
 
     for _ in range(5):
@@ -342,18 +342,68 @@ async def test_printer_outage_logged_on_change(tmp_path, caplog):
 
     up["v"] = True
     await bridge.poll()
-    # The outage and its end show at the same level; the reminder in between is INFO.
+    # The printer now answers, badly: the trouble changes kind, which logs at WARNING.
     outage = [
         (r.levelname, r.getMessage().split(":")[0])
         for r in caplog.records
-        if "reachable" in r.getMessage() and r.levelno >= logging.INFO
+        if r.getMessage().startswith("printer") and r.levelno >= logging.INFO
     ]
     assert outage == [
         ("WARNING", "printer unreachable"),
         ("INFO", "printer still unreachable after 3h 00m"),
-        ("WARNING", "printer reachable again after 3h 00m"),
+        ("WARNING", "printer read failed, skipping poll"),
     ]
-    assert not bridge.printers[0]._printer_outage.down
+    assert not bridge.printers[0]._printer_reach.down
+    await bridge.aclose()
+
+
+async def test_printer_kind_change_and_bad_answer_reporting(tmp_path, caplog):
+    mode = {"v": "refuse"}
+    now = {"v": 0.0}
+
+    def handler(request):
+        if mode["v"] == "refuse":
+            raise httpx.ConnectError("refused")
+        return httpx.Response(401)
+
+    cfg = make_config(tmp_path)
+    t = httpx.MockTransport(handler)
+    bridge = Bridge(
+        cfg, Spoolman("http://s", transport=t), {"default": PrusaLink("http://p", "k", transport=t)}
+    )
+    reach = bridge.printers[0]._printer_reach
+    reach.clock = lambda: now["v"]
+    caplog.set_level("DEBUG")
+
+    def lines(text):
+        return [
+            (r.levelname, r.getMessage().split(":")[0])
+            for r in caplog.records
+            if text in r.getMessage()
+        ]
+
+    await bridge.poll()
+    assert reach.down
+    mode["v"] = "bad"  # Answering badly is a new kind of trouble, and counts as up.
+    await bridge.poll()
+    assert not reach.down
+    assert bridge.interval() == cfg.poll_printing  # Up, and not yet read.
+    now["v"] += 60
+    await bridge.poll()  # Same kind again: DEBUG.
+    now["v"] += 3600
+    await bridge.poll()  # An hour on: the reminder.
+    mode["v"] = "refuse"
+    await bridge.poll()
+    mode["v"] = "bad"
+    await bridge.poll()
+    assert [x for x in lines("printer") if x[0] != "DEBUG"] == [
+        ("WARNING", "printer unreachable"),
+        ("WARNING", "printer read failed, skipping poll"),
+        ("INFO", "printer still giving bad answers after 1h 01m"),
+        ("WARNING", "printer unreachable"),
+        ("WARNING", "printer read failed, skipping poll"),
+    ]
+    assert ("DEBUG", "printer read still failing") in lines("still failing")
     await bridge.aclose()
 
 

@@ -124,10 +124,11 @@ drift, and color don't change.
 One tick serves every printer:
 
 1. `flush()` the shared outbox. If that fails, the tick ends, as today.
-2. Read every printer's status and filament. A printer that's off is logged
-   through its own `Outage`; one that answers with an error is logged once
-   per distinct error. Either is skipped for this tick, and the others carry
-   on. If no printer answers, the tick ends here, as today with one.
+2. Read every printer's status and filament. A printer that's off or that answers
+   with an error is tracked by its own `Reachability`: one warning when the
+   trouble starts, changes kind, or answers with a new error, an hourly
+   reminder, and one warning when it ends. Either is skipped for this tick,
+   and the others carry on. If no printer answers, the tick ends here, as today with one.
 3. Read Spoolman once.
 4. For each printer that answered: `check_missing()` and `process()`. A
    printer that didn't answer contributes the flag texts from its last

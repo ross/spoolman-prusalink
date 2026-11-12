@@ -982,7 +982,7 @@ async def test_printer_read_error_logged_once(tmp_path, caplog):
     printer.error = None
     for _ in range(2):
         await bridge.poll()
-    assert levels(caplog, "printer reads working again") == ["WARNING"]
+    assert levels(caplog, "printer reads working again after") == ["WARNING"]
     await bridge.aclose()
 
 
@@ -998,12 +998,12 @@ async def test_spoolman_read_problems_logged_once(tmp_path, caplog):
     fake.fail_read = 500
     for _ in range(3):
         await bridge.poll()
-    assert levels(caplog, "Spoolman reachable again") == ["WARNING"]
-    assert caplog.text.count("Spoolman read failed") == 1
+    assert "Spoolman reachable again" not in caplog.text  # It answers, badly.
+    assert levels(caplog, "Spoolman read failed") == ["WARNING"]
     fake.fail_read = None
     for _ in range(2):
         await bridge.poll()
-    assert levels(caplog, "Spoolman reads working again") == ["WARNING"]
+    assert levels(caplog, "Spoolman reads working again after") == ["WARNING"]
     await bridge.aclose()
 
 
