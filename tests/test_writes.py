@@ -2937,6 +2937,34 @@ async def test_watched_tag_load_is_adopted(tmp_path, before):
     await bridge.aclose()
 
 
+async def test_adopted_uuid_is_stored_in_lowercase(tmp_path):
+    bridge, fake, station = make(tmp_path, [spool(20)], uuid_field="instance_uuid")
+    fill(station.tool, None)
+    await bridge.poll()
+    fill(station.tool, tagged(TAG_K.upper()))
+    await bridge.poll()
+    assert stored_uuid(fake, 20) == TAG_K
+    await bridge.aclose()
+
+
+async def test_watched_tag_of_an_archived_spool_is_refused_once(tmp_path, caplog):
+    """An archived spool has the tag's UUID: spool 20 doesn't take it, and the bridge
+    doesn't ask Spoolman about the pair again."""
+    bridge, fake, station = make(tmp_path, [spool(20)], uuid_field="instance_uuid")
+    caplog.set_level("INFO")
+    fake.spools[18] = {**spool(18, None), "archived": True}
+    fake.spools[18]["extra"] = {"instance_uuid": json.dumps(TAG_K)}
+    fill(station.tool, None)
+    await bridge.poll()
+    fill(station.tool, tagged())
+    for _ in range(3):
+        await bridge.poll()
+    assert stored_uuid(fake, 20) is None
+    assert caplog.text.count("archived spool 18 has it") == 1
+    assert jobs(station) == []  # Loaded from a tag, so it isn't written either.
+    await bridge.aclose()
+
+
 async def test_tag_loaded_before_start_is_kept_not_adopted(tmp_path):
     bridge, fake, station = make(tmp_path, [spool(20)], uuid_field="instance_uuid")
     fill(station.tool, tagged())
