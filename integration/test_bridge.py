@@ -21,6 +21,7 @@ from integration.conftest import (
     World,
     charges,
     count,
+    event_fields,
     events,
     logged_once,
     print_spec,
@@ -35,8 +36,8 @@ async def test_b1_first_start(world: World):
     w = world
     assert w.counter == 1000
     records = await w.poll()
-    assert [e["message"] for e in events(records)] == [
-        f"baseline extruded=1000 spool={w.spools['A']}"
+    assert event_fields(records) == [
+        {"event": "baseline", "extruded": 1000, "spool": w.spools["A"]}
     ]
     assert charges(records) == []
 
@@ -98,7 +99,7 @@ async def test_b4_database_lost(world: World):
         Path(f"{w.cfg.db_file}{suffix}").unlink(missing_ok=True)
     await w.restart()
     records = await w.poll()
-    assert [e["message"] for e in events(records)] == [f"baseline extruded={w.counter} spool={a}"]
+    assert event_fields(records) == [{"event": "baseline", "extruded": w.counter, "spool": a}]
     assert charges(records) == []
 
     # Spoolman catches up, but the open swap is gone: B is only staged, and the load stays

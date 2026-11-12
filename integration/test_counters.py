@@ -14,6 +14,7 @@ from integration.conftest import (
     baseline,
     charges,
     count,
+    event_fields,
     events,
     logged,
     logged_once,
@@ -45,15 +46,13 @@ async def test_c1_reboot_keeps_usage_held_at_the_reboot(world: World):
     records = await w.poll()
     reboots = events(records, "reboot")
     assert len(reboots) == 1
-    assert reboots[0]["message"].endswith(f"; {LOAD_MM} mm held before the restart is kept")
+    assert reboots[0]["kept_mm"] == LOAD_MM
     assert charges(records) == []
 
     # An unload with no spool active first: the held load is reported lost, as in S6.
     await w.unload()
     records = await w.poll()
-    assert [e["message"] for e in events(records, "lost_unassigned")] == [
-        f"{LOAD_MM} mm before unload had no spool"
-    ]
+    assert event_fields(records, "lost_unassigned") == [{"mm": LOAD_MM}]
     assert charges(records) == []
 
     # Held again through another reboot, then B is assigned: B takes it, logged then.
@@ -65,8 +64,8 @@ async def test_c1_reboot_keeps_usage_held_at_the_reboot(world: World):
     await w.move("B", w.tool_location)
     w.printer.extrude(0, 10)
     records = await w.poll()
-    assert [e["message"] for e in events(records, "held_charged")] == [
-        f"spool {b} is active; charged it {LOAD_MM} mm held before the printer restarted"
+    assert event_fields(records, "held_charged") == [
+        {"spool": b, "mm": LOAD_MM, "deleted_spool": None}
     ]
     assert [(r["use_length"], r["reason"]) for r in charges(records)] == [
         (LOAD_MM, "held before the printer restarted"),
@@ -95,12 +94,8 @@ async def test_c1_usage_held_over_a_reboot_joins_the_open_swap(world: World):
     assert w.material() == (None, None, None)
     records = await w.poll()
     reboots = events(records, "reboot")
-    assert len(reboots) == 1 and reboots[0]["message"].endswith(
-        "; 20 mm held before the restart is kept"
-    )
-    assert [e["message"] for e in events(records, "held_charged")] == [
-        f"spool {a} is active; charged it 20 mm held before the printer restarted"
-    ]
+    assert len(reboots) == 1 and reboots[0]["kept_mm"] == 20
+    assert event_fields(records, "held_charged") == [{"spool": a, "mm": 20, "deleted_spool": None}]
     assert [(r["spool_id"], r["use_length"]) for r in charges(records)] == [(a, 20.0)]
     tool = w.bridge.printers[0].tools[0]
     assert tool.swap is not None and tool.swap.spool_id == a and tool.swap.mm == 20
@@ -115,9 +110,7 @@ async def test_c1_usage_held_over_a_reboot_joins_the_open_swap(world: World):
     await w.move("A", w.shelf)
     await w.move("B", w.tool_location)
     records = await w.poll()
-    assert [e["message"] for e in events(records, "swap_confirmed")] == [
-        f"swap confirmed: 20 mm moved from spool {a} to {b}"
-    ]
+    assert event_fields(records, "swap_confirmed") == [{"mm": 20, "from_spool": a, "to_spool": b}]
     assert [(r["spool_id"], r["use_length"]) for r in charges(records)] == [(b, 20.0), (a, -20.0)]
     assert w.charged(w.since(0), "A") == 0
 
@@ -171,9 +164,9 @@ async def test_c1_usage_held_over_a_reboot_joins_the_provisional_charge(
     records = await w.poll()
     reboots = events(records, "reboot")
     assert len(reboots) == 1
-    assert reboots[0]["message"].endswith(f"; {held} mm held before the restart is kept")
-    assert [e["message"] for e in events(records, "held_charged")] == [
-        f"spool {a} is active; charged it {held} mm held before the printer restarted"
+    assert reboots[0]["kept_mm"] == held
+    assert event_fields(records, "held_charged") == [
+        {"spool": a, "mm": held, "deleted_spool": None}
     ]
     assert [(r["spool_id"], r["use_length"]) for r in charges(records)] == [(a, held)]
     tool = w.bridge.printers[0].tools[0]
@@ -190,9 +183,7 @@ async def test_c1_usage_held_over_a_reboot_joins_the_provisional_charge(
     w.printer.extrude(0, 10)
     await w.unload()
     records = await w.poll()
-    assert [e["message"] for e in events(records, "provisional_kept")] == [
-        f"unload keeps the {provisional + 10} mm charged provisionally to spool {a}"
-    ]
+    assert event_fields(records, "provisional_kept") == [{"mm": provisional + 10, "spool": a}]
     since_unload = w.since(unloaded)
     assert all(c["spool_id"] == a and c["use_length"] > 0 for c in charges(since_unload))
     assert w.charged(since_unload, "A") == provisional + 10
@@ -257,8 +248,9 @@ async def test_c3_reboot_and_unload_in_one_poll(world: World):
     await w.unload()
     records = await w.poll()
     assert [e["event"] for e in events(records)] == ["reboot", "unload", "swap_unconfirmed"]
-    unload = events(records, "unload")[0]
-    assert unload["message"] == f"1 unload(s); 15 mm before the unload goes to spool {a}"
+    assert event_fields(records, "unload") == [
+        {"unloads": 1, "mm": 15, "spool": a, "deleted_spool": None}
+    ]
     assert [(r["use_length"], r["reason"]) for r in charges(records)] == [(15, "before unload")]
 
 
@@ -271,9 +263,14 @@ async def test_c4_counter_goes_backward(world: World):
 
     w.printer.counter_step_back(0, 30)
     records = await w.poll()
-    anomalies = events(records, "counter_anomaly")
-    assert [e["message"] for e in anomalies] == [
-        f"extruded {w.counter} < charged {w.counter + 30} within one boot; resyncing"
+    assert event_fields(records, "counter_anomaly") == [
+        {
+            "extruded": w.counter,
+            "charged": w.counter + 30,
+            "unloads_from": None,
+            "unloads_to": None,
+            "at_unload": None,
+        }
     ]
     assert charges(records) == []
 
@@ -299,8 +296,8 @@ async def test_c5_extruded_at_unload_out_of_range(world: World):
         "unload",
         "swap_unconfirmed",
     ]
-    anomaly = events(records, "counter_anomaly")[0]["message"]
-    assert f"extruded_at_unload={w.counter + 500}" in anomaly
+    anomaly = events(records, "counter_anomaly")[0]
+    assert anomaly["at_unload"] == w.counter + 500
     # Clamped to the counter: everything since the last poll is before the unload.
     assert [(r["use_length"], r["reason"]) for r in charges(records)] == [(30, "before unload")]
 

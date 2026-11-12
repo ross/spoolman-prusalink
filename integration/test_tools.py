@@ -16,6 +16,7 @@ from integration.conftest import (
     World,
     baseline,
     charges,
+    event_fields,
     events,
     logged,
 )
@@ -122,7 +123,7 @@ async def test_t3_swap_on_one_tool_leaves_the_other(world: World):
         (1, "unload"),
         (1, "swap_committed"),
     ]
-    assert events(records, "swap_committed")[0]["message"] == f"swap done: spool {d} -> {c}"
+    assert event_fields(records, "swap_committed") == [{"from_spool": d, "to_spool": c}]
     assert w.charged(records, "D") == 20
 
     # No tag reader on an INDX: the load is from the menu's preset.
@@ -167,8 +168,7 @@ async def test_t4_idle_sensor_clear_on_a_picked_tool(world: World):
         (1, "unload"),
         (1, "swap_unconfirmed"),
     ]
-    message = events(records, "swap_unconfirmed")[0]["message"]
-    assert message.startswith(f"filament unloaded but Spoolman still assigns spool {d};")
+    assert event_fields(records, "swap_unconfirmed") == [{"spool": d}]
     flag = await w.flag("D")
     assert flag is not None and w.locations[TOOL1] in flag
     assert await w.flag("A") is None
@@ -243,12 +243,15 @@ async def test_t7_reboot_restarts_every_tool(world: World):
     records = await w.poll()
     assert w.charged(records, "A") == 10 and w.charged(records, "D") == 20
 
+    old_boot = w.printer.boot_id
     w.printer.reboot()
     assert w.counter_at(0) == 0 and w.counter_at(1) == 0
     records = await w.poll()
     reboots = events(records, "reboot")
     assert [e["tool"] for e in reboots] == [0, 1]
-    assert all("counters restart at 0" in e["message"] for e in reboots)
+    # Every poll charged its usage, so nothing was held to keep.
+    reboot = {"from_boot": old_boot, "to_boot": w.printer.boot_id, "kept_mm": 0}
+    assert event_fields(records, "reboot") == [reboot, reboot]
     assert charges(records) == []
     assert events(records, "unload") == []
 

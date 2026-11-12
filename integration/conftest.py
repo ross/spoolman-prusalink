@@ -275,8 +275,23 @@ def ledger(cfg: Config) -> list[dict]:
 
 
 def events(records: list[dict], kind: str | None = None) -> list[dict]:
-    """Event records, optionally only one `accounting.EventKind` value."""
+    """Event records, optionally only one `events.EventKind` value."""
     return [r for r in records if "event" in r and (kind is None or r["event"] == kind)]
+
+
+# What the bridge adds to every event record beside the event's own fields.
+EVENT_BOOKKEEPING = {"event", "message", "time", "printer", "tool", "location"}
+
+
+def event_fields(records: list[dict], kind: str | None = None) -> list[dict]:
+    """Each event's own fields, as `Event.fields()` gave them to the ledger.
+
+    The wording is checked once, in `tests/test_events.py`. Given no kind, each record
+    also keeps its `event`, so a mix of kinds reads in order. A tuple field, such as
+    `Claimed.moved`, reads back as lists.
+    """
+    drop = EVENT_BOOKKEEPING - ({"event"} if kind is None else set())
+    return [{k: v for k, v in e.items() if k not in drop} for e in events(records, kind)]
 
 
 def charges(records: list[dict], spool_id: int | None = None) -> list[dict]:
