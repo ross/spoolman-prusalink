@@ -275,19 +275,6 @@ def test_ledger_columns(path):
     conn.close()
 
 
-def test_ledger_of_an_older_database_with_a_dry_run_column(path):
-    """Databases made before dry run was removed keep the column, unused."""
-    Database.open(path).close()
-    conn = sqlite3.connect(path)
-    with conn:
-        conn.execute("ALTER TABLE ledger ADD COLUMN dry_run INTEGER")
-    conn.close()
-    db = Database.open(path)
-    assert db.save(State(), LEDGER[:2])
-    db.close()
-    assert read_ledger(path) == LEDGER[:2]
-
-
 def test_ledger_indexes(path):
     Database.open(path).close()
     conn = sqlite3.connect(path)

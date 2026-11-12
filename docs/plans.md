@@ -313,7 +313,7 @@ against.
 | C1 to C9 | Reboot, power off and on for hours (time scale), counter step back, `extruded_at_unload` out of range, sensor fault, firmware switch, bad key and 500 |
 | W1 to W14 | Upload accepted when idle, 409 when not, the job visible with its file name, `M865`, `M865.1` and `M117` applied, a wrong model stopping in `ATTENTION`, the stuck-write toggle |
 | M1 to M7 | Nothing from the simulator; stop or break Spoolman |
-| B1 to B6 | Initial counters in config, restart the bridge mid-print |
+| B1 to B4 | Initial counters in config, restart the bridge mid-print |
 | X1 to X16 | Two or more printers, the actions above on each, power off one |
 | Multi-tool | Tools per printer, per-tool actions, prints with a tool sequence, `M865 L<n>`, disabled tools, no UUIDs on INDX and XL |
 

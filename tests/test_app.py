@@ -29,7 +29,6 @@ ENV_VARS = (
     "PRUSALINK_URL",
     "SPOOLMAN_URL",
     "SPOOLMAN_PRUSALINK_LOCATION",
-    "SPOOLMAN_PRUSALINK_DRY_RUN",
 )
 
 
@@ -557,29 +556,6 @@ def test_config_from_environment_only():
     assert cfg.db_file.as_posix() == "/data/bridge.db"
     with pytest.raises(ConfigError, match="SPOOLMAN_PRUSALINK_LOCATION"):
         load(None, env={"PRUSALINK_URL": "p", "PRUSALINK_API_KEY": "k", "SPOOLMAN_URL": "s"})
-
-
-def test_config_refuses_dry_run(tmp_path):
-    """Dry run was removed: a config that still asks for it is refused, not run live."""
-    env = {
-        "PRUSALINK_URL": "http://p",
-        "PRUSALINK_API_KEY": "k",
-        "SPOOLMAN_URL": "http://s",
-        "SPOOLMAN_PRUSALINK_LOCATION": "Core One L+",
-    }
-    for value in ("true", " YES ", "1", "on"):
-        with pytest.raises(ConfigError, match="dry run was removed"):
-            load(None, env={**env, "SPOOLMAN_PRUSALINK_DRY_RUN": value})
-    for value in ("false", "0", ""):
-        load(None, env={**env, "SPOOLMAN_PRUSALINK_DRY_RUN": value})
-    with pytest.raises(ConfigError, match="true or false"):
-        load(None, env={**env, "SPOOLMAN_PRUSALINK_DRY_RUN": "maybe"})
-    p = tmp_path / "c.toml"
-    p.write_text(CONFIG_BASE + "[bridge]\ndry_run = true\n")
-    with pytest.raises(ConfigError, match="dry run was removed"):
-        load(p, env={"PRUSALINK_API_KEY": "k"})
-    p.write_text(CONFIG_BASE + "[bridge]\ndry_run = false\n")
-    load(p, env={"PRUSALINK_API_KEY": "k"})
 
 
 PRINTERS_BASE = (

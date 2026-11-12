@@ -67,17 +67,6 @@ class Config:
     sync_drift: bool = False
 
 
-def _env_bool(env: dict[str, str], key: str) -> bool | None:
-    value = env.get(key)
-    if value is None or value == "":
-        return None
-    if value.strip().lower() in {"1", "true", "yes", "on"}:
-        return True
-    if value.strip().lower() in {"0", "false", "no", "off"}:
-        return False
-    raise ConfigError(f"{key} must be true or false, got {value!r}")
-
-
 def _bool(table: dict, key: str, default: bool, name: str) -> bool:
     """Return a TOML boolean. A string such as "false" is an error, not true."""
     value = table.get(key, default)
@@ -346,12 +335,6 @@ def load(path: str | os.PathLike | None, env: dict[str, str] | None = None) -> C
         printers: tuple[PrinterConfig, ...] = (_single_printer(raw, env, *identity),)
     else:
         printers = _listed_printers(raw, env)
-
-    # Dry run was removed. A config that still asks for it is refused, not run live.
-    if _env_bool(env, "SPOOLMAN_PRUSALINK_DRY_RUN") or bridge.get("dry_run") is True:
-        raise ConfigError(
-            "dry run was removed; drop bridge.dry_run and SPOOLMAN_PRUSALINK_DRY_RUN to run live"
-        )
 
     length_factor = _number(bridge, "length_factor", 1.0, "bridge.length_factor")
     if not 0 < length_factor <= 2:

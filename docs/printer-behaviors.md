@@ -360,6 +360,6 @@ does and how often it happens, as the old live-check ranks had it:
    of them.
 6. **`sync_delay` above 0**: W4. Done: W4's test runs it end to end, and no
    other row depends on it.
-7. **Counters and boots**: C1 to C9, B1 to B6. Done, except B3, a kill
+7. **Counters and boots**: C1 to C9, B1 to B4. Done, except B3, a kill
    between a charge and the save, which nothing outside the bridge can
    produce; it stays a known limit.
