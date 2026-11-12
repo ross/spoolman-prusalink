@@ -54,8 +54,8 @@ on the other's private fields:
   writes `bridge.state.runouts`, `bridge.state.claimed`, and
   `bridge.state.outbox`.
 - `Bridge` sets `p._idle_since` in `poll`, calls `p._hold_deleted` from
-  `flush`, reads `p._printer_reach.down` and `p._last_state` in `interval`,
-  and assigns `printer.tools[tool]` in `evict`.
+  `flush`, reads `p._printer_reach.down` in `interval`, and assigns
+  `printer.tools[tool]` in `evict`.
 
 Shape: small owners for the spool-keyed concerns, each with public methods:
 the archived-spool cache, the UUID registry (mint, adopt, refused, unowned),
@@ -63,14 +63,7 @@ and the flags. `PrinterBridge` gets the few it needs instead of a
 back-reference to the whole `Bridge`. `Bridge` asks a printer for what it
 needs through public methods.
 
-Size: medium. Easier after B2, which removes most of the reach-ins.
-
-### B10. Smaller items
-
-- The `tools` table holds a JSON blob per tool, `printer_flags` holds JSON,
-  and `seen_tags` has columns. `SCHEMA_VERSION` doesn't cover the blob's
-  shape. The blob is `ToolState.to_json` in `accounting.py`. Do it last in
-  workstream 3.
+Size: medium.
 
 ## Tests and tooling
 
@@ -199,8 +192,7 @@ Size: medium.
 
 | # | Workstream | Findings | Depends on |
 | --- | --- | --- | --- |
-| 3 | Conditions and saved facts | B10 | Nothing |
-| 5 | Narrow the bridge boundary | B4, T1 | Workstream 3 |
+| 5 | Narrow the bridge boundary | B4, T1 | Nothing |
 | 8 | Simulator state | S1, S5, S6, then S2, S4 | Nothing. S4 continues the move that put the PrusaLink routing in `prusalink.serve` |
 
 T3 has no work, so it isn't in a workstream.

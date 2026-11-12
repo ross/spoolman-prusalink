@@ -17,6 +17,11 @@ from .records import ChargeRecord, EventRecord, Outbox
 from .state import PrinterState, Runout, State
 from .tags import SeenTag
 
+# Covers everything `save` writes: the tables below, and the shape of the JSON in their
+# text columns (`tools.data`, `conditions.data`, `writes.written`, `outbox.record`,
+# `ledger.extra`).
+# It stays at 1 until the first release, with saved state changed in place and no
+# migration. From then on, a change to either one bumps it.
 SCHEMA_VERSION = 1
 
 _SCHEMA = """
