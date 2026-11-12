@@ -6,7 +6,6 @@ it directly and the server calls it with scaled real time.
 
 from __future__ import annotations
 
-import asyncio
 import random
 import re
 import sys
@@ -15,17 +14,14 @@ from collections.abc import Callable
 from dataclasses import asdict, dataclass, field, fields, replace
 from enum import StrEnum
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any, ClassVar
 
 from simulator import gcode
 
-if TYPE_CHECKING:
-    from simulator.config import SimConfig
-
 EVENT_LIMIT = 2000
-QUEUE_LIMIT = 1000  # items per SSE client before the oldest are dropped
 SNAPSHOT_NAME = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
 EPSILON = 1e-9
+UUID_TOOL = 0  # the one tool that keeps tag UUIDs, on a model that has them
 
 
 class State(StrEnum):
@@ -72,6 +68,22 @@ class JobPhase(StrEnum):
 
 
 IDLE_STATES = (State.IDLE, State.FINISHED, State.STOPPED)
+# The state each job phase reads as. Without a job the state is BUSY while a tool loads or
+# unloads, else the idle screen the printer stores.
+PHASE_STATES = {
+    JobPhase.SCANNING: State.PRINTING,
+    JobPhase.BLIP: State.IDLE,  # the firmware's PrintInit reads IDLE for a moment
+    JobPhase.PREHEAT: State.PRINTING,
+    JobPhase.PRINTING: State.PRINTING,
+    JobPhase.PAUSED: State.PAUSED,
+    JobPhase.WAIT_LOAD: State.ATTENTION,
+    JobPhase.HOLD: State.ATTENTION,
+    JobPhase.RUN: State.PRINTING,
+    JobPhase.PARKING: State.PRINTING,
+    JobPhase.RECOVER: State.BUSY,
+    JobPhase.AWAIT_RESUME: State.ATTENTION,
+    JobPhase.UNPARK: State.PAUSED,
+}
 TIMED_PHASES = (
     JobPhase.SCANNING,
     JobPhase.BLIP,
@@ -83,6 +95,51 @@ TIMED_PHASES = (
 )
 
 
+class Reason(StrEnum):
+    """Why a job waits for the user."""
+
+    MODEL_CHECK = "model check"  # the print preview asks about a file for another model
+    PARSE_ERROR = "parse error"  # a sync job's G-code can't run
+    JAM = "jam"
+    RUNOUT = "runout"
+    COLOR_CHANGE = "color change"
+    NO_FILAMENT = "no filament"  # a print reached a tool that has none
+    COLD_BED = "cold bed"  # the bed went cold during a power panic
+
+
+# The reasons each waiting phase can have. A jam waits in HOLD when it's cleared in place,
+# and in WAIT_LOAD when it unloads the tool.
+PHASE_REASONS = {
+    JobPhase.HOLD: frozenset({Reason.MODEL_CHECK, Reason.PARSE_ERROR, Reason.JAM}),
+    JobPhase.WAIT_LOAD: frozenset(
+        {Reason.RUNOUT, Reason.JAM, Reason.COLOR_CHANGE, Reason.NO_FILAMENT}
+    ),
+    JobPhase.AWAIT_RESUME: frozenset({Reason.COLD_BED}),
+}
+
+
+@dataclass(frozen=True)
+class Attention:
+    """What the screen asks the user, with the tool it names or a parse error's text."""
+
+    reason: Reason
+    tool: int | None = None
+    detail: str | None = None
+
+    def __str__(self) -> str:
+        match self.reason:
+            case Reason.MODEL_CHECK:
+                return "model check"
+            case Reason.PARSE_ERROR:
+                return f"parse error: {self.detail}"
+            case Reason.NO_FILAMENT:
+                return f"no filament in tool {self.tool}"
+            case Reason.COLD_BED:
+                return "bed cold after the power panic"
+            case _:
+                return f"{self.reason} tool {self.tool}"
+
+
 @dataclass(frozen=True)
 class ModelInfo:
     code: str
@@ -91,6 +148,14 @@ class ModelInfo:
     gap_mm: float = 40.0
     max_tools: int = 1
     counters: bool = True
+
+    def holds_uuid(self, tool: int) -> bool:
+        """Whether `tool` keeps tag UUIDs: tool 0 of a model with a tag reader (F21).
+
+        `M865.1 I0` writes the instance UUID there, and only the Core One and Core One L
+        build `M865.1` and the tag reader.
+        """
+        return self.uuids and tool == UUID_TOOL
 
 
 def _models(*infos: ModelInfo) -> dict[str, ModelInfo]:
@@ -147,10 +212,10 @@ class Material:
     # and M865 X writes are ad-hoc. The page shows the flag; PrusaLink doesn't.
     adhoc: bool = True
     # Set when the material is built, as the firmware does: from the preset, the tag or
-    # M865. None, as in a snapshot from before temperatures, reads as the default.
-    nozzle: int | None = None
-    preheat: int | None = None
-    bed: int | None = None
+    # M865. Without them, the firmware's defaults.
+    nozzle: int = DEFAULT_TEMPERATURES[0]
+    preheat: int = DEFAULT_TEMPERATURES[1]
+    bed: int = DEFAULT_TEMPERATURES[2]
     # Set by a tag load only. M865 X R starts afresh without them; edits and runout
     # reloads keep them.
     material_uuid: str | None = None
@@ -158,8 +223,19 @@ class Material:
 
     def temperatures(self) -> tuple[int, int, int]:
         """Return the nozzle, preheat and bed temperatures the printer reports."""
-        set_ = (self.nozzle, self.preheat, self.bed)
-        return tuple(d if v is None else v for v, d in zip(set_, DEFAULT_TEMPERATURES, strict=True))
+        return self.nozzle, self.preheat, self.bed
+
+
+def color555(color: str | None) -> str | None:
+    """Round `#rrggbb` to what the firmware stores: 5 bits a channel, widened back to 8.
+
+    `Color555::from_rgb` keeps each channel's top 5 bits, and `to_color` widens them as
+    `(v << 3) | (v >> 2)` (`src/common/utils/color555.hpp:23-54` at 2db93db5).
+    """
+    if color is None:
+        return None
+    channels = (int(color[i : i + 2], 16) >> 3 for i in (1, 3, 5))
+    return "#" + "".join(f"{(v << 3) | (v >> 2):02x}" for v in channels)
 
 
 def preset_temperatures(name: str) -> dict[str, int]:
@@ -256,8 +332,43 @@ class SimTool:
     gap: float = 0.0
     sensor_fault: bool = False
     stuck_write: bool = False
-    temps: dict[str, int] = field(default_factory=dict)
     process: LoadProcess | UnloadProcess | None = None
+
+    # The stored type, the ad-hoc slot and the kept type change only through these methods.
+
+    @classmethod
+    def loaded_with(cls, index: int, material: Material | None, **kw: Any) -> SimTool:
+        """A tool as a finished load of `material` leaves it, or empty for None."""
+        tool = cls(index, **kw)
+        tool.fill(material)
+        return tool
+
+    def fill(self, material: Material | None) -> None:
+        """Leave the tool as a finished load of `material` leaves it, or a finished unload for
+        None. Nothing is counted: this is setup, and a load by hand while the printer is off.
+        """
+        self.loaded = material is not None
+        self.store(material)
+
+    def store(self, material: Material | None) -> None:
+        """Write the stored type. An ad-hoc type also fills the ad-hoc slot (`previous`).
+
+        The slot keeps a color in 5 bits per channel, so the color reads back rounded (F25).
+        """
+        if material is not None:
+            material = replace(material, color=color555(material.color))
+        self.material = material
+        if material is not None and material.adhoc:
+            self.previous = replace(material)
+
+    def clear_type(self) -> None:
+        """The firmware writes "none": the type goes, and a runout reload can restore it."""
+        self.kept_type, self.material = self.material, None
+
+    def kept(self) -> Material | None:
+        """The type a load without a source restores: the one the unload left, else the slot."""
+        kept = self.kept_type or self.previous
+        return None if kept is None else replace(kept)
 
 
 @dataclass
@@ -297,39 +408,69 @@ def _opt_float(value: Any) -> float | None:
     return None if value is None else float(value)
 
 
-@dataclass
+@dataclass(kw_only=True)
 class SimJob:
-    id: int | None  # None while the print preview asks its question: the job isn't counted yet
-    kind: str  # "user" or "sync"
+    """What every job has. A job is a `UserJob` or a `SyncJob`."""
+
+    kind: ClassVar[str]
+    id: int | None = None  # None while the preview asks its question: the job isn't counted yet
     name: str
-    display_name: str
     phase: JobPhase = JobPhase.SCANNING
+    attention: Attention | None = None  # set exactly while the phase waits for the user
     remaining: float = 0.0  # seconds left in a timed phase
-    spec: PrintSpec | None = None
+    time_printing: float = 0.0
+    end_state: State = State.FINISHED
+
+    def enter(self, phase: JobPhase, attention: Attention | None = None) -> None:
+        """Move to `phase`. A waiting phase needs a reason that fits it; no other phase has one."""
+        allowed = PHASE_REASONS.get(phase, frozenset())
+        if (attention is None) != (not allowed) or (attention and attention.reason not in allowed):
+            raise ValueError(f"{phase} can't wait for {attention!r}")
+        self.phase, self.attention = phase, attention
+
+    def waits_for(self, reason: Reason) -> bool:
+        return self.attention is not None and self.attention.reason is reason
+
+    @property
+    def wait_tool(self) -> int | None:
+        """The tool WAIT_LOAD waits for a load into."""
+        return self.attention.tool if self.phase is JobPhase.WAIT_LOAD else None
+
+    def progress(self) -> int:
+        return 100 if self.phase is JobPhase.PARKING else 0
+
+
+@dataclass(kw_only=True)
+class UserJob(SimJob):
+    """A print started from the page: it feeds filament through its segments."""
+
+    kind: ClassVar[str] = "user"
+    spec: PrintSpec
     fed_mm: float = 0.0
     segment: int = 0
     pending_color_changes: list[float] = field(default_factory=list)
-    time_printing: float = 0.0
-    end_state: State = State.FINISHED
     paused_from: JobPhase | None = None  # where resume goes back to
-    wait_tool: int | None = None  # the tool WAIT_LOAD waits for
-    gcode: str | None = None
-    attention: str | None = None
-    jam: bool = False
     toolchange_purge: bool = False  # a tool change into an empty tool purges after the reload
     cold_bed: bool = False  # a power-panic resume waits for the user when the bed went cold
     clean_at: float | None = None  # RECOVER time left when the nozzle clean purges
-    run_seconds: float = 0.0  # the length of a sync job's RUN phase
 
     def progress(self) -> int:
-        if self.spec is not None:
-            return int(100 * self.fed_mm / self.spec.total_mm)
-        if self.phase is JobPhase.PARKING:
-            return 100
+        return int(100 * self.fed_mm / self.spec.total_mm)
+
+
+@dataclass(kw_only=True)
+class SyncJob(SimJob):
+    """An uploaded G-code file: it applies its commands, then runs for a while and parks."""
+
+    kind: ClassVar[str] = "sync"
+    gcode: str
+    run_seconds: float = 0.0  # the length of the RUN phase
+
+    def progress(self) -> int:
         if self.phase is JobPhase.RUN and self.run_seconds > 0:
             # A sync job has no moves to measure, so the page sees time pass instead.
             return int(100 * (self.run_seconds - self.remaining) / self.run_seconds)
-        return 0
+        return super().progress()
 
 
 class Busy(Exception):
@@ -359,8 +500,8 @@ def _positive(value: Any, what: str) -> float:
     return float(value)
 
 
-def _check_name(name: Any) -> str:
-    if not isinstance(name, str) or not gcode.NAME_RE.match(name):
+def check_name(name: Any) -> str:
+    if not isinstance(name, str) or not gcode.NAME_RE.fullmatch(name):
         raise Invalid(f"filament name {name!r} must be 1 to 7 of A-Z a-z 0-9 _ -")
     return name
 
@@ -372,15 +513,15 @@ def _check_temperatures(temps: Any) -> tuple[int, int, int]:
     return tuple(temps)
 
 
-def _check_color(color: Any) -> str | None:
+def check_color(color: Any) -> str | None:
     if color is None or color == "":
         return None
-    if not isinstance(color, str) or not gcode.COLOR_RE.match(color):
+    if not isinstance(color, str) or not gcode.COLOR_RE.fullmatch(color):
         raise Invalid(f"color {color!r} must look like #rrggbb")
     return color.lower()
 
 
-def _check_uuid(value: Any) -> str | None:
+def check_uuid(value: Any) -> str | None:
     if value is None or value == "":
         return None
     try:
@@ -413,8 +554,9 @@ class SimPrinter:
     power: Power = Power.ON
     fault: Fault = Fault.NONE
     boot_id: int = field(default_factory=new_boot_id)
-    state: State = State.IDLE
-    job: SimJob | None = None
+    # The screen with no job and no load running: IDLE, or FINISHED or STOPPED until dismissed.
+    screen: State = State.IDLE
+    job: UserJob | SyncJob | None = None
     job_counter: int = 0
     selected_tool: int = 0
     message: str | None = None
@@ -424,8 +566,18 @@ class SimPrinter:
     files: dict[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        # Not a field, so asdict() and snapshots leave it out.
+        # Not fields, so asdict() and snapshots leave them out.
         self._sim: Simulation | None = None
+        self._shown = self.state  # the state last logged
+
+    @property
+    def state(self) -> State:
+        """The state PrusaLink reports, which follows from the job phase or the idle screen."""
+        if self.job is not None:
+            return PHASE_STATES[self.job.phase]
+        if any(t.process is not None for t in self.tools.values()):
+            return State.BUSY
+        return self.screen
 
     # Plumbing.
 
@@ -437,10 +589,12 @@ class SimPrinter:
         if self._sim:
             self._sim.log(self.name, kind, text, data)
 
-    def _set_state(self, state: State) -> None:
-        if state is not self.state:
-            old, self.state = self.state, state
-            self._log("state", f"{old} -> {state}")
+    def _show_state(self) -> None:
+        """Log the state when it changed. Called wherever a phase, the screen or a load changes."""
+        state = self.state
+        if state is not self._shown:
+            self._log("state", f"{self._shown} -> {state}")
+            self._shown = state
 
     def _tool(self, index: Any, *, enabled: bool = True) -> SimTool:
         tool = self.tools.get(index) if isinstance(index, int) else None
@@ -454,17 +608,6 @@ class SimPrinter:
         if self.power is Power.OFF:
             raise Busy(f"{self.name} is off")
 
-    def _set_material(self, tool: SimTool, material: Material | None) -> None:
-        """Write the stored type. An ad-hoc type also fills the ad-hoc slot (`previous`)."""
-        tool.material = material
-        if material is not None and material.adhoc:
-            tool.previous = replace(material)
-
-    def _kept(self, tool: SimTool) -> Material | None:
-        """The type a load without a source restores: the one the unload left, else the slot."""
-        kept = tool.kept_type or tool.previous
-        return None if kept is None else replace(kept)
-
     def _count_unload(self, tool: SimTool, why: str) -> None:
         # The firmware counts a write of "none" over a stored type, nothing else.
         if tool.material is None:
@@ -472,7 +615,7 @@ class SimPrinter:
             return
         tool.unload_count += 1
         tool.extruded_at_unload = int(tool.extruded)
-        tool.kept_type, tool.material = tool.material, None
+        tool.clear_type()
         self._log(
             "unload",
             f"T{tool.index} {why}: unload_count {tool.unload_count} at {tool.extruded_at_unload}",
@@ -497,15 +640,9 @@ class SimPrinter:
     def can_print(self) -> bool:
         # The firmware's rule is state-only: IDLE, READY, STOPPED or FINISHED. A print asked
         # for during the PrintInit blip, which reads IDLE, passes that rule and is then
-        # dropped; `print_file` handles it. A running load or unload refuses too: the
-        # firmware reads BUSY then.
-        busy_tool = any(t.process is not None for t in self.tools.values())
-        return (
-            self.state in IDLE_STATES
-            and self.job is None
-            and not busy_tool
-            and self.power is not Power.OFF
-        )
+        # dropped; `print_file` handles it. A running load or unload reads BUSY, so it
+        # refuses too.
+        return self.state in IDLE_STATES and self.job is None and self.power is not Power.OFF
 
     def status_json(self) -> dict:
         printer: dict[str, Any] = {
@@ -548,7 +685,7 @@ class SimPrinter:
             "time_printing": int(job.time_printing),
             "file": {
                 "name": job.name,
-                "display_name": job.display_name,
+                "display_name": job.name,
                 "path": path,
                 "refs": {"download": path},
             },
@@ -567,7 +704,7 @@ class SimPrinter:
         }
         if m.color:
             out["color"] = m.color
-        if self.model.uuids and tool.index == 0:
+        if self.model.holds_uuid(tool.index):
             for key in ("material_uuid", "package_uuid", "instance_uuid"):
                 if value := getattr(m, key):
                     out[key] = value
@@ -630,14 +767,15 @@ class SimPrinter:
         body = self.files[name]
         wrong = self._wrong_model(body)
         if wrong and not self._auto_accept():
-            self.job = SimJob(None, "sync", name, name, phase=JobPhase.HOLD, gcode=body)
-            self.job.attention = "model check"
+            job = SyncJob(name=name, gcode=body)
+            job.enter(JobPhase.HOLD, Attention(Reason.MODEL_CHECK))
+            self.job = job
             self._log("job", f"{name}: the preview asks about model {wrong}")
-            self._set_state(State.ATTENTION)
+            self._show_state()
             return
         if wrong:
             self._log("gcode", f"model check for {wrong} accepted automatically")
-        self._new_job("sync", name, gcode=body)
+        self._start_job(SyncJob(name=name, gcode=body))
 
     # Actions on tools.
 
@@ -663,11 +801,10 @@ class SimPrinter:
         t = self._tool(tool)
         material = self._new_material(t, source, name, color, uuid, temperatures)
         job = self.job
-        waiting = job is not None and job.phase is JobPhase.WAIT_LOAD and job.wait_tool == tool
+        waiting = job is not None and job.wait_tool == tool
         if source is None and not waiting:
             raise Invalid("a load needs a source, tag or preset, outside a runout reload")
-        kept = t.kept_type or t.previous
-        what = f"{source} {_describe(material)}" if source else f"keep {_describe(kept)}"
+        what = f"{source} {_describe(material)}" if source else f"keep {_describe(t.kept())}"
         if self.power is Power.OFF:
             self._hand_load(t, material)
             return
@@ -678,11 +815,12 @@ class SimPrinter:
         self._log("action", f"load T{tool} {what}")
         feed = self.settings.load_feed_mm if feed_mm is None else _positive(feed_mm, "feed_mm")
         purge = self.settings.purge_mm if purge_mm is None else _positive(purge_mm, "purge_mm")
-        if waiting and job.jam:
+        if waiting and job.waits_for(Reason.JAM):
             purge += self.settings.jam_purge_mm
         t.process = LoadProcess("FEED_GAP", t.gap, feed, purge, material)
         if job is None:
-            self._set_state(State.BUSY)
+            self.screen = State.IDLE  # using the menu dismisses a finished or stopped screen
+        self._show_state()
 
     def _new_material(
         self, t: SimTool, source: str | None, name: Any, color: Any, uuid: Any, temps: Any
@@ -693,7 +831,7 @@ class SimPrinter:
             return None
         if source not in ("tag", "preset"):
             raise Invalid(f"source must be tag or preset, got {source!r}")
-        name, color = _check_name(name), _check_color(color)
+        name, color = check_name(name), check_color(color)
         if source == "preset":
             if uuid or temps is not None:
                 raise Invalid("a preset load has no UUID or temperatures")
@@ -701,11 +839,11 @@ class SimPrinter:
             return Material(name, color, adhoc=color is not None, **preset_temperatures(name))
         if not self.model.uuids:
             raise Invalid(f"{self.model.name} has no tag reader")
-        value = _check_uuid(uuid)
+        value = check_uuid(uuid)
         tag_temps = preset_temperatures(name)
         if temps is not None:
             tag_temps = dict(zip(tag_temps, _check_temperatures(temps), strict=True))
-        if t.index != 0:
+        if not self.model.holds_uuid(t.index):
             return Material(name, color, **tag_temps)
         # A real tag carries its product's UUIDs; derive stable ones from the name and color.
         return Material(
@@ -720,11 +858,10 @@ class SimPrinter:
     def _hand_load(self, t: SimTool, material: Material | None) -> None:
         if t.process is not None:
             raise Busy("a load or unload is already running")
-        if material is None:
-            material = self._kept(t)
-        self._set_material(t, material)
+        # Filament goes in even when there's no type to restore.
+        t.store(t.kept() if material is None else material)
         t.loaded, t.gap = True, 0.0
-        self._log("load", f"T{t.index} loaded by hand while off: {_describe(material)}")
+        self._log("load", f"T{t.index} loaded by hand while off: {_describe(t.material)}")
 
     def unload(self, tool: int) -> None:
         """Unload a tool. While the printer is off the type stays stored until the next boot."""
@@ -743,7 +880,8 @@ class SimPrinter:
             raise Busy(f"can't unload while {self.state}")
         self._log("action", f"unload T{tool}")
         t.process = UnloadProcess(self.settings.unload_seconds)
-        self._set_state(State.BUSY)
+        self.screen = State.IDLE  # using the menu dismisses a finished or stopped screen
+        self._show_state()
 
     def _manual_move(self, tool: int, mm: Any) -> tuple[SimTool, float]:
         t = self._tool(tool)
@@ -792,42 +930,45 @@ class SimPrinter:
             raise Invalid("preheat_s can't be negative")
         total = spec.total_mm
         changes = sorted(x for x in spec.color_changes_mm if 0 < x < total)
-        self._new_job("user", spec.name, spec=spec, pending_color_changes=changes)
+        self._start_job(UserJob(name=spec.name, spec=spec, pending_color_changes=changes))
 
-    def _new_job(self, kind: str, name: str, **kw: Any) -> None:
-        self._start_job(SimJob(None, kind, name, name, **kw))
-
-    def _start_job(self, job: SimJob) -> None:
+    def _start_job(self, job: UserJob | SyncJob) -> None:
         """Count the job and scan the file: the firmware does this once the preview is confirmed."""
         self.homed = True  # a print starts by homing
         self.job_counter += 1
-        job.id, job.phase = self.job_counter, JobPhase.SCANNING
+        job.id = self.job_counter
+        job.enter(JobPhase.SCANNING)
         job.remaining = self.settings.scan_seconds
         self.job = job
-        self._log("job", f"job {job.id} ({job.kind}) {job.name} started")
-        self._set_state(State.PRINTING)
+        self._log(
+            "job",
+            f"job {job.id} ({job.kind}) {job.name} started",
+            {"started": job.id, "kind": job.kind},
+        )
+        self._show_state()
 
     def pause(self) -> None:
         job = self.job
         if job is None or job.phase not in (JobPhase.PRINTING, JobPhase.PREHEAT):
             raise Busy("nothing to pause")
         self._log("action", "pause")
-        job.paused_from, job.phase = job.phase, JobPhase.PAUSED
-        self._set_state(State.PAUSED)
+        job.paused_from = job.phase
+        job.enter(JobPhase.PAUSED)
+        self._show_state()
 
     def resume(self) -> None:
         job = self.job
         if job is not None and job.phase is JobPhase.AWAIT_RESUME:
             self._log("action", "resume after the power panic")
-            job.cold_bed, job.attention = False, None
+            job.cold_bed = False
             self._recover(job, clean=True)
             return
         if job is None or job.phase is not JobPhase.PAUSED or self.state is not State.PAUSED:
             raise Busy("nothing to resume")
         self._log("action", "resume")
         if job.paused_from is JobPhase.PREHEAT:
-            job.phase = JobPhase.PREHEAT
-            self._set_state(State.PRINTING)
+            job.enter(JobPhase.PREHEAT)
+            self._show_state()
         else:
             self._begin_feeding(job)
         job.paused_from = None
@@ -839,8 +980,8 @@ class SimPrinter:
         if job.id is None:
             # Declining the preview: no job was counted, so there's nothing to park.
             self._log("action", f"cancel {job.name} at the preview")
-            self.job = None
-            self._set_state(State.IDLE)
+            self.job, self.screen = None, State.IDLE
+            self._show_state()
             return
         self._log("action", f"cancel job {job.id}")
         for t in self.tools.values():
@@ -867,7 +1008,8 @@ class SimPrinter:
         if self.job is not None or self.state not in (State.FINISHED, State.STOPPED):
             raise Busy(f"nothing to dismiss in {self.state}")
         self._log("action", "dismiss")
-        self._set_state(State.IDLE)
+        self.screen = State.IDLE
+        self._show_state()
 
     def home(self) -> None:
         """Home from the menu. Only the flag changes: homing moves no filament."""
@@ -880,8 +1022,7 @@ class SimPrinter:
     def _check_runout(self, tool: int) -> SimTool:
         t = self._tool(tool)
         job = self.job
-        user = job is not None and job.kind == "user"
-        printing = user and job.phase in (JobPhase.PRINTING, JobPhase.PREHEAT)
+        printing = isinstance(job, UserJob) and job.phase in (JobPhase.PRINTING, JobPhase.PREHEAT)
         if self.power is Power.OFF or not printing:
             raise Busy("a runout or jam needs a print in progress")
         # Only the picked tool feeds, so only its sensor can see a runout or a jam.
@@ -894,48 +1035,45 @@ class SimPrinter:
     def runout(self, tool: int) -> None:
         t = self._check_runout(tool)
         self._log("action", f"runout T{tool}")
-        self._runout(t, "runout", jam=False)
+        self._runout(t, Reason.RUNOUT)
 
     def jam(self, tool: int, unload: bool = True) -> None:
         """A jam either unloads like a runout (and purges more on reload) or is cleared in place."""
         t = self._check_runout(tool)
         self._log("action", f"jam T{tool}" + ("" if unload else " without unloading"))
         if unload:
-            self._runout(t, "jam", jam=True)
+            self._runout(t, Reason.JAM)
             return
         job = self.job
-        job.paused_from, job.phase, job.jam = job.phase, JobPhase.HOLD, True
-        job.attention = f"jam tool {tool}"
-        self._set_state(State.ATTENTION)
+        job.paused_from = job.phase
+        job.enter(JobPhase.HOLD, Attention(Reason.JAM, tool))
+        self._show_state()
 
-    def _runout(self, t: SimTool, why: str, *, jam: bool) -> None:
+    def _runout(self, t: SimTool, reason: Reason) -> None:
         job = self.job
         # Only a print in progress runs out, so the phase is PRINTING or PREHEAT here.
         job.paused_from = job.phase
-        self._physical_unload(t, why)
-        job.phase, job.wait_tool, job.jam = JobPhase.WAIT_LOAD, t.index, jam
-        job.attention = f"{why} tool {t.index}"
-        self._set_state(State.ATTENTION)
+        self._physical_unload(t, str(reason))
+        job.enter(JobPhase.WAIT_LOAD, Attention(reason, t.index))
+        self._show_state()
 
     def clear_jam(self) -> None:
         job = self.job
-        if job is None or job.phase is not JobPhase.HOLD or not job.jam:
+        if job is None or job.phase is not JobPhase.HOLD or not job.waits_for(Reason.JAM):
             raise Busy("no jam to clear")
         self._log("action", "clear jam")
-        job.phase, job.jam, job.attention = JobPhase.PAUSED, False, None
-        self._set_state(State.PAUSED)
+        job.enter(JobPhase.PAUSED)
+        self._show_state()
 
     def tap_through(self) -> None:
         """Answer the screen's question: accept the model check, or abort on a parse error."""
         job = self.job
-        if job is None or job.phase is not JobPhase.HOLD or job.kind != "sync":
+        if job is None or job.phase is not JobPhase.HOLD or not isinstance(job, SyncJob):
             raise Busy("nothing to tap through")
         self._log("action", f"tap through: {job.attention}")
-        if job.attention == "model check":
-            job.attention = None
+        if job.waits_for(Reason.MODEL_CHECK):
             self._start_job(job)
         else:
-            job.attention = None
             self._park(job, State.STOPPED)
 
     # Power and faults.
@@ -971,34 +1109,35 @@ class SimPrinter:
     def _reboot(self, keep_job: bool, cold_bed: bool = False) -> None:
         job = self.job
         resumable = (JobPhase.PRINTING, JobPhase.PAUSED, JobPhase.PREHEAT, JobPhase.WAIT_LOAD)
-        keep = keep_job and job is not None and job.kind == "user" and job.phase in resumable
+        keep = keep_job and isinstance(job, UserJob) and job.phase in resumable
         was_paused = keep and job.phase in (JobPhase.PAUSED, JobPhase.WAIT_LOAD)
         self.boot(idle_clear=not keep)
         if not keep:
-            self.job = None
-            self._set_state(State.IDLE)
+            self.job, self.screen = None, State.IDLE
+            self._show_state()
             return
-        job.wait_tool = job.attention = None
-        job.jam = False
         if was_paused:
-            job.phase, job.paused_from = JobPhase.PAUSED, JobPhase.PRINTING
-            self._set_state(State.PAUSED)
+            job.paused_from = JobPhase.PRINTING
+            job.enter(JobPhase.PAUSED)
+            self._show_state()
             return
         job.paused_from = None
         job.cold_bed = cold_bed
         self._recover(job, clean=not cold_bed)
 
-    def _recover(self, job: SimJob, *, clean: bool) -> None:
+    def _recover(self, job: UserJob, *, clean: bool) -> None:
         """BUSY while the firmware heats and homes; the nozzle clean purges halfway through."""
-        job.phase, job.remaining = JobPhase.RECOVER, self.settings.recover_seconds
+        job.enter(JobPhase.RECOVER)
+        job.remaining = self.settings.recover_seconds
         job.clean_at = self.settings.recover_seconds / 2 if clean else None
-        self._set_state(State.BUSY)
+        self._show_state()
 
-    def _unpark(self, job: SimJob) -> None:
-        job.phase, job.remaining = JobPhase.UNPARK, self.settings.unpark_seconds
-        self._set_state(State.PAUSED)
+    def _unpark(self, job: UserJob) -> None:
+        job.enter(JobPhase.UNPARK)
+        job.remaining = self.settings.unpark_seconds
+        self._show_state()
 
-    def _nozzle_clean(self, job: SimJob) -> None:
+    def _nozzle_clean(self, job: UserJob) -> None:
         """Core One and Core One L clean the nozzle on a power-panic resume, which purges."""
         tool = self.tools[job.spec.segments[job.segment].tool]
         if tool.loaded:
@@ -1032,9 +1171,8 @@ class SimPrinter:
     def set_tool_enabled(self, tool: int, value: bool) -> None:
         t = self._tool(tool, enabled=False)
         if not value:
-            in_print = (
-                self.job and self.job.spec and tool in {s.tool for s in self.job.spec.segments}
-            )
+            job = self.job
+            in_print = isinstance(job, UserJob) and tool in {s.tool for s in job.spec.segments}
             if tool == self.selected_tool or in_print or t.process is not None:
                 raise Invalid(f"T{tool} is in use")
         t.enabled = bool(value)
@@ -1105,9 +1243,9 @@ class SimPrinter:
         if p.phase == "FEED_GAP":
             p.phase, p.remaining, t.gap = "FEED", p.feed_mm, 0.0
         elif p.phase == "FEED":
-            material = p.material if p.material is not None else self._kept(t)
-            self._set_material(t, material)
-            self._log("load", f"T{t.index} type set to {_describe(material)}")
+            material = p.material if p.material is not None else t.kept()
+            t.store(material)
+            self._log("load", f"T{t.index} type set to {_describe(t.material)}")
             p.phase, p.remaining = "PURGE", p.purge_mm
         else:
             t.loaded, t.process = True, None
@@ -1117,11 +1255,8 @@ class SimPrinter:
     def _process_done(self) -> None:
         job = self.job
         if job is not None and job.phase is JobPhase.WAIT_LOAD:
-            job.phase, job.wait_tool, job.attention, job.jam = JobPhase.PAUSED, None, None, False
-            self._set_state(State.PAUSED)
-        elif job is None and self.state is State.BUSY:
-            # Using the menu dismisses a finished or stopped screen, so it ends at IDLE.
-            self._set_state(State.IDLE)
+            job.enter(JobPhase.PAUSED)
+        self._show_state()
 
     def _tick_job(self, dt: float) -> None:
         while dt > EPSILON and self.job is not None:
@@ -1146,11 +1281,12 @@ class SimPrinter:
             else:
                 return  # paused or waiting for the user
 
-    def _end_phase(self, job: SimJob) -> None:
+    def _end_phase(self, job: UserJob | SyncJob) -> None:
         s = self.settings
         if job.phase is JobPhase.SCANNING and s.start_blip:
-            job.phase, job.remaining = JobPhase.BLIP, s.blip_seconds
-            self._set_state(State.IDLE)
+            job.enter(JobPhase.BLIP)
+            job.remaining = s.blip_seconds
+            self._show_state()
         elif job.phase in (JobPhase.SCANNING, JobPhase.BLIP):
             self._after_blip(job)
         elif job.phase is JobPhase.PREHEAT:
@@ -1159,50 +1295,52 @@ class SimPrinter:
             self._park(job, State.FINISHED)
         elif job.phase is JobPhase.RECOVER:
             if job.cold_bed:
-                job.phase, job.attention = JobPhase.AWAIT_RESUME, "bed cold after the power panic"
-                self._set_state(State.ATTENTION)
+                job.enter(JobPhase.AWAIT_RESUME, Attention(Reason.COLD_BED))
+                self._show_state()
             else:
                 self._unpark(job)
         elif job.phase is JobPhase.UNPARK:
             self._begin_feeding(job)
         else:  # PARKING, the last of the timed phases
-            self.job = None
+            self.job, self.screen = None, job.end_state
             self._log("job", f"job {job.id} {job.end_state.lower()}")
-            self._set_state(job.end_state)
+            self._show_state()
 
-    def _after_blip(self, job: SimJob) -> None:
-        self._set_state(State.PRINTING)
-        if job.kind == "sync":
+    def _after_blip(self, job: UserJob | SyncJob) -> None:
+        if isinstance(job, SyncJob):
             self._run_sync(job)
             return
         spec = job.spec
-        job.phase = JobPhase.PREHEAT
+        job.enter(JobPhase.PREHEAT)
         job.remaining = self.settings.preheat_seconds if spec.preheat_s is None else spec.preheat_s
         self.selected_tool = spec.segments[0].tool
+        self._show_state()
 
-    def _begin_feeding(self, job: SimJob) -> None:
+    def _begin_feeding(self, job: UserJob) -> None:
         tool = job.spec.segments[job.segment].tool
         self.selected_tool = tool
         if self.tools[tool].loaded:
             if job.toolchange_purge:
                 job.toolchange_purge = False
                 _feed(self.tools[tool], self.settings.toolchange_purge_mm)
-            job.phase = JobPhase.PRINTING
-            self._set_state(State.PRINTING)
+            job.enter(JobPhase.PRINTING)
+            self._show_state()
         else:
             self._wait_for_filament(job, tool)
 
-    def _wait_for_filament(self, job: SimJob, tool: int) -> None:
-        job.phase, job.wait_tool, job.paused_from = JobPhase.WAIT_LOAD, tool, JobPhase.PRINTING
-        job.attention = f"no filament in tool {tool}"
-        self._set_state(State.ATTENTION)
+    def _wait_for_filament(self, job: UserJob, tool: int) -> None:
+        job.paused_from = JobPhase.PRINTING
+        job.enter(JobPhase.WAIT_LOAD, Attention(Reason.NO_FILAMENT, tool))
+        self._show_state()
 
-    def _park(self, job: SimJob, end: State) -> None:
-        job.phase, job.remaining, job.end_state = JobPhase.PARKING, self.settings.park_seconds, end
-        job.wait_tool = job.attention = job.paused_from = None
-        self._set_state(State.PRINTING)
+    def _park(self, job: UserJob | SyncJob, end: State) -> None:
+        job.enter(JobPhase.PARKING)
+        job.remaining, job.end_state = self.settings.park_seconds, end
+        if isinstance(job, UserJob):
+            job.paused_from = None
+        self._show_state()
 
-    def _print_step(self, job: SimJob, dt: float) -> float:
+    def _print_step(self, job: UserJob, dt: float) -> float:
         """Feed for dt, stopping at each segment end and color change. Return the time left."""
         spec = job.spec
         total = spec.total_mm
@@ -1226,7 +1364,7 @@ class SimPrinter:
             if change is not None and change <= target:
                 job.pending_color_changes.pop(0)
                 self._log("job", f"color change at {change:g} mm")
-                self._runout(tool, "color change", jam=False)
+                self._runout(tool, Reason.COLOR_CHANGE)
                 return 0.0
             if job.segment == len(spec.segments) - 1:
                 self._park(job, State.FINISHED)
@@ -1234,7 +1372,7 @@ class SimPrinter:
             self._next_segment(job)
         return 0.0 if job.phase is not JobPhase.PRINTING else dt
 
-    def _next_segment(self, job: SimJob) -> None:
+    def _next_segment(self, job: UserJob) -> None:
         segments = job.spec.segments
         old = segments[job.segment].tool
         job.segment += 1
@@ -1257,15 +1395,15 @@ class SimPrinter:
             return self.auto_accept_model_check
         return self.settings.auto_accept_model_check
 
-    def _run_sync(self, job: SimJob) -> None:
+    def _run_sync(self, job: SyncJob) -> None:
         try:
-            commands = gcode.parse(job.gcode or "")
+            commands = gcode.parse(job.gcode)
         except gcode.GcodeError as e:
-            self._hold(job, f"parse error: {e}")
+            self._hold(job, str(e))
             return
         problem = self._tool_problem(commands)
         if problem:
-            self._hold(job, f"parse error: {problem}")
+            self._hold(job, problem)
             return
         self._run_commands(job, commands)
 
@@ -1293,16 +1431,16 @@ class SimPrinter:
                     return f"M865 names tool {index}; {self.model.name} has tools 0 to {last}"
         return None
 
-    def _hold(self, job: SimJob, why: str) -> None:
-        job.phase, job.attention = JobPhase.HOLD, why
-        self._log("job", f"job {job.id} stopped: {why}")
-        self._set_state(State.ATTENTION)
+    def _hold(self, job: SyncJob, problem: str) -> None:
+        job.enter(JobPhase.HOLD, Attention(Reason.PARSE_ERROR, detail=problem))
+        self._log("job", f"job {job.id} stopped: {job.attention}")
+        self._show_state()
 
-    def _run_commands(self, job: SimJob, commands: list[gcode.Command]) -> None:
+    def _run_commands(self, job: SyncJob, commands: list[gcode.Command]) -> None:
         self.apply(commands)
-        job.phase, job.remaining = JobPhase.RUN, self.settings.sync_job_seconds
-        job.run_seconds = job.remaining
-        self._set_state(State.PRINTING)
+        job.enter(JobPhase.RUN)
+        job.remaining = job.run_seconds = self.settings.sync_job_seconds
+        self._show_state()
 
     def apply(self, commands: list[gcode.Command]) -> None:
         for c in commands:
@@ -1344,14 +1482,11 @@ class SimPrinter:
                 nozzle, preheat, bed = DEFAULT_TEMPERATURES
                 name = c.name or (old.name if old else "Custom")
                 material = Material(name, nozzle=nozzle, preheat=preheat, bed=bed)
-                temps: dict[str, int] = {}
             else:
-                material, temps = replace(old, adhoc=True), dict(t.temps)
+                material = replace(old, adhoc=True)
             material.name = c.name or material.name
             material.color = c.color or material.color
             _apply_temperatures(material, c.temps)
-            temps.update(c.temps)
-            t.temps = temps
         elif c.name:
             # A preset write: the firmware ignores every parameter but the type.
             material = Material(c.name, adhoc=False, **preset_temperatures(c.name))
@@ -1364,35 +1499,33 @@ class SimPrinter:
                 return
             material = replace(t.material, color=c.color or t.material.color)
             _apply_temperatures(material, c.temps)
-            t.temps = {**t.temps, **c.temps}
         else:
             self._log("gcode", f"M865 L{c.tool}: nothing to write")
             return
-        self._set_material(t, material)
-        self._log("gcode", f"M865 T{c.tool} set to {_describe(material)}")
+        t.store(material)
+        self._log("gcode", f"M865 T{c.tool} set to {_describe(t.material)}")
 
     def _copy_filament(self, t: SimTool, source: SimTool) -> None:
         if source.material is None:
             self._count_unload(t, f"M865 copied empty T{source.index}")
             return
         material = replace(source.material)
-        if not (self.model.uuids and t.index == 0):
+        if not self.model.holds_uuid(t.index):
             material.instance_uuid = material.material_uuid = material.package_uuid = None
-        self._set_material(t, material)
+        t.store(material)
         self._log("gcode", f"M865 T{t.index} copied from T{source.index}: {_describe(material)}")
 
     def _apply_uuid(self, c: gcode.SetUuid) -> None:
         t = self.tools.get(c.tool)
-        usable = self.model.uuids and c.tool == 0 and t is not None and t.material is not None
+        usable = self.model.holds_uuid(c.tool) and t is not None and t.material is not None
         if not usable or t.stuck_write:
             self._log("gcode", f"M865.1 I{c.tool} dropped")
             return
         if not t.material.adhoc:
-            self._log("gcode", f"M865.1 I0 ignored on preset {t.material.name}")
+            self._log("gcode", f"M865.1 I{c.tool} ignored on preset {t.material.name}")
             return
-        t.material.instance_uuid = c.uuid
-        t.previous = replace(t.material)
-        self._log("gcode", f"M865.1 T0 instance UUID {c.uuid}")
+        t.store(replace(t.material, instance_uuid=c.uuid))
+        self._log("gcode", f"M865.1 T{c.tool} instance UUID {c.uuid}")
 
     # The page's view.
 
@@ -1401,20 +1534,21 @@ class SimPrinter:
         job = None
         if self.job is not None:
             j = self.job
+            a = j.attention
+            user = isinstance(j, UserJob)
             job = {
                 "id": j.id,
                 "kind": j.kind,
                 "name": j.name,
-                "display_name": j.display_name,
                 "phase": str(j.phase),
                 "progress": j.progress(),
-                "fed_mm": j.fed_mm,
-                "total_mm": j.spec.total_mm if j.spec else 0.0,
-                "attention": j.attention,
+                "fed_mm": j.fed_mm if user else 0.0,
+                "total_mm": j.spec.total_mm if user else 0.0,
+                "attention": None
+                if a is None
+                else {"reason": str(a.reason), "tool": a.tool, "text": str(a)},
                 "time_printing": j.time_printing,
-                "segment": j.segment,
-                "wait_tool": j.wait_tool,
-                "jam": j.jam,
+                "segment": j.segment if user else 0,
             }
         return {
             "name": self.name,
@@ -1480,7 +1614,6 @@ def _process_from(d: dict | None) -> LoadProcess | UnloadProcess | None:
         return None
     d = dict(d)
     kind = d.pop("kind")
-    d.pop("resume_state", None)  # older snapshots
     if kind == "unload":
         return UnloadProcess(**d)
     d["material"] = _material_from(d["material"])
@@ -1491,31 +1624,36 @@ def _tool_from(d: dict) -> SimTool:
     d = dict(d)
     d["material"] = _material_from(d["material"])
     d["previous"] = _material_from(d["previous"])
-    d["kept_type"] = _material_from(d.get("kept_type"))
+    d["kept_type"] = _material_from(d["kept_type"])
     d["process"] = _process_from(d["process"])
     return SimTool(**d)
 
 
-def _job_from(d: dict | None) -> SimJob | None:
+def _job_from(d: dict | None) -> UserJob | SyncJob | None:
     if d is None:
         return None
     d = dict(d)
+    kind = d.pop("kind")
     d["phase"] = JobPhase(d["phase"])
     d["end_state"] = State(d["end_state"])
+    if (a := d["attention"]) is not None:
+        d["attention"] = Attention(Reason(a["reason"]), a["tool"], a["detail"])
+    if kind == "sync":
+        return SyncJob(**d)
     if d["paused_from"] is not None:
         d["paused_from"] = JobPhase(d["paused_from"])
-    spec = d["spec"]
-    if spec is not None:
-        spec = dict(spec)
-        spec["segments"] = [Segment(**s) for s in spec["segments"]]
-        d["spec"] = PrintSpec(**spec)
-    return SimJob(**d)
+    spec = dict(d["spec"])
+    spec["segments"] = [Segment(**s) for s in spec["segments"]]
+    d["spec"] = PrintSpec(**spec)
+    return UserJob(**d)
 
 
 def _printer_dict(p: SimPrinter) -> dict:
     d = asdict(p)
     d["model"] = p.model.code
     d["tools"] = [d["tools"][i] for i in sorted(d["tools"])]
+    if p.job is not None:
+        d["job"]["kind"] = p.job.kind
     return d
 
 
@@ -1525,7 +1663,7 @@ def _printer_from(d: dict) -> SimPrinter:
     d["firmware"] = Firmware(d["firmware"])
     d["power"] = Power(d["power"])
     d["fault"] = Fault(d["fault"])
-    d["state"] = State(d["state"])
+    d["screen"] = State(d["screen"])
     d["tools"] = {t["index"]: _tool_from(t) for t in d["tools"]}
     d["job"] = _job_from(d["job"])
     return SimPrinter(**d)
@@ -1543,32 +1681,10 @@ class Simulation:
         self.events: list[Event] = []
         self.now = 0.0
         self.data_dir = Path(data_dir) if data_dir else None
-        self.listeners: list[Callable[[Event], None]] = []
-        self._queues: list[asyncio.Queue] = []
+        self.listeners: list[Callable[[Event], None]] = []  # called with each event
+        self.watchers: list[Callable[[], None]] = []  # called when a tick changed something
         for p in printers or []:
             self.add(p)
-
-    @classmethod
-    def from_config(cls, cfg: SimConfig) -> Simulation:
-        sim = cls(Settings(**cfg.settings), data_dir=cfg.data_dir)
-        for pc in cfg.printers:
-            model = MODELS[pc.model]
-            default = Firmware.FULL if model.counters else Firmware.NO_COUNTERS
-            tools = {tc.index: _tool_from_config(tc) for tc in pc.tools}
-            enabled = sorted(i for i, t in tools.items() if t.enabled)
-            sim.add(
-                SimPrinter(
-                    name=pc.name,
-                    port=pc.port,
-                    api_key=pc.api_key,
-                    model=model,
-                    firmware=Firmware(pc.firmware) if pc.firmware else default,
-                    auto_accept_model_check=pc.auto_accept_model_check,
-                    tools=tools,
-                    selected_tool=enabled[0] if enabled else min(tools),
-                )
-            )
-        return sim
 
     def add(self, printer: SimPrinter) -> None:
         printer._sim = self
@@ -1583,32 +1699,7 @@ class Simulation:
         del self.events[:-EVENT_LIMIT]
         for listener in self.listeners:
             listener(event)
-        self.push(("log", event))
-        self.changed()
         return event
-
-    def subscribe(self) -> asyncio.Queue:
-        """A queue of ("log", Event) and ("state", None) items for one SSE client.
-
-        It's bounded so a client that stops reading costs a fixed amount of memory: `push`
-        drops the oldest item to make room.
-        """
-        queue: asyncio.Queue = asyncio.Queue(maxsize=QUEUE_LIMIT)
-        self._queues.append(queue)
-        return queue
-
-    def unsubscribe(self, queue: asyncio.Queue) -> None:
-        if queue in self._queues:
-            self._queues.remove(queue)
-
-    def push(self, item: tuple) -> None:
-        for queue in self._queues:
-            if queue.full():
-                queue.get_nowait()
-            queue.put_nowait(item)
-
-    def changed(self) -> None:
-        self.push(("state", None))
 
     def tick(self, dt: float) -> None:
         if dt <= 0:
@@ -1616,7 +1707,8 @@ class Simulation:
         self.now += dt
         active = [p.tick(dt) for p in self.printers.values()]
         if any(active):
-            self.changed()
+            for watcher in self.watchers:
+                watcher()
 
     def advance(self, seconds: float, step: float = 0.1) -> None:
         """Tick through `seconds` in the clock task's steps, so phases end in order."""
@@ -1674,29 +1766,3 @@ class Simulation:
         if events:
             out["events"] = [asdict(e) for e in self.events[-200:]]
         return out
-
-
-def _tool_from_config(tc: Any) -> SimTool:
-    m = tc.material
-    material = None
-    if m:
-        color, uuid = m.get("color"), m.get("instance_uuid")
-        # A configured color or UUID can only come from an ad-hoc type; a bare name is a preset.
-        adhoc = bool(color or uuid)
-        material = Material(
-            m["name"],
-            color.lower() if color else None,
-            uuid,
-            adhoc,
-            **preset_temperatures(m["name"]),
-        )
-    return SimTool(
-        index=tc.index,
-        enabled=tc.enabled,
-        loaded=material is not None,
-        material=material,
-        previous=replace(material) if material and material.adhoc else None,
-        extruded=float(tc.extruded),
-        unload_count=tc.unload_count,
-        extruded_at_unload=tc.extruded_at_unload,
-    )

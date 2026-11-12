@@ -279,7 +279,7 @@ async def test_c8_firmware_without_usage_counters(world: World, caplog: pytest.L
 CONTENT = [
     pytest.param(
         dict(material="TPU"),
-        ['N"TPU" T220 B60 P210 C25 D15 E40 F1 G1 O"#1f6fb2" L0'],
+        ['N"TPU" T220 B60 P210 C25 D15 E40 F1 G1 O"#186bb5" L0'],
         [],
         ("TPU", PETG[1]),
         id="flexible",
@@ -293,14 +293,14 @@ CONTENT = [
     ),
     pytest.param(
         dict(material=None),
-        ['N"{short}" T220 B60 O"#1f6fb2" L0'],
+        ['N"{short}" T220 B60 O"#186bb5" L0'],
         [" P1", " C", " G1"],
         ("{short}", PETG[1]),
         id="no_material",
     ),
     pytest.param(
-        dict(color_hex="1f6fb2cc"),
-        ['O"#1f6fb2" L0'],
+        dict(color_hex="186bb5cc"),
+        ['O"#186bb5" L0'],
         ["cc"],
         ("PETG", PETG[1]),
         id="rgba_color",
@@ -461,7 +461,7 @@ async def test_w9_printer_change_beside_an_edit_is_drift(
     await written_b(w)
 
     # The edit alone would be written (W14). The printer no longer shows the last write.
-    await w.spoolman.edit_filament(b, color_hex="00aa55")
+    await w.spoolman.edit_filament(b, color_hex="00ad52")
     w.tool.material = replace(w.tool.material, **change)
     for _ in range(3):
         await w.poll()

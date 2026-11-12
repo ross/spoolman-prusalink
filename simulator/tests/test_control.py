@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import re
+from pathlib import Path
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
@@ -17,8 +19,10 @@ from simulator.tests.util import make
 async def setup(tmp_path):
     sim, printer = make()
     sim.data_dir = tmp_path
-    client = TestClient(TestServer(control.make_app(sim)))
+    app = control.make_app(sim)
+    client = TestClient(TestServer(app))
     await client.start_server()
+    client.stream = app[control.STREAM]
     yield sim, printer, client
     await client.close()
 
@@ -95,8 +99,8 @@ async def test_close_ends_the_stream_wherever_it_is_in_a_batch(setup):
     sim, p, client = setup
     resp = await client.get("/api/events")
     await resp.content.readuntil(b"\n\n")  # the first state
-    sim.changed()
-    sim.push(("close", None))
+    client.stream.changed()
+    client.stream.push(("close", None))
     await asyncio.wait_for(resp.content.read(), 2)  # returns at EOF, not the 15 s heartbeat
     assert resp.content.at_eof()
 
@@ -166,3 +170,43 @@ async def test_an_action_without_a_body_takes_no_parameters(setup):
     assert resp.status == 200 and p.homed
     resp = await client.post("/api/printers/p/dismiss")
     assert resp.status == 409 and "nothing to dismiss" in (await resp.json())["error"]
+
+
+async def test_a_type_error_inside_an_action_is_a_bug_not_a_bad_request(setup, monkeypatch):
+    sim, p, client = setup
+
+    def broken() -> None:
+        raise TypeError("a bug")
+
+    monkeypatch.setattr(p, "home", broken)
+    resp = await client.post("/api/printers/p/home")
+    assert resp.status == 500
+
+
+def test_the_readme_lists_every_action():
+    readme = (Path(control.__file__).parent / "README.md").read_text()
+    listed = re.search(r"^Actions: (.*?)\. Parameter names", readme, re.S | re.M).group(1)
+    assert set(re.findall(r"`(\w+)`", listed)) == control.ACTIONS
+
+
+def test_the_stream_queues_events_and_tick_changes():
+    sim, p = make()
+    stream = control.Stream(sim)
+    queue = stream.subscribe()
+    p.unload(0)
+    items = [queue.get_nowait() for _ in range(queue.qsize())]
+    assert [kind for kind, _ in items] == ["log", "state", "log", "state"]
+    sim.tick(0.1)  # the unload runs on: a state item, no log
+    assert queue.get_nowait() == ("state", None) and queue.empty()
+    stream.unsubscribe(queue)
+    sim.tick(0.1)
+    assert queue.empty()
+
+
+def test_a_stream_queue_drops_the_oldest():
+    sim, p = make()
+    stream = control.Stream(sim)
+    queue = stream.subscribe()
+    for i in range(1500):
+        stream.push(("n", i))
+    assert queue.qsize() == 1000 and queue.get_nowait() == ("n", 500)

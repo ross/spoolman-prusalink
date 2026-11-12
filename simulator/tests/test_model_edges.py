@@ -8,19 +8,23 @@ import pytest
 
 from simulator import gcode
 from simulator.model import (
+    PHASE_STATES,
+    Attention,
     Busy,
     Invalid,
     JobPhase,
     Material,
     PrintSpec,
+    Reason,
     Segment,
     Settings,
     SimTool,
     Simulation,
     State,
+    SyncJob,
 )
 from simulator.tests.test_model import one_segment, run_sync, tool0
-from simulator.tests.util import PLA, loaded, make
+from simulator.tests.util import PLA, loaded, make, run
 
 TAG = "8b6a3e3e-3f6c-4d7b-9a43-6c1f0e7d2a11"
 
@@ -67,7 +71,7 @@ def test_m865_with_nothing_to_write_changes_nothing():
 
 def test_m865_copy_onto_tool_0_of_a_tag_model_keeps_the_uuids():
     sim, p = make("8.1.0", [SimTool(0)])
-    p.apply(gcode.parse('M865 X R N"PETG" O"#1f6fb2" L0'))
+    p.apply(gcode.parse('M865 X R N"PETG" O"#186bb5" L0'))
     p.apply(gcode.parse(f'M865.1 I0 C"{TAG}"'))
     uuids = tool0(p).material.instance_uuid
     assert uuids == TAG
@@ -77,7 +81,7 @@ def test_m865_copy_onto_tool_0_of_a_tag_model_keeps_the_uuids():
 
 
 def test_m865_copy_onto_another_tool_drops_the_uuids():
-    tagged = Material("PETG", "#1f6fb2", TAG, True, material_uuid=TAG, package_uuid=TAG)
+    tagged = Material("PETG", "#186bb5", TAG, True, material_uuid=TAG, package_uuid=TAG)
     sim, p = make("1.4.1", [loaded(0, tagged)])
     p.tools[1] = SimTool(1, enabled=False)
     p.model = type(p.model)("x", "X", uuids=True, max_tools=2)  # only tool 0 holds UUIDs
@@ -126,10 +130,10 @@ def test_tag_load_validates_its_fields():
 
 def test_tag_load_on_another_tool_than_0_has_no_product_uuids():
     sim, p = make("8.1.0", [SimTool(0), SimTool(1)])
-    p.load(1, source="tag", name="PETG", color="#1F6FB2", uuid=TAG)
+    p.load(1, source="tag", name="PETG", color="#186BB5", uuid=TAG)
     sim.tick(100)
     m = p.tools[1].material
-    assert (m.name, m.color) == ("PETG", "#1f6fb2")
+    assert (m.name, m.color) == ("PETG", "#186bb5")
     assert m.instance_uuid is None and m.material_uuid is None and m.package_uuid is None
 
 
@@ -420,14 +424,14 @@ def test_snapshot_while_paused_keeps_where_the_print_paused_from():
     assert q.state is State.FINISHED
 
 
-def test_snapshot_of_a_sync_job_has_no_print_spec():
+def test_snapshot_keeps_a_sync_job_a_sync_job():
     sim, p = make()
     run_sync(sim, p)
-    assert p.job is not None and p.job.spec is None
+    assert isinstance(p.job, SyncJob)
     other = Simulation()
     other.restore(json.loads(json.dumps(sim.snapshot())))
     q = other.printers["p"]
-    assert q.job is not None and q.job.spec is None and q.job.kind == "sync"
+    assert q.job == p.job and isinstance(q.job, SyncJob)
     other.tick(100)
     assert q.job is None and q.state is State.FINISHED
     assert q.tools[0].material.name == "PETG"
@@ -469,3 +473,112 @@ def test_simulation_takes_printers_at_construction():
     _, p = make()
     sim = Simulation(printers=[p])
     assert sim.printer("p") is p and p._sim is sim
+
+
+# The state follows from the phase.
+
+
+def test_every_phase_has_a_state():
+    assert set(PHASE_STATES) == set(JobPhase)
+
+
+@pytest.mark.parametrize(
+    ("phase", "attention"),
+    [
+        (JobPhase.PRINTING, Attention(Reason.RUNOUT, 0)),
+        (JobPhase.WAIT_LOAD, None),
+        (JobPhase.WAIT_LOAD, Attention(Reason.MODEL_CHECK)),
+        (JobPhase.AWAIT_RESUME, Attention(Reason.JAM, 0)),
+    ],
+)
+def test_a_phase_takes_only_its_own_reasons(phase, attention):
+    job = SyncJob(name="x", gcode="")
+    with pytest.raises(ValueError, match="can't wait"):
+        job.enter(phase, attention)
+    assert job.phase is JobPhase.SCANNING and job.attention is None
+
+
+def test_leaving_a_wait_clears_its_reason():
+    sim, p = printing()
+    p.runout(0)
+    assert p.job.wait_tool == 0
+    p.load(0)
+    run(sim, 20)
+    assert p.job.phase is JobPhase.PAUSED and p.job.attention is None
+    assert p.job.wait_tool is None
+
+
+def test_each_state_change_is_logged_once():
+    sim, p = make()
+    p.unload(0)
+    run(sim, 3.1)
+    p.screen = State.FINISHED  # a screen set directly isn't logged until the next change
+    p.load(0, source="preset", name="PLA")
+    run(sim, 20)
+    changes = [e.text for e in sim.events if e.kind == "state"]
+    assert changes == ["IDLE -> BUSY", "BUSY -> IDLE", "IDLE -> BUSY", "BUSY -> IDLE"]
+
+
+@pytest.mark.parametrize(
+    ("attention", "text"),
+    [
+        (Attention(Reason.MODEL_CHECK), "model check"),
+        (Attention(Reason.PARSE_ERROR, detail="line 1: bad"), "parse error: line 1: bad"),
+        (Attention(Reason.JAM, 1), "jam tool 1"),
+        (Attention(Reason.RUNOUT, 0), "runout tool 0"),
+        (Attention(Reason.COLOR_CHANGE, 2), "color change tool 2"),
+        (Attention(Reason.NO_FILAMENT, 3), "no filament in tool 3"),
+        (Attention(Reason.COLD_BED), "bed cold after the power panic"),
+    ],
+)
+def test_the_screen_text_for_each_reason(attention, text):
+    assert str(attention) == text
+
+
+def test_a_snapshot_from_an_older_simulator_is_refused():
+    sim, p = make()
+    data = json.loads(json.dumps(sim.snapshot()))
+    del data["printers"][0]["tools"][0]["kept_type"]  # older snapshots had no kept type
+    with pytest.raises(Invalid, match="bad snapshot"):
+        Simulation().restore(data)
+
+
+def test_load_logs_name_the_type_the_tool_holds():
+    """A runout reload by hand logs the kept type, and a load logs the color as stored."""
+    sim, p = printing()
+    p.runout(0)
+    p.set_power("off")
+    p.load(0)
+    assert (
+        messages(sim, "load")[-1]
+        == f"T0 loaded by hand while off: PLA {PLA.color} {PLA.instance_uuid}"
+    )
+    p.set_power("on")
+    p.unload(0)
+    run(sim, 10)
+    p.load(0, source="preset", name="PETG", color="#73767d")
+    run(sim, 20)
+    assert "T0 type set to PETG #73737b" in messages(sim, "load")
+
+
+def test_a_tool_can_be_disabled_during_a_sync_job():
+    """A sync job has no segments, so only the selected tool is in use."""
+    sim, p = make("3.1.0", [loaded(0), loaded(1), loaded(2)])
+    p.upload("x.gcode", 'M862.3 P"MK4"\nM117 x\n', print_after=True, overwrite=False)
+    assert p.job.waits_for(Reason.MODEL_CHECK)
+    p.set_tool_enabled(2, False)
+    assert not p.tools[2].enabled
+    with pytest.raises(Invalid, match="T0 is in use"):
+        p.set_tool_enabled(0, False)
+
+
+def test_a_reload_by_hand_with_no_type_to_restore_still_loads_the_tool():
+    """A runout on a tool that never had a type: the hand reload has nothing to restore."""
+    sim, p = printing()
+    tool = p.tools[0]
+    tool.material = tool.previous = None  # no type was ever stored
+    p.runout(0)
+    assert tool.kept() is None
+    p.set_power("off")
+    p.load(0)
+    assert tool.loaded and tool.material is None

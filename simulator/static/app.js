@@ -172,18 +172,17 @@ function renderTool(p, t) {
   const st = up(p.state);
   const job = p.job;
   const ph = job ? up(job.phase) : '';
-  const attn = job && job.attention ? String(job.attention) : '';
+  const at = job && job.attention;
   const proc = t.process;
   const i = t.index;
-  const mentions = new RegExp('tool ' + i + '\\b').test(attn);
+  const mentions = !!at && at.tool === i;
   const running = st === 'PRINTING' || st === 'PAUSED';
   const multi = p.tools.length > 1;
   const midPrint = job && (ph === 'PRINTING' || ph === 'PREHEAT');
   const off = low(p.power) === 'off';
   const tdis = !t.enabled; // a disabled tool takes only Enable/Disable
   const hasJob = !!job;
-  const wm = job && job.wait_tool != null ? job.wait_tool : (/tool (\d+)/.exec(attn) || [])[1];
-  const canKeep = st === 'ATTENTION' && ph === 'WAIT_LOAD' && wm != null && Number(wm) === i;
+  const canKeep = ph === 'WAIT_LOAD' && mentions;
   const canTag = !!(p.model && p.model.uuids);
   const dLoad = tdis || !!proc || (running && !(st === 'ATTENTION' && mentions));
   const dUnload = tdis || !t.loaded || !!proc || running || hasJob;
@@ -249,7 +248,8 @@ function renderPrinter(p) {
   const ph = job ? up(job.phase) : '';
   const off = low(p.power) === 'off';
   const m = p.model || {};
-  const attn = job && job.attention ? String(job.attention) : '';
+  const at = job && job.attention;
+  const attn = at ? at.text : '';
 
   let pct = job ? 0 : null;
   if (job) {
@@ -272,7 +272,7 @@ function renderPrinter(p) {
 
   h += '<div class="jobline">';
   if (job) {
-    h += '<span>job <b>#' + (job.id == null ? '?' : esc(job.id)) + '</b> ' + esc(job.kind) + ' ' + esc(job.display_name || job.name) +
+    h += '<span>job <b>#' + (job.id == null ? '?' : esc(job.id)) + '</b> ' + esc(job.kind) + ' ' + esc(job.name) +
       ' <span class="muted">' + esc(ph) + '</span></span>';
     if (ph === 'HOLD') {
       // the attention text stands in for the bar
@@ -290,9 +290,9 @@ function renderPrinter(p) {
   if (p.message) h += '<div style="margin-top:3px"><span class="pill" title="last M117">' + esc(p.message) + '</span></div>';
 
   const canStart = IDLEISH.includes(st) && !off && !(st === 'IDLE' && job) && !p.tools.some((t) => t.process);
-  const canClearJam = !off && ph === 'HOLD' && !!job && job.jam === true;
+  const canClearJam = !off && ph === 'HOLD' && at.reason === 'jam';
   const aa = p.auto_accept_model_check;
-  const tap = st === 'ATTENTION' && (attn === 'model check' || attn.startsWith('parse error'));
+  const tap = ph === 'HOLD' && job.kind === 'sync';
   h += '<div class="btns">' +
     btn('Start print', 'toggle', { form: 'start', dis: !canStart, cls: isOpen(p, 'start') ? 'on' : '' }) +
     btn('Pause', 'pause', { dis: off || !(ph === 'PRINTING' || ph === 'PREHEAT') }) +
