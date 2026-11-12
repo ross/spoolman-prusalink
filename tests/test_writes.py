@@ -34,7 +34,7 @@ from simulator.model import MODELS
 from simulator.prusalink import Answer
 from spoolman_prusalink.accounting import ToolState
 from spoolman_prusalink.db import read_state
-from spoolman_prusalink.printer_sync import PRINTER_MODELS, default_preamble
+from spoolman_prusalink.printer_sync import PRINTER_MODELS, WriteState, default_preamble
 from spoolman_prusalink.prusalink import PrusaLink
 from spoolman_prusalink.records import ChargeRecord
 
@@ -141,8 +141,8 @@ async def test_a_failed_save_in_process_saves_nothing(tmp_path):
     await bridge.poll()
     db = tmp_path / "bridge.db"
     state, records = read_state(db), ledger(tmp_path)
-    conn = bridge.db._conn
-    bridge.db._conn = FailingCommit(conn)
+    conn = bridge.db.conn
+    bridge.db.conn = FailingCommit(conn)
     station.tool.unload_count, station.tool.extruded_at_unload, station.tool.extruded = (
         1,
         1400,
@@ -151,14 +151,14 @@ async def test_a_failed_save_in_process_saves_nothing(tmp_path):
     with pytest.raises(sqlite3.OperationalError):
         await bridge.poll()
     # One transaction held the events, the queued charges and the tool's counters.
-    failed = bridge.db._conn.failed
-    assert bridge.db._conn.wrote("INSERT INTO ledger", failed) == 2
-    assert bridge.db._conn.wrote("INSERT INTO outbox", failed) == 2
-    assert bridge.db._conn.wrote("INSERT OR REPLACE INTO tools", failed) == 1
+    failed = bridge.db.conn.failed
+    assert bridge.db.conn.wrote("INSERT INTO ledger", failed) == 2
+    assert bridge.db.conn.wrote("INSERT INTO outbox", failed) == 2
+    assert bridge.db.conn.wrote("INSERT OR REPLACE INTO tools", failed) == 1
     assert read_state(db) == state
     assert ledger(tmp_path) == records
     assert fake.used == {}
-    bridge.db._conn = conn
+    bridge.db.conn = conn
 
     # The bridge stops on the error; started again, it charges the same usage.
     bridge = restart(bridge)
@@ -183,18 +183,18 @@ async def test_a_failed_save_in_flush_keeps_the_charge_queued(tmp_path):
     db = tmp_path / "bridge.db"
     state, records = read_state(db), ledger(tmp_path)
     assert [r.use_length for r in state.outbox] == [500.0]
-    conn = bridge.db._conn
-    bridge.db._conn = FailingCommit(conn)
+    conn = bridge.db.conn
+    bridge.db.conn = FailingCommit(conn)
     with pytest.raises(sqlite3.OperationalError):
         await bridge.flush()
     # One transaction held the record and the charge leaving the outbox.
-    failed = bridge.db._conn.failed
-    assert bridge.db._conn.wrote("INSERT INTO ledger", failed) == 1
-    assert bridge.db._conn.wrote("DELETE FROM outbox", failed) == 1
+    failed = bridge.db.conn.failed
+    assert bridge.db.conn.wrote("INSERT INTO ledger", failed) == 1
+    assert bridge.db.conn.wrote("DELETE FROM outbox", failed) == 1
     assert fake.used == {19: [500.0]}  # Spoolman took it,
     assert read_state(db) == state  # but it's still queued,
     assert ledger(tmp_path) == records  # with no record of it.
-    bridge.db._conn = conn
+    bridge.db.conn = conn
 
     # Sent again at restart: charges are at least once.
     bridge = restart(bridge)
@@ -449,7 +449,7 @@ async def test_spoolman_first_swap_evicts_and_writes_printer(tmp_path):
     station.finish_job()
     await bridge.poll()  # printer now matches: no second job, no flag
     assert len(jobs(station)) == 1
-    assert bridge.printers[0].tools[0].needs_sync is False
+    assert bridge.printers[0].writes[0].due is False
     assert fake.flag(20) is None
     await bridge.aclose()
 
@@ -476,7 +476,7 @@ async def test_failed_uuid_mint_holds_the_write_until_stored(tmp_path, caplog):
         await bridge.poll()
     assert jobs(station) == []
     assert stored_uuid(fake, 20) is None
-    assert bridge.printers[0].tools[0].needs_sync is True
+    assert bridge.printers[0].writes[0].due is True
     assert levels(caplog, "can't store an instance UUID on spool 20") == [
         "WARNING",
         "DEBUG",
@@ -512,7 +512,7 @@ async def test_uuid_field_of_another_type_writes_without_a_uuid(tmp_path, caplog
     (gcode,) = jobs(station)
     assert 'M865 X R N"PLA"' in gcode and "M865.1" not in gcode
     assert stored_uuid(fake, 20) is None
-    assert bridge.printers[0].tools[0].sync_attempts == 1
+    assert bridge.printers[0].writes[0].attempts == 1
     station.finish_job()
     await bridge.poll()  # The printer matches: nothing held, nothing written again.
     assert len(jobs(station)) == 1
@@ -660,7 +660,7 @@ async def test_busy_printer_defers_write(tmp_path):
     fake.spools[20] = spool_x(20)
     station.before_request = answer(409, "PUT")
     await bridge.poll()
-    assert jobs(station) == [] and bridge.printers[0].tools[0].sync_attempts == 0
+    assert jobs(station) == [] and bridge.printers[0].writes[0].attempts == 0
     station.before_request = None
     await bridge.poll()
     assert len(jobs(station)) == 1
@@ -734,8 +734,8 @@ async def test_pps_loaded_from_the_menu_clears_the_flag(tmp_path, caplog):
         await bridge.poll()
     assert fake.flag(20) is None
     assert jobs(station) == []
-    st = bridge.printers[0].tools[0]
-    assert (st.needs_sync, st.sync_attempts) == (False, 0)
+    write = bridge.printers[0].writes[0]
+    assert (write.due, write.attempts) == (False, 0)
     assert "differs" not in caplog.text
     await bridge.aclose()
 
@@ -944,7 +944,7 @@ async def test_runout_reload_keeps_old_uuid_and_gets_rewritten(tmp_path):
     assert f'M865.1 I0 C"{minted}"' in gcode
     station.finish_job()
     await bridge.poll()
-    assert len(jobs(station)) == 1 and bridge.printers[0].tools[0].needs_sync is False
+    assert len(jobs(station)) == 1 and bridge.printers[0].writes[0].due is False
     await bridge.aclose()
 
 
@@ -1130,7 +1130,9 @@ async def test_flag_failure_ends_when_spoolman_already_matches(tmp_path, caplog)
     await bridge.poll()
     assert caplog.text.count("can't update the flag on spool 19") == 1
     # The user writes the same flag themselves, so there's nothing left to update.
-    fake.spools[19]["extra"]["bridge_flag"] = json.dumps(bridge._flags[19])
+    fake.spools[19]["extra"]["bridge_flag"] = json.dumps(
+        " | ".join(bridge.printers[0].flags({})[19])
+    )
     await bridge.poll()
     assert levels(caplog, "flag on spool 19 is up to date") == ["INFO"]
     await bridge.aclose()
@@ -1208,7 +1210,7 @@ async def test_emptied_location_reports_only_real_drift(tmp_path, caplog, reason
     elif reason == "edited":
         fake.spools[20]["filament"]["color_hex"] = "00ff00"
     else:
-        bridge.printers[0].tools[0] = replace(bridge.printers[0].tools[0], needs_sync=True)
+        bridge.printers[0].writes[0] = bridge.printers[0].writes[0].resync()
     for _ in range(3):
         await bridge.poll()
     assert len(jobs(station)) == 1  # only the original write
@@ -1305,10 +1307,7 @@ async def test_spoolman_edit_is_not_drift_while_its_job_runs(tmp_path):
     await bridge.poll()
     await bridge.poll()
     assert len(jobs(station)) == 2 and fake.flag(20) is None
-    assert (
-        bridge.printers[0].tools[0].needs_sync is False
-        and bridge.printers[0].tools[0].sync_attempts == 0
-    )
+    assert bridge.printers[0].writes[0].due is False and bridge.printers[0].writes[0].attempts == 0
     await bridge.aclose()
 
 
@@ -1343,7 +1342,7 @@ async def test_print_started_during_the_poll_holds_the_sync_job(tmp_path, caplog
     await swap_to_spool_20(bridge, fake, station)
     assert jobs(station) == [] and refused(station) == 0
     assert "printer became PRINTING; sync job waits" in caplog.text
-    assert bridge.printers[0].tools[0].sync_attempts == 0  # Nothing counted as written.
+    assert bridge.printers[0].writes[0].attempts == 0  # Nothing counted as written.
     await bridge.poll()
     assert len(jobs(station)) == 1
     # The wait ends with the job, which its own line reports: no separate recovery line.
@@ -1441,7 +1440,7 @@ async def test_wait_for_a_running_sync_job_is_not_logged(tmp_path, caplog):
     assert caplog.text.count("] printer will be set to spool 20") == 1
     # Once the printer shows it, the note's end is logged once, at the note's level.
     assert levels(caplog, "] no longer: printer will be set to spool 20") == ["WARNING"]
-    assert bridge.printers[0].tools[0].needs_sync is False
+    assert bridge.printers[0].writes[0].due is False
     await bridge.aclose()
 
 
@@ -3033,15 +3032,14 @@ async def test_tag_with_other_values_is_not_written(tmp_path, caplog, sync_drift
         tmp_path, [spool(20)], uuid_field="instance_uuid", sync_drift=sync_drift
     )
     await bridge.poll()  # baseline
-    st = bridge.printers[0].tools[0]
-    bridge.printers[0].tools[0] = replace(st, needs_sync=True, sync_attempts=1)
+    bridge.printers[0].writes[0] = WriteState(due=True, attempts=1)
     fill(station.tool, other_tag())
     for _ in range(3):
         await bridge.poll()
     assert jobs(station) == []
     assert stored_uuid(fake, 20) == TAG_K  # Still adopted.
-    st = bridge.printers[0].tools[0]
-    assert (st.needs_sync, st.sync_attempts) == (False, 0)
+    write = bridge.printers[0].writes[0]
+    assert (write.due, write.attempts) == (False, 0)
     assert not fake.flag(20)
     assert "differs" not in caplog.text
     await bridge.aclose()
@@ -3353,4 +3351,21 @@ async def test_kept_uuid_of_an_archived_spool_is_replaced(tmp_path, caplog):
     await bridge.poll()
     assert len(jobs(station)) == 2
     assert caplog.text.count("archived spool 18 has it") == 1
+    await bridge.aclose()
+
+
+async def test_a_sync_job_asks_for_the_next_poll_soon(tmp_path):
+    bridge, fake, station = make(tmp_path, [spool(19)])
+    await bridge.poll()
+    assert bridge.interval() == bridge.config.poll_idle
+    station.tool.unload_count, station.tool.extruded_at_unload = 1, 1000
+    fill(station.tool, menu("PLA"))
+    fake.spools[20] = spool_x(20)
+    await bridge.poll()
+    assert len(jobs(station)) == 1
+    # The printer read idle this poll, but the job is starting: check on it soon.
+    assert bridge.interval() == bridge.config.poll_printing
+    station.finish_job()
+    await bridge.poll()
+    assert bridge.interval() == bridge.config.poll_idle
     await bridge.aclose()
