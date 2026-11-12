@@ -19,6 +19,7 @@ import httpx
 import pytest
 from aiohttp.test_utils import TestServer
 
+from integration.faults import SpoolmanFaults
 from integration.printers import Station, add_printers
 from integration.temperatures import TEMPERATURES, WRITTEN
 from simulator.model import (
@@ -245,6 +246,12 @@ async def spoolman(spoolman_url: str, prefix: str):
             await helper.cleanup()
 
 
+def sim_clock(sim: Simulation) -> Callable[[], float]:
+    """The bridge's clock: simulated time, offset so that it starts large, as a monotonic
+    clock does. An outage reminder measured from zero would show up in the tests."""
+    return lambda: sim.now + 1e6
+
+
 def advance(sim: Simulation, seconds: float) -> None:
     """Move simulated time on by `seconds`, in the clock task's 0.1 s steps."""
     t = 0.0
@@ -297,7 +304,6 @@ class World:
 
     sim: Simulation
     printer: SimPrinter
-    bridge: Bridge
     cfg: Config
     spoolman: SpoolmanHelper
     tool_location: str
@@ -311,7 +317,7 @@ class World:
         default_factory=lambda: {"uuid": UUID_FIELD, "flag": FLAG_FIELD, "claim": CLAIM_FIELD}
     )
     # Runs before the simulator serves each request, with its method and path. It can
-    # return a response to send instead, or `simulator.prusalink.DROP` to drop the
+    # return an `Answer` to send instead, or `simulator.prusalink.DROP` to drop the
     # connection; None serves the request as usual.
     before_request: Callable[[str, str], Reply] | None = None
     # --- Several printers (world_printers; see integration/printers.py) ---
@@ -326,20 +332,34 @@ class World:
 
     # --- End of several printers ---
 
+    # The bridge started last, and the transport in front of its Spoolman client, which
+    # a test can cut or make refuse requests (see `integration/faults.py`).
+    bridge: Bridge = field(init=False)
+    spoolman_faults: SpoolmanFaults = field(init=False)
     # Every bridge this world started, the current one last; the fixture closes them all.
     bridges: list[Bridge] = field(default_factory=list)
+
+    def start_bridge(self, cfg: Config) -> Bridge:
+        """Start a bridge on `cfg` and the simulator's clock; it becomes `bridge`.
+
+        Each bridge gets its own `spoolman_faults`, with no faults set. The caller
+        closes the old bridge first.
+        """
+        self.spoolman_faults = SpoolmanFaults(httpx.AsyncHTTPTransport())
+        self.bridge = Bridge.from_config(
+            cfg, clock=sim_clock(self.sim), spoolman_transport=self.spoolman_faults
+        )
+        self.bridges.append(self.bridge)
+        return self.bridge
 
     async def restart(self, **config) -> None:
         """Stop the bridge and start a new one on the same database, with `config` changed.
 
-        The bridge's restart (B2) and a lost database (B4) are tested this way; the new
-        bridge runs on the simulator's clock like the first.
+        The bridge's restart (B2) and a lost database (B4) are tested this way.
         """
         await self.bridge.aclose()
         self.cfg = replace(self.cfg, **config)
-        self.bridge = Bridge.from_config(self.cfg)
-        self.bridge.clock = lambda: self.sim.now
-        self.bridges.append(self.bridge)
+        self.start_bridge(self.cfg)
 
     @property
     def tool(self) -> SimTool:
@@ -456,16 +476,6 @@ class World:
     def material(self, tool: int = 0) -> tuple[str | None, str | None, str | None]:
         m = self.tool_at(tool).material
         return (None, None, None) if m is None else (m.name, m.color, m.instance_uuid)
-
-    @property
-    def spoolman_faults(self):
-        """The bridge's Spoolman transport, which a test can cut or make refuse requests.
-
-        Installed on first use; see `integration/faults.py`.
-        """
-        from integration.faults import install
-
-        return install(self.bridge)
 
 
 @pytest.fixture
@@ -645,12 +655,9 @@ async def world(
         ),
         **world_config,
     )
-    bridge = Bridge.from_config(cfg)
-    bridge.clock = lambda: sim.now
     w = World(
         sim,
         printer,
-        bridge,
         cfg,
         spoolman,
         tool_location,
@@ -662,7 +669,7 @@ async def world(
     )
     for name, sim_printer, location, other_server, _ in others:
         w.others[name] = Station(w, name, sim_printer, location, other_server)
-    w.bridges.append(bridge)
+    w.start_bridge(cfg)
     try:
         yield w
     finally:

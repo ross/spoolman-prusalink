@@ -170,7 +170,6 @@ async def test_x4a_eviction_rereads_the_spool_before_moving_it(tmp_path):
         return handle(request)
 
     fake.handle = racing
-    bridge.spoolman._client._transport = httpx.MockTransport(racing)
     await bridge.poll()
     assert tools(bridge)["a"].active == 22
     assert fake.spools[19]["location"] == B
@@ -279,13 +278,12 @@ async def test_eviction_reread_with_a_malformed_body_is_logged_and_retried(tmp_p
             return httpx.Response(200, text="<html>bad gateway</html>")
         return handle(request)
 
-    transport = bridge.spoolman._client._transport
-    bridge.spoolman._client._transport = httpx.MockTransport(bad_gateway)
+    fake.handle = bad_gateway
     await bridge.poll()  # Doesn't raise; the eviction waits.
     await bridge.poll()
     assert caplog.text.count("can't move spool 19 out") == 1
     assert fake.spools[19]["location"] == A and tools(bridge)["a"].active == 22
-    bridge.spoolman._client._transport = transport
+    fake.handle = handle
     await bridge.poll()
     assert fake.spools[19]["location"] is None
     await bridge.aclose()

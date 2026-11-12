@@ -3091,7 +3091,8 @@ def two_printers(tmp_path, spools, **cfg):
             uuid_field=config.uuid_field,
             flag_field=config.flag_field,
             claim_field=config.claim_field,
-            transport=httpx.MockTransport(fake.handle),
+            # Late bound, so a test can replace `fake.handle`.
+            transport=httpx.MockTransport(lambda request: fake.handle(request)),
         ),
         clients={
             name: PrusaLink(f"http://{name}", "k", transport=httpx.MockTransport(p.handle))

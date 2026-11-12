@@ -417,30 +417,6 @@ Nothing to do now. If changing both suites for each behavior change becomes
 a burden, narrow the integration suite to the scenarios where Spoolman's
 own behavior decides the outcome. Don't narrow the unit suite.
 
-### T4. The test clock doesn't reach `Reachability`
-
-`Reachability` takes its own `clock`, which defaults to `time.monotonic`
-(`app.py`). `PrinterBridge` and `Bridge` build theirs without passing the
-bridge's clock. The integration tests set
-`bridge.clock`, so reachability runs on wall time, and
-`integration/test_counters.py` patches `_printer_reach.clock` to work
-around it.
-
-Shape: pass one clock from `Bridge` to every `Reachability`, and accept it
-in `Bridge.from_config`.
-
-Size: small.
-
-### T5. Tests swap the Spoolman transport through private attributes
-
-`integration/faults.py` and `tests/test_printers.py` assign
-`bridge.spoolman._client._transport`. `Spoolman` and `PrusaLink` accept
-`transport=`, but `Bridge.from_config` can't pass one.
-
-Shape: add transport parameters to `from_config`.
-
-Size: small.
-
 ### T6. Harness duplication
 
 - The `world` fixture (`integration/conftest.py`) branches on six
@@ -563,7 +539,6 @@ Size: medium.
 
 | # | Workstream | Findings | Depends on |
 | --- | --- | --- | --- |
-| 1 | Injection seams | T4, T5 | Nothing |
 | 2 | Tag-UUID owner | B1, T1 (UUID tests) | Nothing |
 | 3 | Conditions and saved facts | B2, B3, B5, B7, T1 (rest) | Workstreams 2 and 10. B7 changes the part of `account()` that B9 part 1 restructures |
 | 4 | Typed records | B6, B9 (part 2), T7 | Workstream 10. Easier after 3 |
@@ -574,7 +549,7 @@ Size: medium.
 | 9 | Small items | B10, T8 | Nothing |
 | 10 | Accounting state | B9 (part 1) | Nothing |
 
-Workstreams 1, 6, 9, and 10 are independent and can run at any time. T3
+Workstreams 6, 9, and 10 are independent and can run at any time. T3
 has no work, so it isn't in a workstream.
 Of the large ones, workstream 7 is best first, because workstreams 2 and 3
 rewrite many of the same tests and would otherwise port them twice. Then
