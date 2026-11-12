@@ -31,10 +31,11 @@ differ while a swap is in progress:
   reload keeps the old name, color and UUID whatever was loaded.
 - A print start that closes an unconfirmed swap leaves the usage on the old spool as a
   *provisional* charge. Later usage on that spool adds to it until the next unload, which
-  keeps it where it is, or a claim.
+  keeps it where it is, or a claim or a correction, which moves it.
 - A Spoolman change with no unload, when the printer already reports the new spool's
   instance UUID, is a correction: the new spool becomes active immediately. Name and
-  color can't identify a spool, because two spools of one product look the same.
+  color can't identify a spool, because two spools of one product look the same. During
+  a provisional charge, a correction also moves the usage since load, as a claim does.
 - A *claim* is the user saying which spool is in the tool. Everything charged since the
   later of the tool's last unload and the printer's last reboot (`since_load`) moves to
   the claimed spool, which becomes active. Claiming the active spool confirms it.
@@ -131,8 +132,8 @@ class SwapFlag:
 class Provisional:
     """Usage charged to a spool on the assumption that it was reloaded after an unload.
 
-    Recorded when a print start closes an unconfirmed swap. A claim resolves it, and so
-    does the next unload, which leaves the usage where it is.
+    Recorded when a print start closes an unconfirmed swap. A claim or a correction
+    resolves it, and so does the next unload, which leaves the usage where it is.
     """
 
     spool_id: int
@@ -498,6 +499,28 @@ def account(
             provisional = replace(provisional, mm=provisional.mm + held)
         held = 0
 
+    def take(target: int, how: str) -> str:
+        """Move the usage since load to `target` and make it active, as a claim does.
+
+        Returns what moved, for the event.
+        """
+        nonlocal active, assigned, evict
+        # Charge before refunding: Spoolman clamps used_weight at 0, so a refund applied
+        # first could be truncated if the charge then fails.
+        moved = {i: mm for i, mm in sorted(window.items()) if i != target and mm > 0}
+        charge(target, sum(moved.values()), f"{how} usage since load")
+        for i, mm in moved.items():
+            charge(i, -mm, f"moved to {how} spool")
+        evict = tuple(i for i in evict if i != target)
+        if active is not None and active in location_ids and active not in evict:
+            evict = (*evict, active)
+        active = target
+        resolved = resolve_assignment(replace(s, active=target, evict=evict), location_ids)
+        assigned = target if isinstance(resolved, list) else resolved
+        since = "reboot" if rebooted or not s.unload_count else "unload"
+        sources = ", ".join(f"{mm} mm from spool {i}" for i, mm in moved.items())
+        return f"{sources or 'nothing'} (usage since the last {since})"
+
     # 1. Unload since the last poll: usage before it goes to the active spool.
     if reading.unload_count != s.unload_count:
         at = reading.extruded_at_unload or 0
@@ -594,26 +617,12 @@ def account(
                 f"spool {claim} claimed: confirmed as loaded, nothing moves{closed}",
             )
         else:
-            # Charge before refunding: Spoolman clamps used_weight at 0, so a refund
-            # applied first could be truncated if the charge then fails.
-            moved = {i: mm for i, mm in sorted(window.items()) if i != claim and mm > 0}
-            total = sum(moved.values())
-            charge(claim, total, "claimed usage since load")
-            for i, mm in moved.items():
-                charge(i, -mm, "moved to claimed spool")
-            since = "reboot" if rebooted or not s.unload_count else "unload"
-            sources = ", ".join(f"{mm} mm from spool {i}" for i, mm in moved.items())
+            old = active
+            moved = take(claim, "claimed")
             event(
                 EventKind.CLAIMED,
-                f"spool {claim} claimed in place of spool {active}: moved "
-                f"{sources or 'nothing'} (usage since the last {since})",
+                f"spool {claim} claimed in place of spool {old}: moved {moved}",
             )
-            evict = tuple(i for i in evict if i != claim)
-            if active is not None and active in location_ids and active not in evict:
-                evict = (*evict, active)
-            active = claim
-            resolved = resolve_assignment(replace(s, active=claim, evict=evict), location_ids)
-            assigned = claim if isinstance(resolved, list) else resolved
         swap = None
         provisional = None
         staged_notice = None
@@ -692,6 +701,17 @@ def account(
                     f"spool {active} isn't in the location "
                     "either; still charging it until the printer reports an unload",
                 )
+        elif matches(assigned) and provisional is not None:
+            # The printer settles which spool went in at the unload, as a claim would:
+            # the usage charged provisionally moves to it.
+            old = active
+            moved = take(assigned, "corrected")
+            event(
+                EventKind.CORRECTION,
+                f"printer already has spool {assigned}'s filament; switching from spool "
+                f"{old} now and moving {moved}",
+            )
+            provisional = None
         elif matches(assigned):
             event(
                 EventKind.CORRECTION,
@@ -816,13 +836,6 @@ def account(
         staged_notice = Notice(assigned, EventKind.STAGED_AT_REBOOT, msg)
     if staged_notice is not None and (staged_notice.spool_id != assigned or assigned == active):
         staged_notice = None
-    if provisional is not None and provisional.spool_id != active:
-        event(
-            EventKind.PROVISIONAL_KEPT,
-            f"spool {provisional.spool_id} is no longer active; its {provisional.mm} mm "
-            "provisional charge stays",
-        )
-        provisional = None
 
     resync = unloaded or active != s.active or out.claimed
     out.state = replace(
