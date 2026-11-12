@@ -71,7 +71,9 @@ def serve(
         answer = Answer(500, {"message": "Internal Server Error"})
     else:
         answer = _route(p, method, path, headers, body)
-    data = {"body": body} if method == "PUT" else None
+    data = {"method": method, "path": path, "status": answer.status}
+    if method == "PUT":
+        data["body"] = body
     sim.log(name, "request", f"{method} {path} {answer.status}", data)
     return answer
 

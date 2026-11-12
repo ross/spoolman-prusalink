@@ -15,7 +15,7 @@ from simulator.tests.util import KEY, PLA, make
 
 AUTH = {"X-Api-Key": KEY}
 UPLOAD = {**AUTH, "Print-After-Upload": "?1", "Overwrite": "?1", "Content-Type": "text/x.gcode"}
-JOB = 'M862.3 P "COREONEL"\nM865 X R N"PETG" O"#1f6fb2" L0\nM117 Spoolman: test\n'
+JOB = 'M862.3 P "COREONEL"\nM865 X R N"PETG" O"#186bb5" L0\nM117 Spoolman: test\n'
 
 
 @pytest.fixture
@@ -64,7 +64,13 @@ async def test_requests_are_logged(setup):
     requests = [e for e in sim.events if e.kind == "request"]
     assert requests[0].text == "GET /api/v1/status 200"
     assert requests[1].text == "PUT /api/v1/files/usb/a.gcode 201"
-    assert requests[1].data == {"body": "M117 x\n"}
+    assert requests[0].data == {"method": "GET", "path": "/api/v1/status", "status": 200}
+    assert requests[1].data == {
+        "method": "PUT",
+        "path": "/api/v1/files/usb/a.gcode",
+        "status": 201,
+        "body": "M117 x\n",
+    }
 
 
 async def test_bad_key_and_faults(setup):
@@ -107,7 +113,7 @@ async def test_sync_job_upload_runs_to_finished(setup):
         "nozzle_temperature": 215,
         "preheat_temperature": 170,
         "bed_temperature": 60,
-        "color": "#1f6fb2",
+        "color": "#186bb5",
     }
     sim.tick(10)
     status = await (await client.get("/api/v1/status", headers=AUTH)).json()
@@ -127,7 +133,7 @@ async def test_upload_refusals(setup):
     assert resp.status == 409
     assert (await resp.json())["message"] == "File already exists"
 
-    p.state = State.BUSY
+    p.unload(0)  # BUSY
     resp = await client.put("/api/v1/files/usb/b.gcode", data="y", headers=UPLOAD)
     assert resp.status == 409
     assert (await resp.json())["message"] == "Can't print right now"
@@ -257,7 +263,7 @@ async def test_transport_serves_the_printer_in_process():
         assert (await client.get("/api/v1/status", headers={"X-Api-Key": "no"})).status_code == 401
     requests = [e for e in sim.events if e.kind == "request"]
     assert requests[2].text == "PUT /api/v1/files/usb/s.gcode 201"
-    assert requests[2].data == {"body": JOB}
+    assert requests[2].data["body"] == JOB
 
 
 async def test_transport_raises_when_the_printer_gives_no_answer():

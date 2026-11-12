@@ -122,7 +122,7 @@ async def seed(
         api = _Api(session, spoolman_url)
         vendor_id = await _vendor(api)
         filaments = await _filaments(api, vendor_id)
-        if any(loc.uuids and loc.tool == 0 for loc in locations):
+        if any(loc.holds_uuid for loc in locations):
             await _ensure_field(api, uuid_field)
         comments = {s.get("comment") for s in await api.request("GET", "/api/v1/spool")}
 
@@ -147,7 +147,7 @@ async def seed(
             # with the printer. A material seed has no filament for falls back to the cycle.
             loaded = _filament_for(loc.material) or CYCLE[position]
             extra = None
-            if loc.uuids and loc.tool == 0:
+            if loc.holds_uuid:
                 # A configured material keeps its UUID, even none, as the printer reports it.
                 # Otherwise one is minted, only when the spool is created.
                 value = loc.instance_uuid if loc.material else str(uuid.uuid4())
