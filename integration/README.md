@@ -136,6 +136,7 @@ current and that the scenario rows name their tests.
 | S11 | `test_swaps.py::test_s11_ambiguous_location_at_first_start` | Ambiguous at the first poll: no state is kept, and the baseline waits until it's clear. |
 | S11 | `test_swaps.py::test_s11_drift_flag_stands_while_the_tool_is_skipped` | A drift flag stays in Spoolman, like its note, while the tool is skipped as ambiguous. |
 | S11 | `test_swaps.py::test_s11_drift_note_stands_while_the_tool_is_skipped` | A drift note isn't ended or repeated by polls that skip the tool as ambiguous. |
+| S11 | `test_swaps.py::test_s11_reboots_while_the_tool_is_skipped` | Reboots while skipped as ambiguous: the usage is held once, charged once it's clear. |
 | S11 | `test_swaps.py::test_s11_two_spools_neither_active` | Two spools in the location, neither active: skipped and warned once until one leaves. |
 | S12 | `test_swaps.py::test_s12_spoolman_corrected_to_the_loaded_uuid` | Spoolman changed to the spool whose UUID the printer reports: switched at once. |
 | S13 | `test_swaps.py::test_s13_staged_spool_claimed` | Staged spool, no unload: a claim moves the usage since the reboot and makes it active. |
@@ -197,6 +198,7 @@ current and that the scenario rows name their tests.
 | M3 | `test_spoolman.py::test_m3_deleted_during_an_unconfirmed_swap` | Active spool deleted with an unconfirmed swap open: the swap's usage is held once. |
 | M3 | `test_spoolman.py::test_m3_deleted_spool_replaced_with_nothing_held` | Active spool deleted, then B moved in before any use: B is active with nothing to charge. |
 | M3 | `test_spoolman.py::test_m3_lookup_of_a_missing_spool_fails` | Active spool missing from the list and its lookup fails: charged, logged once. |
+| M3 | `test_spoolman.py::test_m3_staged_spool_claimed_takes_held_usage` | Active spool deleted with B staged, then B claimed: B is active and takes what's held. |
 | M3 | `test_spoolman.py::test_m3_staged_spool_flag_and_unload` | Active spool deleted with B staged: B's flag says why, and the unload gives B the usage. |
 | M3 | `test_spoolman.py::test_m3_staged_spool_takes_held_usage_at_print_start` | Active spool deleted with another staged: a print start makes it active and charges it. |
 | M3 | `test_spoolman.py::test_m3_unload_with_no_poll_after_the_extrusion` | Deleted spool found, then extrusion and an unload in one poll: the extrusion is held. |
@@ -206,6 +208,7 @@ current and that the scenario rows name their tests.
 | M5 | `test_spoolman.py::test_m5_negative_weight_ends` | A negative weight ends with one line when edited, and silently when the spool unloads. |
 | M5 | `test_spoolman.py::test_m5_spool_used_past_empty` | Spool used past empty: still charged, a negative weight logged once, no flag. |
 | M5a | `test_configs.py::test_m5a_runout_on_a_spool_with_no_net_weight_is_not_flagged` | Runout on a spool with no net weight: unloaded as usual, no flag and no error. |
+| M5a | `test_spoolman.py::test_m5a_refund_past_the_used_weight_is_not_an_edit` | A refund bigger than the runout spool's used weight stops at 0: not taken for an edit. |
 | M5a | `test_spoolman.py::test_m5a_runout_spool_archived_before_its_refund` | Runout spool archived before a refund to it: the flag follows the refund, no false edit. |
 | M5a | `test_spoolman.py::test_m5a_runout_with_plenty_left_is_flagged` | Runout in a started print with over 5% left flags the spool; a weight edit clears it. |
 | M5a | `test_spoolman.py::test_m5a_weight_edited_before_a_charge` | A weight edited between the poll's spool read and a charge still clears the runout flag. |
@@ -242,6 +245,7 @@ current and that the scenario rows name their tests.
 | T7 | `test_tools.py::test_t7_reboot_restarts_every_tool` | Reboot on a multi-tool printer: each tool's counter restarts, and nothing is charged. |
 | C1 | `test_counters.py::test_c1_reboot_keeps_usage_held_at_the_reboot` | Reboot between prints: usage held then is kept, and goes to the next active spool. |
 | C1 | `test_counters.py::test_c1_usage_held_over_a_reboot_joins_the_open_swap` | Usage held over a reboot with a swap open: charged to the old spool, moved with it. |
+| C1 | `test_counters.py::test_c1_usage_held_over_a_reboot_joins_the_provisional_charge` | Usage held over a reboot with a provisional charge open: it joins that charge. |
 | C2 | `test_counters.py::test_c2_printer_off_for_hours` | Printer off for hours: logged going, hourly and back, idle polls, nothing charged. |
 | C3 | `test_counters.py::test_c3_reboot_and_unload_in_one_poll` | Reboot and an unload in the same poll: the reboot is handled first, then the unload. |
 | C4 | `test_counters.py::test_c4_counter_goes_backward` | Counter goes backward within one boot: an anomaly, no charge, and later use charged. |

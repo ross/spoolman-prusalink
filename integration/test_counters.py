@@ -6,7 +6,17 @@ import logging
 
 import pytest
 
-from integration.conftest import ASA, LOAD_MM, PLA, World, charges, events, logged
+from integration.conftest import (
+    ASA,
+    LOAD_MM,
+    PLA,
+    World,
+    charges,
+    count,
+    events,
+    logged,
+    print_spec,
+)
 from simulator.model import State
 
 
@@ -122,6 +132,85 @@ async def test_c1_usage_held_over_a_reboot_joins_the_open_swap(world: World):
     ]
     assert [(r["spool_id"], r["use_length"]) for r in charges(records)] == [(b, 20.0), (a, -20.0)]
     assert w.charged(w.since(0), "A") == 0
+
+
+async def test_c1_usage_held_over_a_reboot_joins_the_provisional_charge(
+    world: World, caplog: pytest.LogCaptureFixture
+):
+    """Usage held over a reboot with a provisional charge open: it joins that charge."""
+    caplog.set_level(logging.INFO, logger="spoolman_prusalink")
+    w = world
+    a = w.spools["A"]
+    await baseline(w)
+
+    # S4: A unloaded and reloaded with no Spoolman change, then a print charges it
+    # provisionally.
+    w.printer.extrude(0, 30)
+    await w.unload()
+    records = await w.poll()
+    assert len(events(records, "swap_unconfirmed")) == 1
+    unloaded = w.mark()
+    at_unload = w.tool.extruded_at_unload
+    await w.swap_cycle(poll_every=0.3, source="tag", name=PLA[0], color=PLA[1], uuid=w.uuids["A"])
+    await w.poll()
+    await w.run_until(lambda: w.printer.job is None)
+    records = await w.start_print(print_spec())
+    assert len(events(records, "swap_assumed")) == 1
+    tool = w.bridge.printers[0].tools[0]
+    assert tool.provisional is not None and tool.provisional.spool_id == a
+
+    # The sensor fails mid-print: the tool reports no filament, which isn't an unload
+    # while printing, so the usage is held. Then the printer reboots, dropping the print.
+    # The load above held its usage for a poll too, so count from here.
+    hold = f"[{w.tool_location}] holding usage until filament is reported"
+    hold_ended = f"[{w.tool_location}] no longer: holding usage until filament is reported"
+    holds, ends = count(caplog, logging.WARNING, hold), count(caplog, logging.WARNING, hold_ended)
+    w.printer.set_sensor_fault(0, True)
+    w.advance(0.5)
+    records = await w.poll()
+    assert charges(records) == [] and events(records, "unload") == []
+    w.advance(0.5)
+    records = await w.poll()
+    assert charges(records) == []
+    tool = w.bridge.printers[0].tools[0]
+    held = w.counter - tool.charged
+    assert held > 0
+    before_reboot = w.counter
+    assert count(caplog, logging.WARNING, hold) == holds + 1
+
+    w.printer.set_sensor_fault(0, False)
+    w.printer.reboot()
+    records = await w.poll()
+    reboots = events(records, "reboot")
+    assert len(reboots) == 1
+    assert reboots[0]["message"].endswith(f"; {held} mm held before the restart is kept")
+    assert [e["message"] for e in events(records, "held_charged")] == [
+        f"spool {a} is active; charged it {held} mm held before the printer restarted"
+    ]
+    assert [(r["spool_id"], r["use_length"]) for r in charges(records)] == [(a, held)]
+    tool = w.bridge.printers[0].tools[0]
+    provisional = before_reboot - at_unload
+    assert tool.provisional is not None and tool.provisional.spool_id == a
+    assert tool.provisional.mm == provisional
+    assert tool.held_mm == 0
+    flag = await w.flag("A")
+    assert flag is not None and f" {provisional} mm (≈ " in flag
+    assert count(caplog, logging.WARNING, hold) == holds + 1
+    assert count(caplog, logging.WARNING, hold_ended) == ends + 1
+
+    # The next unload keeps all of it on A, held part included; B was never involved.
+    w.printer.extrude(0, 10)
+    await w.unload()
+    records = await w.poll()
+    assert [e["message"] for e in events(records, "provisional_kept")] == [
+        f"unload keeps the {provisional + 10} mm charged provisionally to spool {a}"
+    ]
+    since_unload = w.since(unloaded)
+    assert all(c["spool_id"] == a and c["use_length"] > 0 for c in charges(since_unload))
+    assert w.charged(since_unload, "A") == provisional + 10
+    assert w.charged(w.since(0), "B") == 0
+    assert w.bridge.printers[0].tools[0].provisional is None
+    assert a not in w.bridge.state.runouts
 
 
 async def test_c2_printer_off_for_hours(world: World, caplog: pytest.LogCaptureFixture):
