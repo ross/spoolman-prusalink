@@ -8,19 +8,23 @@ import pytest
 
 from simulator import gcode
 from simulator.model import (
+    PHASE_STATES,
+    Attention,
     Busy,
     Invalid,
     JobPhase,
     Material,
     PrintSpec,
+    Reason,
     Segment,
     Settings,
     SimTool,
     Simulation,
     State,
+    SyncJob,
 )
 from simulator.tests.test_model import one_segment, run_sync, tool0
-from simulator.tests.util import PLA, loaded, make
+from simulator.tests.util import PLA, loaded, make, run
 
 TAG = "8b6a3e3e-3f6c-4d7b-9a43-6c1f0e7d2a11"
 
@@ -420,14 +424,14 @@ def test_snapshot_while_paused_keeps_where_the_print_paused_from():
     assert q.state is State.FINISHED
 
 
-def test_snapshot_of_a_sync_job_has_no_print_spec():
+def test_snapshot_keeps_a_sync_job_a_sync_job():
     sim, p = make()
     run_sync(sim, p)
-    assert p.job is not None and p.job.spec is None
+    assert isinstance(p.job, SyncJob)
     other = Simulation()
     other.restore(json.loads(json.dumps(sim.snapshot())))
     q = other.printers["p"]
-    assert q.job is not None and q.job.spec is None and q.job.kind == "sync"
+    assert q.job == p.job and isinstance(q.job, SyncJob)
     other.tick(100)
     assert q.job is None and q.state is State.FINISHED
     assert q.tools[0].material.name == "PETG"
@@ -469,3 +473,63 @@ def test_simulation_takes_printers_at_construction():
     _, p = make()
     sim = Simulation(printers=[p])
     assert sim.printer("p") is p and p._sim is sim
+
+
+# The state follows from the phase.
+
+
+def test_every_phase_has_a_state():
+    assert set(PHASE_STATES) == set(JobPhase)
+
+
+@pytest.mark.parametrize(
+    ("phase", "attention"),
+    [
+        (JobPhase.PRINTING, Attention(Reason.RUNOUT, 0)),
+        (JobPhase.WAIT_LOAD, None),
+        (JobPhase.WAIT_LOAD, Attention(Reason.MODEL_CHECK)),
+        (JobPhase.AWAIT_RESUME, Attention(Reason.JAM, 0)),
+    ],
+)
+def test_a_phase_takes_only_its_own_reasons(phase, attention):
+    job = SyncJob(name="x", gcode="")
+    with pytest.raises(ValueError, match="can't wait"):
+        job.enter(phase, attention)
+    assert job.phase is JobPhase.SCANNING and job.attention is None
+
+
+def test_leaving_a_wait_clears_its_reason():
+    sim, p = printing()
+    p.runout(0)
+    assert p.job.wait_tool == 0
+    p.load(0)
+    run(sim, 20)
+    assert p.job.phase is JobPhase.PAUSED and p.job.attention is None
+    assert p.job.wait_tool is None
+
+
+def test_each_state_change_is_logged_once():
+    sim, p = make()
+    p.unload(0)
+    run(sim, 3.1)
+    p.screen = State.FINISHED  # a screen set directly isn't logged until the next change
+    p.load(0, source="preset", name="PLA")
+    run(sim, 20)
+    changes = [e.text for e in sim.events if e.kind == "state"]
+    assert changes == ["IDLE -> BUSY", "BUSY -> IDLE", "IDLE -> BUSY", "BUSY -> IDLE"]
+
+
+@pytest.mark.parametrize(
+    ("attention", "text"),
+    [
+        (Attention(Reason.MODEL_CHECK), "model check"),
+        (Attention(Reason.PARSE_ERROR, detail="line 1: bad"), "parse error: line 1: bad"),
+        (Attention(Reason.JAM, 1), "jam tool 1"),
+        (Attention(Reason.RUNOUT, 0), "runout tool 0"),
+        (Attention(Reason.COLOR_CHANGE, 2), "color change tool 2"),
+        (Attention(Reason.NO_FILAMENT, 3), "no filament in tool 3"),
+        (Attention(Reason.COLD_BED), "bed cold after the power panic"),
+    ],
+)
+def test_the_screen_text_for_each_reason(attention, text):
+    assert str(attention) == text

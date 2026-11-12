@@ -69,11 +69,11 @@ def test_unload_bookkeeping():
 
 def test_menu_use_dismisses_the_finished_screen():
     sim, p = make()
-    p.state = State.FINISHED
+    p.screen = State.FINISHED
     p.unload(0)
     run(sim, 3.1)
     assert p.state is State.IDLE
-    p.state = State.STOPPED
+    p.screen = State.STOPPED
     p.load(0, source="preset", name="PETG")
     sim.tick(20)
     assert p.state is State.IDLE
@@ -209,7 +209,7 @@ def test_extrude_fills_gap_then_counts_and_retract_clamps():
     assert tool0(p).gap == 40
     p.extrude(0, 50)
     assert tool0(p).gap == 0 and tool0(p).extruded == 10
-    p.state = State.PRINTING
+    p.start_print(PrintSpec([Segment(0, 10)]))
     with pytest.raises(Busy):
         p.extrude(0, 5)
 
@@ -332,7 +332,7 @@ def test_runout_keeps_previous_and_reload_restores_it():
     at = int(tool0(p).extruded)
     p.runout(0)
     t = tool0(p)
-    assert p.state is State.ATTENTION and p.job.attention == "runout tool 0"
+    assert p.state is State.ATTENTION and str(p.job.attention) == "runout tool 0"
     assert (t.unload_count, t.extruded_at_unload, t.material) == (1, at, None)
     assert t.previous == PLA
     assert p.job_json()["state"] == "PAUSED"
@@ -354,7 +354,7 @@ def test_jam_adds_an_extra_purge_on_reload():
     p.start_print(one_segment(100, preheat_s=0))
     sim.tick(0.8 + 1)
     p.jam(0)
-    assert p.job.attention == "jam tool 0"
+    assert str(p.job.attention) == "jam tool 0"
     before = tool0(p).extruded
     p.load(0)
     sim.tick(100)
@@ -380,7 +380,7 @@ def test_color_change_in_one_large_tick():
     sim, p = make()
     p.start_print(one_segment(100, preheat_s=0, color_changes_mm=[40, 400]))
     sim.tick(1000)
-    assert p.state is State.ATTENTION and p.job.attention == "color change tool 0"
+    assert p.state is State.ATTENTION and str(p.job.attention) == "color change tool 0"
     assert p.job.fed_mm == 40
     assert tool0(p).unload_count == 1 and tool0(p).extruded_at_unload == 38
     p.load(0)
@@ -412,7 +412,7 @@ def test_tool_change_to_empty_tool_waits_for_it():
     sim, p = make("8.10.0", [loaded(0, PETG), SimTool(1)])
     p.start_print(PrintSpec([Segment(0, 10), Segment(1, 10)], preheat_s=0))
     sim.tick(100)
-    assert p.job.phase is JobPhase.WAIT_LOAD and p.job.attention == "no filament in tool 1"
+    assert p.job.phase is JobPhase.WAIT_LOAD and str(p.job.attention) == "no filament in tool 1"
 
 
 # Power and boot.
@@ -638,7 +638,7 @@ def test_upload_refusals():
 def test_model_check_asks_before_the_job_is_counted():
     sim, p = make()
     p.upload("s.gcode", JOB.replace("COREONEL", "MK4S"), print_after=True, overwrite=True)
-    assert p.state is State.ATTENTION and p.job.attention == "model check"
+    assert p.state is State.ATTENTION and str(p.job.attention) == "model check"
     assert p.job_counter == 0 and p.job.id is None
     assert p.job_json() is None and "job" not in p.status_json()
     assert not p.can_print()
@@ -676,7 +676,7 @@ def test_model_check_accepts_mmu3_variant_and_auto_accept():
 def test_parse_error_holds_and_tap_through_stops():
     sim, p = make()
     run_sync(sim, p, 'M865 X N"WAYTOOLONG" L0\n')
-    assert p.state is State.ATTENTION and p.job.attention.startswith("parse error: line 1")
+    assert p.state is State.ATTENTION and str(p.job.attention).startswith("parse error: line 1")
     p.tap_through()
     sim.tick(2)
     assert p.state is State.STOPPED
@@ -685,7 +685,7 @@ def test_parse_error_holds_and_tap_through_stops():
 def test_m865_on_missing_tool_is_a_parse_error():
     sim, p = make()
     run_sync(sim, p, 'M865 X R N"PLA" L3\n')
-    assert p.job.attention.startswith("parse error")
+    assert str(p.job.attention).startswith("parse error")
 
 
 def test_m865_reset_clears_uuid_and_preset_write_ignores_parameters():
@@ -723,7 +723,7 @@ def test_m865_writes_disabled_and_unconfigured_tools():
     assert [t["index"] for t in p.filament_json()["tools"]] == [0]
     sim, p = make("8.10.0", [loaded(0, PETG)])
     run_sync(sim, p, 'M865 X R N"PLA" L8\n')
-    assert p.job.attention.startswith("parse error")
+    assert str(p.job.attention).startswith("parse error")
 
 
 def test_m865_writes_an_unloaded_tool():
@@ -881,8 +881,7 @@ def test_cancel_stops_a_reload():
 def test_no_print_while_a_tool_process_runs():
     sim, p = make()
     p.unload(0)
-    p.state = State.IDLE  # only the process is left to refuse it
-    assert not p.can_print()
+    assert p.state is State.BUSY and not p.can_print()
 
 
 def test_tool_change_into_an_empty_tool_purges_after_the_reload():

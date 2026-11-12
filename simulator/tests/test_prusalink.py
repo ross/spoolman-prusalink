@@ -127,7 +127,7 @@ async def test_upload_refusals(setup):
     assert resp.status == 409
     assert (await resp.json())["message"] == "File already exists"
 
-    p.state = State.BUSY
+    p.unload(0)  # BUSY
     resp = await client.put("/api/v1/files/usb/b.gcode", data="y", headers=UPLOAD)
     assert resp.status == 409
     assert (await resp.json())["message"] == "Can't print right now"

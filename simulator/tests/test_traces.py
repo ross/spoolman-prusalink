@@ -241,7 +241,7 @@ def f10b_sync_job_rewrite(rec: Recorder) -> None:
     screen: the slot's values don't change, so no material event."""
     tool = rec.printer.tools[0]
     tool.material = tool.previous = replace(TAGGED)
-    rec.printer._set_state(State.FINISHED)
+    rec.printer.screen = State.FINISHED
     rec.reset()
     rec.advance(LEAD)
     rec.printer.upload("spoolman-sync.gcode", SYNC_JOB, print_after=True, overwrite=True)
