@@ -24,8 +24,8 @@ from integration.conftest import (
     print_spec,
 )
 from integration.faults import archive_spool, set_extra_text
-from integration.temperatures import TEMPERATURES
-from simulator.model import State
+from integration.temperatures import TEMPERATURES, WRITTEN
+from simulator.model import Material, State
 
 
 async def baseline(w: World) -> None:
@@ -1155,3 +1155,211 @@ async def test_k2_two_claims_in_one_tool(
         assert w.charged(records, "B") == 0
     assert w.bridge.state.claimed == []
     assert count(caplog, logging.WARNING, "several spools claimed at once") == 1
+
+
+async def test_s8_staged_spool_leaves_after_the_active_one(
+    world: World, caplog: pytest.LogCaptureFixture
+):
+    """Active spool moved out, B staged, then B moved out too: A still charged until unload."""
+    caplog.set_level(logging.INFO, logger="spoolman_prusalink")
+    w = world
+    a, b = w.spools["A"], w.spools["B"]
+    await baseline(w)
+    await stage_b(w, caplog)
+
+    # B leaves too: staging is cancelled, and A, still loaded, is still charged.
+    await w.move("B", w.shelf)
+    w.printer.extrude(0, 20)
+    records = await w.poll()
+    cancelled = f"spool {b} is no longer staged; still charging spool {a}"
+    either = (
+        f"spool {a} isn't in the location either; still charging it until the printer "
+        "reports an unload"
+    )
+    assert [e["message"] for e in events(records, "staging_cancelled")] == [cancelled]
+    assert [e["message"] for e in events(records, "active_unassigned")] == [either]
+    assert w.charged(records, "A") == 20
+    tool = w.bridge.printers[0].tools[0]
+    assert tool.active == a and tool.assigned is None
+
+    # Nothing more is said while it lasts, and A is charged as before.
+    w.printer.extrude(0, 10)
+    records = await w.poll()
+    assert events(records) == []
+    assert w.charged(records, "A") == 10
+    assert count(caplog, logging.INFO, cancelled) == 1
+    assert count(caplog, logging.INFO, either) == 1
+
+    # The unload ends A's time in the tool: S10, usage held until a spool is assigned.
+    await w.unload()
+    records = await w.poll()
+    assert len(events(records, "active_unassigned")) == 1
+    assert w.bridge.printers[0].tools[0].active is None
+    assert await w.flag("B") is None
+
+
+async def test_s9_staged_flags_survive_a_restart(world: World, caplog: pytest.LogCaptureFixture):
+    """The print-start flags on the active and staged spools outlive a bridge restart."""
+    caplog.set_level(logging.INFO, logger="spoolman_prusalink")
+    w = world
+    a, b = w.spools["A"], w.spools["B"]
+    await baseline(w)
+    await stage_b(w, caplog)
+    records = await w.start_print(print_spec())
+    msg = f"print started while spool {b} is staged but not loaded; charging spool {a}"
+    assert [e["message"] for e in events(records, "staged_at_print")] == [msg]
+    flag_a, flag_b = await w.flag("A"), await w.flag("B")
+    assert flag_a is not None and msg in flag_a
+    assert flag_b is not None and msg in flag_b
+
+    # The bridge restarts mid-print. The notices come back from the database, so the
+    # flags stand: nothing is logged again and neither flag is rewritten.
+    await w.restart()
+    caplog.clear()
+    w.advance(0.5)
+    records = await w.poll()
+    w.advance(0.5)
+    records += await w.poll()
+    assert events(records, "staged_at_print") == []
+    assert w.charged(records, "A") > 0
+    assert await w.flag("A") == flag_a
+    assert await w.flag("B") == flag_b
+    assert not logged(caplog, logging.WARNING, msg)
+    assert not any("flag on spool" in r.getMessage() for r in caplog.records)
+    tool = w.bridge.printers[0].tools[0]
+    assert tool.notice is not None and tool.notice.message == msg
+    assert tool.staged_notice is not None and tool.staged_notice.spool_id == b
+
+
+async def test_s11_ambiguous_location_at_first_start(
+    world: World, caplog: pytest.LogCaptureFixture
+):
+    """Ambiguous at the first poll: no state is kept, and the baseline waits until it's clear."""
+    caplog.set_level(logging.INFO, logger="spoolman_prusalink")
+    w = world
+    a, b, c = w.spools["A"], w.spools["B"], w.spools["C"]
+    await w.move("B", w.tool_location)
+    await w.move("C", w.tool_location)
+
+    records = []
+    for _ in range(3):
+        records += await w.poll()
+        w.printer.extrude(0, 10)
+    assert events(records) == [] and charges(records) == []
+    assert w.bridge.printers[0].tools == {}
+    ids = ", ".join(str(i) for i in sorted((a, b, c)))
+    msg = f"[{w.tool_location}] location holds spools {ids}; skipping until it's clear"
+    assert count(caplog, logging.WARNING, msg) == 1
+
+    # B and C leave: the baseline is taken now, so the use while ambiguous isn't charged.
+    await w.move("B", w.shelf)
+    await w.move("C", w.shelf)
+    records = await w.poll()
+    assert [e["message"] for e in events(records)] == [f"baseline extruded=1030 spool={a}"]
+    assert charges(records) == []
+    gone = f"[{w.tool_location}] no longer: location holds spools {ids}"
+    assert count(caplog, logging.WARNING, gone) == 1
+
+    w.printer.extrude(0, 20)
+    records = await w.poll()
+    assert w.charged(records, "A") == 20
+    assert count(caplog, logging.WARNING, msg) == 1
+    assert count(caplog, logging.WARNING, gone) == 1
+
+
+async def test_s11_drift_note_stands_while_the_tool_is_skipped(
+    world: World, caplog: pytest.LogCaptureFixture
+):
+    """A drift note isn't ended or repeated by polls that skip the tool as ambiguous."""
+    caplog.set_level(logging.INFO, logger="spoolman_prusalink")
+    w = world
+    a = w.spools["A"]
+    await baseline(w)
+
+    # W9: the color changed on the printer with no unload.
+    w.tool.material = Material(PLA[0], ASA[1], w.uuids["A"], **WRITTEN)
+    await w.poll()
+    drift = f"[{w.tool_location}] printer differs from spool {a}: color"
+    assert count(caplog, logging.WARNING, drift) == 1
+
+    # B and C join A in the location: the tool is skipped, and the printer isn't
+    # compared, so the drift note stands without a word.
+    await w.move("B", w.tool_location)
+    await w.move("C", w.tool_location)
+    for _ in range(2):
+        await w.poll()
+    assert count(caplog, logging.WARNING, "location holds spools") == 1
+    assert not logged(caplog, logging.WARNING, "no longer: printer differs")
+
+    # Resolved: compared again, still drifting, and still not logged again.
+    await w.move("B", w.shelf)
+    await w.move("C", w.shelf)
+    await w.poll()
+    assert count(caplog, logging.WARNING, "no longer: location holds spools") == 1
+    assert count(caplog, logging.WARNING, drift) == 1
+    assert not logged(caplog, logging.WARNING, "no longer: printer differs")
+
+    # The printer put back: the note ends, once.
+    w.tool.material = Material(PLA[0], PLA[1], w.uuids["A"], **WRITTEN)
+    await w.poll()
+    await w.poll()
+    assert count(caplog, logging.WARNING, f"no longer: printer differs from spool {a}") == 1
+    assert count(caplog, logging.WARNING, drift) == 1
+    assert await w.flag("A") is None
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="a skipped tool's drift flag is cleared while its note stands, then set again",
+)
+async def test_s11_drift_flag_stands_while_the_tool_is_skipped(
+    world: World, caplog: pytest.LogCaptureFixture
+):
+    """A drift flag stays in Spoolman, like its note, while the tool is skipped as ambiguous."""
+    caplog.set_level(logging.INFO, logger="spoolman_prusalink")
+    w = world
+    a = w.spools["A"]
+    await baseline(w)
+    w.tool.material = Material(PLA[0], ASA[1], w.uuids["A"], **WRITTEN)
+    await w.poll()
+    flag = await w.flag("A")
+    assert flag is not None and "printer filament differs: color" in flag
+
+    await w.move("B", w.tool_location)
+    await w.move("C", w.tool_location)
+    await w.poll()
+    assert await w.flag("A") == flag
+    await w.move("B", w.shelf)
+    await w.move("C", w.shelf)
+    await w.poll()
+    assert await w.flag("A") == flag
+    assert count(caplog, logging.INFO, f"set flag on spool {a}") == 1
+    assert not logged(caplog, logging.INFO, f"cleared flag on spool {a}")
+
+
+async def test_k1_claim_ticked_before_the_first_start(
+    world: World, caplog: pytest.LogCaptureFixture
+):
+    """A claim already ticked at the first start: the spool is the baseline's, the box cleared."""
+    caplog.set_level(logging.INFO, logger="spoolman_prusalink")
+    w = world
+    a = w.spools["A"]
+    await w.claim("A")
+
+    records = await w.poll()
+    assert [e["message"] for e in events(records)] == [
+        f"spool {a} claimed; nothing to move",
+        f"baseline extruded=1000 spool={a}",
+    ]
+    assert charges(records) == []
+    assert await w.spoolman.extra(a, CLAIM_FIELD) is None
+    assert w.bridge.state.claimed == []
+    assert count(caplog, logging.INFO, f"cleared the claim on spool {a}") == 1
+
+    # The printer already shows A, so the write the claim queues has nothing to do.
+    w.printer.extrude(0, 20)
+    records = await w.poll()
+    assert events(records) == []
+    assert w.charged(records, "A") == 20
+    assert w.requests("PUT") == []
+    assert count(caplog, logging.INFO, "cleared the claim") == 1
