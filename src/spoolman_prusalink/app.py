@@ -42,6 +42,7 @@ from .db import Database
 from .errors import Busy, NotFound, Rejected, ServiceError, Unreachable, record_failure
 from .events import Report, Unload
 from .fields import SpoolFields
+from .flags import Flags, FlagSync, SharedSpools
 from .models import FilamentReading, Spool
 from .prusalink import BUSY_STATES, IDLE_STATES, NoFilamentEndpoint, PrinterStatus, PrusaLink
 from .records import ChargeRecord, EventRecord
@@ -52,7 +53,6 @@ from .uuids import UuidRegistry
 
 log = logging.getLogger("spoolman_prusalink")
 
-FLAG_FIELD_NAME = "Printer bridge flag"
 # Sorts a spool that's never been used before any that has.
 _NEVER = datetime.min.replace(tzinfo=UTC)
 # While a service stays in trouble, remind once per this many seconds.
@@ -182,10 +182,6 @@ def _outbox_outcome(sent: int, held: int, dropped: int) -> str:
     if dropped:
         parts.append(f"dropped {dropped}")
     return "; ".join(parts)
-
-
-# Flag texts by spool. A spool's texts are joined into its one flag.
-Flags = dict[int, list[str]]
 
 
 def _add_flags(flags: Flags, more: Flags) -> None:
@@ -1015,11 +1011,11 @@ class Bridge:
     printers: list[PrinterBridge] = field(init=False, default_factory=list)
     fields: SpoolFields = field(init=False)
     uuids: UuidRegistry = field(init=False)
+    flag_sync: FlagSync = field(init=False)
     _spoolman_reach: Reachability = field(init=False)
     # What's failing now, by spool, with the last error logged for each.
     _unclaim_failing: dict[int, str] = field(default_factory=dict)
     _evict_failing: dict[int, str] = field(default_factory=dict)
-    _flag_failing: dict[int, str] = field(default_factory=dict)
     # The status or error code of a charge that's stuck in the outbox, if one is.
     _charge_failing: str | None = None
     # Active or flagged spools missing from Spoolman's list that turned out to be archived.
@@ -1027,8 +1023,7 @@ class Bridge:
     # Claimed spools outside every tool's location, with the location each was last
     # logged in.
     _unplaced: dict[int, str | None] = field(default_factory=dict)
-    # Spools active in two tools last poll, with the tool locations each was logged in.
-    _shared: dict[int, list[str]] = field(default_factory=dict)
+    shared: SharedSpools = field(default_factory=SharedSpools)
     # Loaded spools that showed a negative remaining weight last poll.
     _negative: set[int] = field(default_factory=set)
     clock: Callable[[], float] = time.monotonic
@@ -1038,6 +1033,9 @@ class Bridge:
         self._spoolman_reach = Reachability("Spoolman", lambda: self.clock())
         self.fields = SpoolFields(self.spoolman)
         self.uuids = UuidRegistry(self.spoolman, self.fields, self.config.uuid_field)
+        self.flag_sync = FlagSync(
+            self.spoolman, self.fields, self.archived, self.state, self.config.flag_field
+        )
         several = len(self.config.printers) > 1
         self.printers = [
             PrinterBridge(
@@ -1145,7 +1143,7 @@ class Bridge:
                 )
             # An unread printer's conditions stand until it answers again.
             _add_flags(flags, printer.flags(by_id))
-        _add_flags(flags, self._check_shared())
+        _add_flags(flags, self.shared.check(self._active_where()))
         self._check_negative(spools)
         _add_flags(flags, self._runout_flags(spools))
         await self.flush()
@@ -1191,13 +1189,8 @@ class Bridge:
         kept = {i for i in self._negative if i in loaded and i not in listed}
         self._negative = set(negative) | kept
 
-    def _check_shared(self) -> Flags:
-        """Return a flag for each spool that's active in more than one tool at once.
-
-        It happens when a tool misses an unload, which a reboot can cause, and the spool is
-        then loaded elsewhere. Each tool keeps charging it until its own unload or a claim.
-        """
-        flags: Flags = {}
+    def _active_where(self) -> dict[int, list[str]]:
+        """Return the locations of the tools each spool is active in."""
         where: dict[int, list[str]] = {}
         for printer in self.printers:
             for tool, st in printer.tools.items():
@@ -1205,24 +1198,7 @@ class Bridge:
                     where.setdefault(st.active, []).append(
                         printer.config.tools.get(tool, str(tool))
                     )
-        shared = {spool_id for spool_id, locations in where.items() if len(locations) > 1}
-        for spool_id in sorted(self._shared.keys() - shared):
-            log.warning("spool %d is no longer active in more than one tool", spool_id)
-        previous, self._shared = self._shared, {i: where[i] for i in shared}
-        for spool_id in sorted(shared):
-            locations = where[spool_id]
-            names = " and ".join(locations)
-            flags.setdefault(spool_id, []).append(
-                f"active in {names} at once. One of them missed an unload: unload and reload "
-                "there, or claim the spool that's loaded."
-            )
-            if previous.get(spool_id) != locations:
-                log.warning(
-                    "spool %d is active in %s at once; one of them missed an unload",
-                    spool_id,
-                    names,
-                )
-        return flags
+        return where
 
     def _claims(
         self, spools: list[Spool]
@@ -1478,89 +1454,9 @@ class Bridge:
                     printer.tools[tool] = st
                     self._save()
 
-    def _flag_spool_deleted(self, spool_id: int) -> bool:
-        """Forget a deleted spool's flag, and end a failing update on it.
-
-        Returns whether `State.flagged` changed.
-        """
-        if self._flag_failing.pop(spool_id, None) is not None:
-            log.info("spool %d was deleted; its flag no longer needs updating", spool_id)
-        if spool_id not in self.state.flagged:
-            return False
-        self.state.flagged.remove(spool_id)
-        return True
-
     async def sync_flags(self, spools: list[Spool], flags: Mapping[int, str]) -> None:
-        """Make the flag field match `flags`, each spool's text, on spools the bridge manages.
-
-        The field is the bridge's own: on a spool it flags, whatever the field held is
-        replaced, and clearing the flag empties it. On spools it has no flag for and
-        didn't flag itself (`State.flagged`), the field is left as it is.
-        """
-        key = self.config.flag_field
-        assert key
-        if not await self.fields.ensure(key, FLAG_FIELD_NAME):
-            return
-        current = {s.id: s.flag for s in [*spools, *self.archived]}
-        changed = False
-        for spool_id in sorted(set(flags) | set(self.state.flagged)):
-            want = flags.get(spool_id)
-            if spool_id not in current and spool_id in self.state.flagged:
-                # A spool the bridge flagged left the list. An archived one is looked up
-                # once and kept, like an archived active spool, so its flag is kept current
-                # and a stale one is cleared.
-                try:
-                    found = await self.spoolman.spool(spool_id)
-                except ServiceError as e:
-                    if record_failure(self._flag_failing, spool_id, e):
-                        log.warning("can't look up flagged spool %d: %s", spool_id, e)
-                    else:
-                        log.debug("can't look up flagged spool %d: %s", spool_id, e)
-                    continue
-                if found is None:
-                    changed |= self._flag_spool_deleted(spool_id)
-                    continue
-                if found.archived:
-                    self.archived.add(found)
-                # Otherwise it was unarchived since the list was read; next poll lists it.
-                current[spool_id] = found.flag
-            if spool_id not in current:
-                continue  # Not listed, and the bridge never flagged it: leave it alone.
-            if current[spool_id] != want:
-                try:
-                    await self.spoolman.set_extra(spool_id, key, want)
-                except NotFound:
-                    # Deleted since it was listed or cached. An active spool that was
-                    # cached as archived is looked up again, as deleted.
-                    self.archived.drop(spool_id)
-                    changed |= self._flag_spool_deleted(spool_id)
-                    continue
-                except ServiceError as e:
-                    if record_failure(self._flag_failing, spool_id, e):
-                        log.warning("can't update the flag on spool %d: %s", spool_id, e)
-                    else:
-                        log.debug("can't update the flag on spool %d: %s", spool_id, e)
-                    continue
-                self.archived.set_flag(spool_id, want)
-                self._flag_failing.pop(spool_id, None)
-                log.info(
-                    "%s flag on spool %d%s",
-                    "set" if want else "cleared",
-                    spool_id,
-                    f": {want}" if want else "",
-                )
-            else:
-                # Someone else made it match, so a failing update is no longer needed.
-                if self._flag_failing.pop(spool_id, None) is not None:
-                    log.info("flag on spool %d is up to date", spool_id)
-            if want is None:
-                # Only a spool the bridge flagged earlier has no desired flag.
-                self.state.flagged.remove(spool_id)
-                changed = True
-            elif spool_id not in self.state.flagged:
-                self.state.flagged.append(spool_id)
-                changed = True
-        if changed:
+        """Make the flag field match `flags`, and save the spools the bridge now flags."""
+        if await self.flag_sync.sync(spools, flags):
             self._save()
 
     def interval(self) -> float:

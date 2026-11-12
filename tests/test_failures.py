@@ -504,8 +504,12 @@ async def test_flagged_spool_that_leaves_the_list_while_its_flag_fails_ends_once
         assert ended == [("INFO", "cleared flag on spool 19")]
         assert fake.flag(19) is None
     assert bridge.state.flagged == []
-    assert bridge._flag_failing == {}
     assert levels(caplog, "can't update the flag on spool 19").count("WARNING") == 1
+    if how == "archived":
+        # The failure ended, so a new one logs at WARNING again.
+        fake.fail_patch = 500
+        await bridge.sync_flags(await bridge.spoolman.spools(), {19: "y"})
+        assert levels(caplog, "can't update the flag on spool 19").count("WARNING") == 2
     await bridge.aclose()
 
 
@@ -551,7 +555,6 @@ async def test_archived_flagged_spool_deleted_while_its_flag_fails_ends_once(tmp
     assert bridge.state.flagged == []
     assert read_state(tmp_path / "bridge.db").flagged == []
     assert not bridge.archived
-    assert bridge._flag_failing == {}
     assert fake.lookups == [19]  # Looked up once, while archived.
     assert levels(caplog, "can't update the flag on spool 19") == ["WARNING", "DEBUG"]
     await bridge.aclose()
@@ -586,7 +589,6 @@ async def test_archived_active_spool_deleted_while_its_flag_fails_ends_once(tmp_
     for _ in range(2):
         await bridge.poll()
     assert records_after(caplog, before) == []
-    assert bridge._flag_failing == {}
     assert levels(caplog, "can't update the flag on spool 19") == ["WARNING", "DEBUG"]
     await bridge.aclose()
 
