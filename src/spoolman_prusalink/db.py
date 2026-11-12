@@ -86,6 +86,9 @@ _OUTBOX_COLUMNS = ("printer", "tool", "spool_id", "use_length")
 # Ledger columns besides `kind` and `extra`. A charge fills them all but `applied` or
 # `failed`, and an event only the first three. `extra` holds the record's other fields.
 _LEDGER_COLUMNS = ("time", "printer", "tool", "spool_id", "use_length", "applied", "failed")
+# `ChargeRecord` fields that say how Spoolman answered, which a queued charge doesn't have
+# yet. Its outbox row leaves them out.
+_OUTCOMES = ("applied", "failed", "held")
 # `ledger.kind` for a charge. An event's is its kind.
 _CHARGE = "charge"
 
@@ -192,6 +195,9 @@ class Database:
             for rec in new:
                 record = rec.to_json()
                 columns = tuple(record.pop(c) for c in _OUTBOX_COLUMNS)
+                # A charge gets an outcome only as it leaves the outbox.
+                for outcome in _OUTCOMES:
+                    del record[outcome]
                 cur = conn.execute(
                     "INSERT INTO outbox (printer, tool, spool_id, use_length, record) "
                     "VALUES (?, ?, ?, ?, ?)",

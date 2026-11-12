@@ -85,7 +85,7 @@ def full_state() -> State:
         },
         outbox=outbox(
             charge(7, 50.0, grams=0.15),
-            charge(9, -2.5, printer="mk4s", reason="x", applied="set", failed="403", held=True),
+            charge(9, -2.5, printer="mk4s", reason="x"),
         ),
         flagged=[7, 8],
         runouts={
@@ -185,9 +185,6 @@ def test_outbox_columns(path):
         "reason": "extruded",
         "boot_id": 3,
         "extruded": 1500,
-        "applied": None,
-        "failed": None,
-        "held": False,
     }
     conn.close()
 
@@ -571,3 +568,18 @@ def test_an_outbox_row_with_an_unknown_field_is_a_database_error(path):
     conn.close()
     with pytest.raises(DatabaseError, match="outbox row 1: .*colour"):
         read_state(path)
+
+
+def test_an_outbox_row_without_outcomes_loads_with_none(path):
+    # A queued charge's row has no outcome fields, as main wrote it before typed records.
+    db = Database.open(path)
+    db.save(full_state())
+    db.close()
+    conn = sqlite3.connect(path)
+    keys = {k for (r,) in conn.execute("SELECT record FROM outbox") for k in json.loads(r)}
+    assert keys.isdisjoint({"applied", "failed", "held"})
+    conn.close()
+    assert read_state(path).outbox == full_state().outbox
+    assert all(
+        (r.applied, r.failed, r.held) == (None, None, False) for r in read_state(path).outbox
+    )
