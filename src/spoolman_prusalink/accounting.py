@@ -237,45 +237,42 @@ class ToolState:
 
     @classmethod
     def from_json(cls, data: dict) -> ToolState:
-        swap = data.get("swap")
-        provisional = data.get("provisional")
+        swap = data["swap"]
+        provisional = data["provisional"]
         return cls(
-            boot_id=data.get("boot_id"),
-            charged=int(data.get("charged", 0)),
-            unload_count=int(data.get("unload_count", 0)),
-            active=data.get("active"),
-            assigned=data.get("assigned"),
-            evict=_evict_from_json(data.get("evict")),
+            boot_id=data["boot_id"],
+            charged=int(data["charged"]),
+            unload_count=int(data["unload_count"]),
+            active=data["active"],
+            assigned=data["assigned"],
+            evict=_evict_from_json(data["evict"]),
             swap=None
             if swap is None
             else SwapFlag(
                 int(swap["spool_id"]),
                 int(swap["mm"]),
-                swap.get("started_job"),
+                swap["started_job"],
             ),
-            job_id=data.get("job_id"),
-            pending_job=data.get("pending_job"),
-            pending_at=int(data.get("pending_at", 0)),
-            notice=_notice_from_json(data.get("notice")),
-            needs_sync=bool(data.get("needs_sync", False)),
-            sync_attempts=int(data.get("sync_attempts", 0)),
-            written=data.get("written"),
-            held_mm=int(data.get("held_mm", 0)),
-            deleted_spool=data.get("deleted_spool"),
-            staged_notice=_notice_from_json(data.get("staged_notice")),
+            job_id=data["job_id"],
+            pending_job=data["pending_job"],
+            pending_at=int(data["pending_at"]),
+            notice=_notice_from_json(data["notice"]),
+            needs_sync=bool(data["needs_sync"]),
+            sync_attempts=int(data["sync_attempts"]),
+            written=data["written"],
+            held_mm=int(data["held_mm"]),
+            deleted_spool=data["deleted_spool"],
+            staged_notice=_notice_from_json(data["staged_notice"]),
             provisional=None
             if provisional is None
             else Provisional(
                 int(provisional["spool_id"]),
                 int(provisional["mm"]),
-                provisional.get("job_id"),
+                provisional["job_id"],
             ),
-            # State from before claims has no record: a claim then moves only usage
-            # charged since the upgrade.
-            since_load={int(k): int(v) for k, v in (data.get("since_load") or {}).items()},
-            # State from before this was recorded holds nothing over a reboot.
-            extruded=int(data.get("extruded", data.get("charged", 0))),
-            reboot_pending=bool(data.get("reboot_pending", False)),
+            since_load={int(k): int(v) for k, v in data["since_load"].items()},
+            extruded=int(data["extruded"]),
+            reboot_pending=bool(data["reboot_pending"]),
         )
 
 

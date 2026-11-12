@@ -75,6 +75,12 @@ script/integration --cov=spoolman_prusalink --cov-fail-under=0
   Core One L INDX (`8.10.0`) instead, with no UUIDs on the printer and tool 1
   loaded with spool D's green PETG in `<prefix> T1`. The `World` helpers that
   act on a tool take a `tool` argument, 0 by default.
+- **Another model, or other settings.** A test that takes `world_model`, such
+  as `"1.4.0"` for an MK4, gets that single-tool model instead, with no UUID on
+  spool A or the printer. `world_config` overrides the bridge's `Config`, such
+  as `flag_field=""`, and `world_printer` overrides the printer's
+  `PrinterConfig`, such as `uuids=False`. All three are set with
+  `@pytest.mark.parametrize(..., indirect=True)`.
 - **A second printer, when asked for.** A test that takes `world_printers`
   at 2 (`@pytest.mark.parametrize("world_printers", [2], indirect=True)`)
   also gets printer `b`, a second Core One L with its own PrusaLink server on
@@ -98,6 +104,8 @@ current and that the scenario rows name their tests.
 <!-- table:begin -->
 | Row | Test | What it checks |
 | --- | --- | --- |
+| S1 | `test_configs.py::test_s1_tag_uuid_conflict_is_ignored_without_uuids` | UUIDs off, and the tag's differs from the spool's in Spoolman: no conflict, no flag. |
+| S1 | `test_configs.py::test_s1_tag_uuid_is_not_adopted_without_uuids` | UUIDs off, and the new spool's tag has one: nothing is stored, written or flagged. |
 | S1 | `test_swaps.py::test_s1_matching_tag_writes_nothing` | Spoolman first, and the new spool's tag already matches: nothing is written. |
 | S1 | `test_swaps.py::test_s1_menu_load_with_other_values_is_written` | Spoolman first, and a menu load of another type: Spoolman's spool is written. |
 | S1 | `test_swaps.py::test_s1_spoolman_first_swap` | Spoolman updated before the unload: the swap commits there, the load is the new spool's. |
@@ -113,6 +121,7 @@ current and that the scenario rows name their tests.
 | S3 | `test_swaps.py::test_s3_unload_while_the_location_is_empty` | Unload while the swap's location is empty: closed on the old spool, held usage lost. |
 | S4 | `test_swaps.py::test_s4_claiming_the_reloaded_spool_confirms_it` | S4's provisional charge, then the reloaded spool claimed: confirmed, nothing moves. |
 | S4 | `test_swaps.py::test_s4_same_spool_reloaded_then_print` | Same spool unloaded and reloaded, then a print: provisional charge, kept at the unload. |
+| S5 | `test_configs.py::test_s5_claim_is_ignored_with_claims_off` | claim_field off: a ticked box moves nothing and the flag says to move usage by hand. |
 | S5 | `test_swaps.py::test_s5_claim_after_printing_on_the_wrong_spool` | Print charged provisionally to the old spool: claiming the loaded one moves it there. |
 | S5 | `test_swaps.py::test_s5_correction_after_printing_on_the_wrong_spool` | Print charged provisionally to the old spool: moving in the tagged one moves it (#107). |
 | S6 | `test_swaps.py::test_s6_unload_with_nothing_assigned` | Unload with nothing assigned: the usage before it is lost, the usage after it held. |
@@ -142,6 +151,9 @@ current and that the scenario rows name their tests.
 | P10 | `test_prints.py::test_p10_spoolman_changed_mid_print_is_staged` | Spoolman changed mid-print with no unload: staged, the old spool charged until unload. |
 | P11 | `test_prints.py::test_p11_pause_and_resume_changes_nothing` | Pause and resume with no filament change: one print start, and the counter carries on. |
 | P12 | `test_prints.py::test_p12_power_panic_resume_keeps_the_job` | Power loss mid-print and resume: a reboot with the same job, so no new print start. |
+| W1 | `test_configs.py::test_w1_custom_preamble_is_written` | A custom preamble with the model's check, or its MMU3 name, starts the job as given. |
+| W1 | `test_configs.py::test_w1_write_content` | Flexible, colorless, materialless and RGBA filaments: the M865 line and no false drift. |
+| W1 | `test_configs.py::test_w1_write_without_uuids` | No UUIDs to write: an M865 line with no M865.1, and the spool isn't given a UUID. |
 | W1 | `test_writes.py::test_w1_uuid_mint_fails` | Storing a minted UUID fails: logged once, and B is written without a UUID. |
 | W1 | `test_writes.py::test_w1_uuid_minted_once_spoolman_takes_it` | Storing a minted UUID fails, then works: B gets a UUID and the printer shows it (W1). |
 | W1 | `test_writes.py::test_w1_write_after_swap` | Menu load after a Spoolman-first swap: the bridge writes name, color and UUID. |
@@ -152,8 +164,13 @@ current and that the scenario rows name their tests.
 | W5 | `test_writes.py::test_w5_write_that_does_not_take_is_flagged` | Two sync jobs dropped in a print's start blip: the spool is flagged, no third job. |
 | W6 | `test_writes.py::test_w6_sync_job_gone_before_its_name_is_read` | The sync job ends between the bridge's status and job reads: still not a print start. |
 | W6 | `test_writes.py::test_w6_sync_job_is_not_a_print_start` | The bridge's sync job, polled while it runs, isn't taken for a print start. |
+| W7 | `test_configs.py::test_w7_malformed_instance_uuid_is_flagged` | A spool whose instance UUID isn't a UUID: flagged, nothing written until it's fixed. |
+| W7 | `test_configs.py::test_w7_spool_with_nothing_to_write_is_flagged` | No material and a name with no usable characters: flagged, written once it has one. |
 | W7 | `test_writes.py::test_w7_non_preset_without_temperatures_is_flagged` | Material that isn't a preset, no temperatures: flagged, not written until they're set. |
 | W8 | `test_writes.py::test_w8_pps_is_flagged_until_loaded_from_the_menu` | PPS isn't written but flagged; loaded from the printer's menu, the flag clears. |
+| W9 | `test_configs.py::test_w9_drift_is_logged_but_not_flagged_with_flags_off` | Flags off: drift is logged and left alone, and the flag field is never written. |
+| W9 | `test_configs.py::test_w9_printer_change_beside_an_edit_is_drift` | A spool edited in Spoolman and the printer changed too: drift, so nothing is written. |
+| W9 | `test_configs.py::test_w9_tag_of_another_spool_is_not_drift_without_uuids` | UUIDs off, and the tag is another spool's UUID in Spoolman: not drift, not flagged. |
 | W9 | `test_writes.py::test_w9_drift_is_flagged_unless_sync_drift` | Printer changed with no unload: flagged and left alone, or rewritten with sync_drift. |
 | W9 | `test_writes.py::test_w9_malformed_color_is_drift` | The printer reports a color that isn't a hex color: drift, logged and cleared once. |
 | W9 | `test_writes.py::test_w9_temperature_drift_is_flagged_unless_sync_drift` | A temperature changed on the printer is drift too: flagged, or rewritten. |
@@ -163,6 +180,7 @@ current and that the scenario rows name their tests.
 | W11 | `test_writes.py::test_w11_unconfirmed_swap_writes_the_assigned_spool` | Unload with no Spoolman change, then a menu load: the printer gets A written back. |
 | W12 | `test_writes.py::test_w12_staged_spool_waits_for_the_unload` | Write of B due, then C staged: nothing is written until C is unloaded and loaded. |
 | W13 | `test_writes.py::test_w13_sync_job_homes_an_unhomed_printer` | Unhomed after a boot: the sync job homes with G28 O before it writes and ends. |
+| W14 | `test_configs.py::test_w14_edit_that_leaves_the_spool_unwritable_is_flagged` | An edit to PPS after a write: flagged with why it can't be written, not drift. |
 | W14 | `test_writes.py::test_w14_edit_after_the_uuid_is_cleared_keeps_the_printers` | UUID cleared in Spoolman, then a color edit: the rewrite keeps the printer's UUID. |
 | W14 | `test_writes.py::test_w14_spoolman_edit_is_written` | A color edit in Spoolman is written to the printer; a name-only edit isn't. |
 | W15 | `test_writes.py::test_w15_upload_fails` | Upload fails with a 500 or a dropped connection: logged once, retried each idle poll. |
@@ -182,11 +200,14 @@ current and that the scenario rows name their tests.
 | M3 | `test_spoolman.py::test_m3_unload_with_no_poll_after_the_extrusion` | Deleted spool found, then extrusion and an unload in one poll: the extrusion is held. |
 | M3a | `test_spoolman.py::test_m3a_archived_active_spool` | Active spool archived: still charged and flagged until the next unload. |
 | M4 | `test_spoolman.py::test_m4_location_renamed` | Location renamed: the spool stays active until the next unload, then usage is held. |
+| M5 | `test_configs.py::test_m5_spool_with_no_weights_and_no_vendor` | No net weight and no vendor: charged and named by the filament, past empty is no flag. |
 | M5 | `test_spoolman.py::test_m5_negative_weight_ends` | A negative weight ends with one line when edited, and silently when the spool unloads. |
 | M5 | `test_spoolman.py::test_m5_spool_used_past_empty` | Spool used past empty: still charged, a negative weight logged once, no flag. |
+| M5a | `test_configs.py::test_m5a_runout_on_a_spool_with_no_net_weight_is_not_flagged` | Runout on a spool with no net weight: unloaded as usual, no flag and no error. |
 | M5a | `test_spoolman.py::test_m5a_runout_spool_archived_before_its_refund` | Runout spool archived before a refund to it: the flag follows the refund, no false edit. |
 | M5a | `test_spoolman.py::test_m5a_runout_with_plenty_left_is_flagged` | Runout in a started print with over 5% left flags the spool; a weight edit clears it. |
 | M5a | `test_spoolman.py::test_m5a_weight_edited_before_a_charge` | A weight edited between the poll's spool read and a charge still clears the runout flag. |
+| M6 | `test_configs.py::test_m6_flag_field_off_leaves_every_note` | flag_field off: notes in the field stay on every spool, flagged or not. |
 | M6 | `test_spoolman.py::test_m6_flag_write_fails` | Writing a flag fails: logged once, retried each poll, and the write logged when it works. |
 | M6 | `test_spoolman.py::test_m6_flagged_spool_gone_while_its_flag_fails` | Spool deleted or archived while its flag fails: end logged once; stale flag open (#120). |
 | M6 | `test_spoolman.py::test_m6_flags_by_others_left_alone` | A flag someone else wrote stays while the bridge sets and clears its own elsewhere. |
@@ -225,6 +246,7 @@ current and that the scenario rows name their tests.
 | C5 | `test_counters.py::test_c5_extruded_at_unload_out_of_range` | `extruded_at_unload` past the counter: clamped to it, an anomaly, the unload charged. |
 | C6 | `test_counters.py::test_c6_manual_extrude_and_retract` | Extrude and retract from the menu: extrusion charged, a retraction charges nothing. |
 | C7 | `test_counters.py::test_c7_tool_reports_no_filament` | Tool reports no filament after a sensor fault: usage held until filament is back. |
+| C8 | `test_configs.py::test_c8_firmware_without_usage_counters` | Firmware with no usage counters: logged once, nothing charged, resumes when they're back. |
 | C8 | `test_counters.py::test_c8_firmware_update` | Firmware update: a reboot, the model checked again, an unsupported version logged once. |
 | C9 | `test_counters.py::test_c9_printer_answers_with_an_error` | Printer answers 401 then 500: each logged once, nothing charged, then caught up. |
 | B1 | `test_bridge.py::test_b1_first_start` | First start: the counter is the baseline, and use before it isn't charged. |
@@ -244,7 +266,9 @@ current and that the scenario rows name their tests.
    `docs/printer-behaviors.md`; if one of them has no trace yet, the test
    stands on the firmware source until it does.
 2. Add `test_<row id>_<short name>` to the file for its group, taking the
-   `world` fixture. `world` holds the simulator (`sim`, `printer`), the bridge
+   `world` fixture. A row under another setup, such as a printer with no tag
+   reader or a feature turned off, goes in `test_configs.py`, which takes the
+   setup from `world_model`, `world_config` and `world_printer`. `world` holds the simulator (`sim`, `printer`), the bridge
    and its config, and the Spoolman helper with this test's spool IDs. Give
    the test a docstring whose first line says what it checks.
 3. Act as the user would: `w.printer` for the printer (`unload`, `load`,

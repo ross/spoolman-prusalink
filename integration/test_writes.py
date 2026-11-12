@@ -405,8 +405,13 @@ async def test_w9_temperature_drift_is_flagged_unless_sync_drift(
             COREONEL_PREAMBLE,
             "gcode_preamble is for COREONEL but the printer is MK4",
         ),
+        (
+            MODELS["8.1.0"],
+            ("M862.5 P2 ; level check", 'M862.6 P"Input shaper"'),
+            "gcode_preamble has no M862.3 model check; set one for COREONEL",
+        ),
     ],
-    ids=["unknown", "unsupported", "mismatched"],
+    ids=["unknown", "unsupported", "mismatched", "no_model_check"],
 )
 async def test_w10_model_the_bridge_cannot_write(
     world: World,
