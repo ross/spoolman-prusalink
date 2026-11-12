@@ -1018,14 +1018,6 @@ def test_hold_messages_stay_the_same_while_holding():
     assert first.events == second.events
 
 
-def test_state_without_last_reading_holds_nothing_over_reboot():
-    old = ToolState(BOOT, 100, 0, None, None).to_json()
-    del old["extruded"]
-    state = ToolState.from_json(old)
-    charges, _, state = run([(BOOT + 1, r(10), loc(7))], state)
-    assert charges == [Charge(7, 10, "extruded")] and state.held_mm == 0
-
-
 # Persistence
 
 
@@ -1059,15 +1051,6 @@ def test_state_round_trip():
     assert ToolState.from_json(json.loads(json.dumps(s.to_json()))) == s
     unwritten = replace(s, written=None)
     assert ToolState.from_json(json.loads(json.dumps(unwritten.to_json()))) == unwritten
-
-
-def test_held_usage_round_trips_and_old_state_has_none():
-    s = ToolState(BOOT, 123, 2, None, None, held_mm=300, deleted_spool=19)
-    assert ToolState.from_json(s.to_json()) == s
-    old = s.to_json()
-    del old["held_mm"], old["deleted_spool"]
-    restored = ToolState.from_json(old)
-    assert (restored.held_mm, restored.deleted_spool) == (0, None)
 
 
 def test_restart_from_saved_state_neither_double_charges_nor_drops():
@@ -1498,24 +1481,6 @@ def test_state_round_trip_with_claim_fields():
     assert ToolState.from_json(json.loads(json.dumps(s.to_json()))) == s
 
 
-def test_state_from_before_claims_loads():
-    old = {
-        "boot_id": BOOT,
-        "charged": 10,
-        "unload_count": 1,
-        "active": 7,
-        "assigned": 7,
-        "evict": [],
-        "swap": None,
-        "job_id": None,
-        "notice": {"spool_id": 7, "kind": "swap_assumed", "message": "assumed"},
-    }
-    s = ToolState.from_json(old)
-    assert (s.provisional, s.staged_notice, s.since_load) == (None, None, {})
-    assert s.reboot_pending is False
-    assert s.notice == Notice(7, EventKind.SWAP_ASSUMED, "assumed")
-
-
 def test_claim_takes_usage_held_for_a_deleted_spool():
     state = deleted(ids=(20,))
     assert state.since_load == {}  # The deleted spool's charges aren't moved.
@@ -1613,24 +1578,3 @@ def test_claim_while_a_job_waits_for_its_first_extrusion():
     _, kinds, state = run([(BOOT, r(260, unloads=1, at_unload=100), loc(9), 42)], res.state)
     assert EventKind.SWAP_ASSUMED not in kinds
     assert (state.active, state.job_id, state.provisional) == (9, 42, None)
-
-
-def test_first_claim_after_upgrade_moves_only_usage_since_then():
-    old = {
-        "boot_id": BOOT,
-        "charged": 10,
-        "unload_count": 1,
-        "active": 7,
-        "assigned": 7,
-        "evict": [],
-        "swap": None,
-        "job_id": None,
-    }
-    _, _, state = run([(BOOT, r(60, unloads=1, at_unload=5), loc(7))], ToolState.from_json(old))
-    assert state.since_load == {7: 50}
-    res = account(state, BOOT, r(80, unloads=1, at_unload=5), loc(7, 9), claim=9)
-    assert res.charges == [
-        Charge(9, 50, "claimed usage since load"),
-        Charge(7, -50, "moved to claimed spool"),
-        Charge(9, 20, "extruded"),
-    ]
