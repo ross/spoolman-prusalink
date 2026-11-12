@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # Run the end-to-end tests in integration/ against a real Spoolman.
 #
-# With SPOOLMAN_URL set, they use that Spoolman; the tests clean up after
-# themselves, so a Spoolman in use is fine. Otherwise this starts a throwaway
-# Spoolman container with Podman or Docker on a free local port and removes it
-# afterwards. Arguments go to pytest:
+# With SPOOLMAN_URL set, they use that Spoolman, which no bridge or other run
+# may use at the same time (see integration/README.md). Otherwise this starts a
+# throwaway Spoolman container with Podman or Docker on a free local port and
+# removes it afterwards. Arguments go to pytest:
 #
 #   script/integration -k runout
 #
