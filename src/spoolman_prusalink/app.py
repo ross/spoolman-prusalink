@@ -29,7 +29,7 @@ from .config import Config, PrinterConfig
 from .db import Database
 from .models import FilamentReading, Material, Spool
 from .prusalink import BUSY_STATES, IDLE_STATES, NoFilamentEndpoint, PrinterStatus, PrusaLink
-from .spoolman import Spoolman
+from .spoolman import FieldTypeError, Spoolman
 from .state import PrinterState, Runout, State
 
 log = logging.getLogger("spoolman_prusalink")
@@ -1120,15 +1120,14 @@ class PrinterBridge:
                     uuid_value = adopted[1]
                 else:
                     uuid_value = await self.bridge._mint_uuid(spool)
-                    if uuid_value is None and self.bridge.config.uuid_field in (
-                        self.bridge._ready_fields
+                    if uuid_value is None and self.bridge.config.uuid_field not in (
+                        self.bridge._wrong_type_fields
                     ):
-                        # The field is set up, so storing the UUID failed. The spool gets
-                        # its UUID first (W1): written without one, the printer would
-                        # match the write and no later poll would mint again. The write
-                        # stays due, and the next poll retries the mint. A field that
-                        # can't be set up, such as a key of another type, doesn't hold
-                        # the write: the spool is written without a UUID.
+                        # The spool gets its UUID first (W1): written without one, the
+                        # printer would match the write and no later poll would mint
+                        # again. The write stays due, and the next poll retries the mint.
+                        # Only a UUID key of another type doesn't hold the write, since
+                        # it won't fix itself: the spool is written without a UUID.
                         minting = True
                         continue
             writes.append(printer_sync.ToolWrite(tool, spool, uuid_value))
@@ -1250,6 +1249,8 @@ class Bridge:
     state: State = field(default_factory=State)
     printers: list[PrinterBridge] = field(init=False, default_factory=list)
     _ready_fields: set[str] = field(default_factory=set)
+    # Field keys found with another type and not set up since.
+    _wrong_type_fields: set[str] = field(default_factory=set)
     _flags: dict[int, str] = field(default_factory=dict)  # Desired flags from the last poll.
     _spoolman_reach: Reachability = field(default_factory=lambda: Reachability("Spoolman"))
     # What's failing now, by spool, with the last error logged for each.
@@ -1786,6 +1787,8 @@ class Bridge:
         try:
             await self.spoolman.ensure_field(key, name, field_type)
         except (httpx.HTTPError, ValueError) as e:
+            if isinstance(e, FieldTypeError):
+                self._wrong_type_fields.add(key)
             if _record(self._field_failing, key, e):
                 log.warning("can't set up the %r spool field: %s", key, e)
             else:
@@ -1793,6 +1796,7 @@ class Bridge:
             return False
         if self._field_failing.pop(key, None) is not None:
             log.info("%r spool field is set up", key)
+        self._wrong_type_fields.discard(key)
         self._ready_fields.add(key)
         return True
 

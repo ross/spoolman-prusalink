@@ -698,6 +698,26 @@ async def test_uuid_field_of_another_type_writes_without_a_uuid(tmp_path, caplog
     await bridge.aclose()
 
 
+async def test_uuid_field_setup_failing_holds_the_write_until_stored(tmp_path, caplog):
+    """A field read that fails passes: the write waits, then goes out with the UUID."""
+    bridge, fake, printer = make(tmp_path, [spool(19)], uuid_field="instance_uuid")
+    caplog.set_level("DEBUG")
+    await swap_to_menu_loaded_20(bridge, fake, printer)
+    fake.fail_field = 500
+    for _ in range(2):
+        await bridge.poll()
+    assert jobs(printer) == []
+    assert levels(caplog, "can't set up the 'instance_uuid' spool field") == ["WARNING", "DEBUG"]
+
+    fake.fail_field = None
+    await bridge.poll()
+    minted = stored_uuid(fake, 20)
+    (gcode,) = jobs(printer)
+    assert minted is not None and f'M865.1 I0 C"{minted}"' in gcode
+    assert levels(caplog, "'instance_uuid' spool field is set up") == ["INFO"]
+    await bridge.aclose()
+
+
 async def test_failed_uuid_mint_leaves_a_failing_sync_job_failing(tmp_path, caplog):
     """A write waiting on the mint is still needed: the job's failure isn't over."""
     bridge, fake, printer = make(tmp_path, [spool(19)], uuid_field="instance_uuid")
