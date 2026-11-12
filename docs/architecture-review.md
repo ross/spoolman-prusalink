@@ -185,72 +185,26 @@ tool state.
 
 Size: small to medium. Do it with B3, which reshapes `written`.
 
-### B9. `account()` mixes last poll's state with this poll's
+### B9. `account()` is one function of six steps
 
-`account()` (`accounting.py`) is 490 lines: six numbered steps, about
-ten mutable locals, and five closures, two of which use `nonlocal`. It's
-pure, well documented, and has 94 tests through its public signature. The order of the
-steps is real: unload, claim, assignment, print start, usage. The length
-isn't the problem. These are:
+`account()` (`accounting.py`) is about 500 lines in six numbered steps.
+It's pure, well documented, and tested through its public signature. The
+order of the steps is real: unload, claim, assignment, print start, usage.
+Step 3 is a 13-branch `elif` chain where order is priority.
 
-- **`s` is half last poll and half this poll.** `s.active`, `s.assigned`,
-  and `s.job_id` are the previous poll's values, compared with the new
-  locals. `s.charged`, `s.unload_count`, `s.boot_id`, and `s.evict` have
-  already been advanced with `replace`. The reader has to know which, field
-  by field.
-- **The usage tallies are kept by hand.** `swap.mm` and `provisional.mm`
-  track what's been charged to their spool. Three charge sites each update
-  them: `charge_held`, the unload in step 1, and the usage in step 5. A new
-  charge site has to remember to.
-- **The legal states aren't written down.** Which combinations of `active`,
-  `assigned`, `swap`, `provisional`, and `deleted_spool` can occur is known
-  only by reasoning. Three commits have removed branches that turned out to
-  be unreachable. The one invariant that's checked, that a provisional
-  charge is on the active spool, lives in a wrapper in
-  `tests/test_accounting.py`.
-- **Step 3 is a 13-branch `elif` chain** where order is priority.
-- **Event classification is split.** `WARNINGS` is in `accounting.py`,
-  `_REPEATING` is in `app.py`, and `process()` has a special case for
-  `HOLD_DELETED`. `ACTIVE_UNASSIGNED` is used for five different messages,
-  including "is back in the location", and `ASSIGNMENT_CHANGED` for two.
-
-The rework is in two parts. Neither changes behavior, and the existing
-tests are the check.
-
-Part 1, a small stack of its own:
-
-- **Two states.** `last` is the state passed in. It's frozen and never
-  reassigned, so `last.x` always means the previous poll. `current` holds
-  this poll's values: every step writes to it, and at the end it's the
-  result. Nothing else carries tool state, so the loose locals go away.
-
-  Start `current` as a copy of `last`, not empty. Most fields carry over
-  unchanged on most polls, and with an empty start a field that a step
-  forgets to copy is silently reset. The early returns for a first poll and
-  an ambiguous location build their own state today and have the same
-  risk.
-- **One charge helper owns the tallies.** A charge to a spool updates
-  `swap.mm` and `provisional.mm` when they're on that spool, in the helper,
-  not at each call. Before changing it, trace the refund paths: a claim and
-  a confirmed swap refund a spool and then clear the swap, which looks
-  compatible but isn't confirmed.
-- **Write the invariants down.** One function checks that a `ToolState` is
-  a legal combination. The test wrapper calls it on every poll.
-- **One event table** gives each kind its severity and whether it repeats.
-  Split the overloaded kinds.
-
-Part 2, with B6: each numbered step becomes a function over `last` and
-`current`. B6 gives events fields, which already rewrites every `event()`
-call, so do the split in the same stack.
+Shape: each numbered step becomes a function over `last` and `current`,
+the two states `account()` already keeps. It doesn't change behavior, and
+the existing tests are the check. B6 gives events fields, which already
+rewrites every `event()` call, so do the split in the same stack.
 
 Not planned: a formal state machine, with a named mode per tool and defined
 transitions. The conditions overlap (a provisional charge with a staged
-spool, a deleted spool with a staged spool), so the modes multiply. The
-invariants function from part 1 is what such a machine would be derived
-from. Reconsider it once that function exists and shows how many legal
-combinations there are.
+spool, a deleted spool with a staged spool), so the modes multiply.
+`violations()` in `accounting.py` lists the rules for a legal state, which
+is what such a machine would be derived from. Reconsider it against those
+rules.
 
-Size: small for part 1, medium for part 2.
+Size: medium.
 
 ### B10. Smaller items
 
@@ -406,11 +360,11 @@ Size: medium.
 
 | # | Workstream | Findings | Depends on |
 | --- | --- | --- | --- |
-| 3 | Conditions and saved facts | B2, B3, B5, B7, T1 (rest) | Workstream 10. B7 changes the part of `account()` that B9 part 1 restructures |
-| 4 | Typed records | B6, B9 (part 2), T7 | Workstream 10. Easier after 3 |
+| 3 | Conditions and saved facts | B2, B3, B5, B7, T1 (rest) | Nothing |
+| 4 | Typed records | B6, B9, T7 | Nothing. Easier after 3 |
 | 5 | Narrow the bridge boundary | B4, T1 (UUID registry tests) | Workstream 3 |
 | 8 | Simulator state | S1, S5, S6, then S2, S4 | Nothing. S4 continues the move that put the PrusaLink routing in `prusalink.serve` |
-| 10 | Accounting state | B9 (part 1), B10 | Nothing |
+| 10 | Accounting state | B10 | Nothing |
 
 Workstream 10 is independent and can run at any time. T3
 has no work, so it isn't in a workstream.
