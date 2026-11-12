@@ -166,7 +166,9 @@ current and that the scenario rows name their tests.
 | W14 | `test_writes.py::test_w14_edit_after_the_uuid_is_cleared_keeps_the_printers` | UUID cleared in Spoolman, then a color edit: the rewrite keeps the printer's UUID. |
 | W14 | `test_writes.py::test_w14_spoolman_edit_is_written` | A color edit in Spoolman is written to the printer; a name-only edit isn't. |
 | W15 | `test_writes.py::test_w15_upload_fails` | Upload fails with a 500 or a dropped connection: logged once, retried each idle poll. |
+| M1 | `test_spoolman.py::test_m1_spool_list_fails` | Spool list answers 5xx or bad JSON: polls skip, logged once, not as an outage. |
 | M1 | `test_spoolman.py::test_m1_spoolman_unreachable` | Spoolman unreachable: polls skip and log once; queued charges go in order when back. |
+| M2 | `test_spoolman.py::test_m2_charge_accepted_with_an_unreadable_reply` | Spoolman applies a charge but its 200 reply isn't JSON: the charge counts as sent. |
 | M2 | `test_spoolman.py::test_m2_rejected_charge_is_dropped` | A charge Spoolman rejects with a 4xx is dropped with an error; later ones go through. |
 | M3 | `test_spoolman.py::test_m3_404_for_a_spool_no_longer_active_is_dropped` | A 404 on a charge to a spool no longer active is dropped, not held for the next spool. |
 | M3 | `test_spoolman.py::test_m3_charge_to_deleted_spool_is_held` | A charge that 404s because the spool was deleted is held for the next spool. |
@@ -174,6 +176,7 @@ current and that the scenario rows name their tests.
 | M3 | `test_spoolman.py::test_m3_deleted_active_spool_holds_usage` | Active spool deleted: its usage is held, then charged to the next spool made active. |
 | M3 | `test_spoolman.py::test_m3_deleted_during_an_unconfirmed_swap` | Active spool deleted with an unconfirmed swap open: the swap's usage is held once. |
 | M3 | `test_spoolman.py::test_m3_deleted_spool_replaced_with_nothing_held` | Active spool deleted, then B moved in before any use: B is active with nothing to charge. |
+| M3 | `test_spoolman.py::test_m3_lookup_of_a_missing_spool_fails` | Active spool missing from the list and its lookup fails: charged, logged once. |
 | M3 | `test_spoolman.py::test_m3_staged_spool_flag_and_unload` | Active spool deleted with B staged: B's flag says why, and the unload gives B the usage. |
 | M3 | `test_spoolman.py::test_m3_staged_spool_takes_held_usage_at_print_start` | Active spool deleted with another staged: a print start makes it active and charges it. |
 | M3 | `test_spoolman.py::test_m3_unload_with_no_poll_after_the_extrusion` | Deleted spool found, then extrusion and an unload in one poll: the extrusion is held. |
@@ -181,7 +184,11 @@ current and that the scenario rows name their tests.
 | M4 | `test_spoolman.py::test_m4_location_renamed` | Location renamed: the spool stays active until the next unload, then usage is held. |
 | M5 | `test_spoolman.py::test_m5_negative_weight_ends` | A negative weight ends with one line when edited, and silently when the spool unloads. |
 | M5 | `test_spoolman.py::test_m5_spool_used_past_empty` | Spool used past empty: still charged, a negative weight logged once, no flag. |
+| M5a | `test_spoolman.py::test_m5a_runout_spool_archived_before_its_refund` | Runout spool archived before a refund to it: the flag follows the refund, no false edit. |
 | M5a | `test_spoolman.py::test_m5a_runout_with_plenty_left_is_flagged` | Runout in a started print with over 5% left flags the spool; a weight edit clears it. |
+| M5a | `test_spoolman.py::test_m5a_weight_edited_before_a_charge` | A weight edited between the poll's spool read and a charge still clears the runout flag. |
+| M6 | `test_spoolman.py::test_m6_flag_write_fails` | Writing a flag fails: logged once, retried each poll, and the write logged when it works. |
+| M6 | `test_spoolman.py::test_m6_flagged_spool_gone_while_its_flag_fails` | A spool whose flag can't be cleared is deleted or archived: the bridge lets it go. |
 | M6 | `test_spoolman.py::test_m6_flags_by_others_left_alone` | A flag someone else wrote stays while the bridge sets and clears its own elsewhere. |
 | M7 | `test_spoolman.py::test_m7_density_edit_applies_to_later_charges` | Density edited in Spoolman: later charges use the new one, earlier aren't recalculated. |
 | K1 | `test_swaps.py::test_k1_claim_handled_once_when_clearing_fails` | Clearing a claim's box fails: the claim is handled once, and the failure logged once. |
@@ -191,10 +198,12 @@ current and that the scenario rows name their tests.
 | X2 | `test_printers.py::test_x2_filament_first_across_printers` | Unload at A, load at B, then move the spool: B's swap confirms, A's stays open and holds. |
 | X3 | `test_printers.py::test_x3_spool_moved_but_never_loaded_elsewhere` | Spool moved LA to LB with no unload: A charges it, B stages it and flags it at a print. |
 | X4 | `test_printers.py::test_x4_evicted_spool_moves_to_the_other_printer` | A swap on A, the old spool moved into LB before the eviction: it's left there for B. |
+| X4 | `test_printers.py::test_x4_failing_eviction_ends_when_the_spool_is_moved` | An eviction Spoolman keeps refusing ends, said once, when the user moves the spool to B. |
 | X4a | `test_printers.py::test_x4a_eviction_rereads_the_spool` | Spool moved into LB between the bridge's Spoolman read and its eviction: left in LB. |
 | X5 | `test_printers.py::test_x5_claim_on_b_while_a_still_has_the_spool` | Spool claimed in LB while A, off, still has it active: B takes it, A lets go on return. |
 | X6 | `test_printers.py::test_x6_one_spool_active_in_two_tools` | A missed an unload over a reboot and B loads the spool: logged once, flagged, both charge. |
 | X7 | `test_printers.py::test_x7_two_claims_one_per_printer` | Two spools claimed in one poll, one in LA and one in LB: each claim is its tool's. |
+| X8 | `test_printers.py::test_x8_failing_eviction_ends_while_the_printer_is_off` | A's eviction keeps failing, A goes off, the user moves the spool out: ended once. |
 | X8 | `test_printers.py::test_x8_one_printer_off` | Printer A off: logged once, B charged, A's eviction runs, A's claim waits for it. |
 | X9 | `test_printers.py::test_x9_spoolman_unreachable` | Spoolman down: printers still read; both printers' charges queue in one outbox, in order. |
 | X10 | `test_printers.py::test_x10_firmware_without_the_filament_endpoint` | A's firmware lacks the filament endpoint: logged once, nothing charged, B unaffected. |
@@ -221,6 +230,7 @@ current and that the scenario rows name their tests.
 | B1 | `test_bridge.py::test_b1_first_start` | First start: the counter is the baseline, and use before it isn't charged. |
 | B2 | `test_bridge.py::test_b2_restart_mid_print` | Restart mid-print: one catch-up charge, with no double charge and no loss. |
 | B4 | `test_bridge.py::test_b4_database_lost` | The database lost: a new baseline, use since the last poll lost, the swap forgotten. |
+| B5 | `test_bridge.py::test_b5_field_setup_fails_then_recovers` | Registering the flag field fails on a fresh Spoolman: logged once, set up when it can. |
 | B5 | `test_bridge.py::test_b5_field_with_the_wrong_type` | A field key taken by another type: logged once, no flag written, charging unaffected. |
 | B5 | `test_bridge.py::test_b5_fields_registered_on_a_fresh_spoolman` | Fresh Spoolman: the bridge registers its flag, claim and UUID fields as it needs them. |
 | B6 | `test_bridge.py::test_b6_second_bridge_on_one_database_is_refused` | A second bridge on a running bridge's database refuses to start; the first carries on. |
@@ -261,8 +271,8 @@ between two of the bridge's requests, such as move or delete a spool, and can
 return a response to use instead.
 `restore()` ends all three. Its `requests` list says what each of the bridge's
 requests got, as `"PUT /api/v1/spool/7/use 503"` or `"... unreachable"`. The same
-module has the Spoolman edits the `world` helpers don't cover: deleting and
-archiving a spool, writing a text field, and renaming a location.
+module has the Spoolman edits the `world` helpers don't cover: deleting,
+archiving and unarchiving a spool, writing a text field, and renaming a location.
 
 To make the printer fail one request, set `w.before_request`, a function that gets
 the method and path of each request before the simulator serves it. It can change

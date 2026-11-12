@@ -769,43 +769,6 @@ async def test_m6_flagged_spool_gone_while_its_flag_fails(
     assert len(ended) == 1, [r.getMessage() for r in ended]
 
 
-FRESH = pytest.mark.parametrize("world_fields", ["fresh"], indirect=True)
-
-
-@FRESH
-async def test_b5_field_setup_fails_then_recovers(world: World, caplog: pytest.LogCaptureFixture):
-    """Registering the flag field fails on a fresh Spoolman: logged once, set up when it can."""
-    caplog.set_level(logging.DEBUG, logger="spoolman_prusalink")
-    w = world
-    key = w.fields["flag"]
-    faults = w.spoolman_faults
-    faults.answer("POST", f"/api/v1/field/spool/{key}", 500, times=None)
-
-    await baseline(w)
-    w.printer.extrude(0, 30)
-    await w.unload()
-    records = await w.poll()
-    assert len(events(records, "swap_unconfirmed")) == 1
-    assert w.charged(records, "A") == 30
-    await w.poll()
-    assert key not in await w.spoolman.fields_by_key()
-    assert "unloaded with no Spoolman change" in w.bridge._flags.get(w.spools["A"], "")
-    cant = f"can't set up the {key!r} spool field"
-    assert count(caplog, logging.WARNING, cant) == 1
-    assert count(caplog, logging.DEBUG, cant) == 2
-    assert faults.requests.count(f"POST /api/v1/field/spool/{key} 500") == 3
-
-    # Spoolman takes it: the field is set up, said once, and the flag written.
-    faults.restore()
-    await w.poll()
-    await w.poll()
-    assert (await w.spoolman.fields_by_key())[key] == "text"
-    flag = await w.flag("A")
-    assert flag is not None and "unloaded with no Spoolman change" in flag
-    assert count(caplog, logging.INFO, f"{key!r} spool field is set up") == 1
-    assert count(caplog, logging.WARNING, cant) == 1
-
-
 async def test_m2_charge_accepted_with_an_unreadable_reply(
     world: World, caplog: pytest.LogCaptureFixture
 ):

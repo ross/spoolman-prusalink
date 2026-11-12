@@ -10,7 +10,7 @@ requests or to answer one itself.
 asks for it, so worlds that don't ask talk to Spoolman directly.
 
 The rest are changes a user makes in Spoolman's UI that the conftest helper doesn't
-cover: deleting or archiving a spool, writing a text field, renaming a location.
+cover: deleting, archiving or unarchiving a spool, writing a text field, renaming a location.
 """
 
 from __future__ import annotations
