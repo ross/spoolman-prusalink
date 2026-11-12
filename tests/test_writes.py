@@ -103,6 +103,8 @@ class FakeSpoolman:
             if self.fail_patch:
                 return httpx.Response(self.fail_patch, text="oops")
             spool_id = int(path.rsplit("/", 1)[1])
+            if spool_id not in self.spools:
+                return httpx.Response(404, json={"message": "not found"})
             body = json.loads(request.content)
             if self.fail_uuid and "instance_uuid" in body.get("extra", {}):
                 return httpx.Response(self.fail_uuid, text="oops")

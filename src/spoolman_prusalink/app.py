@@ -1792,6 +1792,18 @@ class Bridge:
         self._ready_fields.add(key)
         return True
 
+    def _flag_spool_deleted(self, spool_id: int) -> bool:
+        """Forget a deleted spool's flag, and end a failing update on it.
+
+        Returns whether `State.flagged` changed.
+        """
+        if self._flag_failing.pop(spool_id, None) is not None:
+            log.info("spool %d was deleted; its flag no longer needs updating", spool_id)
+        if spool_id not in self.state.flagged:
+            return False
+        self.state.flagged.remove(spool_id)
+        return True
+
     async def sync_flags(self, spools: list[Spool]) -> None:
         """Make the flag field match the desired flags, on spools the bridge manages.
 
@@ -1820,12 +1832,7 @@ class Bridge:
                         log.debug("can't look up flagged spool %d: %s", spool_id, e)
                     continue
                 if found is None:
-                    self.state.flagged.remove(spool_id)  # Deleted, so there's no flag left.
-                    changed = True
-                    if self._flag_failing.pop(spool_id, None) is not None:
-                        log.info(
-                            "spool %d was deleted; its flag no longer needs updating", spool_id
-                        )
+                    changed |= self._flag_spool_deleted(spool_id)
                     continue
                 if found.archived:
                     self._archived[spool_id] = found
@@ -1837,6 +1844,12 @@ class Bridge:
                 try:
                     await self.spoolman.set_extra_text(spool_id, key, want)
                 except httpx.HTTPError as e:
+                    if isinstance(e, httpx.HTTPStatusError) and e.response.status_code == 404:
+                        # Deleted since it was listed or cached. An active spool that
+                        # was cached as archived is looked up again, as deleted.
+                        self._archived.pop(spool_id, None)
+                        changed |= self._flag_spool_deleted(spool_id)
+                        continue
                     if _record(self._flag_failing, spool_id, e):
                         log.warning("can't update the flag on spool %d: %s", spool_id, e)
                     else:
