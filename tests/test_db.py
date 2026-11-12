@@ -1,6 +1,8 @@
 import errno
 import fcntl
+import json
 import os
+import re
 import sqlite3
 
 import pytest
@@ -455,3 +457,37 @@ def test_a_lock_that_fails_for_another_reason_lets_go_of_the_file(path, monkeypa
     (fd,) = opened
     with pytest.raises(OSError):  # Closed.
         os.fstat(fd)
+
+
+@pytest.mark.parametrize(
+    ("edit", "message"),
+    [
+        (lambda d: d.pop("extruded"), "missing key 'extruded'"),
+        (lambda d: d["swap"].pop("mm"), "missing key 'mm'"),
+        (lambda d: d.update(evict=None), "a null where a value belongs"),
+    ],
+)
+def test_a_tools_row_missing_a_key_is_a_database_error(path, edit, message):
+    db = Database.open(path)
+    state = full_state()
+    db.save(state)
+    db.close()
+    conn = sqlite3.connect(path)
+    (printer, tool, data) = conn.execute(
+        "SELECT printer, tool, data FROM tools WHERE json_extract(data, '$.swap') IS NOT NULL"
+    ).fetchone()
+    record = json.loads(data)
+    edit(record)
+    with conn:
+        conn.execute(
+            "UPDATE tools SET data = ? WHERE printer = ? AND tool = ?",
+            (json.dumps(record), printer, tool),
+        )
+    conn.close()
+    row = f"tools row ({printer!r}, {tool}): {message}"
+    with pytest.raises(DatabaseError, match=re.escape(f"{path}: {row}")):
+        Database.open(path)
+    with pytest.raises(DatabaseError, match=re.escape(f"{path}: {row}")):
+        read_state(path)
+    path.unlink()
+    Database.open(path).close()  # The failed open let go of the lock.

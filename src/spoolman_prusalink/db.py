@@ -409,9 +409,15 @@ def _read(conn: sqlite3.Connection) -> tuple[State, Rows, list[tuple[int, str]]]
         }
     state = State()
     for (printer, tool), (data,) in rows["tools"].items():
-        state.printers.setdefault(printer, PrinterState()).tools[tool] = ToolState.from_json(
-            json.loads(data)
-        )
+        try:
+            tool_state = ToolState.from_json(json.loads(data))
+        except KeyError as e:
+            raise ValueError(f"tools row ({printer!r}, {tool}): missing key {e}") from e
+        except TypeError as e:
+            raise ValueError(
+                f"tools row ({printer!r}, {tool}): a null where a value belongs"
+            ) from e
+        state.printers.setdefault(printer, PrinterState()).tools[tool] = tool_state
     for (printer, spool_id), (texts,) in rows["printer_flags"].items():
         state.printers.setdefault(printer, PrinterState()).flags[spool_id] = json.loads(texts)
     for (printer, tool), (uuid, spool_id, runout) in rows["seen_uuids"].items():
