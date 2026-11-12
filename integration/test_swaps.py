@@ -1016,8 +1016,15 @@ async def test_k1_claim_handled_once_when_clearing_fails(
     assert count(caplog, logging.WARNING, cant) == 1
 
 
-async def test_k2_two_claims_in_one_tool(world: World, caplog: pytest.LogCaptureFixture):
-    """Two claims in one tool in one poll: the most recently used spool wins, once."""
+@pytest.mark.parametrize("newer", ["staged", "active"])
+async def test_k2_two_claims_in_one_tool(
+    world: World, caplog: pytest.LogCaptureFixture, newer: str
+):
+    """Two claims in one tool in one poll: the most recently used spool wins, once.
+
+    The staged spool B has the lower ID and the active spool C the higher, and either is
+    the one used last, so only `last_used` can make the choice.
+    """
     caplog.set_level(logging.INFO, logger="spoolman_prusalink")
     w = world
     b, c = w.spools["B"], w.spools["C"]
@@ -1036,43 +1043,58 @@ async def test_k2_two_claims_in_one_tool(world: World, caplog: pytest.LogCapture
     assert w.charged(records, "C") == 30
     loaded = LOAD_MM + 30
 
-    # B goes into the location too, so it's staged, and is used in Spoolman after C was.
-    # Then both boxes are ticked before the next poll.
+    # B goes into the location too, so it's staged. One of the two is used in Spoolman
+    # after C's last charge, then both boxes are ticked before the next poll.
     await w.move("B", w.tool_location)
     records = await w.poll()
     assert len(events(records, "swap_staged")) == 1
+    winner, loser = (b, c) if newer == "staged" else (c, b)
     last_used = datetime.fromisoformat((await w.spoolman.get(c))["last_used"])
     later = (last_used + timedelta(minutes=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
-    resp = await w.spoolman.client.patch(f"/api/v1/spool/{b}", json={"last_used": later})
+    resp = await w.spoolman.client.patch(f"/api/v1/spool/{winner}", json={"last_used": later})
     resp.raise_for_status()
     await w.claim("B")
     await w.claim("C")
     mark = w.mark()
     records = await w.poll()
-    assert [e["message"] for e in events(records, "claimed")] == [
-        f"spool {b} claimed in place of spool {c}: moved {loaded} mm from spool {c} "
-        "(usage since the last unload)"
-    ]
-    assert w.charged(records, "B") == loaded
-    assert w.charged(records, "C") == -loaded
+    if newer == "staged":
+        assert [e["message"] for e in events(records, "claimed")] == [
+            f"spool {b} claimed in place of spool {c}: moved {loaded} mm from spool {c} "
+            "(usage since the last unload)"
+        ]
+        assert events(records, "claim_confirmed") == []
+        assert w.charged(records, "B") == loaded
+        assert w.charged(records, "C") == -loaded
+        assert await w.spoolman.location(c) != w.tool_location
+    else:
+        assert [e["message"] for e in events(records, "claim_confirmed")] == [
+            f"spool {c} claimed: confirmed as loaded, nothing moves"
+        ]
+        assert events(records, "claimed") == []
+        assert charges(records) == []
+        assert await w.spoolman.location(b) == w.tool_location  # Still staged.
     chose = (
-        f"[{w.tool_location}] several spools claimed at once: chose spool {b}, the most "
-        f"recently used, and clearing the claims on spools {c}"
+        f"[{w.tool_location}] several spools claimed at once: chose spool {winner}, the most "
+        f"recently used, and clearing the claims on spools {loser}"
     )
     assert count(caplog, logging.WARNING, chose) == 1
     assert await w.spoolman.extra(b, CLAIM_FIELD) is None
     assert await w.spoolman.extra(c, CLAIM_FIELD) is None
-    assert await w.spoolman.location(c) != w.tool_location
-    assert w.bridge.printers[0].tools[0].active == b
+    assert w.bridge.printers[0].tools[0].active == winner
 
     # Later polls see both boxes clear: nothing else moves, and nothing is logged again.
+    await w.run_until(lambda: w.printer.job is None)
     w.printer.extrude(0, 10)
     await w.poll()
     await w.poll()
     records = w.since(mark)
-    assert len(events(records, "claimed")) == 1
-    assert events(records, "claim_confirmed") == []
-    assert w.charged(records, "B") == loaded + 10
-    assert w.charged(records, "C") == -loaded
+    assert len(events(records, "claimed" if newer == "staged" else "claim_confirmed")) == 1
+    assert w.bridge.printers[0].tools[0].active == winner
+    if newer == "staged":
+        assert w.charged(records, "B") == loaded + 10
+        assert w.charged(records, "C") == -loaded
+    else:
+        assert w.charged(records, "C") == 10
+        assert w.charged(records, "B") == 0
     assert w.bridge.state.claimed == []
     assert count(caplog, logging.WARNING, "several spools claimed at once") == 1
