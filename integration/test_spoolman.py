@@ -725,13 +725,17 @@ async def test_m6_flag_write_fails(world: World, caplog: pytest.LogCaptureFixtur
 
 @pytest.mark.xfail(
     strict=True,
-    reason="a failing flag update on a spool that leaves Spoolman's list never logs its end",
+    reason="a failing flag update on a spool that leaves Spoolman's list never logs its end (#120)",
 )
 @pytest.mark.parametrize("gone", ["deleted", "archived"])
 async def test_m6_flagged_spool_gone_while_its_flag_fails(
     world: World, caplog: pytest.LogCaptureFixture, gone: str
 ):
-    """A spool whose flag can't be cleared is deleted or archived: the bridge lets it go."""
+    """Spool deleted or archived while its flag fails: end logged once; stale flag open (#120).
+
+    Whether an archived spool's stale flag is cleared later is an open question (#120),
+    so this doesn't check it either way.
+    """
     caplog.set_level(logging.DEBUG, logger="spoolman_prusalink")
     w = world
     a = w.spools["A"]
@@ -753,20 +757,27 @@ async def test_m6_flagged_spool_gone_while_its_flag_fails(
     cant = f"can't update the flag on spool {a}"
     assert count(caplog, logging.WARNING, cant) == 1
 
-    # A leaves Spoolman's list: the bridge forgets it, with nothing more to write.
+    # A leaves Spoolman's list, and Spoolman takes writes again, so clearing an archived
+    # spool's flag (#120) would work too. Either way the failure is over: one INFO line.
     logged_before = len(caplog.records)
     if gone == "deleted":
         await delete_spool(w.spoolman.client, a)
     else:
         await archive_spool(w.spoolman.client, a)
+    w.spoolman_faults.restore()
     for _ in range(2):
         await w.poll()
-    assert w.bridge.state.flagged == []
-    assert count(caplog, logging.WARNING, cant) == 1
-    assert w.spoolman_faults.requests.count(f"PATCH /api/v1/spool/{a} 500") == 2
-    # The failure that was logged has ended, so one line should say so.
     ended = [r for r in caplog.records[logged_before:] if r.levelno >= logging.INFO]
-    assert len(ended) == 1, [r.getMessage() for r in ended]
+    assert [r.levelno for r in ended] == [logging.INFO], [r.getMessage() for r in ended]
+
+    # Later polls say nothing more about it.
+    logged_before = len(caplog.records)
+    for _ in range(2):
+        await w.poll()
+    later = caplog.records[logged_before:]
+    assert [r.getMessage() for r in later if r.levelno >= logging.INFO] == []
+    assert not any(cant in r.getMessage() for r in later)
+    assert count(caplog, logging.WARNING, cant) == 1
 
 
 async def test_m2_charge_accepted_with_an_unreadable_reply(

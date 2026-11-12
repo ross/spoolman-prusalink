@@ -736,7 +736,7 @@ async def test_w1_uuid_mint_fails(world: World, caplog: pytest.LogCaptureFixture
         w.advance(1.0)
         await w.poll()
     assert len(w.requests("PUT")) == 1
-    assert w.material()[:2] == PETG
+    assert w.material() == (*PETG, None)
     assert await w.spoolman.extra(b, UUID_FIELD) is None
     assert count(caplog, logging.WARNING, f"can't store an instance UUID on spool {b}") == 1
     assert await w.flag("B") is None
