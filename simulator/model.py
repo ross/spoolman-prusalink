@@ -886,8 +886,6 @@ class SimPrinter:
         self._log("action", f"retract T{tool} {mm:g} mm: gap {t.gap:g}")
 
     def select_tool(self, tool: int) -> None:
-        if self.model.max_tools == 1:
-            raise Invalid(f"{self.model.name} has one tool")
         t = self._tool(tool)
         self._check_select(t)
         self.selected_tool = tool
@@ -1153,8 +1151,8 @@ class SimPrinter:
 
     # Guards. Each raises Busy or Invalid when its action can't run now. The actions call
     # them, and `actions_json` calls them to tell the page what it can do, so the rules
-    # are written once. The power check comes first: a printer that's off takes no input,
-    # except filament pushed in or pulled out by hand.
+    # are written once. A printer that's off takes no input except by hand: filament pushed
+    # in or pulled out, and a tool picked, enabled or disabled.
 
     def _check_load(self, t: SimTool, *, keep: bool) -> None:
         waiting = self.job is not None and self.job.wait_tool == t.index

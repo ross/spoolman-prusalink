@@ -120,6 +120,21 @@ def multi_tool_print():
     return sim, p
 
 
+def multi_tool_unloading():
+    """T1 unloads, so the printer reads BUSY for the other tools."""
+    sim, p = make("3.1.0", [loaded(0), loaded(1), SimTool(2)])
+    p.unload(1)
+    return sim, p
+
+
+def preheat_empty():
+    """A print preheats on an empty tool, so a runout has no filament to run out."""
+    sim, p = make(tools=[SimTool(0)])
+    p.start_print(one_segment(100, preheat_s=60))
+    run(sim, 1.8)
+    return sim, p
+
+
 def multi_tool_idle():
     return make("3.1.0", [loaded(0), loaded(1), SimTool(2), loaded(3, enabled=False)])
 
@@ -139,17 +154,20 @@ SITUATIONS = [
     cold_bed,
     multi_tool_print,
     multi_tool_idle,
+    multi_tool_unloading,
+    preheat_empty,
 ]
 
 
-def succeeds(sim: Simulation, call: Callable[[SimPrinter], None]) -> bool:
-    """Whether `call` runs on a copy of the printer, which leaves the original as it was."""
+def refusal(sim: Simulation, call: Callable[[SimPrinter], None]) -> str | None:
+    """Why `call` is refused on a copy of the printer, or None when it runs. The copy leaves
+    the original as it was."""
     other = copy.deepcopy(sim)
     try:
         call(other.printers["p"])
-    except (Busy, Invalid):
-        return False
-    return True
+    except (Busy, Invalid) as e:
+        return str(e)
+    return None
 
 
 @pytest.mark.parametrize("situation", SITUATIONS)
@@ -158,13 +176,13 @@ def test_published_actions_match_the_model(situation):
     view = p.to_json()
     assert set(view["actions"]) == set(PRINTER_CALLS)
     for name, reason in view["actions"].items():
-        assert succeeds(sim, PRINTER_CALLS[name]) == (reason is None), (name, reason)
+        assert refusal(sim, PRINTER_CALLS[name]) == reason, name
     for tool in view["tools"]:
         assert set(tool["actions"]) == set(TOOL_CALLS)
         for name, reason in tool["actions"].items():
             call = TOOL_CALLS[name]
-            ok = succeeds(sim, lambda q, call=call, i=tool["index"]: call(q, i))
-            assert ok == (reason is None), (tool["index"], name, reason)
+            got = refusal(sim, lambda q, call=call, i=tool["index"]: call(q, i))
+            assert got == reason, (tool["index"], name)
 
 
 def test_a_refused_action_says_why():
@@ -184,3 +202,10 @@ def test_the_page_gets_the_setting_fields_and_options():
     assert view["options"]["power"] == ["on", "off", "hung"]
     assert p.to_json()["load_sources"] == ["tag", "preset"]
     assert make("1.4.1")[1].to_json()["load_sources"] == ["preset"]
+
+
+def test_a_disabled_tool_on_a_one_tool_printer_is_refused_as_published():
+    sim, p = make(tools=[loaded(0, enabled=False)])
+    reason = p.to_json()["tools"][0]["actions"]["select_tool"]
+    assert reason == "tool 0 is disabled"
+    assert refusal(sim, lambda q: q.select_tool(0)) == reason
