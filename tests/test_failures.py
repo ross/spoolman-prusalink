@@ -6,8 +6,11 @@ import logging
 from dataclasses import replace
 
 import pytest
-from test_writes import (
+from harness import (
     LOC,
+    PLA,
+    drop,
+    fill,
     jobs,
     levels,
     make,
@@ -51,7 +54,7 @@ def stored_uuid(fake, spool_id):
 async def test_unreadable_printer_model_keeps_writes_off_and_warns_once(
     tmp_path, caplog, monkeypatch, error
 ):
-    bridge, fake, printer = make(tmp_path, [spool(19)], uuid_field="instance_uuid")
+    bridge, fake, station = make(tmp_path, [spool(19)], uuid_field="instance_uuid")
     client = bridge.printers[0].client
     real = client.printer_type
     caplog.set_level("INFO")
@@ -60,9 +63,9 @@ async def test_unreadable_printer_model_keeps_writes_off_and_warns_once(
         raise error
 
     monkeypatch.setattr(client, "printer_type", broken)
-    await swap_to_spool_20(bridge, fake, printer)  # Four polls.
+    await swap_to_spool_20(bridge, fake, station)  # Four polls.
     await bridge.poll()
-    assert jobs(printer) == []
+    assert jobs(station) == []
     assert "instance_uuid" not in fake.spools[20]["extra"]  # Nothing minted either.
     assert f"can't read the printer model ({error}); printer writes are off" in caplog.text
     assert count(caplog, "printer writes are off until it can") == 1
@@ -80,8 +83,10 @@ async def test_unreadable_printer_model_keeps_writes_off_and_warns_once(
     await bridge.poll()
     # Writes coming back on ends the warning, so it's logged at the warning's level.
     assert levels(caplog, "printer is COREONEL (8.1.0)") == ["WARNING"]
+    assert len(jobs(station)) == 1
+    station.finish_job()
     await bridge.poll()
-    assert len(jobs(printer)) == 1
+    assert len(jobs(station)) == 1
     await bridge.aclose()
 
 
@@ -91,7 +96,7 @@ async def test_unreadable_printer_model_keeps_writes_off_and_warns_once(
 async def test_sync_job_failing_without_a_status_is_logged_once_and_retried(
     tmp_path, caplog, monkeypatch, error
 ):
-    bridge, fake, printer = make(tmp_path, [spool(19)], uuid_field="instance_uuid")
+    bridge, fake, station = make(tmp_path, [spool(19)], uuid_field="instance_uuid")
     client = bridge.printers[0].client
     real = client.upload_and_print
     caplog.set_level("INFO")
@@ -100,22 +105,22 @@ async def test_sync_job_failing_without_a_status_is_logged_once_and_retried(
         raise error
 
     monkeypatch.setattr(client, "upload_and_print", broken)
-    await swap_to_spool_20(bridge, fake, printer)
-    assert jobs(printer) == []
+    await swap_to_spool_20(bridge, fake, station)
+    assert jobs(station) == []
     await bridge.poll()  # Still broken: the same failure isn't logged again.
     assert count(caplog, f"sync job failed: {error}") == 1
     assert count(caplog, "sync job working again") == 0
 
     monkeypatch.setattr(client, "upload_and_print", real)
     await bridge.poll()
-    assert len(jobs(printer)) == 1
+    assert len(jobs(station)) == 1
     assert count(caplog, "sync job failed") == 1
     assert levels(caplog, "sync job working again") == ["WARNING"]
     await bridge.aclose()
 
 
 async def test_sync_job_busy_and_failing_ends_with_one_line(tmp_path, caplog):
-    bridge, fake, printer = make(tmp_path, [spool(19)])
+    bridge, fake, station = make(tmp_path, [spool(19)])
     caplog.set_level("INFO")
     await bridge.poll()
     printer_bridge = bridge.printers[0]
@@ -145,7 +150,8 @@ async def test_evicted_spool_that_already_left_clears_the_eviction_problem(tmp_p
     await bridge.poll()
     fake.spools[22] = spool(22, "Tool a")  # Spoolman first on a: 19 goes out.
     await bridge.poll()
-    a.unloads, a.at_unload, a.material = 1, 1000, {"name": "PLA", "color": "#73737b"}
+    a.tool.unload_count, a.tool.extruded_at_unload = 1, 1000
+    fill(a.tool, PLA)
     fake.fail_patch = 500
     await bridge.poll()
     tool = bridge.printers[0].tools[0]
@@ -154,7 +160,7 @@ async def test_evicted_spool_that_already_left_clears_the_eviction_problem(tmp_p
 
     # With a unreachable, its accounting doesn't run to drop the eviction. The user moves
     # the spool out themselves meanwhile, so the bridge finds nothing left to do.
-    a.down = True
+    a.before_request = drop
     fake.fail_patch = None  # A move would succeed, so it not happening is the bridge's doing.
     fake.spools[19]["location"] = "Shelf"
     await bridge.poll()
@@ -173,7 +179,7 @@ def uuid_bridge(tmp_path):
 
 
 async def test_failed_uuid_field_setup_mints_nothing(uuid_bridge, caplog):
-    bridge, fake, printer = uuid_bridge
+    bridge, fake, station = uuid_bridge
     caplog.set_level("INFO")
     fake.fail_field = 500
     target = (await bridge.spoolman.spools())[0]
@@ -190,7 +196,7 @@ async def test_failed_uuid_field_setup_mints_nothing(uuid_bridge, caplog):
 
 
 async def test_uuid_field_of_another_type_is_known_until_set_up(uuid_bridge, caplog):
-    bridge, fake, printer = uuid_bridge
+    bridge, fake, station = uuid_bridge
     caplog.set_level("INFO")
     fake.fields.append({"key": "instance_uuid", "name": "UUID", "field_type": "integer"})
     target = (await bridge.spoolman.spools())[0]
@@ -205,7 +211,7 @@ async def test_uuid_field_of_another_type_is_known_until_set_up(uuid_bridge, cap
 
 
 async def test_failed_uuid_field_setup_adopts_nothing(uuid_bridge, caplog):
-    bridge, fake, printer = uuid_bridge
+    bridge, fake, station = uuid_bridge
     caplog.set_level("INFO")
     fake.fail_field = 500
     assert await bridge._adopt_uuid(19, TAG) is False
@@ -220,7 +226,7 @@ async def test_failed_uuid_field_setup_adopts_nothing(uuid_bridge, caplog):
 
 
 async def test_failed_archived_check_adopts_nothing_and_logs_once(uuid_bridge, caplog):
-    bridge, fake, printer = uuid_bridge
+    bridge, fake, station = uuid_bridge
     caplog.set_level("INFO")
     fake.fail_read = 500
     assert await bridge._adopt_uuid(19, TAG) is False
@@ -239,7 +245,7 @@ async def test_failed_archived_check_adopts_nothing_and_logs_once(uuid_bridge, c
 
 
 async def test_failed_check_of_a_kept_uuid_logs_its_recovery(uuid_bridge, caplog):
-    bridge, fake, printer = uuid_bridge
+    bridge, fake, station = uuid_bridge
     caplog.set_level("INFO")
     fake.fail_read = 500
     assert await bridge._adopt_uuid(19, TAG, store=False) is False
@@ -254,7 +260,7 @@ async def test_failed_check_of_a_kept_uuid_logs_its_recovery(uuid_bridge, caplog
 
 
 async def test_failed_store_of_an_adopted_uuid_logs_once_and_retries(uuid_bridge, caplog):
-    bridge, fake, printer = uuid_bridge
+    bridge, fake, station = uuid_bridge
     caplog.set_level("INFO")
     fake.fail_patch = 500
     assert await bridge._adopt_uuid(19, TAG) is False
@@ -272,7 +278,7 @@ async def test_failed_store_of_an_adopted_uuid_logs_once_and_retries(uuid_bridge
 
 
 async def test_failed_store_of_a_minted_uuid_logs_once_and_retries(uuid_bridge, caplog):
-    bridge, fake, printer = uuid_bridge
+    bridge, fake, station = uuid_bridge
     caplog.set_level("INFO")
     target = (await bridge.spoolman.spools())[0]
     fake.fail_patch = 500
@@ -288,12 +294,12 @@ async def test_failed_store_of_a_minted_uuid_logs_once_and_retries(uuid_bridge, 
 
 
 async def test_printer_that_doesnt_report_a_configured_tool_is_noted_once(tmp_path, caplog):
-    bridge, fake, printer = make(tmp_path, [spool(19), spool(21, location="Tool 2")])
+    bridge, fake, station = make(tmp_path, [spool(19), spool(21, location="Tool 2")])
     printer_bridge = bridge.printers[0]
     printer_bridge.config = replace(printer_bridge.config, tools={0: LOC, 1: "Tool 2"})
     caplog.set_level("INFO")
     await bridge.poll()
-    printer.extruded = 1500
+    station.tool.extruded = 1500
     for _ in range(3):
         await bridge.poll()
     assert count(caplog, "[Tool 2] printer doesn't report tool index 1") == 1
@@ -303,7 +309,7 @@ async def test_printer_that_doesnt_report_a_configured_tool_is_noted_once(tmp_pa
 
 
 async def test_a_tool_note_that_goes_away_is_logged_once_at_its_level(tmp_path, caplog):
-    bridge, fake, printer = make(tmp_path, [spool(19)])
+    bridge, fake, station = make(tmp_path, [spool(19)])
     caplog.set_level("INFO")
     printer_bridge = bridge.printers[0]
     gone = ("index", "[Tool 2] printer doesn't report tool index 1")
@@ -325,7 +331,7 @@ async def test_a_tool_note_that_goes_away_is_logged_once_at_its_level(tmp_path, 
 
 
 async def test_a_tool_note_with_new_detail_is_logged_without_an_end_line(tmp_path, caplog):
-    bridge, fake, printer = make(tmp_path, [spool(19)])
+    bridge, fake, station = make(tmp_path, [spool(19)])
     caplog.set_level("INFO")
     printer_bridge = bridge.printers[0]
     what = ("printer", 19)
@@ -352,7 +358,7 @@ async def test_a_tool_note_with_new_detail_is_logged_without_an_end_line(tmp_pat
 
 
 async def test_eviction_no_longer_needed_logs_only_after_a_failure(tmp_path, caplog):
-    bridge, fake, printer = make(tmp_path, [spool(19)])
+    bridge, fake, station = make(tmp_path, [spool(19)])
     caplog.set_level("INFO")
     await bridge.evict([])  # Spool 19 isn't in any tool's evict list, and never failed.
     assert count(caplog, "no longer needs moving out") == 0
@@ -364,12 +370,13 @@ async def test_eviction_no_longer_needed_logs_only_after_a_failure(tmp_path, cap
 
 
 async def test_evict_failing_then_moved_logs_warning_then_info(tmp_path, caplog):
-    bridge, fake, printer = make(tmp_path, [spool(19)])
+    bridge, fake, station = make(tmp_path, [spool(19)])
     caplog.set_level("DEBUG", "spoolman_prusalink")
     await bridge.poll()
     fake.spools[20] = spool_x(20)
     await bridge.poll()
-    printer.unloads, printer.at_unload, printer.material = 1, 1000, None
+    station.tool.unload_count, station.tool.extruded_at_unload = 1, 1000
+    fill(station.tool, None)
     fake.fail_patch = 500
     for _ in range(3):
         await bridge.poll()
@@ -384,7 +391,7 @@ async def test_evict_failing_then_moved_logs_warning_then_info(tmp_path, caplog)
 
 
 async def test_flagged_spools_missing_from_the_list_are_looked_up(tmp_path):
-    bridge, fake, printer = make(tmp_path, [spool(19, flag="still wanted")])
+    bridge, fake, station = make(tmp_path, [spool(19, flag="still wanted")])
     fake.spools[19]["archived"] = True
     bridge.state.flagged[:] = [19, 20]
     bridge._save()
@@ -400,7 +407,7 @@ async def test_flagged_spools_missing_from_the_list_are_looked_up(tmp_path):
 
 
 async def test_flag_wanted_on_an_unlisted_spool_the_bridge_never_flagged_is_left(tmp_path):
-    bridge, fake, printer = make(tmp_path, [spool(19)])
+    bridge, fake, station = make(tmp_path, [spool(19)])
     bridge._flags = {19: "wanted"}  # Not in the list given, and never flagged.
     await bridge.sync_flags([])
     assert bridge.state.flagged == []
@@ -410,7 +417,7 @@ async def test_flag_wanted_on_an_unlisted_spool_the_bridge_never_flagged_is_left
 
 
 async def test_flagged_spool_unarchived_since_the_list_was_read_is_kept_current(tmp_path):
-    bridge, fake, printer = make(tmp_path, [spool(19, flag="x")])
+    bridge, fake, station = make(tmp_path, [spool(19, flag="x")])
     fake.unlisted.add(19)
     bridge.state.flagged[:] = [19]
     bridge._flags = {}
@@ -423,10 +430,10 @@ async def test_flagged_spool_unarchived_since_the_list_was_read_is_kept_current(
 
 @pytest.mark.parametrize("queued", [False, True])
 async def test_run_polls_until_stopped(tmp_path, caplog, queued):
-    bridge, fake, printer = make(tmp_path, [spool(19)], poll_idle=0, poll_printing=0)
+    bridge, fake, station = make(tmp_path, [spool(19)], poll_idle=0, poll_printing=0)
     await bridge.poll()
     if queued:
-        printer.extruded = 1500
+        station.tool.extruded = 1500
         fake.fail_use = [503]
         await bridge.poll()
         bridge = restart(bridge)  # Loads the queued charge.
@@ -451,7 +458,7 @@ async def test_run_polls_until_stopped(tmp_path, caplog, queued):
 
 
 async def test_cleared_flag_leaves_the_flagged_list_and_is_saved(tmp_path):
-    bridge, fake, printer = make(tmp_path, [spool(19, flag="was flagged"), spool(20)])
+    bridge, fake, station = make(tmp_path, [spool(19, flag="was flagged"), spool(20)])
     bridge.state.flagged[:] = [19]
     bridge._save()  # As an earlier poll left it.
     bridge._flags = {}  # Nothing wanted any more.
@@ -464,7 +471,7 @@ async def test_cleared_flag_leaves_the_flagged_list_and_is_saved(tmp_path):
 
 @pytest.mark.parametrize("how", ["deleted", "archived"])
 async def test_flagged_spool_that_leaves_the_list_is_forgotten_and_saved(tmp_path, how):
-    bridge, fake, printer = make(tmp_path, [spool(19, flag="x"), spool(20)])
+    bridge, fake, station = make(tmp_path, [spool(19, flag="x"), spool(20)])
     bridge.state.flagged[:] = [19]
     bridge._save()  # As an earlier poll left it.
     bridge._flags = {}
@@ -491,7 +498,7 @@ async def test_flagged_spool_that_leaves_the_list_while_its_flag_fails_ends_once
 ):
     # #120: the failure's end is logged once at INFO, and an archived spool's stale flag
     # is cleared once writes work again.
-    bridge, fake, printer = make(tmp_path, [spool(19, flag="x"), spool(20)])
+    bridge, fake, station = make(tmp_path, [spool(19, flag="x"), spool(20)])
     caplog.set_level("DEBUG", "spoolman_prusalink")
     bridge.state.flagged[:] = [19]
     bridge._flags = {}
@@ -527,7 +534,7 @@ async def test_flagged_spool_that_leaves_the_list_while_its_flag_fails_ends_once
 
 
 async def test_flagged_spool_that_cant_be_looked_up_is_retried_and_logged_once(tmp_path, caplog):
-    bridge, fake, printer = make(tmp_path, [spool(19, flag="x")])
+    bridge, fake, station = make(tmp_path, [spool(19, flag="x")])
     caplog.set_level("DEBUG", "spoolman_prusalink")
     fake.spools[19]["archived"] = True
     bridge.state.flagged[:] = [19]
@@ -548,7 +555,7 @@ async def test_flagged_spool_that_cant_be_looked_up_is_retried_and_logged_once(t
 async def test_archived_flagged_spool_deleted_while_its_flag_fails_ends_once(tmp_path, caplog):
     # Once looked up, an archived spool is cached and not looked up again, so a 404 on its
     # flag write is what shows it was deleted.
-    bridge, fake, printer = make(tmp_path, [spool(19, flag="x"), spool(20)])
+    bridge, fake, station = make(tmp_path, [spool(19, flag="x"), spool(20)])
     caplog.set_level("DEBUG", "spoolman_prusalink")
     bridge.state.flagged[:] = [19]
     bridge._flags = {}
@@ -577,7 +584,7 @@ async def test_archived_flagged_spool_deleted_while_its_flag_fails_ends_once(tmp
 
 
 async def test_archived_active_spool_deleted_while_its_flag_fails_ends_once(tmp_path, caplog):
-    bridge, fake, printer = make(tmp_path, [spool(19)])
+    bridge, fake, station = make(tmp_path, [spool(19)])
     caplog.set_level("DEBUG", "spoolman_prusalink")
     await bridge.poll()
     fake.spools[19]["archived"] = True
@@ -624,7 +631,7 @@ def error_pages():
 
 async def test_error_page_that_changes_each_time_is_logged_once(tmp_path, caplog, monkeypatch):
     """A proxy's error page with a request ID in it isn't a new failure on every poll."""
-    bridge, fake, printer = make(tmp_path, [spool(19)])
+    bridge, fake, station = make(tmp_path, [spool(19)])
     await bridge.poll()
     caplog.set_level("INFO")
     gateway = error_pages()
@@ -637,7 +644,7 @@ async def test_error_page_that_changes_each_time_is_logged_once(tmp_path, caplog
 
     real = bridge.spoolman.use_length
     monkeypatch.setattr(bridge.spoolman, "use_length", use_length)
-    printer.extruded = 1500
+    station.tool.extruded = 1500
     for _ in range(3):  # The charge is queued, and the next polls can't send it.
         await bridge.poll()
     assert count(caplog, "charge to spool 19 failed (502 Bad Gateway") == 1
@@ -655,7 +662,7 @@ async def test_error_page_that_changes_each_time_is_logged_once(tmp_path, caplog
 async def test_printer_error_page_that_changes_each_time_is_logged_once(
     tmp_path, caplog, monkeypatch
 ):
-    bridge, fake, printer = make(tmp_path, [spool(19)], uuid_field="instance_uuid")
+    bridge, fake, station = make(tmp_path, [spool(19)], uuid_field="instance_uuid")
     client = bridge.printers[0].client
     real = client.printer_type
     caplog.set_level("INFO")
@@ -665,7 +672,7 @@ async def test_printer_error_page_that_changes_each_time_is_logged_once(
         raise gateway("PUT /api/v1/files/usb/spoolman-sync.gcode")
 
     monkeypatch.setattr(client, "upload_and_print", upload)
-    await swap_to_spool_20(bridge, fake, printer)
+    await swap_to_spool_20(bridge, fake, station)
     for _ in range(3):
         await bridge.poll()
     assert count(caplog, "sync job failed") == 1
@@ -678,7 +685,7 @@ async def test_printer_error_page_that_changes_each_time_is_logged_once(
         raise gateway("GET /api/version")
 
     monkeypatch.setattr(client, "printer_type", version)
-    printer.boot_id += 1  # A reboot makes the bridge read the model again.
+    station.printer.boot_id += 1  # A reboot makes the bridge read the model again.
     for _ in range(3):
         await bridge.poll()
     assert count(caplog, "printer writes are off until it can") == 1

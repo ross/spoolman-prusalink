@@ -14,7 +14,17 @@ from pathlib import Path
 
 import pytest
 
-from integration.conftest import LOAD_MM, PETG, PLA, World, charges, count, events, print_spec
+from integration.conftest import (
+    LOAD_MM,
+    PETG,
+    PLA,
+    World,
+    charges,
+    count,
+    events,
+    logged_once,
+    print_spec,
+)
 from simulator.model import State
 from spoolman_prusalink.app import Bridge
 from spoolman_prusalink.db import DatabaseError
@@ -196,7 +206,7 @@ async def test_b5_field_with_the_wrong_type(world: World, caplog: pytest.LogCapt
     assert key not in ((await w.spoolman.get(a)).get("extra") or {})
     assert (await w.spoolman.fields_by_key())[key] == "integer"
     trouble = f"can't set up the {key!r} spool field: spool extra field {key!r} exists"
-    assert count(caplog, logging.WARNING, trouble) == 1
+    assert logged_once(caplog, logging.WARNING, trouble)
     assert not any(r.levelno > logging.WARNING for r in caplog.records)
     assert writes == []
     assert not any("can't update the flag" in r.getMessage() for r in caplog.records)
@@ -222,7 +232,7 @@ async def test_b5_field_setup_fails_then_recovers(world: World, caplog: pytest.L
     assert key not in await w.spoolman.fields_by_key()
     assert "unloaded with no Spoolman change" in w.bridge._flags.get(w.spools["A"], "")
     cant = f"can't set up the {key!r} spool field"
-    assert count(caplog, logging.WARNING, cant) == 1
+    assert logged_once(caplog, logging.WARNING, cant)
     assert count(caplog, logging.DEBUG, cant) == 2
     assert faults.requests.count(f"POST /api/v1/field/spool/{key} 500") == 3
 
@@ -233,8 +243,8 @@ async def test_b5_field_setup_fails_then_recovers(world: World, caplog: pytest.L
     assert (await w.spoolman.fields_by_key())[key] == "text"
     flag = await w.flag("A")
     assert flag is not None and "unloaded with no Spoolman change" in flag
-    assert count(caplog, logging.INFO, f"{key!r} spool field is set up") == 1
-    assert count(caplog, logging.WARNING, cant) == 1
+    assert logged_once(caplog, logging.INFO, f"{key!r} spool field is set up")
+    assert logged_once(caplog, logging.WARNING, cant)
 
 
 async def test_b6_second_bridge_on_one_database_is_refused(world: World):
