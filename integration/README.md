@@ -156,7 +156,7 @@ current and that the scenario rows name their tests.
 | W1 | `test_configs.py::test_w1_custom_preamble_is_written` | A custom preamble with the model's check, or its MMU3 name, starts the job as given. |
 | W1 | `test_configs.py::test_w1_write_content` | Flexible, colorless, materialless and RGBA filaments: the M865 line and no false drift. |
 | W1 | `test_configs.py::test_w1_write_without_uuids` | No UUIDs to write: an M865 line with no M865.1, and the spool isn't given a UUID. |
-| W1 | `test_writes.py::test_w1_uuid_mint_fails` | Storing a minted UUID fails: logged once, and B is written without a UUID. |
+| W1 | `test_writes.py::test_w1_uuid_mint_fails` | Storing a minted UUID fails: logged once, and B's write waits for its UUID (W1). |
 | W1 | `test_writes.py::test_w1_uuid_minted_once_spoolman_takes_it` | Storing a minted UUID fails, then works: B gets a UUID and the printer shows it (W1). |
 | W1 | `test_writes.py::test_w1_write_after_swap` | Menu load after a Spoolman-first swap: the bridge writes name, color and UUID. |
 | W2 | `test_writes.py::test_w2_write_waits_while_printing` | Write due when a print starts: nothing is written until the print ends. |
