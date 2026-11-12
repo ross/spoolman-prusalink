@@ -345,7 +345,7 @@ class SimTool:
 
     def fill(self, material: Material | None) -> None:
         """Leave the tool as a finished load of `material` leaves it, or a finished unload for
-        None. Nothing is counted: this is setup, and a load by hand while the printer is off.
+        None. Nothing is counted: this is setup, such as a config or a test's starting state.
         """
         self.loaded = material is not None
         self.store(material)
