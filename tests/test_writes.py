@@ -1149,7 +1149,7 @@ async def test_missing_filament_endpoint_logged_once(tmp_path, caplog):
     for _ in range(3):
         await bridge.poll()
     assert caplog.text.count("printer: firmware has no /api/v1/filament") == 1
-    # With one printer the line reads as it always has, with no printer label in front.
+    # With one printer the line starts with the bare label, "printer: ".
     (record,) = [r for r in caplog.records if "isn't supported" in r.getMessage()]
     assert record.getMessage().startswith("printer: firmware has no /api/v1/filament")
     assert "printer read failed" not in caplog.text
