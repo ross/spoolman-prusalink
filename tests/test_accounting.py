@@ -270,7 +270,7 @@ def test_spool_moved_out_with_no_replacement_is_not_staging():
     assert res.events == [] and res.state.notice is None
     res = account(res.state, BOOT, r(260), loc(7), 42)
     assert [(e.kind, e.message) for e in res.events] == [
-        (EventKind.ACTIVE_UNASSIGNED, "spool 7 is back in the location")
+        (EventKind.ACTIVE_REASSIGNED, "spool 7 is back in the location")
     ]
     assert res.charges == [Charge(7, 10, "extruded")]
 
@@ -306,7 +306,7 @@ def test_both_spools_leaving_the_location_is_reported():
     assert [(e.kind, e.message) for e in res.events] == STAGED_8_LEFT
     res = account(res.state, BOOT, r(160), loc(7))
     assert [(e.kind, e.message) for e in res.events] == [
-        (EventKind.ACTIVE_UNASSIGNED, "spool 7 is back in the location")
+        (EventKind.ACTIVE_REASSIGNED, "spool 7 is back in the location")
     ]
 
 
@@ -317,7 +317,7 @@ def test_unload_after_the_location_empties_holds_usage():
     assert [(e.kind, e.message) for e in res.events] == [
         (EventKind.UNLOAD, "1 unload(s); 30 mm before the unload goes to spool 7"),
         (
-            EventKind.ACTIVE_UNASSIGNED,
+            EventKind.UNLOADED_UNASSIGNED,
             "spool 7 unloaded with no spool in the location; holding usage until one is assigned",
         ),
         (EventKind.HOLD_UNASSIGNED, "holding usage: no spool assigned"),
@@ -581,7 +581,7 @@ def test_swap_kept_open_when_spool_removed():
     )
     assert charges == [Charge(7, 500, "before unload"), Charge(7, 300, "extruded")]
     assert EventKind.SWAP_CONFIRMED not in kinds
-    assert kinds[-2:] == [EventKind.ACTIVE_UNASSIGNED, EventKind.HOLD_UNASSIGNED]
+    assert kinds[-2:] == [EventKind.SWAP_UNASSIGNED, EventKind.HOLD_UNASSIGNED]
     assert (state.swap, state.active, state.charged) == (SwapFlag(7, 300), None, 900)
 
 
@@ -615,7 +615,7 @@ def test_old_spool_moved_back_keeps_swap_open():
     _, _, state = run(TWO_STEP)
     charges, kinds, state = run([(BOOT, r(1000, unloads=1, at_unload=600), loc(7))], state)
     assert charges == [Charge(7, 100, "extruded")]
-    assert kinds == [EventKind.ACTIVE_UNASSIGNED]
+    assert kinds == [EventKind.ACTIVE_REASSIGNED]
     assert (state.swap, state.active) == (SwapFlag(7, 400), 7)
     # A different spool later still takes everything since the unload.
     charges, _, _ = run([(BOOT, r(1000, unloads=1, at_unload=600), loc(7, 9))], state)

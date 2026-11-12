@@ -44,7 +44,7 @@ async def test_c1_reboot_keeps_usage_held_at_the_reboot(world: World):
     await w.move("A", w.shelf)
     await w.unload()
     records = await w.poll()
-    assert [e["event"] for e in events(records)][-1] == "active_unassigned"
+    assert [e["event"] for e in events(records)][-1] == "unloaded_unassigned"
 
     # A load with no spool assigned is held, by not charging it.
     await w.swap_cycle(source="preset", name=ASA[0])

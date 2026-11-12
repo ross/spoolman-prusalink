@@ -232,28 +232,17 @@ catches the client errors only.
 
 Size: small to medium. Independent of the rest.
 
-### B9. `account()` keeps its tallies, legal states, and event kinds by convention
+### B9. `account()` is one function of six steps
 
 `account()` (`accounting.py`) is about 500 lines in six numbered steps.
-It's pure, well documented, and has 94 tests through its public signature.
-The order of the steps is real: unload, claim, assignment, print start,
-usage. The length isn't the problem. These are:
+It's pure, well documented, and tested through its public signature. The
+order of the steps is real: unload, claim, assignment, print start, usage.
+Step 3 is a 13-branch `elif` chain where order is priority.
 
-- **Step 3 is a 13-branch `elif` chain** where order is priority.
-- **Two event kinds are overloaded.** `ACTIVE_UNASSIGNED` is used for five
-  different messages, including "is back in the location", and
-  `ASSIGNMENT_CHANGED` for two.
-
-The rework is in two parts. Neither changes behavior, and the existing
-tests are the check.
-
-Part 1, a small stack of its own:
-
-- **Split the overloaded kinds**, so that a kind has one meaning.
-
-Part 2, with B6: each numbered step becomes a function over `last` and
-`current`. B6 gives events fields, which already rewrites every `event()`
-call, so do the split in the same stack.
+Shape: each numbered step becomes a function over `last` and `current`,
+the two states `account()` already keeps. It doesn't change behavior, and
+the existing tests are the check. B6 gives events fields, which already
+rewrites every `event()` call, so do the split in the same stack.
 
 Not planned: a formal state machine, with a named mode per tool and defined
 transitions. The conditions overlap (a provisional charge with a staged
@@ -262,7 +251,7 @@ spool, a deleted spool with a staged spool), so the modes multiply.
 is what such a machine would be derived from. Reconsider it against those
 rules.
 
-Size: small for part 1, medium for part 2.
+Size: medium.
 
 ### B10. Smaller items
 
@@ -529,16 +518,15 @@ Size: medium.
 | # | Workstream | Findings | Depends on |
 | --- | --- | --- | --- |
 | 2 | Tag-UUID owner | B1, T1 (UUID tests) | Nothing |
-| 3 | Conditions and saved facts | B2, B3, B5, B7, T1 (rest) | Workstreams 2 and 10. B7 changes the part of `account()` that B9 part 1 restructures |
-| 4 | Typed records | B6, B9 (part 2), T7 | Workstream 10. Easier after 3 |
+| 3 | Conditions and saved facts | B2, B3, B5, B7, T1 (rest) | Workstream 2 |
+| 4 | Typed records | B6, B9, T7 | Nothing. Easier after 3 |
 | 5 | Narrow the bridge boundary | B4 | Workstreams 2 and 3. Easier after B11 |
 | 6 | Client errors | B8 | Nothing |
 | 7 | Unit suite on the simulator | T2, T6 | Nothing. Before workstreams 2 and 3 if possible, so their tests are ported once |
 | 8 | Simulator state | S1, S5, S6, then S2, S4 | Workstream 7 for S4, which continues the routing move in T2 |
 | 9 | Small items | B10, B11, T8 | Nothing |
-| 10 | Accounting state | B9 (part 1) | Nothing |
 
-Workstreams 6, 9, and 10 are independent and can run at any time. T3
+Workstreams 6 and 9 are independent and can run at any time. T3
 has no work, so it isn't in a workstream.
 Of the large ones, workstream 7 is best first, because workstreams 2 and 3
 rewrite many of the same tests and would otherwise port them twice. Then

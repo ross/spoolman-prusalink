@@ -105,8 +105,18 @@ class EventKind(StrEnum):
     CLAIM_CONFIRMED = "claim_confirmed"
     CORRECTION = "correction"
     STAGING_CANCELLED = "staging_cancelled"
+    # The active spool left the location with no unload: it's still charged.
     ACTIVE_UNASSIGNED = "active_unassigned"
+    # The active spool is in the location again.
+    ACTIVE_REASSIGNED = "active_reassigned"
+    # The tool unloaded with nothing in the location: usage is held.
+    UNLOADED_UNASSIGNED = "unloaded_unassigned"
+    # The spool of an unconfirmed swap left the location: usage is held.
+    SWAP_UNASSIGNED = "swap_unassigned"
+    # A spool was assigned while none was active, and became active.
     ASSIGNMENT_CHANGED = "assignment_changed"
+    # A print started with a deleted spool's usage held: the assigned spool became active.
+    ACTIVE_AT_PRINT = "active_at_print"
     HOLD_EMPTY = "hold_empty", Report.LASTING
     HOLD_UNASSIGNED = "hold_unassigned", Report.LASTING
     # The bridge logs when a hold for a deleted spool starts and ends, from
@@ -714,7 +724,7 @@ def account(
         if current.assigned is None and current.active is not None:
             # S10: not a swap. Usage is held until a spool is assigned.
             event(
-                EventKind.ACTIVE_UNASSIGNED,
+                EventKind.UNLOADED_UNASSIGNED,
                 f"spool {current.active} unloaded with no spool in "
                 "the location; holding usage until one is assigned",
             )
@@ -774,7 +784,7 @@ def account(
             # The old spool left first, before the new one arrived. Keep the swap open and
             # hold usage until a spool is assigned: a new spool confirms the swap below.
             event(
-                EventKind.ACTIVE_UNASSIGNED,
+                EventKind.SWAP_UNASSIGNED,
                 f"spool {current.active} is no longer in the "
                 "location; holding usage until a spool is assigned, which also takes "
                 f"the {swap.mm} mm since the unload",
@@ -783,7 +793,7 @@ def account(
         elif swap is not None and current.assigned == swap.spool_id:
             # The old spool is back: as if it had never left, the swap stays open, or closes
             # as of a print start while it was out.
-            event(EventKind.ACTIVE_UNASSIGNED, f"spool {current.assigned} is back in the location")
+            event(EventKind.ACTIVE_REASSIGNED, f"spool {current.assigned} is back in the location")
             current.active = current.assigned
             if swap.started_job is not None:
                 event(
@@ -874,7 +884,7 @@ def account(
     elif (
         current.active is not None and last.assigned is None and current.assigned == current.active
     ):
-        event(EventKind.ACTIVE_UNASSIGNED, f"spool {current.active} is back in the location")
+        event(EventKind.ACTIVE_REASSIGNED, f"spool {current.active} is back in the location")
     elif (
         current.active is not None
         and last.assigned != current.active
@@ -904,7 +914,7 @@ def account(
             and current.assigned is not None
         ):
             event(
-                EventKind.ASSIGNMENT_CHANGED,
+                EventKind.ACTIVE_AT_PRINT,
                 f"print started with spool {current.assigned} assigned; making it active "
                 f"in place of deleted spool {current.deleted_spool}",
             )
