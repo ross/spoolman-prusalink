@@ -18,6 +18,7 @@ from integration.conftest import (
     count,
     events,
     logged,
+    logged_once,
     print_spec,
 )
 from integration.faults import set_extra_text
@@ -273,7 +274,7 @@ async def test_w7_non_preset_without_temperatures_is_flagged(
     assert w.requests("PUT") == []
     flag = await w.flag("B")
     assert flag is not None and "isn't a printer preset; set its extruder and bed" in flag
-    assert count(caplog, logging.WARNING, f"] can't write spool {b} to the printer") == 1
+    assert logged_once(caplog, logging.WARNING, f"] can't write spool {b} to the printer")
     assert not logged(caplog, logging.WARNING, f"printer will be set to spool {b}")
 
     # The flag stays through a print, which is still charged to B.
@@ -294,11 +295,11 @@ async def test_w7_non_preset_without_temperatures_is_flagged(
     assert w.material() == ("PLA-CF", PETG[1], minted)
     await w.poll()
     assert await w.flag("B") is None
-    assert count(caplog, logging.WARNING, f"] can't write spool {b} to the printer") == 1
+    assert logged_once(caplog, logging.WARNING, f"] can't write spool {b} to the printer")
     # The "can't write" note gave way to a pending write for the same spool, with no
     # end line between; the pending write's note ends once, at its level.
     assert not logged(caplog, logging.WARNING, f"] no longer: can't write spool {b}")
-    assert count(caplog, logging.WARNING, f"] no longer: printer will be set to spool {b}") == 1
+    assert logged_once(caplog, logging.WARNING, f"] no longer: printer will be set to spool {b}")
 
 
 async def test_w8_pps_is_flagged_until_loaded_from_the_menu(
@@ -318,7 +319,7 @@ async def test_w8_pps_is_flagged_until_loaded_from_the_menu(
     assert w.requests("PUT") == []
     flag = await w.flag("B")
     assert flag is not None and "needs the printer's HT idler-door setting" in flag
-    assert count(caplog, logging.WARNING, f"] can't write spool {b} to the printer") == 1
+    assert logged_once(caplog, logging.WARNING, f"] can't write spool {b} to the printer")
 
     # The user reloads it from the menu as PPS, as the flag asks. The unload with no
     # Spoolman change opens a swap (W11), but the menu load is what the bridge would
@@ -335,7 +336,7 @@ async def test_w8_pps_is_flagged_until_loaded_from_the_menu(
     unloaded = "filament was unloaded with no Spoolman change"
     assert unloaded in (flag := await w.flag("B") or "") and "HT idler-door" not in flag
     assert not logged(caplog, logging.WARNING, f"printer differs from spool {b}")
-    assert count(caplog, logging.WARNING, f"] can't write spool {b} to the printer") == 1
+    assert logged_once(caplog, logging.WARNING, f"] can't write spool {b} to the printer")
 
 
 @pytest.mark.parametrize("world_config", [{}, dict(sync_drift=True)], indirect=True)
@@ -429,7 +430,7 @@ async def test_w10_model_the_bridge_cannot_write(
         await w.restart(printers=(replace(w.cfg.printers[0], gcode_preamble=preamble),))
     records = await w.poll()
     assert len(events(records, "baseline")) == 1
-    assert count(caplog, logging.WARNING, f"{problem}; printer writes are off") == 1
+    assert logged_once(caplog, logging.WARNING, f"{problem}; printer writes are off")
 
     # A Spoolman-first swap to B, loaded from the menu: a write is due but can't run.
     await w.move("B", w.tool_location)
@@ -446,8 +447,8 @@ async def test_w10_model_the_bridge_cannot_write(
     assert w.charged(records, "B") == LOAD_MM + 30
     flag = await w.flag("B")
     assert flag == f"{w.tool_location}: can't write to the printer: {problem}"
-    assert count(caplog, logging.WARNING, f"] can't write spool {b} to the printer") == 1
-    assert count(caplog, logging.WARNING, "printer writes are off") == 1
+    assert logged_once(caplog, logging.WARNING, f"] can't write spool {b} to the printer")
+    assert logged_once(caplog, logging.WARNING, "printer writes are off")
 
 
 async def test_w11_unconfirmed_swap_writes_the_assigned_spool(world: World):
@@ -619,7 +620,7 @@ async def test_w14_edit_after_the_uuid_is_cleared_keeps_the_printers(
     await w.poll()  # Sees the write took.
     assert len(w.requests("PUT")) == 1
     written = w.material()[2]
-    assert count(caplog, logging.INFO, f"gave spool {b} instance UUID") == 1
+    assert logged_once(caplog, logging.INFO, f"gave spool {b} instance UUID")
 
     # The user clears B's UUID and edits its color: the edit is written with the UUID
     # the printer already shows, and no new one is minted.
@@ -634,7 +635,7 @@ async def test_w14_edit_after_the_uuid_is_cleared_keeps_the_printers(
     m865 = [t for t in gcode(w) if t.startswith("M865.1 T0")]
     assert len(m865) == 2 and written in m865[-1]
     await w.poll()
-    assert count(caplog, logging.INFO, f"gave spool {b} instance UUID") == 1
+    assert logged_once(caplog, logging.INFO, f"gave spool {b} instance UUID")
     assert await w.spoolman.extra(b, UUID_FIELD) is None  # Kept on the printer, not stored.
     assert await w.flag("B") is None
     assert len(w.requests("PUT")) == 2
@@ -664,7 +665,7 @@ async def test_w3_print_started_before_the_upload(world: World, caplog: pytest.L
     assert w.printer.state is State.PRINTING
     assert w.requests("PUT") == []
     waits = "printer became PRINTING; sync job waits for the next idle poll"
-    assert count(caplog, logging.INFO, waits) == 1
+    assert logged_once(caplog, logging.INFO, waits)
 
     await w.run_until(lambda: w.printer.job is None, poll_every=1.0)
     assert w.requests("PUT") == []
@@ -675,8 +676,8 @@ async def test_w3_print_started_before_the_upload(world: World, caplog: pytest.L
     assert len(puts) == 1 and puts[0].text.endswith(" 201")
     await wrote_b(w)
     await w.poll()
-    assert count(caplog, logging.INFO, "became ") == 1
-    assert count(caplog, logging.INFO, f"ran printer job {SYNC_FILE}") == 1
+    assert logged_once(caplog, logging.INFO, "became ")
+    assert logged_once(caplog, logging.INFO, f"ran printer job {SYNC_FILE}")
     assert count(caplog, logging.WARNING, "sync job") == 0
 
 
@@ -705,7 +706,7 @@ async def test_w15_upload_fails(world: World, caplog: pytest.LogCaptureFixture, 
     assert failed == 3
     assert w.printer.job is None
     assert w.material() == (PETG[0], None, None)
-    assert count(caplog, logging.WARNING, "printer sync job failed") == 1
+    assert logged_once(caplog, logging.WARNING, "printer sync job failed")
 
     # The printer takes uploads again: the next idle poll writes B, and says so once.
     w.before_request = None
@@ -714,9 +715,9 @@ async def test_w15_upload_fails(world: World, caplog: pytest.LogCaptureFixture, 
     assert puts[-1].text.endswith(" 201")
     await wrote_b(w)
     await w.poll()
-    assert count(caplog, logging.WARNING, "printer sync job working again") == 1
-    assert count(caplog, logging.WARNING, "printer sync job failed") == 1
-    assert count(caplog, logging.INFO, f"ran printer job {SYNC_FILE}") == 1
+    assert logged_once(caplog, logging.WARNING, "printer sync job working again")
+    assert logged_once(caplog, logging.WARNING, "printer sync job failed")
+    assert logged_once(caplog, logging.INFO, f"ran printer job {SYNC_FILE}")
 
 
 def mint_refused(w: World) -> None:
@@ -742,7 +743,7 @@ async def test_w1_uuid_mint_fails(world: World, caplog: pytest.LogCaptureFixture
     assert w.requests("PUT") == []
     assert w.material() == (PETG[0], None, None)
     assert await w.spoolman.extra(b, UUID_FIELD) is None
-    assert count(caplog, logging.WARNING, f"can't store an instance UUID on spool {b}") == 1
+    assert logged_once(caplog, logging.WARNING, f"can't store an instance UUID on spool {b}")
     assert await w.flag("B") is None
 
 
@@ -767,8 +768,8 @@ async def test_w1_uuid_minted_once_spoolman_takes_it(
     minted = await w.spoolman.extra(b, UUID_FIELD)
     assert minted is not None
     assert w.material() == (PETG[0], PETG[1], minted)
-    assert count(caplog, logging.WARNING, f"can't store an instance UUID on spool {b}") == 1
-    assert count(caplog, logging.INFO, f"gave spool {b} instance UUID") == 1
+    assert logged_once(caplog, logging.WARNING, f"can't store an instance UUID on spool {b}")
+    assert logged_once(caplog, logging.INFO, f"gave spool {b} instance UUID")
 
 
 async def test_w10_model_unreadable_until_it_answers(
@@ -795,8 +796,8 @@ async def test_w10_model_unreadable_until_it_answers(
     assert w.requests("PUT") == []
     off = "can't read the printer model ("
     cant = f"] can't write spool {w.spools['B']} to the printer"
-    assert count(caplog, logging.WARNING, cant) == 1
-    assert count(caplog, logging.WARNING, "printer writes are off until it can") == 1
+    assert logged_once(caplog, logging.WARNING, cant)
+    assert logged_once(caplog, logging.WARNING, "printer writes are off until it can")
     flag = await w.flag("B")
     assert flag is not None and f"can't write to the printer: {off}" in flag
     versions = [e for e in w.sim.events if e.kind == "request" and "/api/version" in e.text]
@@ -805,16 +806,16 @@ async def test_w10_model_unreadable_until_it_answers(
     # The printer answers: the model is read once, writes come back on, and B is written.
     w.before_request = None
     await w.poll()
-    assert count(caplog, logging.WARNING, "printer is COREONEL (8.1.0)") == 1
+    assert logged_once(caplog, logging.WARNING, "printer is COREONEL (8.1.0)")
     assert len(w.requests("PUT")) == 1
     await wrote_b(w)
     for _ in range(2):
         w.advance(1.0)
         await w.poll()
     assert await w.flag("B") is None
-    assert count(caplog, logging.WARNING, "printer writes are off until it can") == 1
+    assert logged_once(caplog, logging.WARNING, "printer writes are off until it can")
     assert count(caplog, logging.INFO, "printer is ") == 0
-    assert count(caplog, logging.WARNING, "printer is ") == 1
+    assert logged_once(caplog, logging.WARNING, "printer is ")
 
 
 async def test_w6_sync_job_gone_before_its_name_is_read(
@@ -888,7 +889,7 @@ async def test_w9_malformed_color_is_drift(world: World, caplog: pytest.LogCaptu
         assert w.charged(records, "A") == 10
     assert w.requests("PUT") == []
     differs = f"printer differs from spool {a}: color printer=#7g737b spoolman={PLA[1]}"
-    assert count(caplog, logging.WARNING, differs) == 1
+    assert logged_once(caplog, logging.WARNING, differs)
     flag = await w.flag("A")
     assert flag is not None and "color printer=#7g737b" in flag
 
@@ -897,5 +898,5 @@ async def test_w9_malformed_color_is_drift(world: World, caplog: pytest.LogCaptu
     for _ in range(2):
         await w.poll()
     assert await w.flag("A") is None
-    assert count(caplog, logging.WARNING, f"no longer: {differs}") == 1
+    assert logged_once(caplog, logging.WARNING, f"no longer: {differs}")
     assert count(caplog, logging.WARNING, differs) == 2

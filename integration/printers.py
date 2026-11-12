@@ -1,33 +1,56 @@
-"""A second printer for `world`.
+"""The printers of `world`: what each starts with, and its `Station`.
 
-`world` takes `world_printers` at 2 to add printer "b": a Core One L like printer "it",
-with its own PrusaLink server on the same `Simulation`, location `<prefix> LB`, and
-spool E's white PLA loaded and in that location. `World.at(name)` gives either printer
-as a `Station`. Ledger records name their printer, so `printer_of()` splits them.
+`world` builds every printer from a `Spec`: its model, and for each tool the spool
+that's loaded and where that spool is in Spoolman. Printer "it" is always there. With
+`world_printers` at 2 there's also printer "b": a Core One L with its own PrusaLink
+server on the same `Simulation`, location `<prefix> LB`, and spool E's white PLA
+loaded. `World.at(name)` gives either printer as a `Station`. Ledger records name
+their printer, so `printer_of()` splits them.
 """
 
 from __future__ import annotations
 
-import uuid
 from collections.abc import Callable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 
 from aiohttp.test_utils import TestServer
 
 from integration import station
 from integration.temperatures import TEMPERATURES, WRITTEN
-from simulator.model import MODELS, Material, PrintSpec, SimPrinter, SimTool, Simulation
-from simulator.prusalink import make_app
+from simulator.model import MODELS, Material, PrintSpec, SimPrinter, SimTool
 from spoolman_prusalink.accounting import ToolState
 from spoolman_prusalink.config import PrinterConfig
 
 if TYPE_CHECKING:
-    from integration.conftest import SpoolmanHelper, World
+    from integration.conftest import World
 
+KEY = "it-key"
 # Spool E, loaded in printer b: a PLA that none of A to D share.
 PLA_WHITE = ("PLA", "#f2f2f2")
+FIRST = "it"
 SECOND = "b"
+
+
+@dataclass
+class Load:
+    """What a tool starts with: a spool, loaded in the tool and in its Spoolman location."""
+
+    spool: str  # The spool's name in `World.spools`, such as "A".
+    filament: tuple[str, str]  # Material and color.
+    location: str
+    extruded: float  # The tool's counter.
+    uuid: str | None = None  # The instance UUID on the spool and on the printer, if any.
+
+
+@dataclass
+class Spec:
+    """One printer for `world` to build: its name, model code, and tools in index order."""
+
+    name: str
+    model: str
+    loads: list[Load]
+    config: dict = field(default_factory=dict)  # Overrides for its `PrinterConfig`.
 
 
 @dataclass(kw_only=True)
@@ -38,8 +61,9 @@ class Station(station.Station):
     """
 
     world: World
-    location: str  # Tool 0's Spoolman location.
-    server: TestServer | None = None  # None for printer "it", which `world` serves.
+    locations: dict[int, str]  # Tool index -> Spoolman location, as the bridge is configured.
+    # Serves the printer's PrusaLink to the bridge; `start` sets it.
+    server: TestServer = field(init=False)
 
     def __post_init__(self) -> None:
         # The world's bridge changes at a restart, so look it up at each poll.
@@ -48,6 +72,11 @@ class Station(station.Station):
     @property
     def name(self) -> str:
         return self.printer.name
+
+    @property
+    def location(self) -> str:
+        """Tool 0's Spoolman location."""
+        return self.locations[0]
 
     @property
     def state(self) -> ToolState | None:
@@ -88,38 +117,33 @@ def printer_of(records: list[dict], name: str) -> list[dict]:
     return [r for r in records if r.get("printer") == name]
 
 
-async def add_printers(
-    count: int,
-    sim: Simulation,
-    spoolman: SpoolmanHelper,
-    vendor: int,
-    prefix: str,
-    key: str,
-    spools: dict[str, int],
-    uuids: dict[str, str],
-) -> list[tuple[str, SimPrinter, str, TestServer, PrinterConfig]]:
-    """Add printer b to `sim` when `count` is 2, with spool E, and serve it.
+async def start(spec: Spec, world: World) -> tuple[Station, PrinterConfig]:
+    """Add `spec`'s printer to the world's simulation and serve it.
 
-    Returns its name, simulated printer, location, server and bridge config, for
-    `world` to put in its `Config` and its `World`. Adds E to `spools` and `uuids`.
+    Returns its station and the bridge's config for it. The spools its tools hold are
+    `world`'s to create.
     """
-    if count == 1:
-        return []
-    location = f"{prefix} LB"
-    uuid_e = str(uuid.uuid4())
-    filament = await spoolman.filament(vendor, *PLA_WHITE)
-    spools["E"] = await spoolman.spool(filament, location, "E", uuid_e)
-    uuids["E"] = uuid_e
-    e = Material(PLA_WHITE[0], PLA_WHITE[1], uuid_e, **WRITTEN)
-    tool = SimTool(0, loaded=True, material=replace(e), previous=replace(e), extruded=2000.0)
-    printer = SimPrinter(SECOND, 0, key, MODELS["8.1.0"], tools={0: tool})
-    sim.add(printer)
-    server = TestServer(make_app(sim, printer.name))
-    await server.start_server()
+    tools = {}
+    for index, load in enumerate(spec.loads):
+        material = Material(*load.filament, load.uuid, **WRITTEN)
+        tools[index] = SimTool(
+            index,
+            loaded=True,
+            material=replace(material),
+            previous=replace(material),
+            extruded=load.extruded,
+        )
+    printer = SimPrinter(spec.name, 0, KEY, MODELS[spec.model], tools=tools)
+    world.sim.add(printer)
+    locations = {index: load.location for index, load in enumerate(spec.loads)}
+    made = Station(world.sim, printer, world=world, locations=locations)
+    made.server = TestServer(made.app())
+    await made.server.start_server()
     config = PrinterConfig(
-        name=SECOND,
-        url=f"http://{server.host}:{server.port}",
-        api_key=key,
-        tools={0: location},
+        name=spec.name,
+        url=f"http://{made.server.host}:{made.server.port}",
+        api_key=KEY,
+        tools=dict(locations),
+        **spec.config,
     )
-    return [(SECOND, printer, location, server, config)]
+    return made, config

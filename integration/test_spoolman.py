@@ -16,10 +16,12 @@ from integration.conftest import (
     PETG,
     UUID_FIELD,
     World,
+    baseline,
     charges,
     count,
     events,
     logged,
+    logged_once,
     print_spec,
 )
 from integration.faults import (
@@ -34,11 +36,6 @@ from simulator.model import State
 
 def use_path(spool_id: int) -> str:
     return f"/api/v1/spool/{spool_id}/use"
-
-
-async def baseline(w: World) -> None:
-    records = await w.poll()
-    assert len(events(records, "baseline")) == 1
 
 
 async def set_used(w: World, name: str, grams: float) -> None:
@@ -66,13 +63,13 @@ async def test_m1_spoolman_unreachable(world: World, caplog: pytest.LogCaptureFi
         w.printer.extrude(0, 20)
         assert await w.poll() == []
     assert w.bridge.printers[0].tools[0].charged == charged_at
-    assert count(caplog, logging.WARNING, "Spoolman unreachable") == 1
+    assert logged_once(caplog, logging.WARNING, "Spoolman unreachable")
 
     # Back: one poll logs it and charges everything since in one charge.
     faults.restore()
     records = await w.poll()
     assert [r["use_length"] for r in charges(records)] == [60.0]
-    assert count(caplog, logging.WARNING, "Spoolman reachable again") == 1
+    assert logged_once(caplog, logging.WARNING, "Spoolman reachable again")
 
     # A charge Spoolman fails with a 503 stays queued.
     caplog.clear()
@@ -96,9 +93,9 @@ async def test_m1_spoolman_unreachable(world: World, caplog: pytest.LogCaptureFi
     records = await w.poll()
     assert [r["use_length"] for r in charges(records)] == [30.0, 30.0]
     assert w.bridge.state.outbox == []
-    assert count(caplog, logging.WARNING, "sent 1 queued charge(s)") == 1
+    assert logged_once(caplog, logging.WARNING, "sent 1 queued charge(s)")
     await w.poll()
-    assert count(caplog, logging.WARNING, "sent ") == 1
+    assert logged_once(caplog, logging.WARNING, "sent ")
     # Every millimetre was charged once: three charges reached Spoolman, for all 120 mm,
     # and the queued one was tried once a poll while Spoolman was down.
     assert w.charged(w.since(0), "A") == 60 + 30 + 30 == w.counter - 1000
@@ -122,14 +119,14 @@ async def test_m2_rejected_charge_is_dropped(world: World, caplog: pytest.LogCap
     assert [(r["spool_id"], r["use_length"], r["failed"]) for r in failed] == [(a, 50.0, "422")]
     assert w.bridge.state.outbox == []
     msg = f"Spoolman rejected a +50 mm charge to spool {a} (422 "
-    assert count(caplog, logging.ERROR, msg) == 1
+    assert logged_once(caplog, logging.ERROR, msg)
     assert await w.used("A") == 0
 
     w.printer.extrude(0, 20)
     records = await w.poll()
     assert [r["use_length"] for r in charges(records)] == [20.0]
     assert await w.used("A") > 0
-    assert count(caplog, logging.ERROR, "Spoolman rejected") == 1
+    assert logged_once(caplog, logging.ERROR, "Spoolman rejected")
 
 
 async def test_m3_deleted_active_spool_holds_usage(world: World, caplog: pytest.LogCaptureFixture):
@@ -147,14 +144,14 @@ async def test_m3_deleted_active_spool_holds_usage(world: World, caplog: pytest.
     # Found by the list and the lookup, before any charge: nothing was sent and rejected.
     assert charges(records) == [] and [r for r in records if "failed" in r] == []
     found = f"[{w.tool_location}] spool {a} was deleted in Spoolman; holding its usage"
-    assert count(caplog, logging.WARNING, found) == 1
+    assert logged_once(caplog, logging.WARNING, found)
 
     # Usage goes on being held, through an unload, and the warning isn't repeated.
     w.printer.extrude(0, 30)
     await w.poll()
     await w.unload()
     await w.poll()
-    assert count(caplog, logging.WARNING, found) == 1
+    assert logged_once(caplog, logging.WARNING, found)
     assert w.bridge.printers[0].tools[0].held_mm == 50
 
     # B moved in and loaded: it becomes active and takes the held usage, then its load.
@@ -165,11 +162,11 @@ async def test_m3_deleted_active_spool_holds_usage(world: World, caplog: pytest.
     held = events(records, "held_charged")
     charged = f"spool {b} is active; charged it 50 mm held after spool {a} was deleted"
     assert [e["message"] for e in held] == [charged]
-    assert count(caplog, logging.INFO, charged) == 1
+    assert logged_once(caplog, logging.INFO, charged)
     assert w.charged(records, "B") == 50 + LOAD_MM
     tool = w.bridge.printers[0].tools[0]
     assert tool.active == b and tool.deleted_spool is None and tool.held_mm == 0
-    assert count(caplog, logging.WARNING, found) == 1
+    assert logged_once(caplog, logging.WARNING, found)
     # The hold is logged by the deleted-spool line above, not as a note on each poll.
     holding = f"[{w.tool_location}] holding usage since spool {a} was deleted"
     assert not logged(caplog, logging.WARNING, holding)
@@ -196,16 +193,16 @@ async def test_m3_charge_to_deleted_spool_is_held(world: World, caplog: pytest.L
     tool = w.bridge.printers[0].tools[0]
     assert tool.active is None and tool.deleted_spool == a and tool.held_mm == 40
     found = f"[{w.tool_location}] spool {a} was deleted in Spoolman; holding its usage"
-    assert count(caplog, logging.WARNING, found) == 1
+    assert logged_once(caplog, logging.WARNING, found)
     assert not logged(caplog, logging.ERROR, "Spoolman rejected")
     held_msg = "sent 0 queued charge(s); held 1 for the next spool"
-    assert count(caplog, logging.WARNING, held_msg) == 1
+    assert logged_once(caplog, logging.WARNING, held_msg)
 
     # The next spool moved into the location takes it.
     await w.move("C", w.tool_location)
     records = await w.poll()
     assert w.charged(records, "C") == 40
-    assert count(caplog, logging.WARNING, found) == 1
+    assert logged_once(caplog, logging.WARNING, found)
 
 
 async def test_m3_404_for_a_spool_no_longer_active_is_dropped(
@@ -241,7 +238,7 @@ async def test_m3_404_for_a_spool_no_longer_active_is_dropped(
     assert not failed[0].get("held")
     assert charges(records) == []
     msg = f"Spoolman rejected a +30 mm charge to spool {a} (404 "
-    assert count(caplog, logging.ERROR, msg) == 1
+    assert logged_once(caplog, logging.ERROR, msg)
     tool = w.bridge.printers[0].tools[0]
     assert tool.active == b and tool.deleted_spool is None and tool.held_mm == 0
     assert not logged(caplog, logging.WARNING, f"spool {a} was deleted in Spoolman")
@@ -409,10 +406,10 @@ async def test_m3a_archived_active_spool(world: World, caplog: pytest.LogCapture
     assert await w.used("A") > 0
     assert w.bridge.printers[0].tools[0].active == a
     found = f"[{w.tool_location}] spool {a} is archived but still loaded; charging it until"
-    assert count(caplog, logging.WARNING, found) == 1
+    assert logged_once(caplog, logging.WARNING, found)
     assert len(events(records, "active_unassigned")) == 1
     assert await w.flag("A") == f"{w.tool_location}: spool is archived but still loaded"
-    assert count(caplog, logging.INFO, f"set flag on spool {a}") == 1
+    assert logged_once(caplog, logging.INFO, f"set flag on spool {a}")
 
     # The unload ends it: the flag clears and usage is held for the next spool assigned.
     await w.unload()
@@ -427,7 +424,7 @@ async def test_m3a_archived_active_spool(world: World, caplog: pytest.LogCapture
     records = await w.poll()
     assert w.charged(records, "B") == LOAD_MM
     assert w.charged(w.since(mark), "A") == 30
-    assert count(caplog, logging.WARNING, found) == 1
+    assert logged_once(caplog, logging.WARNING, found)
 
 
 async def test_m4_location_renamed(world: World, caplog: pytest.LogCaptureFixture):
@@ -462,7 +459,7 @@ async def test_m4_location_renamed(world: World, caplog: pytest.LogCaptureFixtur
     for _ in range(2):
         assert await w.poll() == []
     assert w.bridge.printers[0].tools[0].active is None
-    assert count(caplog, logging.WARNING, "holding usage: no spool assigned") == 1
+    assert logged_once(caplog, logging.WARNING, "holding usage: no spool assigned")
 
     # A spool moved into the location (by its old name, as configured) takes the hold.
     await w.move("B", w.tool_location)
@@ -489,7 +486,7 @@ async def test_m5_spool_used_past_empty(world: World, caplog: pytest.LogCaptureF
     assert [r["use_length"] for r in charges(records, a)] == [1000.0] * 4
     assert await w.used("A") > 1010
     negative = f"spool {a} shows -"
-    assert count(caplog, logging.INFO, negative) == 1
+    assert logged_once(caplog, logging.INFO, negative)
     assert logged(caplog, logging.INFO, "g remaining in Spoolman but is still loaded")
     assert await w.flag("A") is None
 
@@ -629,7 +626,7 @@ async def test_m1_spool_list_fails(
     assert not w.bridge._spoolman_reach.down
     assert faults.requests.count(f"GET /api/v1/spool {status}") == 3
     failed = "Spoolman read failed, skipping poll"
-    assert count(caplog, logging.WARNING, failed) == 1
+    assert logged_once(caplog, logging.WARNING, failed)
     assert count(caplog, logging.DEBUG, failed) == 2
     assert not logged(caplog, logging.WARNING, "unreachable")
 
@@ -638,8 +635,8 @@ async def test_m1_spool_list_fails(
     records = await w.poll()
     assert [r["use_length"] for r in charges(records)] == [60.0]
     await w.poll()
-    assert count(caplog, logging.WARNING, "Spoolman reads working again after") == 1
-    assert count(caplog, logging.WARNING, failed) == 1
+    assert logged_once(caplog, logging.WARNING, "Spoolman reads working again after")
+    assert logged_once(caplog, logging.WARNING, failed)
     assert not logged(caplog, logging.WARNING, "reachable again")
 
 
@@ -665,7 +662,7 @@ async def test_m3_lookup_of_a_missing_spool_fails(
     assert w.charged(records, "A") == 30
     assert w.bridge.printers[0].tools[0].active == a
     cant = f"[{w.tool_location}] can't look up spool {a}, which is missing from Spoolman's list"
-    assert count(caplog, logging.WARNING, cant) == 1
+    assert logged_once(caplog, logging.WARNING, cant)
     assert count(caplog, logging.DEBUG, f"still can't look up spool {a}") == 2
     assert faults.requests.count(f"GET /api/v1/spool/{a} 500") == 3
 
@@ -675,9 +672,9 @@ async def test_m3_lookup_of_a_missing_spool_fails(
         for _ in range(2):
             w.printer.extrude(0, 10)
             await w.poll()
-        assert count(caplog, logging.INFO, f"[{w.tool_location}] can look up spool {a} again") == 1
+        assert logged_once(caplog, logging.INFO, f"[{w.tool_location}] can look up spool {a} again")
         archived = f"spool {a} is archived but still loaded"
-        assert count(caplog, logging.WARNING, archived) == 1
+        assert logged_once(caplog, logging.WARNING, archived)
         assert await w.flag("A") == f"{w.tool_location}: spool is archived but still loaded"
     else:
         # A is unarchived, so the list has it again and no lookup is needed.
@@ -685,10 +682,10 @@ async def test_m3_lookup_of_a_missing_spool_fails(
         for _ in range(2):
             w.printer.extrude(0, 10)
             await w.poll()
-        assert count(caplog, logging.INFO, f"spool {a} no longer needs looking up") == 1
+        assert logged_once(caplog, logging.INFO, f"spool {a} no longer needs looking up")
         assert faults.requests.count(f"GET /api/v1/spool/{a} 500") == 3
     assert w.charged(w.since(mark), "A") == 50
-    assert count(caplog, logging.WARNING, cant) == 1
+    assert logged_once(caplog, logging.WARNING, cant)
 
 
 def refuse_flag(w: World, name: str) -> None:
@@ -713,7 +710,7 @@ async def test_m6_flag_write_fails(world: World, caplog: pytest.LogCaptureFixtur
     assert await w.flag("A") is None
     assert w.spoolman_faults.requests.count(f"PATCH /api/v1/spool/{a} 500") == 2
     cant = f"can't update the flag on spool {a}"
-    assert count(caplog, logging.WARNING, cant) == 1
+    assert logged_once(caplog, logging.WARNING, cant)
     assert count(caplog, logging.DEBUG, cant) == 1
 
     w.spoolman_faults.restore()
@@ -721,8 +718,8 @@ async def test_m6_flag_write_fails(world: World, caplog: pytest.LogCaptureFixtur
     await w.poll()
     flag = await w.flag("A")
     assert flag is not None and "unloaded with no Spoolman change" in flag
-    assert count(caplog, logging.INFO, f"set flag on spool {a}") == 1
-    assert count(caplog, logging.WARNING, cant) == 1
+    assert logged_once(caplog, logging.INFO, f"set flag on spool {a}")
+    assert logged_once(caplog, logging.WARNING, cant)
 
 
 @pytest.mark.parametrize("gone", ["deleted", "archived"])
@@ -753,7 +750,7 @@ async def test_m6_flagged_spool_gone_while_its_flag_fails(
     await w.poll()
     assert await w.flag("A") is not None
     cant = f"can't update the flag on spool {a}"
-    assert count(caplog, logging.WARNING, cant) == 1
+    assert logged_once(caplog, logging.WARNING, cant)
 
     # A leaves Spoolman's list, and Spoolman takes writes again. An archived A has its
     # flag cleared, and a deleted A has none. Either way the failure is over: one INFO line.
@@ -777,7 +774,7 @@ async def test_m6_flagged_spool_gone_while_its_flag_fails(
     later = caplog.records[logged_before:]
     assert [r.getMessage() for r in later if r.levelno >= logging.INFO] == []
     assert not any(cant in r.getMessage() for r in later)
-    assert count(caplog, logging.WARNING, cant) == 1
+    assert logged_once(caplog, logging.WARNING, cant)
 
 
 async def test_m2_charge_accepted_with_an_unreadable_reply(
@@ -856,9 +853,9 @@ async def test_m5a_weight_edited_before_a_charge(world: World, caplog: pytest.Lo
     assert w.bridge.state.runouts == {}
     assert mid_print not in (await w.flag("A") or "")
     edit = f"spool {a}'s weight was edited in Spoolman; clearing its runout flag"
-    assert count(caplog, logging.INFO, edit) == 1
+    assert logged_once(caplog, logging.INFO, edit)
     await w.run_until(lambda: w.printer.job is None, poll_every=1.0)
-    assert count(caplog, logging.INFO, edit) == 1
+    assert logged_once(caplog, logging.INFO, edit)
 
 
 async def test_m5a_runout_spool_archived_before_its_refund(world: World):
@@ -958,8 +955,8 @@ async def test_m3_staged_spool_flag_and_unload(world: World, caplog: pytest.LogC
         "at the next unload or print start, or when this spool is claimed."
     )
     found = f"[{loc}] spool {a} was deleted in Spoolman; holding its usage"
-    assert count(caplog, logging.WARNING, found) == 1
-    assert count(caplog, logging.INFO, f"set flag on spool {b}") == 1
+    assert logged_once(caplog, logging.WARNING, found)
+    assert logged_once(caplog, logging.INFO, f"set flag on spool {b}")
 
     # The unload makes B active: it takes the 30 mm held, and the hold and flag end once.
     await w.unload()
@@ -973,9 +970,9 @@ async def test_m3_staged_spool_flag_and_unload(world: World, caplog: pytest.LogC
     await w.poll()
     assert await w.flag("B") is None
     ended = f"[{loc}] no longer holding usage for a deleted spool"
-    assert count(caplog, logging.WARNING, ended) == 1
-    assert count(caplog, logging.INFO, f"cleared flag on spool {b}") == 1
-    assert count(caplog, logging.WARNING, found) == 1
+    assert logged_once(caplog, logging.WARNING, ended)
+    assert logged_once(caplog, logging.INFO, f"cleared flag on spool {b}")
+    assert logged_once(caplog, logging.WARNING, found)
 
 
 async def test_m3_staged_spool_claimed_takes_held_usage(
@@ -1023,7 +1020,7 @@ async def test_m3_staged_spool_claimed_takes_held_usage(
     tool = w.bridge.printers[0].tools[0]
     assert tool.active == b and tool.deleted_spool is None and tool.held_mm == 0
     assert await w.spoolman.extra(b, CLAIM_FIELD) is None
-    assert count(caplog, logging.INFO, f"cleared the claim on spool {b}") == 1
+    assert logged_once(caplog, logging.INFO, f"cleared the claim on spool {b}")
 
     # The hold and B's flag end once, and once B is written, later use is B's alone.
     await w.run_until(lambda: w.printer.job is None)
@@ -1033,10 +1030,10 @@ async def test_m3_staged_spool_claimed_takes_held_usage(
     assert await w.flag("B") is None
     found = f"[{loc}] spool {a} was deleted in Spoolman; holding its usage"
     ended = f"[{loc}] no longer holding usage for a deleted spool"
-    assert count(caplog, logging.WARNING, found) == 1
-    assert count(caplog, logging.WARNING, ended) == 1
-    assert count(caplog, logging.INFO, f"cleared flag on spool {b}") == 1
-    assert count(caplog, logging.INFO, f"cleared the claim on spool {b}") == 1
+    assert logged_once(caplog, logging.WARNING, found)
+    assert logged_once(caplog, logging.WARNING, ended)
+    assert logged_once(caplog, logging.INFO, f"cleared flag on spool {b}")
+    assert logged_once(caplog, logging.INFO, f"cleared the claim on spool {b}")
     assert w.charged(w.since(0), "B") == 35
 
 
@@ -1053,7 +1050,7 @@ async def test_m3_deleted_spool_replaced_with_nothing_held(
     await w.poll()
     loc = w.tool_location
     found = f"[{loc}] spool {a} was deleted in Spoolman; holding its usage"
-    assert count(caplog, logging.WARNING, found) == 1
+    assert logged_once(caplog, logging.WARNING, found)
     assert w.bridge.printers[0].tools[0].held_mm == 0
 
     await w.move("B", loc)
@@ -1063,15 +1060,15 @@ async def test_m3_deleted_spool_replaced_with_nothing_held(
     tool = w.bridge.printers[0].tools[0]
     assert tool.active == b and tool.deleted_spool is None
     ended = f"[{loc}] no longer holding usage for a deleted spool"
-    assert count(caplog, logging.WARNING, ended) == 1
+    assert logged_once(caplog, logging.WARNING, ended)
 
     # The printer still shows A's PLA, so B is written to it; then B's use is charged.
     await w.run_until(lambda: w.printer.job is None)
     w.printer.extrude(0, 10)
     records = await w.poll()
     assert w.charged(records, "B") == 10
-    assert count(caplog, logging.WARNING, found) == 1
-    assert count(caplog, logging.WARNING, ended) == 1
+    assert logged_once(caplog, logging.WARNING, found)
+    assert logged_once(caplog, logging.WARNING, ended)
 
 
 @pytest.mark.parametrize("end", ["edit", "unload"])
@@ -1087,12 +1084,12 @@ async def test_m5_negative_weight_ends(world: World, caplog: pytest.LogCaptureFi
     await w.poll()  # Spoolman's list is read before the poll's charge is sent.
     negative = f"spool {a} shows -"
     recovered = f"spool {a} no longer shows a negative weight remaining in Spoolman"
-    assert count(caplog, logging.INFO, negative) == 1
+    assert logged_once(caplog, logging.INFO, negative)
 
     if end == "edit":
         await set_used(w, "A", 500.0)
         await w.poll()
-        assert count(caplog, logging.INFO, recovered) == 1
+        assert logged_once(caplog, logging.INFO, recovered)
     else:
         # S1 to B: A is unloaded and moved out, still negative.
         await w.move("B", w.tool_location)
@@ -1107,5 +1104,5 @@ async def test_m5_negative_weight_ends(world: World, caplog: pytest.LogCaptureFi
     for _ in range(2):
         w.printer.extrude(0, 10)
         await w.poll()
-    assert count(caplog, logging.INFO, negative) == 1
+    assert logged_once(caplog, logging.INFO, negative)
     assert count(caplog, logging.INFO, recovered) == (1 if end == "edit" else 0)

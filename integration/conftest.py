@@ -9,6 +9,7 @@ same way each run. Spoolman is the one external piece: its URL comes from
 from __future__ import annotations
 
 import json
+import logging
 import os
 import uuid
 from collections.abc import Callable
@@ -17,15 +18,12 @@ from pathlib import Path
 
 import httpx
 import pytest
-from aiohttp.test_utils import TestServer
 
 from integration.faults import SpoolmanFaults
-from integration.printers import Station, add_printers
+from integration.printers import FIRST, PLA_WHITE, SECOND, Load, Spec, Station, start
 from integration.station import SETTINGS
-from integration.temperatures import WRITTEN
 from simulator.model import (
     MODELS,
-    Material,
     PrintSpec,
     Segment,
     Settings,
@@ -34,12 +32,11 @@ from simulator.model import (
     Simulation,
     State,
 )
-from simulator.prusalink import Reply, make_app
+from simulator.prusalink import Hook
 from spoolman_prusalink.app import Bridge
-from spoolman_prusalink.config import Config, PrinterConfig
+from spoolman_prusalink.config import Config
 from spoolman_prusalink.db import read_ledger
 
-KEY = "it-key"
 FLAG_FIELD = "bridge_flag"
 UUID_FIELD = "instance_uuid"
 CLAIM_FIELD = "bridge_claim"
@@ -244,14 +241,33 @@ def print_spec() -> PrintSpec:
     return PrintSpec([Segment(0, 400)], duration_s=4, preheat_s=0.5)
 
 
+def messages(caplog: pytest.LogCaptureFixture, level: int | None, text: str) -> list[str]:
+    """The bridge's log lines that contain `text`, at `level` unless it's None."""
+    return [
+        r.getMessage()
+        for r in caplog.records
+        if text in r.getMessage() and level in (None, r.levelno)
+    ]
+
+
 def logged(caplog: pytest.LogCaptureFixture, level: int, text: str) -> bool:
     """Whether the bridge logged `text` at `level`."""
-    return any(r.levelno == level and text in r.getMessage() for r in caplog.records)
+    return messages(caplog, level, text) != []
 
 
 def count(caplog: pytest.LogCaptureFixture, level: int, text: str) -> int:
     """How many times the bridge logged `text` at `level`."""
-    return sum(1 for r in caplog.records if r.levelno == level and text in r.getMessage())
+    return len(messages(caplog, level, text))
+
+
+def logged_once(caplog: pytest.LogCaptureFixture, level: int, text: str) -> bool:
+    """Whether the bridge logged `text` once at `level`, and at no other level but DEBUG.
+
+    The bridge logs a problem once and stays quiet until it changes. Some problems
+    repeat at DEBUG, which the log doesn't show by default, so those lines don't count.
+    """
+    levels = [r.levelno for r in caplog.records if text in r.getMessage()]
+    return [found for found in levels if found != logging.DEBUG] == [level]
 
 
 def ledger(cfg: Config) -> list[dict]:
@@ -274,6 +290,16 @@ def charged(records: list[dict], spool_id: int) -> float:
     return round(sum(r["use_length"] for r in charges(records, spool_id)), 1)
 
 
+async def baseline(w: World) -> None:
+    """The bridge's first poll: a baseline for each tool of each printer, nothing charged."""
+    records = await w.poll()
+    tools = [(p.name, tool) for p in w.cfg.printers for tool in sorted(p.tools)]
+    assert [(e["printer"], e["tool"], e["event"]) for e in events(records)] == [
+        (name, tool, "baseline") for name, tool in tools
+    ]
+    assert charges(records) == []
+
+
 @dataclass
 class World:
     """One test's printer, bridge and Spoolman records, with the moves a scenario makes.
@@ -282,43 +308,53 @@ class World:
     """
 
     sim: Simulation
-    printer: SimPrinter
-    cfg: Config
     spoolman: SpoolmanHelper
-    tool_location: str
     shelf: str
     spools: dict[str, int] = field(default_factory=dict)
     uuids: dict[str, str] = field(default_factory=dict)
-    # Tool index -> Spoolman location, as the bridge is configured. Tool 0's is `tool_location`.
-    locations: dict[int, str] = field(default_factory=dict)
     # The bridge's extra field keys: "uuid", "flag" and "claim". See `world_fields`.
     fields: dict[str, str] = field(
         default_factory=lambda: {"uuid": UUID_FIELD, "flag": FLAG_FIELD, "claim": CLAIM_FIELD}
     )
-    # Runs before the simulator serves each request, with its method and path. It can
-    # return an `Answer` to send instead, or `simulator.prusalink.DROP` to drop the
-    # connection; None serves the request as usual.
-    before_request: Callable[[str, str], Reply] | None = None
-    # --- Several printers (world_printers; see integration/printers.py) ---
-    # Printers other than "it", by name.
-    others: dict[str, Station] = field(default_factory=dict)
-
-    def at(self, name: str) -> Station:
-        """One printer by name, "it" included, with its tool 0."""
-        return self.station if name == self.printer.name else self.others[name]
-
-    # --- End of several printers ---
-
-    # The bridge started last, and the transport in front of its Spoolman client, which
-    # a test can cut or make refuse requests (see `integration/faults.py`).
+    # Every printer by name. The moves below hand to printer "it"'s station.
+    stations: dict[str, Station] = field(default_factory=dict)
+    # The bridge started last with its config, and the transport in front of its Spoolman
+    # client, which a test can cut or make refuse requests (see `integration/faults.py`).
+    cfg: Config = field(init=False)
     bridge: Bridge = field(init=False)
     spoolman_faults: SpoolmanFaults = field(init=False)
     # Every bridge this world started, the current one last; the fixture closes them all.
     bridges: list[Bridge] = field(default_factory=list)
 
-    def __post_init__(self) -> None:
-        # Printer "it" with its moves, which the ones below hand to.
-        self.station = Station(self.sim, self.printer, world=self, location=self.tool_location)
+    def at(self, name: str) -> Station:
+        """One printer by name, "it" included."""
+        return self.stations[name]
+
+    @property
+    def station(self) -> Station:
+        return self.stations[FIRST]
+
+    @property
+    def printer(self) -> SimPrinter:
+        return self.station.printer
+
+    @property
+    def tool_location(self) -> str:
+        return self.station.location
+
+    @property
+    def locations(self) -> dict[int, str]:
+        """Tool index -> Spoolman location, as the bridge is configured for printer "it"."""
+        return self.station.locations
+
+    @property
+    def before_request(self) -> Hook | None:
+        """Runs before the simulator serves each request to printer "it". See `Station`."""
+        return self.station.before_request
+
+    @before_request.setter
+    def before_request(self, hook: Hook | None) -> None:
+        self.station.before_request = hook
 
     def start_bridge(self, cfg: Config) -> Bridge:
         """Start a bridge on `cfg` and the simulator's clock; it becomes `bridge`.
@@ -326,6 +362,7 @@ class World:
         Each bridge gets its own `spoolman_faults`, with no faults set. The caller
         closes the old bridge first.
         """
+        self.cfg = cfg
         self.spoolman_faults = SpoolmanFaults(httpx.AsyncHTTPTransport())
         self.bridge = Bridge.from_config(
             cfg, clock=sim_clock(self.sim), spoolman_transport=self.spoolman_faults
@@ -339,8 +376,7 @@ class World:
         The bridge's restart (B2) and a lost database (B4) are tested this way.
         """
         await self.bridge.aclose()
-        self.cfg = replace(self.cfg, **config)
-        self.start_bridge(self.cfg)
+        self.start_bridge(replace(self.cfg, **config))
 
     @property
     def tool(self) -> SimTool:
@@ -544,9 +580,6 @@ async def world(
     integration/printers.py.
     """
     tool_location, shelf = f"{prefix} T", f"{prefix} shelf"
-    locations = {0: tool_location}
-    if world_tools == 2:
-        locations[1] = f"{prefix} T1"
     fresh = world_fields == "fresh"
     # No UUID on spool A or the printer: a fresh Spoolman, or a model other than the
     # defaults, which are the ones with a tag reader or a test of their own.
@@ -558,76 +591,56 @@ async def world(
         spoolman.fields.extend(keys.values())
     else:
         await spoolman.ensure_text_field(UUID_FIELD, "Instance UUID")
+
+    it = Spec(
+        FIRST,
+        world_model,
+        [Load("A", PLA, tool_location, 1000.0, None if bare else str(uuid.uuid4()))],
+        world_printer,
+    )
+    if world_tools == 2:
+        it.loads.append(Load("D", PETG_GREEN, f"{prefix} T1", 500.0))
+    specs = [it]
+    if world_printers == 2:
+        e = Load("E", PLA_WHITE, f"{prefix} LB", 2000.0, str(uuid.uuid4()))
+        specs.append(Spec(SECOND, WORLD_MODELS[1], [e]))
+
+    w = World(Simulation(Settings(**SETTINGS)), spoolman, shelf, fields=keys)
+    # Spoolman's records: A in its tool, B and C on the shelf, then every other tool's spool.
+    first, *rest = [load for spec in specs for load in spec.loads]
+    on_shelf = [Load("B", PETG, shelf, 0.0), Load("C", ASA, shelf, 0.0)]
     vendor = await spoolman.vendor()
-    uuid_a = str(uuid.uuid4())
-    spools = {}
-    setup = [("A", PLA, tool_location), ("B", PETG, shelf), ("C", ASA, shelf)]
-    if world_tools == 2:
-        setup.append(("D", PETG_GREEN, locations[1]))
-    for name, (material, color), location in setup:
-        filament = await spoolman.filament(vendor, material, color)
-        spools[name] = await spoolman.spool(
-            filament, location, name, uuid_a if name == "A" and not bare else None
-        )
+    for load in (first, *on_shelf, *rest):
+        filament = await spoolman.filament(vendor, *load.filament)
+        w.spools[load.spool] = await spoolman.spool(filament, load.location, load.spool, load.uuid)
+        if load.uuid is not None:
+            w.uuids[load.spool] = load.uuid
 
-    sim = Simulation(Settings(**SETTINGS))
-    a = Material(PLA[0], PLA[1], None if bare else uuid_a, **WRITTEN)
-    tools = {0: SimTool(0, loaded=True, material=replace(a), previous=replace(a), extruded=1000.0)}
-    if world_tools == 2:
-        d = Material(*PETG_GREEN, **WRITTEN)
-        tools[1] = SimTool(1, loaded=True, material=replace(d), previous=replace(d), extruded=500.0)
-    printer = SimPrinter("it", 0, KEY, MODELS[world_model], tools=tools)
-    sim.add(printer)
-    w: World
-
-    def before_request(method: str, path: str) -> Reply:
-        return None if w.before_request is None else w.before_request(method, path)
-
-    server = TestServer(make_app(sim, printer.name, before_request))
-    await server.start_server()
-    uuids = {} if bare else {"A": uuid_a}
-    others = await add_printers(world_printers, sim, spoolman, vendor, prefix, KEY, spools, uuids)
-    cfg = Config(
-        spoolman_url=str(spoolman.client.base_url).rstrip("/"),
-        printers=(
-            PrinterConfig(
-                name="it",
-                url=f"http://{server.host}:{server.port}",
-                api_key=KEY,
-                tools=dict(locations),
-                **world_printer,
+    printers = []
+    for spec in specs:
+        w.stations[spec.name], config = await start(spec, w)
+        printers.append(config)
+    w.start_bridge(
+        Config(
+            spoolman_url=str(spoolman.client.base_url).rstrip("/"),
+            printers=tuple(printers),
+            db_file=tmp_path / "bridge.db",
+            **(
+                {
+                    "uuid_field": keys["uuid"],
+                    "flag_field": keys["flag"],
+                    "claim_field": keys["claim"],
+                }
+                if fresh
+                else {}
             ),
-            *(other[-1] for other in others),
-        ),
-        db_file=tmp_path / "bridge.db",
-        **(
-            {"uuid_field": keys["uuid"], "flag_field": keys["flag"], "claim_field": keys["claim"]}
-            if fresh
-            else {}
-        ),
-        **world_config,
+            **world_config,
+        )
     )
-    w = World(
-        sim,
-        printer,
-        cfg,
-        spoolman,
-        tool_location,
-        shelf,
-        spools,
-        uuids,
-        locations=locations,
-        fields=keys,
-    )
-    for name, sim_printer, location, other_server, _ in others:
-        w.others[name] = Station(sim, sim_printer, world=w, location=location, server=other_server)
-    w.start_bridge(cfg)
     try:
         yield w
     finally:
         for started in w.bridges:
             await started.aclose()
-        await server.close()
-        for other in w.others.values():
-            assert other.server is not None
-            await other.server.close()
+        for made in w.stations.values():
+            await made.server.close()

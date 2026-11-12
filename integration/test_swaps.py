@@ -16,22 +16,18 @@ from integration.conftest import (
     PLA,
     UUID_FIELD,
     World,
+    baseline,
     charged,
     charges,
     count,
     events,
     logged,
+    logged_once,
     print_spec,
 )
 from integration.faults import archive_spool, set_extra_text
 from integration.temperatures import TEMPERATURES, WRITTEN
 from simulator.model import Material, State
-
-
-async def baseline(w: World) -> None:
-    records = await w.poll()
-    assert len(events(records, "baseline")) == 1
-    assert charges(records) == []
 
 
 async def test_s1_spoolman_first_swap(world: World):
@@ -224,7 +220,7 @@ async def test_s1_tag_uuid_conflict_is_flagged(world: World, caplog: pytest.LogC
     assert await w.spoolman.extra(b, UUID_FIELD) == theirs
     flag = await w.flag("B") or ""
     assert f"the loaded tag's instance UUID is {tag}, but this spool's is {theirs}" in flag
-    assert count(caplog, logging.WARNING, f"the tag loaded has instance UUID {tag}") == 1
+    assert logged_once(caplog, logging.WARNING, f"the tag loaded has instance UUID {tag}")
 
     # Clearing Spoolman's UUID settles it: the spool takes the tag's.
     await set_extra_text(w.spoolman.client, b, UUID_FIELD, "")
@@ -262,7 +258,7 @@ async def test_s1_tag_uuid_of_an_archived_spool_is_refused(
     records += await w.poll()
     assert w.charged(records, "B") == LOAD_MM
     refused = f"spool {b} can't take instance UUID {tag} from the printer: archived spool {c}"
-    assert count(caplog, logging.INFO, refused) == 1
+    assert logged_once(caplog, logging.INFO, refused)
     assert len(archived_reads) == 1
     assert await w.spoolman.extra(b, UUID_FIELD) is None
     assert await w.spoolman.extra(c, UUID_FIELD) == tag
@@ -272,7 +268,7 @@ async def test_s1_tag_uuid_of_an_archived_spool_is_refused(
         w.advance(2.0)
         await w.poll()
     assert len(archived_reads) == 1
-    assert count(caplog, logging.INFO, refused) == 1
+    assert logged_once(caplog, logging.INFO, refused)
     assert await w.spoolman.extra(b, UUID_FIELD) is None
     assert w.requests("PUT") == []
     assert w.material() == (PETG[0], PETG[1], tag)
@@ -692,7 +688,7 @@ async def test_s3_unload_while_the_location_is_empty(
     records = await w.poll()
     msg = "25 mm before unload had no spool"
     assert [e["message"] for e in events(records, "lost_unassigned")] == [msg]
-    assert count(caplog, logging.WARNING, f"[{w.tool_location}] {msg}") == 1
+    assert logged_once(caplog, logging.WARNING, f"[{w.tool_location}] {msg}")
     assert events(records, "swap_confirmed") == [] and charges(records) == []
     assert charged(w.since(unloaded), a) == LOAD_MM  # The swap's usage stays on A.
     assert await w.flag("A") is None
@@ -797,7 +793,7 @@ async def test_s6_unload_with_nothing_assigned(world: World, caplog: pytest.LogC
     records = await w.poll()
     msg = f"{LOAD_MM} mm before unload had no spool"
     assert [e["message"] for e in events(records, "lost_unassigned")] == [msg]
-    assert count(caplog, logging.WARNING, f"[{w.tool_location}] {msg}") == 1
+    assert logged_once(caplog, logging.WARNING, f"[{w.tool_location}] {msg}")
     assert charges(records) == []
 
     # C's load is held until C is assigned, then charged to it.
@@ -909,7 +905,7 @@ async def test_s10_spool_moved_out_with_no_replacement(
     records += await w.poll()
     assert charges(records) == []
     holding = f"[{w.tool_location}] holding usage: no spool assigned"
-    assert count(caplog, logging.WARNING, holding) == 1
+    assert logged_once(caplog, logging.WARNING, holding)
 
     await w.move("B", w.tool_location)
     records = await w.poll()
@@ -935,7 +931,7 @@ async def test_s11_two_spools_neither_active(world: World, caplog: pytest.LogCap
     assert charges(records) == []
     ids = ", ".join(str(i) for i in sorted((b, c)))
     msg = f"[{w.tool_location}] location holds spools {ids}; skipping until it's clear"
-    assert count(caplog, logging.WARNING, msg) == 1
+    assert logged_once(caplog, logging.WARNING, msg)
     assert await w.spoolman.location(b) == await w.spoolman.location(c) == w.tool_location
 
     # C is removed: A, still loaded, takes the usage skipped meanwhile, and B is staged.
@@ -1014,7 +1010,7 @@ async def test_s4_claiming_the_reloaded_spool_confirms_it(
     assert w.bridge.printers[0].tools[0].provisional is None
     assert await w.flag("A") is None
     assert await w.spoolman.extra(a, CLAIM_FIELD) is None
-    assert count(caplog, logging.INFO, f"cleared the claim on spool {a}") == 1
+    assert logged_once(caplog, logging.INFO, f"cleared the claim on spool {a}")
     assert await w.spoolman.location(a) == w.tool_location
 
     # Nothing moved: everything since the unload stays on A.
@@ -1053,7 +1049,7 @@ async def test_k1_claim_handled_once_when_clearing_fails(
     assert await w.spoolman.extra(b, CLAIM_FIELD) is True
     assert w.bridge.state.claimed == [b]
     cant = f"can't clear the claim on spool {b}"
-    assert count(caplog, logging.WARNING, cant) == 1
+    assert logged_once(caplog, logging.WARNING, cant)
     assert count(caplog, logging.DEBUG, f"still {cant}") == 1
     assert faults.requests.count(f"PATCH {clear} 500") == 2
 
@@ -1069,8 +1065,8 @@ async def test_k1_claim_handled_once_when_clearing_fails(
     assert w.charged(records, "B") == 10
     assert w.charged(records, "A") == 0
     assert w.bridge.state.claimed == []
-    assert count(caplog, logging.INFO, f"spool {b} no longer needs its claim cleared") == 1
-    assert count(caplog, logging.WARNING, cant) == 1
+    assert logged_once(caplog, logging.INFO, f"spool {b} no longer needs its claim cleared")
+    assert logged_once(caplog, logging.WARNING, cant)
 
 
 @pytest.mark.parametrize("newer", ["staged", "active"])
@@ -1134,7 +1130,7 @@ async def test_k2_two_claims_in_one_tool(
         f"[{w.tool_location}] several spools claimed at once: chose spool {winner}, the most "
         f"recently used, and clearing the claims on spools {loser}"
     )
-    assert count(caplog, logging.WARNING, chose) == 1
+    assert logged_once(caplog, logging.WARNING, chose)
     assert await w.spoolman.extra(b, CLAIM_FIELD) is None
     assert await w.spoolman.extra(c, CLAIM_FIELD) is None
     assert w.bridge.printers[0].tools[0].active == winner
@@ -1154,7 +1150,7 @@ async def test_k2_two_claims_in_one_tool(
         assert w.charged(records, "C") == 10
         assert w.charged(records, "B") == 0
     assert w.bridge.state.claimed == []
-    assert count(caplog, logging.WARNING, "several spools claimed at once") == 1
+    assert logged_once(caplog, logging.WARNING, "several spools claimed at once")
 
 
 async def test_s8_staged_spool_leaves_after_the_active_one(
@@ -1187,8 +1183,8 @@ async def test_s8_staged_spool_leaves_after_the_active_one(
     records = await w.poll()
     assert events(records) == []
     assert w.charged(records, "A") == 10
-    assert count(caplog, logging.INFO, cancelled) == 1
-    assert count(caplog, logging.INFO, either) == 1
+    assert logged_once(caplog, logging.INFO, cancelled)
+    assert logged_once(caplog, logging.INFO, either)
 
     # The unload ends A's time in the tool: S10, usage held until a spool is assigned.
     await w.unload()
@@ -1249,7 +1245,7 @@ async def test_s11_ambiguous_location_at_first_start(
     assert w.bridge.printers[0].tools == {}
     ids = ", ".join(str(i) for i in sorted((a, b, c)))
     msg = f"[{w.tool_location}] location holds spools {ids}; skipping until it's clear"
-    assert count(caplog, logging.WARNING, msg) == 1
+    assert logged_once(caplog, logging.WARNING, msg)
 
     # B and C leave: the baseline is taken now, so the use while ambiguous isn't charged.
     await w.move("B", w.shelf)
@@ -1258,13 +1254,13 @@ async def test_s11_ambiguous_location_at_first_start(
     assert [e["message"] for e in events(records)] == [f"baseline extruded=1030 spool={a}"]
     assert charges(records) == []
     gone = f"[{w.tool_location}] no longer: location holds spools {ids}"
-    assert count(caplog, logging.WARNING, gone) == 1
+    assert logged_once(caplog, logging.WARNING, gone)
 
     w.printer.extrude(0, 20)
     records = await w.poll()
     assert w.charged(records, "A") == 20
-    assert count(caplog, logging.WARNING, msg) == 1
-    assert count(caplog, logging.WARNING, gone) == 1
+    assert logged_once(caplog, logging.WARNING, msg)
+    assert logged_once(caplog, logging.WARNING, gone)
 
 
 async def test_s11_reboots_while_the_tool_is_skipped(
@@ -1285,7 +1281,7 @@ async def test_s11_reboots_while_the_tool_is_skipped(
     assert charges(records) == []
     ids = ", ".join(str(i) for i in sorted((b, c)))
     msg = f"[{w.tool_location}] location holds spools {ids}; skipping until it's clear"
-    assert count(caplog, logging.WARNING, msg) == 1
+    assert logged_once(caplog, logging.WARNING, msg)
 
     # Two reboots while the tool is skipped: each keeps what was held before it, once.
     w.printer.reboot()
@@ -1304,7 +1300,7 @@ async def test_s11_reboots_while_the_tool_is_skipped(
     assert charges(records) == []
     tool = w.bridge.printers[0].tools[0]
     assert tool.active == a and tool.held_mm == 30 and tool.reboot_pending
-    assert count(caplog, logging.WARNING, msg) == 1
+    assert logged_once(caplog, logging.WARNING, msg)
 
     # C is removed: A, never unloaded, takes the 30 mm held and the 5 mm since, and B is
     # staged with the reboot's warning.
@@ -1323,7 +1319,7 @@ async def test_s11_reboots_while_the_tool_is_skipped(
     flag = await w.flag("B")
     assert flag is not None and "printer restarted while spool" in flag
     gone = f"[{w.tool_location}] no longer: location holds spools {ids}"
-    assert count(caplog, logging.WARNING, gone) == 1
+    assert logged_once(caplog, logging.WARNING, gone)
     tool = w.bridge.printers[0].tools[0]
     assert tool.held_mm == 0 and not tool.reboot_pending
 
@@ -1336,8 +1332,8 @@ async def test_s11_reboots_while_the_tool_is_skipped(
     assert events(records, "held_charged") == []
     assert w.charged(w.since(0), "A") == 30 + 5 + 7
     assert w.charged(w.since(0), "B") == w.charged(w.since(0), "C") == 0
-    assert count(caplog, logging.WARNING, msg) == 1
-    assert count(caplog, logging.WARNING, gone) == 1
+    assert logged_once(caplog, logging.WARNING, msg)
+    assert logged_once(caplog, logging.WARNING, gone)
 
 
 async def test_s11_drift_note_stands_while_the_tool_is_skipped(
@@ -1353,7 +1349,7 @@ async def test_s11_drift_note_stands_while_the_tool_is_skipped(
     w.tool.material = Material(PLA[0], ASA[1], w.uuids["A"], **WRITTEN)
     await w.poll()
     drift = f"[{w.tool_location}] printer differs from spool {a}: color"
-    assert count(caplog, logging.WARNING, drift) == 1
+    assert logged_once(caplog, logging.WARNING, drift)
 
     # B and C join A in the location: the tool is skipped, and the printer isn't
     # compared, so the drift note stands without a word.
@@ -1361,23 +1357,23 @@ async def test_s11_drift_note_stands_while_the_tool_is_skipped(
     await w.move("C", w.tool_location)
     for _ in range(2):
         await w.poll()
-    assert count(caplog, logging.WARNING, "location holds spools") == 1
+    assert logged_once(caplog, logging.WARNING, "location holds spools")
     assert not logged(caplog, logging.WARNING, "no longer: printer differs")
 
     # Resolved: compared again, still drifting, and still not logged again.
     await w.move("B", w.shelf)
     await w.move("C", w.shelf)
     await w.poll()
-    assert count(caplog, logging.WARNING, "no longer: location holds spools") == 1
-    assert count(caplog, logging.WARNING, drift) == 1
+    assert logged_once(caplog, logging.WARNING, "no longer: location holds spools")
+    assert logged_once(caplog, logging.WARNING, drift)
     assert not logged(caplog, logging.WARNING, "no longer: printer differs")
 
     # The printer put back: the note ends, once.
     w.tool.material = Material(PLA[0], PLA[1], w.uuids["A"], **WRITTEN)
     await w.poll()
     await w.poll()
-    assert count(caplog, logging.WARNING, f"no longer: printer differs from spool {a}") == 1
-    assert count(caplog, logging.WARNING, drift) == 1
+    assert logged_once(caplog, logging.WARNING, f"no longer: printer differs from spool {a}")
+    assert logged_once(caplog, logging.WARNING, drift)
     assert await w.flag("A") is None
 
 
@@ -1402,7 +1398,7 @@ async def test_s11_drift_flag_stands_while_the_tool_is_skipped(
     await w.move("C", w.shelf)
     await w.poll()
     assert await w.flag("A") == flag
-    assert count(caplog, logging.INFO, f"set flag on spool {a}") == 1
+    assert logged_once(caplog, logging.INFO, f"set flag on spool {a}")
     assert not logged(caplog, logging.INFO, f"cleared flag on spool {a}")
 
 
@@ -1423,7 +1419,7 @@ async def test_k1_claim_ticked_before_the_first_start(
     assert charges(records) == []
     assert await w.spoolman.extra(a, CLAIM_FIELD) is None
     assert w.bridge.state.claimed == []
-    assert count(caplog, logging.INFO, f"cleared the claim on spool {a}") == 1
+    assert logged_once(caplog, logging.INFO, f"cleared the claim on spool {a}")
 
     # The printer already shows A, so the write the claim queues has nothing to do.
     w.printer.extrude(0, 20)
@@ -1431,4 +1427,4 @@ async def test_k1_claim_ticked_before_the_first_start(
     assert events(records) == []
     assert w.charged(records, "A") == 20
     assert w.requests("PUT") == []
-    assert count(caplog, logging.INFO, "cleared the claim") == 1
+    assert logged_once(caplog, logging.INFO, "cleared the claim")
