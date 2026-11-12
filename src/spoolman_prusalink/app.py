@@ -17,17 +17,11 @@ from typing import NamedTuple
 import httpx  # For the transport types `from_config` takes; errors come from .errors.
 
 from . import drift, printer_sync
-from .accounting import (
-    EventKind,
-    Provisional,
-    Report,
-    ToolState,
-    account,
-    hold_deleted,
-)
+from .accounting import Provisional, ToolState, account, hold_deleted
 from .config import Config, PrinterConfig
 from .db import Database
 from .errors import Busy, NotFound, Rejected, ServiceError, Unreachable
+from .events import Report, Unload
 from .models import FilamentReading, Material, Spool
 from .prusalink import BUSY_STATES, IDLE_STATES, NoFilamentEndpoint, PrinterStatus, PrusaLink
 from .spoolman import Spoolman
@@ -556,7 +550,7 @@ class PrinterBridge:
                 self._check_runout(location, by_id.get(result.runout))
             if result.claimed:
                 self._claim_handled(location, claim, others)
-            if any(ev.kind is EventKind.UNLOAD for ev in result.events):
+            if any(isinstance(ev, Unload) for ev in result.events):
                 self._seen_unload(tool, runout=result.runout is not None)
 
             notes: list[Note] = []
@@ -570,8 +564,10 @@ class PrinterBridge:
                     continue
                 level = logging.WARNING if report is Report.WARNING else logging.INFO
                 log.log(level, "[%s] %s", location, ev.message)
+                # The event's fields first: none of them is named like a key here.
                 events.append(
                     {
+                        **ev.fields(),
                         "time": now,
                         "printer": self.name,
                         "tool": tool,
@@ -710,14 +706,14 @@ class PrinterBridge:
                 f"different spool went in, move it into {location} before the next print."
             )
         if st.notice is not None:
-            flags.setdefault(st.notice.spool_id, []).append(f"{location}: {st.notice.message}.")
+            flags.setdefault(st.notice.active, []).append(f"{location}: {st.notice.message}.")
         if st.staged_notice is not None:
             hint = (
                 f" If this spool is the one loaded, tick '{CLAIM_FIELD_NAME}' on it."
                 if self.bridge.config.claim_field
                 else ""
             )
-            flags.setdefault(st.staged_notice.spool_id, []).append(
+            flags.setdefault(st.staged_notice.staged, []).append(
                 f"{location}: {st.staged_notice.message}.{hint}"
             )
         if st.provisional is None:

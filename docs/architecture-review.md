@@ -119,11 +119,12 @@ Size: large.
   the bridge's last write look edited after an upgrade, and the bridge
   would write each one once more. Tagged tools are never written, so they
   aren't affected.
-- `Notice.message`, `Runout.text`, and `PrinterState.flags` are saved as
-  prose. A wording fix doesn't reach state that already exists.
+- `Runout.text` and `PrinterState.flags` are saved as prose. A wording fix
+  doesn't reach state that already exists.
 
 Shape: save what was written as fields (name, color, temperatures, UUID) and
-save notices and runouts as a kind with parameters. Render G-code and prose
+save runouts as a kind with parameters, as notices are saved as typed events
+(`events.py`). Render G-code and prose
 at the point of use. `PrinterState.flags` can then hold conditions from B2.
 
 Size: medium.
@@ -177,7 +178,7 @@ own field. Each phase saves once, at its end.
 
 Size: medium. Falls out of B2 for the most part.
 
-### B6. Charges and events are untyped dictionaries
+### B6. Charges are untyped dictionaries
 
 A charge is a dictionary with 11 keys built in `process()` (`app.py`).
 It goes to the outbox, then to `flush`, then to the ledger.
@@ -190,14 +191,10 @@ It goes to the outbox, then to `flush`, then to the ledger.
   owner mutates.
 - The ledger tells a charge from an event by whether the record has an
   `event` key (`db.py`).
-- `Event` is a kind and a message (`accounting.py`). Amounts and spool
-  IDs exist only in the prose, so about 78 integration test lines compare
-  messages exactly (see T7).
 
-Shape: `ChargeRecord` and `EventRecord` dataclasses. An outbox object with
-push and pop that knows its own row IDs, so the database is told what
-changed. Events carry fields (millimeters, from spool, to spool) and the
-message is rendered from them.
+Shape: a `ChargeRecord` dataclass, as events are typed in `events.py`. An
+outbox object with push and pop that knows its own row IDs, so the database
+is told what changed.
 
 Size: medium.
 
@@ -224,8 +221,7 @@ Step 3 is a 13-branch `elif` chain where order is priority.
 
 Shape: each numbered step becomes a function over `last` and `current`,
 the two states `account()` already keeps. It doesn't change behavior, and
-the existing tests are the check. B6 gives events fields, which already
-rewrites every `event()` call, so do the split in the same stack.
+the existing tests are the check.
 
 Not planned: a formal state machine, with a named mode per tool and defined
 transitions. The conditions overlap (a provisional charge with a staged
@@ -299,8 +295,9 @@ own behavior decides the outcome. Don't narrow the unit suite.
 ### T7. Tests match prose
 
 About 78 integration lines compare an event's message exactly, and over
-300 lines across both suites match log text. B6
-removes the cause for events. Keep one prose check per event kind.
+300 lines across both suites match log text. Events now have fields, which
+the ledger stores beside the message, and `tests/test_events.py` checks the
+wording of each kind once. Port the integration checks to the fields.
 
 ## Simulator
 

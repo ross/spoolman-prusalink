@@ -7,7 +7,7 @@ import sqlite3
 
 import pytest
 
-from spoolman_prusalink.accounting import EventKind, Notice, Provisional, SwapFlag, ToolState
+from spoolman_prusalink.accounting import Provisional, SwapFlag, ToolState
 from spoolman_prusalink.db import (
     SCHEMA_VERSION,
     Database,
@@ -15,6 +15,7 @@ from spoolman_prusalink.db import (
     read_ledger,
     read_state,
 )
+from spoolman_prusalink.events import StagedAtPrint, StagedAtReboot
 from spoolman_prusalink.state import PrinterState, Runout, State
 
 TAG = "91da34d9-c1c1-470f-bac7-185a2346f86a"
@@ -33,13 +34,13 @@ def full_state() -> State:
         job_id=11,
         pending_job=12,
         pending_at=1190,
-        notice=Notice(7, EventKind.SWAP_UNCONFIRMED, "unloaded"),
+        notice=StagedAtPrint(8, 7),
         needs_sync=True,
         sync_attempts=1,
         written="M865 T0",
         held_mm=30,
         deleted_spool=4,
-        staged_notice=Notice(8, EventKind.SWAP_UNCONFIRMED, "staged"),
+        staged_notice=StagedAtReboot(8, 7),
         provisional=Provisional(7, 25, job_id=11),
         since_load={7: 100, 8: 40},
         extruded=1250,

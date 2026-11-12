@@ -21,9 +21,9 @@ from harness import (
     two_printers,
 )
 
-from spoolman_prusalink.accounting import EventKind
 from spoolman_prusalink.db import read_state
 from spoolman_prusalink.errors import BadAnswer, Unreachable
+from spoolman_prusalink.events import EventKind
 
 TAG = "91da34d9-c1c1-470f-bac7-185a2346f86a"
 

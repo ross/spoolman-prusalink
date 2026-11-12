@@ -275,7 +275,7 @@ def ledger(cfg: Config) -> list[dict]:
 
 
 def events(records: list[dict], kind: str | None = None) -> list[dict]:
-    """Event records, optionally only one `accounting.EventKind` value."""
+    """Event records, optionally only one `events.EventKind` value."""
     return [r for r in records if "event" in r and (kind is None or r["event"] == kind)]
 
 

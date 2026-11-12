@@ -28,6 +28,7 @@ from integration.conftest import (
 from integration.faults import archive_spool, set_extra_text
 from integration.temperatures import TEMPERATURES, WRITTEN
 from simulator.model import Material, State
+from spoolman_prusalink.events import StagedAtPrint
 
 
 async def test_s1_spoolman_first_swap(world: World):
@@ -1223,8 +1224,7 @@ async def test_s9_staged_flags_survive_a_restart(world: World, caplog: pytest.Lo
     assert not logged(caplog, logging.WARNING, msg)
     assert not any("flag on spool" in r.getMessage() for r in caplog.records)
     tool = w.bridge.printers[0].tools[0]
-    assert tool.notice is not None and tool.notice.message == msg
-    assert tool.staged_notice is not None and tool.staged_notice.spool_id == b
+    assert tool.notice == tool.staged_notice == StagedAtPrint(staged=b, active=a)
 
 
 async def test_s11_ambiguous_location_at_first_start(

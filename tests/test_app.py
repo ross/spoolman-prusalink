@@ -279,7 +279,14 @@ async def test_poll_charges_and_saves(tmp_path, caplog):
     charges = [r for r in ledger if "use_length" in r]
     assert [(r["spool_id"], r["use_length"]) for r in charges] == [(7, 1000)]
     assert charges[0]["applied"]
-    assert any("event" in r for r in ledger)
+    # An event's record has its fields beside its message.
+    [baseline] = [r for r in ledger if "event" in r]
+    assert {k: baseline[k] for k in ("event", "extruded", "spool", "message")} == {
+        "event": "baseline",
+        "extruded": 4310,
+        "spool": 7,
+        "message": "baseline extruded=4310 spool=7",
+    }
     assert bridge.printers[0].tools[0].charged == 5310
     assert read_state(tmp_path / "bridge.db").tools("default")[0].charged == 5310
     assert bridge.interval() == bridge.config.poll_printing
