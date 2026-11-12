@@ -23,6 +23,7 @@ from integration.conftest import (
     charged,
     charges,
     count,
+    event_fields,
     events,
     logged,
     logged_once,
@@ -202,9 +203,7 @@ async def test_x3_spool_moved_but_never_loaded_elsewhere(world: World):
     await w.move("A", it.location)
     records = await w.poll()
     assert kinds(records) == [(IT, "active_reassigned"), (B, "staging_cancelled")]
-    assert events(records, "active_reassigned")[0]["message"] == (
-        f"spool {a} is back in the location"
-    )
+    assert event_fields(records, "active_reassigned") == [{"spool": a}]
     assert (it.state.active, it.state.assigned) == (a, a)
     assert (b.state.active, b.state.assigned) == (e, e)
     assert await w.flag("A") is None
@@ -321,7 +320,8 @@ async def test_x5_claim_on_b_while_a_still_has_the_spool(
     it.printer.set_power("on")
     records = await w.poll()
     assert kinds(records) == [(IT, "reboot"), (IT, "unload"), (IT, "unloaded_unassigned")]
-    assert f"0 mm before the unload goes to spool {a}" in events(records, "unload")[0]["message"]
+    unload = events(records, "unload")[0]
+    assert (unload["mm"], unload["spool"]) == (0, a)
     assert it.state.active is None and b.state.active == a
     assert "at once" not in (await w.flag("A") or "")
     assert logged(caplog, logging.WARNING, "printer it reachable again")
@@ -571,7 +571,7 @@ async def test_x9_spoolman_unreachable(world: World, caplog: pytest.LogCaptureFi
     records = await w.poll()
     assert kinds(records) == [(B, "reboot")]
     assert charges(records) == []
-    queued = [(r["printer"], r["spool_id"], r["use_length"]) for r in w.bridge.state.outbox]
+    queued = [(r.printer, r.spool_id, r.use_length) for r in w.bridge.state.outbox]
     assert queued == [(IT, a, 10), (B, e, 20)]
 
     # Down again with charges queued: the tick stops at the failed flush, before any read.
@@ -589,7 +589,7 @@ async def test_x9_spoolman_unreachable(world: World, caplog: pytest.LogCaptureFi
         f"PUT /api/v1/spool/{a}/use 200",
         f"PUT /api/v1/spool/{e}/use 200",
     ]
-    assert w.bridge.state.outbox == []
+    assert len(w.bridge.state.outbox) == 0
     assert logged(caplog, logging.WARNING, "sent 2 queued charge(s)")
 
 
@@ -721,7 +721,7 @@ async def test_x14_printer_renamed(world: World, caplog: pytest.LogCaptureFixtur
     records = await w.poll()
     assert kinds(records) == [(IT, "unload"), (IT, "swap_committed")]
     assert it.state.evict == (a,)
-    assert [(r["printer"], r["spool_id"]) for r in w.bridge.state.outbox] == [(IT, c)]
+    assert [(r.printer, r.spool_id) for r in w.bridge.state.outbox] == [(IT, c)]
     await settle(w)
     await w.bridge.aclose()
 

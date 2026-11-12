@@ -16,19 +16,14 @@ from typing import NamedTuple
 import httpx  # For the transport types `from_config` takes; errors come from .errors.
 
 from . import drift, printer_sync, tags
-from .accounting import (
-    EventKind,
-    Provisional,
-    Report,
-    ToolState,
-    account,
-    hold_deleted,
-)
+from .accounting import Provisional, ToolState, account, hold_deleted
 from .config import Config, PrinterConfig
 from .db import Database
 from .errors import Busy, NotFound, Rejected, ServiceError, Unreachable
+from .events import Report, Unload
 from .models import FilamentReading, Material, Spool
 from .prusalink import BUSY_STATES, IDLE_STATES, NoFilamentEndpoint, PrinterStatus, PrusaLink
+from .records import ChargeRecord, EventRecord
 from .spoolman import Spoolman
 from .state import PrinterState, Runout, State
 from .tags import Decision, SeenTag
@@ -378,12 +373,9 @@ class PrinterBridge:
         # Charges to this spool still queued, the rejected one included, are each held
         # as they're rejected, so they're left out of any open swap's usage.
         queued = sum(
-            int(r.get("extruded_mm", 0))
+            r.extruded_mm
             for r in self.bridge.state.outbox
-            if r.get("printer") == self.name
-            and r.get("tool") == tool
-            and r.get("spool_id") == spool_id
-            and int(r.get("extruded_mm", 0)) > 0
+            if (r.printer, r.tool, r.spool_id) == (self.name, tool, spool_id) and r.extruded_mm > 0
         )
         self.tools[tool] = hold_deleted(st, spool_id, mm, queued)
         self._note_hold(tool)
@@ -489,19 +481,19 @@ class PrinterBridge:
         status: PrinterStatus,
         claims: dict[int, tuple[int, list[int]]],
         flags: dict[int, list[str]],
-    ) -> list[dict]:
+    ) -> None:
         """Account one poll and persist the result.
 
         Charges go to the outbox for `flush()` to send, saved in one transaction with the
-        events and the new counters. Returns the charge and event records.
+        events and the new counters.
 
         `claims` is this printer's share of `Bridge._claims()`, by tool. Flags for spools
         are added to `flags`, which the bridge completes and writes after every printer.
         """
         by_id = {s.id: s for s in spools}
         now = _now()
-        events: list[dict] = []
-        charges: list[dict] = []
+        events: list[EventRecord] = []
+        charges: list[ChargeRecord] = []
         self._pending_writes = []
         self._adopts = {}
 
@@ -543,7 +535,7 @@ class PrinterBridge:
             if result.claimed:
                 self._claim_handled(location, claim, others)
             seen = self._seen_tags.get(tool, SeenTag())
-            if any(ev.kind is EventKind.UNLOAD for ev in result.events):
+            if any(isinstance(ev, Unload) for ev in result.events):
                 # Only a runout in a print the bridge saw start is reported as one.
                 seen = tags.unloaded(seen, runout=result.runout is not None)
 
@@ -558,16 +550,7 @@ class PrinterBridge:
                     continue
                 level = logging.WARNING if report is Report.WARNING else logging.INFO
                 log.log(level, "[%s] %s", location, ev.message)
-                events.append(
-                    {
-                        "time": now,
-                        "printer": self.name,
-                        "tool": tool,
-                        "location": location,
-                        "event": ev.kind.value,
-                        "message": ev.message,
-                    }
-                )
+                events.append(EventRecord(now, self.name, tool, location, ev))
 
             for c in result.charges:
                 # An archived spool is still charged until the next unload, but isn't listed.
@@ -585,19 +568,19 @@ class PrinterBridge:
                     c.reason,
                 )
                 charges.append(
-                    {
-                        "time": now,
-                        "printer": self.name,
-                        "tool": tool,
-                        "location": location,
-                        "spool_id": c.spool_id,
-                        "extruded_mm": c.mm,
-                        "use_length": length,
-                        "grams": None if grams is None else round(grams, 3),
-                        "reason": c.reason,
-                        "boot_id": reading.boot_id,
-                        "extruded": tool_reading.extruded,
-                    }
+                    ChargeRecord(
+                        time=now,
+                        printer=self.name,
+                        tool=tool,
+                        location=location,
+                        spool_id=c.spool_id,
+                        extruded_mm=c.mm,
+                        use_length=length,
+                        grams=None if grams is None else round(grams, 3),
+                        reason=c.reason,
+                        boot_id=reading.boot_id,
+                        extruded=tool_reading.extruded,
+                    )
                 )
 
             st = self.tools.get(tool, ToolState())
@@ -676,9 +659,9 @@ class PrinterBridge:
                     flags.setdefault(spool_id, []).extend(texts)
             self._notes(tool, notes, compared=not result.skipped)
 
-        self.bridge.state.outbox.extend(charges)
+        for rec in charges:
+            self.bridge.state.outbox.push(rec)
         self.bridge._save(events)
-        return events + charges
 
     def _state_flags(
         self,
@@ -711,14 +694,14 @@ class PrinterBridge:
                 f"different spool went in, move it into {location} before the next print."
             )
         if st.notice is not None:
-            flags.setdefault(st.notice.spool_id, []).append(f"{location}: {st.notice.message}.")
+            flags.setdefault(st.notice.active, []).append(f"{location}: {st.notice.message}.")
         if st.staged_notice is not None:
             hint = (
                 f" If this spool is the one loaded, tick '{CLAIM_FIELD_NAME}' on it."
                 if self.bridge.config.claim_field
                 else ""
             )
-            flags.setdefault(st.staged_notice.spool_id, []).append(
+            flags.setdefault(st.staged_notice.staged, []).append(
                 f"{location}: {st.staged_notice.message}.{hint}"
             )
         if st.provisional is None:
@@ -1177,7 +1160,7 @@ class Bridge:
                 name,
             )
 
-    def _printer(self, name: object) -> PrinterBridge | None:
+    def _printer(self, name: str) -> PrinterBridge | None:
         return next((p for p in self.printers if p.name == name), None)
 
     @classmethod
@@ -1215,7 +1198,7 @@ class Bridge:
             clock=clock,
         )
 
-    def _save(self, ledger: Sequence[dict] = ()) -> None:
+    def _save(self, ledger: Sequence[ChargeRecord | EventRecord] = ()) -> None:
         """Save the state and append the `ledger` records, in one transaction."""
         self.db.save(self.state, ledger)
 
@@ -1413,7 +1396,7 @@ class Bridge:
             flags.setdefault(spool_id, []).append(runout.text)
         self._flags = {spool_id: " | ".join(texts) for spool_id, texts in flags.items()}
 
-    def _follow_runout_charge(self, rec: dict, used: float | None) -> None:
+    def _follow_runout_charge(self, rec: ChargeRecord, used: float | None) -> None:
         """Move a runout flag's used weight on by a charge Spoolman accepted.
 
         Only when the response is the stored weight plus this charge: anything else
@@ -1421,10 +1404,10 @@ class Bridge:
         weight alone lets the next read see it as an edit. When the charge's weight
         isn't known, the response is taken as the bridge's own charge.
         """
-        runout = self.state.runouts.get(rec["spool_id"])
+        runout = self.state.runouts.get(rec.spool_id)
         if runout is None or used is None:
             return
-        grams = rec.get("grams")
+        grams = rec.grams
         if grams is None:
             runout.used = used
             return
@@ -1498,37 +1481,36 @@ class Bridge:
         outbox = self.state.outbox
         sent = held = dropped = 0
         while outbox:
-            rec = outbox[0]
+            rec = outbox.front()
             try:
-                used = await self.spoolman.use_length(rec["spool_id"], rec["use_length"])
-                rec = {**rec, "applied": _now()}
-                self._follow_runout_charge(rec, used)
+                used = await self.spoolman.use_length(rec.spool_id, rec.use_length)
+                answered = replace(rec, applied=_now())
+                self._follow_runout_charge(answered, used)
                 sent += 1
             except Rejected as e:
-                mm = int(rec.get("extruded_mm", 0))
-                printer = self._printer(rec.get("printer"))
+                printer = self._printer(rec.printer)
                 if (
                     isinstance(e, NotFound)
-                    and mm > 0
+                    and rec.extruded_mm > 0
                     and printer is not None
-                    and printer._hold_deleted(rec.get("tool", -1), rec["spool_id"], mm)
+                    and printer._hold_deleted(rec.tool, rec.spool_id, rec.extruded_mm)
                 ):
-                    rec = {**rec, "failed": f"{e.status}", "held": True}
+                    answered = replace(rec, failed=f"{e.status}", held=True)
                     held += 1
                 else:
                     log.error(
                         "Spoolman rejected a %+g mm charge to spool %d (%s); dropping it",
-                        rec["use_length"],
-                        rec["spool_id"],
+                        rec.use_length,
+                        rec.spool_id,
                         e,
                     )
-                    rec = {**rec, "failed": f"{e.status}"}
+                    answered = replace(rec, failed=f"{e.status}")
                     dropped += 1
             except ServiceError as e:
-                self._charge_stuck(rec["spool_id"], e, len(outbox))
+                self._charge_stuck(rec.spool_id, e, len(outbox))
                 return False
-            outbox.pop(0)
-            self._save([rec])  # One transaction, so the record can't be lost.
+            outbox.pop()
+            self._save([answered])  # One transaction, so the record can't be lost.
         if self._charge_failing is not None:
             self._charge_failing = None
             log.warning("%s", _outbox_outcome(sent, held, dropped))

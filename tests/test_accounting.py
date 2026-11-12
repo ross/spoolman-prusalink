@@ -3,12 +3,10 @@ from dataclasses import fields, replace
 
 import pytest
 
+from spoolman_prusalink import events as ev
 from spoolman_prusalink.accounting import (
     Charge,
-    EventKind,
-    Notice,
     Provisional,
-    Report,
     Result,
     SwapFlag,
     ToolState,
@@ -17,6 +15,7 @@ from spoolman_prusalink.accounting import (
 )
 from spoolman_prusalink.accounting import account as _account
 from spoolman_prusalink.accounting import hold_deleted as _hold_deleted
+from spoolman_prusalink.events import EventKind, Report
 from spoolman_prusalink.models import Material, ToolReading
 from spoolman_prusalink.printer_sync import WrittenFilament
 
@@ -264,13 +263,7 @@ def test_old_spool_moved_out_first_then_new_staged():
 def test_spool_moved_out_with_no_replacement_is_not_staging():
     _, _, state = run([(BOOT, r(100), loc(7))])
     res = account(state, BOOT, r(150), loc())
-    assert [(e.kind, e.message) for e in res.events] == [
-        (
-            EventKind.ACTIVE_UNASSIGNED,
-            "spool 7 is no longer in the location; still charging "
-            "it until the printer reports an unload",
-        )
-    ]
+    assert res.events == [ev.ActiveUnassigned(7)]
     res = account(res.state, BOOT, r(200), loc())
     assert res.events == []
     # A print starts: no spool is staged, so there's nothing to warn about.
@@ -278,9 +271,7 @@ def test_spool_moved_out_with_no_replacement_is_not_staging():
     res = account(res.state, BOOT, r(250), loc(), 42)
     assert res.events == [] and res.state.notice is None
     res = account(res.state, BOOT, r(260), loc(7), 42)
-    assert [(e.kind, e.message) for e in res.events] == [
-        (EventKind.ACTIVE_REASSIGNED, "spool 7 is back in the location")
-    ]
+    assert res.events == [ev.ActiveReassigned(7)]
     assert res.charges == [Charge(7, 10, "extruded")]
 
 
@@ -293,56 +284,42 @@ def emptied_after_staging(*steps):
     return account(state, BOOT, r(150), loc())
 
 
-STAGED_8_LEFT = [
-    (EventKind.STAGING_CANCELLED, "spool 8 is no longer staged; still charging spool 7"),
-    (
-        EventKind.ACTIVE_UNASSIGNED,
-        "spool 7 isn't in the location either; still charging it "
-        "until the printer reports an unload",
-    ),
-]
+STAGED_8_LEFT = [ev.StagingCancelled(staged=8, active=7), ev.ActiveUnassigned(7, staged_left=True)]
 
 
 def test_staged_spool_leaving_an_emptied_location_is_reported():
     # Spool 7 is moved out, spool 8 in, then spool 8 out again.
     res = emptied_after_staging(loc(), loc(8))
-    assert [(e.kind, e.message) for e in res.events] == STAGED_8_LEFT
+    assert res.events == STAGED_8_LEFT
     assert res.charges == [Charge(7, 50, "extruded")]
 
 
 def test_both_spools_leaving_the_location_is_reported():
     res = emptied_after_staging(loc(7, 8))
-    assert [(e.kind, e.message) for e in res.events] == STAGED_8_LEFT
+    assert res.events == STAGED_8_LEFT
     res = account(res.state, BOOT, r(160), loc(7))
-    assert [(e.kind, e.message) for e in res.events] == [
-        (EventKind.ACTIVE_REASSIGNED, "spool 7 is back in the location")
-    ]
+    assert res.events == [ev.ActiveReassigned(7)]
 
 
 def test_unload_after_the_location_empties_holds_usage():
     # S10: the spool stays active until the unload, then usage is held as unassigned.
     _, _, state = run([(BOOT, r(100), loc(7)), (BOOT, r(150), loc())])
     res = account(state, BOOT, r(200, unloads=1, at_unload=180), loc())
-    assert [(e.kind, e.message) for e in res.events] == [
-        (EventKind.UNLOAD, "1 unload(s); 30 mm before the unload goes to spool 7"),
-        (
-            EventKind.UNLOADED_UNASSIGNED,
-            "spool 7 unloaded with no spool in the location; holding usage until one is assigned",
-        ),
-        (EventKind.HOLD_UNASSIGNED, "holding usage: no spool assigned"),
+    assert res.events == [
+        ev.Unload(unloads=1, mm=30, spool=7),
+        ev.UnloadedUnassigned(7),
+        ev.HoldUnassigned(),
     ]
     assert res.state.active is None
     # S6: the next unload with nothing assigned reports the usage before it lost.
     res = account(res.state, BOOT, r(300, unloads=2, at_unload=250), loc())
-    assert [(e.kind, e.message) for e in res.events] == [
-        (EventKind.UNLOAD, "1 unload(s) with no spool active"),
-        (EventKind.LOST_UNASSIGNED, "70 mm before unload had no spool"),
-        (EventKind.HOLD_UNASSIGNED, "holding usage: no spool assigned"),
+    assert res.events == [
+        ev.Unload(unloads=1, mm=70, spool=None),
+        ev.LostUnassigned(70),
+        ev.HoldUnassigned(),
     ]
     res = account(res.state, BOOT, r(320, unloads=2, at_unload=250), loc(8))
-    assert [(e.kind, e.message) for e in res.events] == [
-        (EventKind.ASSIGNMENT_CHANGED, "spool 8 is active")
-    ]
+    assert res.events == [ev.AssignmentChanged(8)]
     assert res.charges == [Charge(8, 70, "extruded")]
 
 
@@ -352,9 +329,7 @@ def test_usage_held_over_a_reboot_is_reported_each_poll_until_assigned():
     res = account(state, BOOT, r(200, unloads=1, at_unload=180), loc())
     for reading in (r(0), r(0)):
         res = account(res.state, BOOT + 1, reading, loc())
-        assert (EventKind.HOLD_UNASSIGNED, "holding usage: no spool assigned") in [
-            (e.kind, e.message) for e in res.events
-        ]
+        assert ev.HoldUnassigned() in res.events
     res = account(res.state, BOOT + 1, r(0, material=None), loc())
     assert [e.kind for e in res.events] == [EventKind.HOLD_EMPTY]
     assert res.state.held_mm == 20
@@ -398,11 +373,9 @@ def test_correction_moves_a_provisional_charge_like_a_claim():
     _, _, state = run(PROVISIONAL_ON_7)
     assert state.provisional == Provisional(7, 200, 42)
     res = account(state, BOOT, r(350, unloads=1, at_unload=100), loc(7, 9), 42, lambda i: i == 9)
-    assert [e.kind for e in res.events] == [EventKind.CORRECTION]
-    assert res.events[0].message == (
-        "printer already has spool 9's filament; switching from spool 7 now and moving "
-        "200 mm from spool 7 (usage since the last unload)"
-    )
+    assert res.events == [
+        ev.Correction(9, from_spool=7, moved=((7, 200),), since="unload"),
+    ]
     assert res.charges == [
         Charge(9, 200, "corrected usage since load"),
         Charge(7, -200, "moved to corrected spool"),
@@ -432,7 +405,7 @@ def test_correction_of_a_provisional_charge_moves_only_usage_since_a_reboot():
     _, _, state = run([*PROVISIONAL_ON_7, (BOOT + 1, r(40), loc(7), 42)])
     assert state.provisional == Provisional(7, 240, 42)
     res = account(state, BOOT + 1, r(40), loc(7, 9), 42, lambda i: i == 9)
-    assert res.events[0].message.endswith("moving 40 mm from spool 7 (usage since the last reboot)")
+    assert res.events == [ev.Correction(9, from_spool=7, moved=((7, 40),), since="reboot")]
     assert res.charges == [
         Charge(9, 40, "corrected usage since load"),
         Charge(7, -40, "moved to corrected spool"),
@@ -614,8 +587,7 @@ def test_two_step_swap_moves_usage_since_unload_to_new_spool():
     for c in charges + res.charges:
         totals[c.spool_id] = totals.get(c.spool_id, 0) + c.mm
     assert totals == {7: 500, 9: 400}
-    confirmed = [e.message for e in res.events if e.kind == EventKind.SWAP_CONFIRMED]
-    assert confirmed == ["swap confirmed: 300 mm moved from spool 7 to 9"]
+    assert ev.SwapConfirmed(mm=300, from_spool=7, to_spool=9) in res.events
     assert (res.state.swap, res.state.active, res.state.evict) == (None, 9, ())
     assert res.state.since_load == {7: 0, 9: 400}
 
@@ -702,8 +674,7 @@ def test_unload_with_location_emptied_closes_swap_on_old_spool():
     # closes the swap, so the usage since the first one stays on the old spool.
     _, _, state = run(TWO_STEP)
     res = account(state, BOOT, r(1200, unloads=2, at_unload=1100), loc())
-    lost = [e.message for e in res.events if e.kind == EventKind.LOST_UNASSIGNED]
-    assert lost == ["200 mm before unload had no spool"]
+    assert [e for e in res.events if isinstance(e, ev.LostUnassigned)] == [ev.LostUnassigned(200)]
     assert res.charges == []
     assert (res.state.swap, res.state.active, res.state.charged) == (None, None, 1100)
     charges, _, _ = run([(BOOT, r(1250, unloads=2, at_unload=1100), loc(9))], res.state)
@@ -982,8 +953,7 @@ def test_usage_held_through_reboot_counts_toward_provisional_at_print_start():
 def test_usage_held_through_reboot_is_lost_at_unload_with_no_spool():
     _, _, state = run([(BOOT, r(100), loc()), (BOOT, r(900), loc())])
     res = account(state, BOOT + 1, r(50, unloads=1, at_unload=30), loc())
-    lost = [e.message for e in res.events if e.kind == EventKind.LOST_UNASSIGNED]
-    assert lost == ["830 mm before unload had no spool"]
+    assert [e for e in res.events if isinstance(e, ev.LostUnassigned)] == [ev.LostUnassigned(830)]
     assert res.charges == [] and res.state.held_mm == 0
 
 
@@ -1042,7 +1012,7 @@ def test_state_round_trip():
         job_id=42,
         pending_job=43,
         pending_at=120,
-        notice=Notice(7, EventKind.STAGED_AT_PRINT, "staged"),
+        notice=ev.StagedAtPrint(8, 7),
         needs_sync=True,
         sync_attempts=2,
         written=WrittenFilament(
@@ -1058,7 +1028,7 @@ def test_state_round_trip():
         ),
         held_mm=30,
         deleted_spool=19,
-        staged_notice=Notice(8, EventKind.STAGED_AT_REBOOT, "rebooted"),
+        staged_notice=ev.StagedAtReboot(8, 7),
         provisional=Provisional(7, 400, 42),
         since_load={7: 400, 9: -3},
         extruded=150,
@@ -1121,7 +1091,7 @@ def test_deletion_drops_the_staged_notice():
         ]
     )
     assert EventKind.STAGED_AT_REBOOT in kinds
-    assert state.staged_notice is not None and state.staged_notice.spool_id == 20
+    assert state.staged_notice is not None and state.staged_notice.staged == 20
     state = hold_deleted(state, 19)
     assert state.staged_notice is None
     _, kinds, state = run([(BOOT + 1, r(20), loc(20))], state)
@@ -1278,8 +1248,9 @@ def test_claim_on_staged_spool_moves_usage_since_unload():
         Charge(7, -550, "moved to claimed spool"),
         Charge(9, 50, "extruded"),
     ]
-    claimed = next(e.message for e in res.events if e.kind is EventKind.CLAIMED)
-    assert claimed.startswith("spool 9 claimed in place of spool 7: ")
+    assert ev.Claimed(9, replaced=7, deleted_spool=None, moved=((7, 550),), since="unload") in (
+        res.events
+    )
     s = res.state
     assert (s.active, s.assigned, s.evict) == (9, 9, (7,))
     assert (s.provisional, s.swap, s.staged_notice) == (None, None, None)
@@ -1399,9 +1370,7 @@ def test_staged_spool_flagged_at_print_start_and_cleared_when_loaded():
         ]
     )
     assert EventKind.STAGED_AT_PRINT in kinds
-    assert state.notice.spool_id == 7
-    assert state.staged_notice.spool_id == 8
-    assert state.staged_notice.kind == EventKind.STAGED_AT_PRINT
+    assert state.notice == state.staged_notice == ev.StagedAtPrint(staged=8, active=7)
     _, _, state = run([(BOOT, r(250, unloads=1, at_unload=220), loc(7, 8), None)], state)
     assert state.active == 8 and state.staged_notice is None
 
@@ -1415,7 +1384,7 @@ def test_staged_spool_flagged_after_reboot_and_cleared_when_unstaged():
         ]
     )
     assert EventKind.STAGED_AT_REBOOT in kinds
-    assert state.staged_notice.spool_id == 8
+    assert state.staged_notice.staged == 8
     _, _, state = run([(222, r(0), loc(7))], state)
     assert state.staged_notice is None
 
@@ -1430,7 +1399,7 @@ def test_staged_notice_for_reboot_while_ambiguous():
         ]
     )
     assert EventKind.STAGED_AT_REBOOT in kinds
-    assert state.staged_notice.spool_id == 8 and not state.reboot_pending
+    assert state.staged_notice.staged == 8 and not state.reboot_pending
 
 
 def test_staged_notice_for_reboot_while_ambiguous_then_another_spool():
@@ -1442,7 +1411,7 @@ def test_staged_notice_for_reboot_while_ambiguous_then_another_spool():
         ]
     )
     assert EventKind.STAGED_AT_REBOOT in kinds
-    assert (state.active, state.staged_notice.spool_id) == (7, 9)
+    assert (state.active, state.staged_notice.staged) == (7, 9)
     assert not state.reboot_pending
 
 
@@ -1455,7 +1424,7 @@ def test_staged_notice_for_reboot_while_ambiguous_with_neither_active():
         ]
     )
     assert EventKind.STAGED_AT_REBOOT in kinds
-    assert (state.active, state.staged_notice.spool_id) == (7, 8)
+    assert (state.active, state.staged_notice.staged) == (7, 8)
     assert not state.reboot_pending
 
 
@@ -1488,7 +1457,7 @@ def test_state_round_trip_with_claim_fields():
         (5,),
         None,
         42,
-        staged_notice=Notice(8, EventKind.STAGED_AT_REBOOT, "staged"),
+        staged_notice=ev.StagedAtReboot(8, 7),
         provisional=Provisional(7, 400, 42),
         since_load={7: 400, 9: -3},
         reboot_pending=True,
@@ -1509,8 +1478,8 @@ def test_claim_takes_usage_held_for_a_deleted_spool():
     ]
     kinds = [e.kind for e in res.events]
     assert EventKind.CLAIMED in kinds and EventKind.HELD_CHARGED in kinds
-    claimed = next(e.message for e in res.events if e.kind is EventKind.CLAIMED)
-    assert claimed.startswith("spool 20 claimed in place of deleted spool 19: ")
+    claimed = next(e for e in res.events if isinstance(e, ev.Claimed))
+    assert (claimed.spool, claimed.replaced, claimed.deleted_spool) == (20, None, 19)
     s = res.state
     assert (s.active, s.held_mm, s.deleted_spool, s.needs_sync) == (20, 0, None, True)
     assert s.since_load == {20: 150}
@@ -1521,8 +1490,8 @@ def test_claim_with_no_spool_active_names_none():
     assert state.active is None
     res = account(state, BOOT, r(150), loc(5), claim=5)
     assert res.claimed
-    claimed = next(e.message for e in res.events if e.kind is EventKind.CLAIMED)
-    assert claimed.startswith("spool 5 claimed with no spool active: ")
+    claimed = next(e for e in res.events if isinstance(e, ev.Claimed))
+    assert (claimed.spool, claimed.replaced, claimed.deleted_spool) == (5, None, None)
     assert res.state.active == 5
 
 
@@ -1555,12 +1524,8 @@ def test_staged_spool_flagged_at_every_print_start():
     )
     assert kinds.count(EventKind.STAGED_AT_PRINT) == 2
     assert (state.active, state.assigned, state.job_id) == (7, 8, 43)
-    assert state.notice.spool_id == 7
-    assert state.staged_notice == Notice(
-        8,
-        EventKind.STAGED_AT_PRINT,
-        "print started while spool 8 is staged but not loaded; charging spool 7",
-    )
+    assert state.notice.active == 7
+    assert state.staged_notice == ev.StagedAtPrint(staged=8, active=7)
 
 
 def test_claim_in_the_same_poll_as_an_unload_moves_only_later_usage():
@@ -1609,14 +1574,14 @@ def test_claim_while_a_job_waits_for_its_first_extrusion():
 
 def test_baseline_with_an_empty_location_names_no_spool():
     res = account(ToolState(), BOOT, r(100), loc())
-    assert [e.message for e in res.events] == ["baseline extruded=100 spool=none"]
+    assert res.events == [ev.Baseline(extruded=100, spool=None)]
 
 
 # Legal states
 
 # A state that has seen the printer, with spool 7 active and assigned.
 LEGAL = ToolState(BOOT, 100, 0, 7, 7, extruded=100)
-STAGED = Notice(8, EventKind.STAGED_AT_PRINT, "staged")
+STAGED = ev.StagedAtPrint(staged=8, active=7)
 
 
 def test_a_new_tool_and_a_loaded_tool_are_legal():
