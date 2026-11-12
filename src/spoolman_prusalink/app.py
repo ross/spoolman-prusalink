@@ -1120,10 +1120,15 @@ class PrinterBridge:
                     uuid_value = adopted[1]
                 else:
                     uuid_value = await self.bridge._mint_uuid(spool)
-                    if uuid_value is None:
-                        # The spool gets its UUID first (W1). Written without one, the
-                        # printer would match the write and no later poll would mint
-                        # again. The write stays due, and the next poll retries the mint.
+                    if uuid_value is None and self.bridge.config.uuid_field in (
+                        self.bridge._ready_fields
+                    ):
+                        # The field is set up, so storing the UUID failed. The spool gets
+                        # its UUID first (W1): written without one, the printer would
+                        # match the write and no later poll would mint again. The write
+                        # stays due, and the next poll retries the mint. A field that
+                        # can't be set up, such as a key of another type, doesn't hold
+                        # the write: the spool is written without a UUID.
                         minting = True
                         continue
             writes.append(printer_sync.ToolWrite(tool, spool, uuid_value))
