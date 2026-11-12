@@ -465,6 +465,13 @@ sqlite3 /data/bridge.db \
 Compare that against the slicer's `filament used [mm]` to validate the
 counts.
 
+The ledger grows with printing time, not with idle printers: while a tool
+prints, it adds about one charge row per `poll_printing` (30 seconds by
+default), plus a few event rows per print. A row takes about 300 bytes with
+its indexes, so a tool that prints around the clock adds about 300 MB a year,
+and one that prints 5 hours a day adds about 65 MB. The bridge keeps every
+row.
+
 ## Simulator
 
 `simulator/` holds a stand-in for one or more printers, for developing and
