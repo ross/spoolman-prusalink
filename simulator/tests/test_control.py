@@ -319,3 +319,16 @@ async def test_a_number_that_isnt_finite_is_refused(setup, raw):
     )
     assert resp.status == 400
     assert (await resp.json())["error"].startswith("extrude mm must be a finite number")
+
+
+async def test_a_huge_integer_is_an_integer_but_not_a_float(setup):
+    sim, p, client = setup
+    huge = "1" + "0" * 400
+    headers = {"Content-Type": "application/json"}
+    data = '{"tool": ' + huge + "}"
+    resp = await client.post("/api/printers/p/unload", data=data, headers=headers)
+    assert resp.status == 400 and (await resp.json())["error"] == f"p has no tool {huge}"
+    data = '{"tool": 0, "mm": ' + huge + "}"
+    resp = await client.post("/api/printers/p/extrude", data=data, headers=headers)
+    assert resp.status == 400
+    assert (await resp.json())["error"].startswith("extrude mm must be a finite number")

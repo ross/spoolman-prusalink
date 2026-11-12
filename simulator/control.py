@@ -142,15 +142,22 @@ def _check(where: str, value: Any, hint: Any) -> Any:
         ok = isinstance(value, bool)
     elif hint is str:
         ok = isinstance(value, str)
+    elif hint is int:
+        ok = isinstance(value, int) and not isinstance(value, bool)
     else:
-        ok = isinstance(value, int | float if hint is float else int) and not isinstance(
-            value, bool
-        )
-        # Python's json reads NaN and Infinity, which no length or time can be.
-        ok = ok and math.isfinite(value)
+        ok = isinstance(value, int | float) and not isinstance(value, bool)
+        if ok:
+            # An integer past the float range doesn't convert, and Python's json reads
+            # NaN and Infinity, which no length or time can be.
+            try:
+                ok = math.isfinite(number := float(value))
+            except OverflowError:
+                ok = False
+            else:
+                value = number
     if not ok:
         raise Invalid(f"{where} must be {_KINDS[hint]}, got {value!r}")
-    return float(value) if hint is float else value
+    return value
 
 
 _SEGMENT_KEYS = {f.name for f in fields(Segment)}
