@@ -119,8 +119,8 @@ class EventKind(StrEnum):
     ACTIVE_AT_PRINT = "active_at_print"
     HOLD_EMPTY = "hold_empty", Report.LASTING
     HOLD_UNASSIGNED = "hold_unassigned", Report.LASTING
-    # The bridge logs when a hold for a deleted spool starts and ends, from
-    # `ToolState.deleted_spool`.
+    # The bridge logs when a hold for a deleted spool starts, moves to another spool, and
+    # ends, from `ToolState.deleted_spool`.
     HOLD_DELETED = "hold_deleted", Report.STATE
     HELD_CHARGED = "held_charged"
     LOST_UNASSIGNED = "lost_unassigned", Report.WARNING
@@ -428,7 +428,8 @@ def violations(state: ToolState) -> list[str]:
     """Return the rules for a legal `ToolState` that `state` breaks, empty if none.
 
     Nothing in the bridge calls this. It writes down which combinations of fields can
-    occur, and the tests check it on every poll.
+    occur, and the tests check it on every state that goes into or comes out of
+    `account()` and `hold_deleted()`.
     """
     return [rule for rule, holds in _INVARIANTS if not holds(state)]
 
@@ -457,7 +458,6 @@ def hold_deleted(state: ToolState, spool_id: int, mm: int = 0, queued: int = 0) 
             state,
             active=None,
             assigned=None if state.assigned == spool_id else state.assigned,
-            evict=tuple(i for i in state.evict if i != spool_id),
             swap=swap,
             notice=notice,
             deleted_spool=spool_id,

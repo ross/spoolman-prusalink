@@ -12,11 +12,11 @@ from spoolman_prusalink.accounting import (
     Result,
     SwapFlag,
     ToolState,
-    hold_deleted,
     resolve_assignment,
     violations,
 )
 from spoolman_prusalink.accounting import account as _account
+from spoolman_prusalink.accounting import hold_deleted as _hold_deleted
 from spoolman_prusalink.models import Material, ToolReading
 
 # What the printer reports for the PLA preset, which `spool()` writes.
@@ -32,6 +32,14 @@ def account(state, *args, **kwargs) -> Result:
     res = _account(state, *args, **kwargs)
     assert violations(res.state) == [], res.state
     return res
+
+
+def hold_deleted(state, *args, **kwargs) -> ToolState:
+    """Call `hold_deleted()`, and check that a legal state in gives a legal state out."""
+    assert violations(state) == [], state
+    state = _hold_deleted(state, *args, **kwargs)
+    assert violations(state) == [], state
+    return state
 
 
 def r(extruded, material=PLA, unloads=0, at_unload=0):
@@ -1093,11 +1101,6 @@ def test_hold_deleted_clears_the_active_spool():
     assert hold_deleted(state, 19, 30).held_mm == 80  # Another rejected charge.
 
 
-def test_hold_deleted_drops_only_the_deleted_spool_from_evict():
-    state = ToolState(BOOT, 100, 0, 19, 19, evict=(5, 19, 8))
-    assert hold_deleted(state, 19).evict == (5, 8)
-
-
 def test_deletion_drops_the_staged_notice():
     _, kinds, state = run(
         [
@@ -1687,7 +1690,7 @@ def test_hold_deleted_keeps_a_state_legal():
     ):
         _, _, state = run(steps)
         assert state.swap is not None or state.provisional is not None
-        assert violations(hold_deleted(state, 7, 25)) == []
+        assert hold_deleted(state, 7, 25).deleted_spool == 7
 
 
 # Event kinds
