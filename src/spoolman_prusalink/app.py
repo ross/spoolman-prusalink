@@ -14,8 +14,6 @@ from datetime import UTC, datetime
 from enum import Enum
 from typing import NamedTuple
 
-import httpx
-
 from . import drift, printer_sync
 from .accounting import (
     WARNINGS,
@@ -27,7 +25,7 @@ from .accounting import (
 )
 from .config import Config, PrinterConfig
 from .db import Database
-from .errors import NotFound, Rejected, ServiceError, Unreachable
+from .errors import Busy, NotFound, Rejected, ServiceError, Unreachable
 from .models import FilamentReading, Material, Spool
 from .prusalink import BUSY_STATES, IDLE_STATES, NoFilamentEndpoint, PrinterStatus, PrusaLink
 from .spoolman import Spoolman
@@ -294,7 +292,7 @@ class PrinterBridge:
             self._last_state = status.state  # Known even when the counters can't be read.
             reading = await self.client.filament()
             job_id = await self._user_job_id(status)
-        except httpx.TransportError as e:
+        except Unreachable as e:
             # Connection refused, timeouts and the like: most often the printer is off.
             _log_failed(self._printer_reach, e, unreachable=True)
             self._idle_since = None
@@ -311,7 +309,7 @@ class PrinterBridge:
                     e,
                 )
             return None
-        except (httpx.HTTPError, ValueError, KeyError) as e:
+        except ServiceError as e:
             _log_failed(self._printer_reach, e, unreachable=False)
             self._idle_since = None
             return None
@@ -441,7 +439,7 @@ class PrinterBridge:
         """Look up the printer's model; if the bridge can't write to it, writes stay off."""
         try:
             printer_type = await self.client.printer_type()
-        except (httpx.HTTPError, ValueError) as e:
+        except ServiceError as e:
             error = f"can't read the printer model ({e})"
             if error != self._model_error:
                 log.warning("%s%s; printer writes are off until it can", self._prefix, error)
@@ -1205,23 +1203,12 @@ class PrinterBridge:
             await self.client.upload_and_print(
                 self.config.sync_storage, self.config.sync_file, gcode
             )
-        except httpx.HTTPStatusError as e:
-            if e.response.status_code == 409:
-                if self._sync_busy != "409":
-                    log.info("%s busy; sync job waits for the next idle poll", self.label)
-                self._sync_busy = "409"
-            else:
-                detail = f"{e.response.status_code} {e.response.text[:200]}"
-                if self._sync_failed != detail:
-                    log.warning(
-                        "%s sync job failed (%d): %s",
-                        self.label,
-                        e.response.status_code,
-                        e.response.text[:200],
-                    )
-                self._sync_failed = detail
+        except Busy:
+            if self._sync_busy != "409":
+                log.info("%s busy; sync job waits for the next idle poll", self.label)
+            self._sync_busy = "409"
             return
-        except (httpx.HTTPError, ValueError, KeyError) as e:
+        except ServiceError as e:
             if self._sync_failed != str(e):
                 log.warning("%s sync job failed: %s", self.label, e)
             self._sync_failed = str(e)

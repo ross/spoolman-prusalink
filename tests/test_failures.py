@@ -5,7 +5,6 @@ import json
 import logging
 from dataclasses import replace
 
-import httpx
 import pytest
 from test_writes import (
     LOC,
@@ -21,6 +20,7 @@ from test_writes import (
 
 from spoolman_prusalink.accounting import EventKind
 from spoolman_prusalink.db import read_state
+from spoolman_prusalink.errors import BadAnswer, Unreachable
 
 TAG = "91da34d9-c1c1-470f-bac7-185a2346f86a"
 
@@ -46,7 +46,7 @@ def stored_uuid(fake, spool_id):
 
 
 @pytest.mark.parametrize(
-    "error", [httpx.ConnectError("no route"), ValueError("not json")], ids=["http", "json"]
+    "error", [Unreachable("no route"), BadAnswer("not json")], ids=["http", "json"]
 )
 async def test_unreadable_printer_model_keeps_writes_off_and_warns_once(
     tmp_path, caplog, monkeypatch, error
@@ -70,7 +70,7 @@ async def test_unreadable_printer_model_keeps_writes_off_and_warns_once(
 
     # A different error is news.
     async def other():
-        raise httpx.ReadTimeout("slow")
+        raise Unreachable("slow")
 
     monkeypatch.setattr(client, "printer_type", other)
     await bridge.poll()
@@ -86,7 +86,7 @@ async def test_unreadable_printer_model_keeps_writes_off_and_warns_once(
 
 
 @pytest.mark.parametrize(
-    "error", [httpx.ConnectError("printer refused"), ValueError("bad json")], ids=["http", "json"]
+    "error", [Unreachable("printer refused"), BadAnswer("bad json")], ids=["http", "json"]
 )
 async def test_sync_job_failing_without_a_status_is_logged_once_and_retried(
     tmp_path, caplog, monkeypatch, error

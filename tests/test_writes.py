@@ -833,7 +833,7 @@ async def test_failed_uuid_mint_leaves_a_failing_sync_job_failing(tmp_path, capl
     await swap_to_menu_loaded_20(bridge, fake, printer)
     printer.upload_error = 500
     await bridge.poll()
-    assert caplog.text.count("sync job failed (500)") == 1
+    assert caplog.text.count("sync job failed: 500 Internal Server Error") == 1
 
     # Someone clears the UUID minted for the failed job, and Spoolman won't take another.
     fake.spools[20]["extra"].pop("instance_uuid")

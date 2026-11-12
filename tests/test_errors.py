@@ -11,6 +11,7 @@ from spoolman_prusalink.errors import (
     parsing,
     send,
 )
+from spoolman_prusalink.prusalink import NoFilamentEndpoint, PrusaLink
 from spoolman_prusalink.spoolman import Spoolman
 
 
@@ -88,3 +89,35 @@ async def test_spool_list_that_cant_be_parsed_is_a_bad_answer(body):
     with pytest.raises(BadAnswer, match="can't read Spoolman's spool list"):
         await spoolman.spools()
     await spoolman.aclose()
+
+
+@pytest.mark.parametrize(
+    ("call", "body", "what"),
+    [
+        ("status", "[]", "the printer's status"),
+        ("status", '{"job": {"id": "x"}}', "the printer's status"),
+        ("filament", '{"boot_id": 1, "tools": [{"index": 0}]}', None),
+        ("filament", '{"boot_id": "x", "tools": []}', "the printer's filament"),
+        ("filament", "not json", "the printer's filament"),
+        ("printer_type", "[]", "the printer's version"),
+        ("job_display_name", '{"file": "x"}', "the printer's job"),
+    ],
+)
+async def test_printer_answer_that_cant_be_parsed_is_a_bad_answer(call, body, what):
+    transport = httpx.MockTransport(lambda request: httpx.Response(200, text=body))
+    printer = PrusaLink("http://printer", "k", transport=transport)
+    if what is None:  # Parses, but has no usage counters.
+        with pytest.raises(NoFilamentEndpoint):
+            await getattr(printer, call)()
+    else:
+        with pytest.raises(BadAnswer, match=what):
+            await getattr(printer, call)()
+    await printer.aclose()
+
+
+async def test_upload_to_a_printing_printer_is_busy():
+    transport = httpx.MockTransport(lambda request: httpx.Response(409, text="printing"))
+    printer = PrusaLink("http://printer", "k", transport=transport)
+    with pytest.raises(Busy, match="409 Conflict for PUT /api/v1/files/usb/a.gcode: printing"):
+        await printer.upload_and_print("usb", "a.gcode", "G28\n")
+    await printer.aclose()

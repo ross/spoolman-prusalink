@@ -215,23 +215,6 @@ tool state.
 
 Size: small to medium. Do it with B3, which reshapes `written`.
 
-### B8. Raw `httpx` errors reach every layer
-
-`app.py` has 18 `except` sites that name `httpx` errors. Seven of them also
-catch `ValueError` and `KeyError`, because the caller has to know what the
-client's parsing can raise. Status codes are interpreted far from the
-client: 404 in `flush` and `sync_flags`, 409 in `sync_printer`, 5xx in
-`flush`, and the other 4xx codes in `_unusable`.
-
-Why it hurts: a `KeyError` from a bug in bridge code inside one of those
-`try` blocks is logged as a bad answer from the service.
-
-Shape: the clients raise their own errors: unreachable, bad answer, not
-found, busy. The clients catch parse errors where they parse. `app.py`
-catches the client errors only.
-
-Size: small to medium. Independent of the rest.
-
 ### B9. `account()` mixes last poll's state with this poll's
 
 `account()` (`accounting.py`) is 490 lines: six numbered steps, about
@@ -634,13 +617,12 @@ Size: medium.
 | 3 | Conditions and saved facts | B2, B3, B5, B7, T1 (rest) | Workstreams 2 and 10. B7 changes the part of `account()` that B9 part 1 restructures |
 | 4 | Typed records | B6, B9 (part 2), T7 | Workstream 10. Easier after 3 |
 | 5 | Narrow the bridge boundary | B4 | Workstreams 2 and 3. Easier after B11 |
-| 6 | Client errors | B8 | Nothing |
 | 7 | Unit suite on the simulator | T2, T6 | Nothing. Before workstreams 2 and 3 if possible, so their tests are ported once |
 | 8 | Simulator state | S1, S5, S6, then S2, S4 | S3, which changes the same code. Workstream 7 for S4, which continues the routing move in T2 |
 | 9 | Small items | B10, B11, T8, S3 | Nothing |
 | 10 | Accounting state | B9 (part 1) | Nothing |
 
-Workstreams 1, 6, 9, and 10 are independent and can run at any time. T3
+Workstreams 1, 9, and 10 are independent and can run at any time. T3
 has no work, so it isn't in a workstream.
 Of the large ones, workstream 7 is best first, because workstreams 2 and 3
 rewrite many of the same tests and would otherwise port them twice. Then
