@@ -209,6 +209,12 @@ class Plan:
     writes: list[int] = field(default_factory=list)  # Tools to write when idle.
     # Per tool: the UUID the printer shows for the active spool, which has none.
     adoptions: dict[int, _Adoption] = field(default_factory=dict)
+    # For the bridge to save with the printer's state: the charges to queue, the events
+    # for the ledger, the runout flags to set (or None to clear), and the claims handled.
+    charges: list[ChargeRecord] = field(default_factory=list)
+    events: list[EventRecord] = field(default_factory=list)
+    runouts: dict[int, Runout | None] = field(default_factory=dict)
+    claimed: list[int] = field(default_factory=list)
 
 
 @dataclass
@@ -216,12 +222,13 @@ class PrinterBridge:
     """One printer's side of the bridge: read it, account its tools, and write to it.
 
     Everything keyed by spool rather than by tool lives on `Bridge`, which this reaches
-    through `bridge`: the Spoolman client, the saved state, flags, and the problem log.
+    through `bridge`. `state` is this printer's part of the saved state.
     """
 
     config: PrinterConfig
     client: PrusaLink
     bridge: Bridge
+    state: PrinterState
     # How log lines name this printer: "printer" alone when it's the only one.
     label: str = "printer"
     _printer_reach: Reachability = field(init=False)
@@ -260,12 +267,12 @@ class PrinterBridge:
 
     @property
     def tools(self) -> dict[int, ToolState]:
-        return self.bridge.state.tools(self.name)
+        return self.state.tools
 
     @property
     def writes(self) -> dict[int, printer_sync.WriteState]:
         """Where each tool's write to the printer stands, which the database keeps."""
-        return self.bridge.state.printers.setdefault(self.name, PrinterState()).writes
+        return self.state.writes
 
     @property
     def busy(self) -> bool:
@@ -276,12 +283,12 @@ class PrinterBridge:
     @property
     def conditions(self) -> dict[int, list[Condition]]:
         """Each tool's conditions as of its last poll, which the database keeps."""
-        return self.bridge.state.printers.setdefault(self.name, PrinterState()).conditions
+        return self.state.conditions
 
     @property
     def _seen_tags(self) -> dict[int, SeenTag]:
         """What each tool's instance UUID was last seen with, which the database keeps."""
-        return self.bridge.state.printers.setdefault(self.name, PrinterState()).seen_tags
+        return self.state.seen_tags
 
     async def read(self) -> tuple[PrinterStatus, FilamentReading] | None:
         """Read the printer's status and counters, or None if this poll can't use it.
@@ -331,7 +338,7 @@ class PrinterBridge:
         elif self._idle_since is None:
             self._idle_since = self.bridge.clock()
 
-    async def check_missing(self, spools: list[Spool]) -> None:
+    async def check_missing(self, spools: list[Spool]) -> bool:
         """Find out why an active spool is missing from Spoolman's list.
 
         The list leaves out archived spools. A deleted one (404) leaves its tool with no
@@ -340,6 +347,8 @@ class PrinterBridge:
         looked up once, not every poll. A spool that's found but neither archived nor
         listed was unarchived after the list was read; it's charged without its filament
         data this poll, and the next poll's list has it, so nothing is remembered.
+
+        Returns whether a tool now holds a deleted spool's usage, which the caller saves.
         """
         listed = {s.id for s in spools}
         missing = {
@@ -390,8 +399,7 @@ class PrinterBridge:
                     location,
                     spool_id,
                 )
-        if held:
-            self.bridge._save()
+        return held
 
     def _hold_deleted(self, tool: int, spool_id: int, mm: int = 0) -> bool:
         """Hold a deleted spool's usage for the tool's next spool. Returns whether it did,
@@ -509,18 +517,16 @@ class PrinterBridge:
         status: PrinterStatus,
         claims: dict[int, tuple[int, list[int]]],
     ) -> Plan:
-        """Account one poll and persist the result.
+        """Account one poll.
 
-        Charges go to the outbox for `flush()` to send, saved in one transaction with the
-        events, the new counters, and each tool's conditions. Returns what's left to do:
-        the UUIDs to adopt and the tools to write.
+        Returns the plan: the charges, events, runout flags, and handled claims, which the
+        caller saves in one transaction with the new counters and each tool's conditions,
+        then the UUIDs to adopt and the tools to write.
 
         `claims` is this printer's share of `Bridge._claims()`, by tool.
         """
         by_id = {s.id: s for s in spools}
         now = _now()
-        events: list[EventRecord] = []
-        charges: list[ChargeRecord] = []
         plan = Plan()
 
         for tool, location in self.config.tools.items():
@@ -555,9 +561,11 @@ class PrinterBridge:
             if not result.skipped or tool in self.tools:
                 self.tools[tool] = result.state
             if result.runout is not None:
-                self._check_runout(location, by_id.get(result.runout))
+                runout = self._check_runout(location, by_id.get(result.runout))
+                if runout is not None:
+                    plan.runouts[result.runout] = runout
             if result.claimed:
-                self._claim_handled(location, claim, others)
+                plan.claimed += self._claim_handled(location, claim, others)
             seen = self._seen_tags.get(tool, SeenTag())
             if any(isinstance(ev, Unload) for ev in result.events):
                 # Only a runout in a print the bridge saw start is reported as one.
@@ -574,7 +582,7 @@ class PrinterBridge:
                     continue
                 level = logging.WARNING if report is Report.WARNING else logging.INFO
                 log.log(level, "[%s] %s", location, ev.message)
-                events.append(EventRecord(now, self.name, tool, location, ev))
+                plan.events.append(EventRecord(now, self.name, tool, location, ev))
 
             for c in result.charges:
                 # An archived spool is still charged until the next unload, but isn't listed.
@@ -591,7 +599,7 @@ class PrinterBridge:
                     f" ≈ {grams:+.2f} g" if grams is not None else "",
                     c.reason,
                 )
-                charges.append(
+                plan.charges.append(
                     ChargeRecord(
                         time=now,
                         printer=self.name,
@@ -614,7 +622,7 @@ class PrinterBridge:
             found = self._state_conditions(tool, st, status) + lasting
             active = by_id.get(st.active) if st.active is not None else None
             if active is not None and active.id != before.active:
-                self.bridge.state.runouts.pop(active.id, None)
+                plan.runouts[active.id] = None
             decision = Decision.NONE
             comparable = not result.skipped and material is not None and active is not None
             if tool == printer_sync.UUID_TOOL and (material is None or not material.instance_uuid):
@@ -684,10 +692,6 @@ class PrinterBridge:
                     if write:
                         plan.writes.append(tool)
             self._report(tool, location, found, by_id, compared=not result.skipped)
-
-        for rec in charges:
-            self.bridge.state.outbox.push(rec)
-        self.bridge._save(events)
         return plan
 
     def _state_conditions(self, tool: int, st: ToolState, status: PrinterStatus) -> list[Condition]:
@@ -783,7 +787,7 @@ class PrinterBridge:
         out to have is dropped, so a write this poll gives the spool its own UUID. On
         any other failure the tool's write waits for the next poll.
         """
-        left = Plan(list(plan.writes))
+        left = Plan(writes=list(plan.writes))
         for tool, adopt in plan.adoptions.items():
             if await self.bridge.uuids.adopt(adopt.spool_id, adopt.uuid, store=adopt.store):
                 left.adoptions[tool] = adopt
@@ -791,29 +795,28 @@ class PrinterBridge:
                 left.writes = [t for t in left.writes if t != tool]
         return left
 
-    def _check_runout(self, location: str, spool: Spool | None) -> None:
-        """Flag a spool that unloaded mid-print with more than RUNOUT_LEFT remaining.
+    def _check_runout(self, location: str, spool: Spool | None) -> Runout | None:
+        """Return a flag for a spool that unloaded mid-print with more than RUNOUT_LEFT
+        remaining, or None.
 
         That usually means an earlier swap charged the wrong spool. A jam or tangle that
         trips the filament sensor, and a planned color change, unload mid-print too, so the
         flag allows for them.
         """
         if spool is None or not spool.net_weight or spool.remaining_weight is None:
-            return
+            return None
         if spool.remaining_weight <= RUNOUT_LEFT * spool.net_weight:
-            return
+            return None
         log.warning(
             "[%s] spool %d unloaded mid-print with %.0f g left in Spoolman",
             location,
             spool.id,
             spool.remaining_weight,
         )
-        self.bridge.state.runouts[spool.id] = Runout(
-            location, spool.remaining_weight, spool.net_weight, spool.used_weight
-        )
+        return Runout(location, spool.remaining_weight, spool.net_weight, spool.used_weight)
 
-    def _claim_handled(self, location: str, claim: int, others: list[int]) -> None:
-        """Record a handled claim and the claims it beat, so their boxes are cleared."""
+    def _claim_handled(self, location: str, claim: int, others: list[int]) -> list[int]:
+        """Return a handled claim and the claims it beat, so their boxes are cleared."""
         if others:
             log.warning(
                 "[%s] several spools claimed at once: chose spool %d, the most "
@@ -823,8 +826,7 @@ class PrinterBridge:
                 ", ".join(str(i) for i in others),
             )
         # _claims() leaves spools already in `claimed` out of the candidates.
-        for spool_id in [claim, *others]:
-            self.bridge.state.claimed.append(spool_id)
+        return [claim, *others]
 
     def _edited(self, tool: int, material, spool: Spool) -> drift.Difference | None:
         """Return why the printer should get Spoolman's edit of `spool`, or None.
@@ -904,10 +906,13 @@ class PrinterBridge:
             )
         return Drift(active.id, diffs, level=logging.WARNING), False
 
-    async def sync_printer(self, spools: list[Spool], plan: Plan) -> None:
-        """Write the plan's tools to the printer in one job."""
+    async def sync_printer(self, spools: list[Spool], plan: Plan) -> bool:
+        """Write the plan's tools to the printer in one job.
+
+        Returns whether it ran one, so the caller saves what it wrote.
+        """
         if self._model_error:
-            return
+            return False
         by_id = {s.id: s for s in spools}
         writes: list[printer_sync.ToolWrite] = []
         minting = False  # A tool's write waits for its spool's UUID to be stored.
@@ -936,7 +941,7 @@ class PrinterBridge:
             writes.append(printer_sync.ToolWrite(tool, spool, uuid_value))
 
         if not writes and minting:
-            return  # The job is still needed: leave its waits and failures as they are.
+            return False  # The job is still needed: leave its waits and failures as they are.
         if not writes:
             # A wait for the delay ends silently. A job that was failing or waiting on a
             # busy printer says it's no longer needed.
@@ -946,7 +951,7 @@ class PrinterBridge:
                 log.info("%s sync job no longer needed", self.label)
             self._sync_delaying = False
             self._sync_busy = self._sync_failed = None
-            return
+            return False
         delay = self.config.sync_delay
         idle_for = 0.0 if self._idle_since is None else self.bridge.clock() - self._idle_since
         if idle_for < delay:
@@ -959,7 +964,7 @@ class PrinterBridge:
                     delay,
                 )
             self._sync_delaying = True
-            return
+            return False
         self._sync_delaying = False
         gcode = printer_sync.build_job(self._preamble(), writes)
         try:
@@ -973,7 +978,7 @@ class PrinterBridge:
                         "%s became %s; sync job waits for the next idle poll", self.label, state
                     )
                 self._sync_busy = state
-                return
+                return False
             await self.client.upload_and_print(
                 self.config.sync_storage, self.config.sync_file, gcode
             )
@@ -981,12 +986,12 @@ class PrinterBridge:
             if self._sync_busy != "409":
                 log.info("%s busy; sync job waits for the next idle poll", self.label)
             self._sync_busy = "409"
-            return
+            return False
         except ServiceError as e:
             if self._sync_failed != e.summary:
                 log.warning("%s sync job failed: %s", self.label, e)
             self._sync_failed = e.summary
-            return
+            return False
         if self._sync_failed is not None:
             log.warning("%s sync job working again", self.label)
         # A wait on a busy printer ends with the job; the line below says it ran.
@@ -995,7 +1000,7 @@ class PrinterBridge:
         for w in writes:
             self.writes[w.tool] = self._write(w.tool).wrote(printer_sync.filament_for(w))
         self._poll_soon = True
-        self.bridge._save()
+        return True
 
 
 @dataclass
@@ -1039,7 +1044,11 @@ class Bridge:
         several = len(self.config.printers) > 1
         self.printers = [
             PrinterBridge(
-                p, self.clients[p.name], self, label=f"printer {p.name}" if several else "printer"
+                p,
+                self.clients[p.name],
+                self,
+                self.state.printers.setdefault(p.name, PrinterState()),
+                label=f"printer {p.name}" if several else "printer",
             )
             for p in self.config.printers
         ]
@@ -1137,10 +1146,11 @@ class Bridge:
         for printer in self.printers:
             if printer.name in reads:
                 status, reading = reads[printer.name]
-                await printer.check_missing(spools)
-                plans[printer.name] = printer.process(
-                    reading, spools, status, claims.get(printer.name, {})
-                )
+                if await printer.check_missing(spools):
+                    self._save()
+                plan = printer.process(reading, spools, status, claims.get(printer.name, {}))
+                self._keep(plan)
+                plans[printer.name] = plan
             # An unread printer's conditions stand until it answers again.
             _add_flags(flags, printer.flags(by_id))
         _add_flags(flags, self.shared.check(self._active_where()))
@@ -1154,12 +1164,26 @@ class Bridge:
         if self.config.claim_field:
             await self.sync_claims()
         for printer in self.printers:
-            if printer.name in plans and reads[printer.name][0].state in IDLE_STATES:
-                await printer.sync_printer(spools, plans[printer.name])
+            idle = printer.name in plans and reads[printer.name][0].state in IDLE_STATES
+            if idle and await printer.sync_printer(spools, plans[printer.name]):
+                self._save()
         if self.config.flag_field:
             await self.sync_flags(
                 spools, {spool_id: " | ".join(texts) for spool_id, texts in flags.items()}
             )
+
+    def _keep(self, plan: Plan) -> None:
+        """Queue a printer's charges and keep its runout flags and handled claims, then
+        save them in one transaction with its state and events."""
+        for rec in plan.charges:
+            self.state.outbox.push(rec)
+        for spool_id, runout in plan.runouts.items():
+            if runout is None:
+                self.state.runouts.pop(spool_id, None)
+            else:
+                self.state.runouts[spool_id] = runout
+        self.state.claimed += plan.claimed
+        self._save(plan.events)
 
     def _check_negative(self, spools: list[Spool]) -> None:
         """Log a loaded spool whose remaining weight in Spoolman goes below 0, and its recovery.
