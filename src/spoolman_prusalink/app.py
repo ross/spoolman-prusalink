@@ -85,11 +85,13 @@ class Recovery(NamedTuple):
 class Reachability:
     """Track whether a service can be read, and for how long it hasn't been.
 
-    The trouble is "unreachable" (a transport error) or a "bad answer" (the service
-    replied, but badly). A bad answer with a different error is a change too, since a
-    wrong key and a server error need different fixes. A transport error's text isn't:
-    refusals and timeouts come and go while a printer is off. This class holds state
-    only. `failed()` and `ok()` report what changed, and the caller logs it.
+        The trouble is "unreachable" (a transport error) or a "bad answer" (the service
+        replied, but badly). A bad answer with a different error is a change too, since a
+        wrong key and a server error need different fixes. A transport error's text isn't:
+        refusals and timeouts come and go while a printer is off. This class holds state
+        only. `failed()` and `ok()` report what changed, and the caller logs it. A change
+    starts the clock again, so a reminder or recovery line gives the length of the
+    current trouble.
     """
 
     name: str
@@ -112,6 +114,7 @@ class Reachability:
             self.unreachable, self.error = unreachable, error
             return Trouble.STARTED
         if (unreachable, error) != (self.unreachable, self.error):
+            self.since = self._reminded = now  # Time and reminders measure this trouble.
             self.unreachable, self.error = unreachable, error
             return Trouble.CHANGED
         if now - self._reminded >= REACH_REMINDER:
@@ -143,7 +146,10 @@ def _log_failed(reach: Reachability, error: Exception, *, unreachable: bool) -> 
         what = "unreachable" if unreachable else "giving bad answers"
         log.info("%s still %s after %s", reach.name, what, reach.lasting())
     else:
-        log.debug("%s read still failing: %s", reach.name, error)
+        if unreachable:
+            log.debug("%s still unreachable: %s", reach.name, error)
+        else:
+            log.debug("%s read failed, skipping poll: %s", reach.name, error)
 
 
 def _log_ok(reach: Reachability) -> None:

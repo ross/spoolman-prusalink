@@ -87,7 +87,7 @@ archived active spool (M3, M3a) is logged once when the bridge finds it.
 | C6 | Manual extrusion or retraction from the printer menu. | Extrusion is charged to the active spool. The counter only counts filament fed. | Implemented; end to end (`test_c6_manual_extrude_and_retract`) |
 | C7 | Tool reports no filament (after an unload, or a sensor problem). | Holds usage until a filament is reported. | Tested; end to end (`test_c7_tool_reports_no_filament`) |
 | C8 | Firmware update. | A reboot (C1). The model is checked again. | Implemented; end to end (`test_c8_firmware_update`) |
-| C9 | Printer answers with an error (wrong API key, 500). | Logs the error once, until it changes or clears. Charges nothing. | Tested; end to end (`test_c9_printer_answers_with_an_error`) |
+| C9 | Printer answers with an error (wrong API key, 500). | Logs the error once, again if the error changes, and as an hourly INFO reminder while it lasts. One warning on recovery gives how long it lasted. Charges nothing. | Tested; end to end (`test_c9_printer_answers_with_an_error`) |
 
 ## Writing to the printer
 
