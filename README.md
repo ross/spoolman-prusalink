@@ -231,9 +231,6 @@ Other rules:
   product look the same.
 - If a print starts while a swap is staged, the bridge warns and keeps
   charging the old spool.
-- Firmware without `unload_count` can't stage swaps. A Spoolman change then
-  switches at the next poll, after charging usage so far to the outgoing
-  spool.
 
 The bridge also logs when the printer's filament name, color, nozzle, preheat
 or bed temperature, or instance UUID differs from the loaded spool. A menu load
@@ -380,11 +377,6 @@ job runs. The wait starts at the first poll that sees the printer idle, and
 starts over after any poll that couldn't read the printer. It's checked once
 per poll, so the job runs up to `poll_idle` seconds later.
 The default, 0, runs the job on the first idle poll.
-
-After upgrading from a version that didn't record its writes, the bridge
-rewrites each tool once when idle. Those versions relied on `J` for
-temperatures, which the firmware ignores, so they left the nozzle and bed
-temperatures at 0.
 
 Requirements for a write:
 

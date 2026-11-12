@@ -18,7 +18,6 @@ import httpx
 
 from . import drift, printer_sync
 from .accounting import (
-    UNKNOWN_WRITE,
     WARNINGS,
     EventKind,
     Provisional,
@@ -984,8 +983,6 @@ class PrinterBridge:
         """
         if st.written is None:
             return None
-        if st.written == UNKNOWN_WRITE:
-            return "rewriting once with full filament parameters"
         try:
             want = self._write_lines(tool, spool, spool.instance_uuid)
         except printer_sync.CannotSync:
@@ -1234,9 +1231,9 @@ class Bridge:
     config: Config
     spoolman: Spoolman
     clients: dict[str, PrusaLink]  # By printer name.
+    # Where the state and the ledger are saved. Closed by `aclose`.
+    db: Database
     state: State = field(default_factory=State)
-    # Where the state and the ledger are saved; None saves them nowhere. Closed by `aclose`.
-    db: Database | None = None
     printers: list[PrinterBridge] = field(init=False, default_factory=list)
     _ready_fields: set[str] = field(default_factory=set)
     _flags: dict[int, str] = field(default_factory=dict)  # Desired flags from the last poll.
@@ -1306,8 +1303,6 @@ class Bridge:
 
     def _save(self, ledger: Sequence[dict] = ()) -> None:
         """Save the state and append the `ledger` records, in one transaction."""
-        if self.db is None:
-            return
         self.db.save(self.state, ledger)
 
     async def aclose(self) -> None:
@@ -1316,8 +1311,7 @@ class Bridge:
                 await client.aclose()
             await self.spoolman.aclose()
         finally:
-            if self.db is not None:
-                self.db.close()
+            self.db.close()
 
     async def poll(self) -> None:
         """Poll every printer once, then reconcile Spoolman.
@@ -1510,14 +1504,14 @@ class Bridge:
 
         Only when the response is the stored weight plus this charge: anything else
         includes a change made in Spoolman since the last read, and leaving the stored
-        weight alone lets the next read see it as an edit. When the charge's weight or
-        the stored weight isn't known, the response is taken as the bridge's own charge.
+        weight alone lets the next read see it as an edit. When the charge's weight
+        isn't known, the response is taken as the bridge's own charge.
         """
         runout = self.state.runouts.get(rec["spool_id"])
         if runout is None or used is None:
             return
         grams = rec.get("grams")
-        if runout.used is None or grams is None:
+        if grams is None:
             runout.used = used
             return
         # Spoolman clamps a refund at 0.
@@ -1535,9 +1529,6 @@ class Bridge:
         for spool_id, runout in list(self.state.runouts.items()):
             spool = by_id.get(spool_id)
             if spool is None:
-                continue
-            if runout.net is None or runout.used is None:
-                runout.net, runout.used = spool.net_weight, spool.used_weight
                 continue
             if (
                 spool.net_weight is not None
@@ -1728,8 +1719,6 @@ class Bridge:
         assert key
         if not store and (spool_id, value) in self._unowned_uuids:
             return True
-        if (spool_id, value) in self._refused_uuids:
-            return False
         try:
             every = await self.spoolman.spools(archived=True)
         except (httpx.HTTPError, ValueError, KeyError) as e:
@@ -1745,7 +1734,7 @@ class Bridge:
         )
         if owner is not None:
             self._refused_uuids.add((spool_id, value))
-            # Logged once: `_refused_uuids` returns early on every later call.
+            # Logged once: `_tag_uuid` doesn't ask again for a refused pair.
             self._uuid_failing.pop(spool_id, None)
             log.info(
                 "spool %d can't take instance UUID %s from the printer: archived spool %d has it",
