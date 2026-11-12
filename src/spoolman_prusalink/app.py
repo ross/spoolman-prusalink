@@ -8,7 +8,7 @@ import logging
 import re
 import time
 import uuid
-from collections.abc import Callable, Hashable, Sequence
+from collections.abc import Callable, Hashable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from enum import Enum
@@ -1345,21 +1345,34 @@ class Bridge:
         return next((p for p in self.printers if p.name == name), None)
 
     @classmethod
-    def from_config(cls, config: Config, *, clock: Callable[[], float] = time.monotonic) -> Bridge:
+    def from_config(
+        cls,
+        config: Config,
+        *,
+        clock: Callable[[], float] = time.monotonic,
+        spoolman_transport: httpx.AsyncBaseTransport | None = None,
+        printer_transports: Mapping[str, httpx.AsyncBaseTransport] | None = None,
+    ) -> Bridge:
         """A bridge on the configured printers, Spoolman and database.
 
         It locks the database until `aclose`, and creates it if it's missing. `clock`
-        times the idle wait and every outage.
+        times the idle wait and every outage. The transports, for Spoolman and by
+        printer name, replace the network; the clients close them.
         """
+        transports = printer_transports or {}
         db = Database.open(config.db_file)
         return cls(
             config=config,
-            clients={p.name: PrusaLink(p.url, p.api_key) for p in config.printers},
+            clients={
+                p.name: PrusaLink(p.url, p.api_key, transport=transports.get(p.name))
+                for p in config.printers
+            },
             spoolman=Spoolman(
                 config.spoolman_url,
                 uuid_field=config.uuid_field,
                 flag_field=config.flag_field,
                 claim_field=config.claim_field,
+                transport=spoolman_transport,
             ),
             state=db.load(),
             db=db,

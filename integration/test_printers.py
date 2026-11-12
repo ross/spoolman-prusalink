@@ -24,7 +24,6 @@ from integration.conftest import (
     events,
     logged,
     print_spec,
-    sim_clock,
 )
 from integration.conftest import (
     count as count_at,
@@ -68,15 +67,12 @@ async def load_a_at_b(w: World) -> list[dict]:
 
 
 def bridge_for(w: World, cfg) -> Bridge:
-    """A new bridge on `cfg` with the simulator's clock, replacing `w.bridge`.
+    """A new bridge on `cfg`, replacing `w.bridge`.
 
     The caller closes the old bridge first; the world closes every bridge it started at
     the end.
     """
-    bridge = Bridge.from_config(cfg, clock=sim_clock(w.sim))
-    w.bridge = bridge
-    w.bridges.append(bridge)
-    return bridge
+    return w.start_bridge(cfg)
 
 
 @pytest.mark.parametrize("b_first", [False, True], ids=["a-first", "b-first"])
