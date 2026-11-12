@@ -487,12 +487,7 @@ class PrinterBridge:
     def _uuids(self) -> bool:
         """Whether to write and compare instance UUIDs: configured with a Spoolman field to
         keep them in, and the model keeps them."""
-        return bool(
-            self.config.uuids
-            and self.bridge.config.uuid_field
-            and self._model is not None
-            and self._model.uuids
-        )
+        return bool(self.bridge.config.uuid_field and self._tag_reader)
 
     def _preamble(self) -> tuple[str, ...]:
         if self.config.gcode_preamble is not None:
