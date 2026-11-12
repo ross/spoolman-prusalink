@@ -3224,6 +3224,50 @@ def with_uuid(data, value):
     return data
 
 
+async def assert_flag_kept_while_ambiguous(bridge, fake, spool_id):
+    """Make the location ambiguous (S11) and back: the spool's flag stays, unwritten."""
+    flag = fake.flag(spool_id)
+    patches = fake.writes.count(("patch", spool_id))
+    for other in (30, 31):
+        fake.spools[other] = spool(other)
+    for _ in range(2):
+        await bridge.poll()
+    assert 0 in bridge.printers[0].tools and fake.flag(spool_id) == flag
+    for other in (30, 31):
+        fake.spools[other]["location"] = "Shelf"
+    await bridge.poll()
+    assert fake.flag(spool_id) == flag
+    assert fake.writes.count(("patch", spool_id)) == patches
+
+
+async def test_a_skipped_tool_keeps_its_tagged_drift_flag(tmp_path):
+    """A tag that's another spool's is drift (Q11); its flag stands through an S11 skip."""
+    other = spool(21, location="Shelf")
+    other["extra"]["instance_uuid"] = json.dumps(TAG_K)
+    bridge, fake, printer = make(tmp_path, [spool(20), other], uuid_field="instance_uuid")
+    await bridge.poll()  # baseline
+    printer.material = other_tag()
+    await bridge.poll()
+    assert (
+        fake.flag(20) == f"{LOC}: printer filament differs: the loaded tag is spool 21's ({TAG_K})"
+    )
+    await assert_flag_kept_while_ambiguous(bridge, fake, 20)
+    await bridge.aclose()
+
+
+async def test_a_skipped_tool_keeps_its_uuid_conflict_flag(tmp_path):
+    """A tag whose UUID differs from the spool's; the conflict flag stands through an S11 skip."""
+    bridge, fake, printer = make(
+        tmp_path, [with_uuid(spool(19), "1f0e7d2a-3f6c-4d7b-9a43-6c1f0e7d2a11")]
+    )
+    await bridge.poll()  # baseline: 19, with no UUID on the printer
+    printer.boot_id, printer.extruded, printer.material = 2, 0, other_tag()
+    await bridge.poll()
+    assert "the loaded tag's instance UUID is" in fake.flag(19)
+    await assert_flag_kept_while_ambiguous(bridge, fake, 19)
+    await bridge.aclose()
+
+
 async def test_claim_of_the_loaded_tags_spool_writes_nothing(tmp_path):
     """Spool 20's tag is loaded while Spoolman has 19, then 20 is claimed: not a leftover."""
     bridge, fake, printer = make(tmp_path, [spool(19)], uuid_field="instance_uuid")
