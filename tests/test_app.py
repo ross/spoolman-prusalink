@@ -1244,7 +1244,7 @@ async def test_from_config_passes_the_clock_and_transports(tmp_path):
         await bridge.poll()  # The printer read fails, so Spoolman isn't read.
         assert seen == ["printer"]
         assert bridge.printers[0]._printer_reach.since == 3600.0
-        with pytest.raises(httpx.ConnectError):
+        with pytest.raises(Unreachable):
             await bridge.spoolman.spools()
         assert seen == ["printer", "spoolman"]
     finally:
