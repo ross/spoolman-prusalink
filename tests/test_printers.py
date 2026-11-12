@@ -374,7 +374,7 @@ async def test_x9_spoolman_down_queues_both_printers_charges_in_order(tmp_path):
     fake.fail_use = [503]  # The first retry fails, so the queue is saved with both.
     await bridge.poll()
     queued = read_state(tmp_path / "bridge.db").outbox
-    assert [(r["printer"], r["spool_id"]) for r in queued] == [("a", 19), ("b", 20)]
+    assert [(r.printer, r.spool_id) for r in queued] == [("a", 19), ("b", 20)]
     await bridge.poll()
     assert fake.used == {19: [100.0, 10.0], 20: [100.0, 20.0]}
     await bridge.aclose()

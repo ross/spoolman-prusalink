@@ -136,26 +136,6 @@ own field. Each phase saves once, at its end.
 
 Size: medium. Falls out of B2 for the most part.
 
-### B6. Charges are untyped dictionaries
-
-A charge is a dictionary with 11 keys built in `process()` (`app.py`).
-It goes to the outbox, then to `flush`, then to the ledger.
-
-- Readers are defensive about a shape the bridge itself writes:
-  `rec.get("tool", -1)` and `int(rec.get("extruded_mm", 0))`, in `flush`
-  and `_hold_deleted`.
-- `db.save` works out which charges left the outbox by comparing lists of
-  canonical JSON (`db.py`), because the outbox is a plain list that its
-  owner mutates.
-- The ledger tells a charge from an event by whether the record has an
-  `event` key (`db.py`).
-
-Shape: a `ChargeRecord` dataclass, as events are typed in `events.py`. An
-outbox object with push and pop that knows its own row IDs, so the database
-is told what changed.
-
-Size: medium.
-
 ### B7. Write-sync state sits in the accounting state
 
 `needs_sync`, `sync_attempts`, and `written` are fields of `ToolState`.
@@ -170,33 +150,12 @@ tool state.
 
 Size: small to medium.
 
-### B9. `account()` is one function of six steps
-
-`account()` (`accounting.py`) is about 500 lines in six numbered steps.
-It's pure, well documented, and tested through its public signature. The
-order of the steps is real: unload, claim, assignment, print start, usage.
-Step 3 is a 13-branch `elif` chain where order is priority.
-
-Shape: each numbered step becomes a function over `last` and `current`,
-the two states `account()` already keeps. It doesn't change behavior, and
-the existing tests are the check.
-
-Not planned: a formal state machine, with a named mode per tool and defined
-transitions. The conditions overlap (a provisional charge with a staged
-spool, a deleted spool with a staged spool), so the modes multiply.
-`violations()` in `accounting.py` lists the rules for a legal state, which
-is what such a machine would be derived from. Reconsider it against those
-rules.
-
-Size: medium.
-
 ### B10. Smaller items
 
 - The `tools` table holds a JSON blob per tool, `printer_flags` holds JSON,
   and `seen_uuids` has columns. `SCHEMA_VERSION` doesn't cover the blob's
   shape. The blob is `ToolState.to_json` in `accounting.py`. Do it last in
-  workstream 3, after workstreams 3 and 4 have changed what's saved per
-  tool.
+  workstream 3, once B3 and B7 have changed what's saved per tool.
 
 ## Tests and tooling
 
@@ -251,13 +210,6 @@ The duplication is accepted (see [the test layers](#the-test-layers)).
 Nothing to do now. If changing both suites for each behavior change becomes
 a burden, narrow the integration suite to the scenarios where Spoolman's
 own behavior decides the outcome. Don't narrow the unit suite.
-
-### T7. Tests match prose
-
-About 78 integration lines compare an event's message exactly, and over
-300 lines across both suites match log text. Events now have fields, which
-the ledger stores beside the message, and `tests/test_events.py` checks the
-wording of each kind once. Port the integration checks to the fields.
 
 ## Simulator
 
@@ -347,7 +299,6 @@ Size: medium.
 | # | Workstream | Findings | Depends on |
 | --- | --- | --- | --- |
 | 3 | Conditions and saved facts | B2, B3, B5, B7, B10, T1 (rest) | Nothing |
-| 4 | Typed records | B6, B9, T7 | Nothing. Easier after 3 |
 | 5 | Narrow the bridge boundary | B4, T1 (UUID registry tests) | Workstream 3 |
 | 8 | Simulator state | S1, S5, S6, then S2, S4 | Nothing. S4 continues the move that put the PrusaLink routing in `prusalink.serve` |
 
