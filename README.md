@@ -154,11 +154,12 @@ them. When no printer can be read, whether it's off, answers with an error,
 or lacks the filament endpoint, the tick ends there. The interval is the
 printing rate while any printer that can be reached is busy or hasn't
 reported its state yet. A printer that's off is logged as an outage, once
-and then hourly; one that answers with an error is logged once per distinct
-error. Either way it's skipped until it can be read, its flags in Spoolman
-stay as they were, and the others carry on. When a logged problem clears,
-one line says so, at the level the problem was logged at. Log lines about a tool
-keep the `[location]` prefix; lines about a whole printer name it when there
+and then hourly; one that answers with an error is logged the same way, and
+again when the error changes. Either way it's skipped until it can be read, its
+flags in Spoolman stay as they were, and the others carry on. When a printer
+or Spoolman can be read again, one warning says so and how long the trouble
+lasted. Other logged problems end with one line at the level they were logged
+at. Log lines about a tool keep the `[location]` prefix; lines about a whole printer name it when there
 are several. A spool active in two tools at once, which happens when one
 printer misses an unload across a reboot, is logged once and flagged on the
 spool naming both locations.
