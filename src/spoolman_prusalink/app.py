@@ -443,10 +443,14 @@ class PrinterBridge:
         try:
             printer_type = await self.client.printer_type()
         except ServiceError as e:
-            # The summary, not the body: this is a flag's text too.
+            # The summary, not the body: this is a flag's text too. The log has the body.
             error = f"can't read the printer model ({e.summary})"
             if error != self._model_error:
-                log.warning("%s%s; printer writes are off until it can", self._prefix, error)
+                log.warning(
+                    "%scan't read the printer model (%s); printer writes are off until it can",
+                    self._prefix,
+                    e,
+                )
             self._model_error = error
             return
         self._model_boot = boot_id
