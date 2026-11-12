@@ -248,6 +248,11 @@ class PrinterBridge:
         return self.bridge.state.tools(self.name)
 
     @property
+    def writes(self) -> dict[int, printer_sync.WriteState]:
+        """Where each tool's write to the printer stands, which the database keeps."""
+        return self.bridge.state.printers.setdefault(self.name, PrinterState()).writes
+
+    @property
     def _seen_tags(self) -> dict[int, SeenTag]:
         """What each tool's instance UUID was last seen with, which the database keeps."""
         return self.bridge.state.printers.setdefault(self.name, PrinterState()).seen_tags
@@ -527,6 +532,8 @@ class PrinterBridge:
                 claim=claim,
             )
             # A skipped tool's state changes only to record the counter and any reboot.
+            if result.resync:
+                self.writes[tool] = self._write(tool).resync()
             if not result.skipped or tool in self.tools:
                 self.tools[tool] = result.state
             if result.runout is not None:
@@ -604,13 +611,13 @@ class PrinterBridge:
                     spools=spools,
                     uuids=self._uuids,
                     refused=self.bridge._refused_uuids,
-                    written_uuid=st.written.uuid if st.written else None,
+                    written_uuid=written.uuid if (written := self._write(tool).written) else None,
                 )
             if seen != SeenTag():
                 self._seen_tags[tool] = seen
             if decision is Decision.CONFLICT:
                 self._uuid_conflict(location, material, active, notes, compared)
-                self._no_write(tool, st)
+                self._no_write(tool)
             elif comparable:
                 if decision is not Decision.NONE:
                     # Compare as if Spoolman already had the printer's UUID: adopting it
@@ -629,16 +636,14 @@ class PrinterBridge:
                     # With the location emptied, the spool is leaving and won't be
                     # rewritten, so only a real printer difference is worth reporting.
                     edited = (
-                        self._edited(tool, st, material, active)
-                        if st.assigned is not None
-                        else None
+                        self._edited(tool, material, active) if st.assigned is not None else None
                     )
                 if tagged:
-                    self._no_write(tool, st)
+                    self._no_write(tool)
                     if diffs:
                         self._drift(location, active, drift.describe(diffs), notes, compared)
                 elif not diffs and not edited:
-                    self._no_write(tool, st)
+                    self._no_write(tool)
                 else:
                     self._classify_mismatch(
                         tool,
@@ -717,10 +722,14 @@ class PrinterBridge:
         for spool_id, texts in self._compared_flags.get(tool, {}).items():
             flags.setdefault(spool_id, []).extend(texts)
 
-    def _no_write(self, tool: int, st: ToolState) -> None:
+    def _write(self, tool: int) -> printer_sync.WriteState:
+        return self.writes.get(tool, printer_sync.WriteState())
+
+    def _no_write(self, tool: int) -> None:
         """Drop any write still expected for a tool, so none fires later."""
-        if st.needs_sync or st.sync_attempts:
-            self.tools[tool] = replace(st, needs_sync=False, sync_attempts=0)
+        write = self._write(tool)
+        if write.due or write.attempts:
+            self.writes[tool] = write.settled()
 
     def _tag_differences(
         self, material: Material, active: Spool, spools: list[Spool]
@@ -846,14 +855,15 @@ class PrinterBridge:
             "keeps the usage here."
         )
 
-    def _edited(self, tool: int, st: ToolState, material, spool: Spool) -> drift.Difference | None:
+    def _edited(self, tool: int, material, spool: Spool) -> drift.Difference | None:
         """Return why the printer should get Spoolman's edit of `spool`, or None.
 
         That's when the printer still shows the bridge's last write, but the write the
         bridge would make now differs: someone changed the spool in Spoolman, not the
         printer.
         """
-        if st.written is None:
+        written = self._write(tool).written
+        if written is None:
             return None
         try:
             want = self._filament(tool, spool, spool.instance_uuid)
@@ -861,9 +871,9 @@ class PrinterBridge:
             # The edit can't be written, but it's still an edit, not drift:
             # _classify_mismatch flags why.
             want = None
-        if want == st.written:
+        if want == written:
             return None
-        if not printer_sync.printer_matches_write(material, st.written, self._uuids):
+        if not printer_sync.printer_matches_write(material, written, self._uuids):
             return None
         return drift.Difference(drift.What.EDIT)
 
@@ -889,12 +899,13 @@ class PrinterBridge:
         detail = drift.describe(diffs)
         # With the location emptied, the active spool is still loaded but is leaving:
         # don't write it, report the mismatch as drift.
-        expected = st.assigned is not None and (st.needs_sync or self.config.sync_drift or edited)
+        write = self._write(tool)
+        expected = st.assigned is not None and (write.due or self.config.sync_drift or edited)
         # Wait while a swap is staged: the active spool is about to change. During an
         # unconfirmed swap, write the assigned spool: the printer then shows what Spoolman
         # thinks is loaded, and confirming a different spool rewrites it.
         settled = st.assigned == st.active
-        if self.config.printer_sync and expected and st.sync_attempts < MAX_SYNC_ATTEMPTS:
+        if self.config.printer_sync and expected and write.attempts < MAX_SYNC_ATTEMPTS:
             if settled and self._model_error:
                 notes.append(
                     (
@@ -920,7 +931,7 @@ class PrinterBridge:
                 self._pending_writes.append(tool)
                 # After a sync job, the printer can take a poll to show it. Don't warn
                 # about that wait: a retry logs its job, and giving up logs below.
-                if not st.sync_attempts or edited:
+                if not write.attempts or edited:
                     notes.append(
                         (
                             ("printer", active.id),
@@ -941,7 +952,7 @@ class PrinterBridge:
                 (
                     ("printer", active.id),
                     f"[{location}] printer still differs from spool {active.id} after "
-                    f"{st.sync_attempts} sync jobs: {detail}",
+                    f"{write.attempts} sync jobs: {detail}",
                 )
             )
             flags.setdefault(active.id, []).append(
@@ -1061,15 +1072,7 @@ class PrinterBridge:
         self._sync_busy = self._sync_failed = None
         log.info("ran %s job %s:\n%s", self.label, self.config.sync_file, gcode.rstrip())
         for w in writes:
-            st = self.tools[w.tool]
-            # Expected until a poll sees the printer match, so an edit write that
-            # hasn't run yet isn't drift and one that didn't take is retried (W5).
-            self.tools[w.tool] = replace(
-                st,
-                needs_sync=True,
-                sync_attempts=st.sync_attempts + 1,
-                written=printer_sync.filament_for(w),
-            )
+            self.writes[w.tool] = self._write(w.tool).wrote(printer_sync.filament_for(w))
         self._pending_writes = []
         self._last_state = "BUSY"  # The job is starting; poll again soon to verify it.
         self.bridge._save()

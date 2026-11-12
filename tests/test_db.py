@@ -17,7 +17,7 @@ from spoolman_prusalink.db import (
     read_state,
 )
 from spoolman_prusalink.events import Baseline, StagedAtPrint, StagedAtReboot
-from spoolman_prusalink.printer_sync import WrittenFilament
+from spoolman_prusalink.printer_sync import WriteState, WrittenFilament
 from spoolman_prusalink.records import ChargeRecord, EventRecord, Outbox
 from spoolman_prusalink.state import PrinterState, Runout, State
 from spoolman_prusalink.tags import SeenTag
@@ -64,9 +64,6 @@ def full_state() -> State:
         pending_job=12,
         pending_at=1190,
         notice=StagedAtPrint(8, 7),
-        needs_sync=True,
-        sync_attempts=1,
-        written=WrittenFilament("PLA", 215, 60, color="#8c9099"),
         held_mm=30,
         deleted_spool=4,
         staged_notice=StagedAtReboot(8, 7),
@@ -81,6 +78,10 @@ def full_state() -> State:
                 tools={0: tool, 1: ToolState(boot_id=3)},
                 flags={7: ["unloaded", "drift"]},
                 seen_tags={0: SeenTag(TAG, 7, runout=True), 1: SeenTag(TAG.upper())},
+                writes={
+                    0: WriteState(True, 1, WrittenFilament("PLA", 215, 60, color="#8c9099")),
+                    1: WriteState(due=True),
+                },
             ),
             "mk4s": PrinterState(tools={0: ToolState(boot_id=1, charged=5)}),
         },
@@ -531,9 +532,6 @@ def test_a_lock_that_fails_for_another_reason_lets_go_of_the_file(path, monkeypa
         (lambda d: d["swap"].pop("mm"), "missing key 'mm'"),
         (lambda d: d.update(evict=None), "a value of the wrong type"),
         (lambda d: d.update(since_load=None), "a value of the wrong type"),
-        # The G-code text an older bridge saved.
-        (lambda d: d.update(written='M865 X R N"PLA" T215 B60 L0'), "a value of the wrong type"),
-        (lambda d: d["written"].pop("nozzle"), "missing key 'nozzle'"),
     ],
 )
 def test_a_tools_row_missing_a_key_is_a_database_error(path, edit, message):
@@ -587,3 +585,26 @@ def test_an_outbox_row_without_outcomes_loads_with_none(path):
     assert all(
         (r.applied, r.failed, r.held) == (None, None, False) for r in read_state(path).outbox
     )
+
+
+@pytest.mark.parametrize(
+    ("written", "message"),
+    [
+        # The G-code text an older bridge saved, as JSON and as it was.
+        (json.dumps('M865 X R N"PLA" T215 B60 L0'), "a value of the wrong type"),
+        ('M865 X R N"PLA" T215 B60 L0', "a value of the wrong type"),
+        (json.dumps({"name": "PLA", "bed": 60}), "missing key 'chamber'"),
+    ],
+)
+def test_a_writes_row_that_cant_be_read_is_a_database_error(path, written, message):
+    db = Database.open(path)
+    db.save(full_state())
+    db.close()
+    conn = sqlite3.connect(path)
+    with conn:
+        conn.execute("UPDATE writes SET written = ? WHERE tool = 0", (written,))
+    conn.close()
+    with pytest.raises(
+        DatabaseError, match=re.escape(f"{path}: writes row ('core', 0): {message}")
+    ):
+        Database.open(path)

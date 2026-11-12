@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import re
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from .color import same_color
 from .models import Material, Spool
@@ -297,6 +297,33 @@ class WrittenFilament:
             color=data["color"],
             uuid=data["uuid"],
         )
+
+
+@dataclass(frozen=True)
+class WriteState:
+    """Where the bridge is with writing a tool's active spool to the printer."""
+
+    # The printer should show the active spool once idle: set when the active spool
+    # changes or the tool unloads, and cleared when a poll sees the printer match.
+    due: bool = False
+    attempts: int = 0  # Sync jobs run since the write became due.
+    # What the bridge last wrote to the tool, so an edit in Spoolman can be told apart
+    # from a change on the printer. None when the bridge hasn't written this tool.
+    written: WrittenFilament | None = None
+
+    def resync(self) -> WriteState:
+        """The active spool changed or the tool unloaded: a write is due."""
+        return replace(self, due=True, attempts=0)
+
+    def settled(self) -> WriteState:
+        """Nothing is to be written: the printer matches, or the tool is left alone."""
+        return replace(self, due=False, attempts=0)
+
+    def wrote(self, filament: WrittenFilament) -> WriteState:
+        """A sync job wrote `filament`. It stays due until a poll sees the printer
+        match, so a write that hasn't shown yet isn't drift and one that didn't take
+        is retried (W5)."""
+        return WriteState(due=True, attempts=self.attempts + 1, written=filament)
 
 
 def filament_for(write: ToolWrite) -> WrittenFilament:

@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from .accounting import ToolState
+from .printer_sync import WriteState
 from .records import Outbox
 from .tags import SeenTag
 
@@ -45,6 +46,8 @@ class PrinterState:
     # By tool: what the tool's instance UUID was last seen with. Kept so a runout reload
     # of one spool's tag isn't taken for the next spool's after a restart.
     seen_tags: dict[int, SeenTag] = field(default_factory=dict)
+    # By tool: where the bridge is with writing the tool's active spool to the printer.
+    writes: dict[int, WriteState] = field(default_factory=dict)
 
 
 @dataclass

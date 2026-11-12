@@ -716,7 +716,7 @@ async def test_s3_moved_after_the_write_back(world: World):
     assert w.material() == (PLA[0], PLA[1], w.uuids["A"])
     # A poll sees the write-back took, so the rewrite below comes from the move, not the unload.
     await w.poll()
-    assert not w.bridge.printers[0].tools[0].needs_sync
+    assert not w.bridge.printers[0].writes[0].due
 
     # The move after the write-back still confirms the swap, and B is written over A.
     await w.move("A", w.shelf)

@@ -136,26 +136,12 @@ own field. Each phase saves once, at its end.
 
 Size: medium. Falls out of B2 for the most part.
 
-### B7. Write-sync state sits in the accounting state
-
-`needs_sync`, `sync_attempts`, and `written` are fields of `ToolState`.
-`account()` sets `needs_sync` and resets `sync_attempts`
-(`accounting.py`), although the accounting knows nothing else about
-printer writes. `app.py` rewrites all three in `_no_write` and
-`sync_printer`.
-
-Shape: `account()` reports "the active spool changed or the tool unloaded"
-in its result. The write logic owns its own per-tool state, saved beside the
-tool state.
-
-Size: small to medium.
-
 ### B10. Smaller items
 
 - The `tools` table holds a JSON blob per tool, `printer_flags` holds JSON,
   and `seen_uuids` has columns. `SCHEMA_VERSION` doesn't cover the blob's
   shape. The blob is `ToolState.to_json` in `accounting.py`. Do it last in
-  workstream 3, once B3 and B7 have changed what's saved per tool.
+  workstream 3, once B3 has changed what's saved per tool.
 
 ## Tests and tooling
 
@@ -298,7 +284,7 @@ Size: medium.
 
 | # | Workstream | Findings | Depends on |
 | --- | --- | --- | --- |
-| 3 | Conditions and saved facts | B2, B3, B5, B7, B10, T1 (rest) | Nothing |
+| 3 | Conditions and saved facts | B2, B3, B5, B10, T1 (rest) | Nothing |
 | 5 | Narrow the bridge boundary | B4, T1 (UUID registry tests) | Workstream 3 |
 | 8 | Simulator state | S1, S5, S6, then S2, S4 | Nothing. S4 continues the move that put the PrusaLink routing in `prusalink.serve` |
 

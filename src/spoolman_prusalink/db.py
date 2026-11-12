@@ -11,6 +11,7 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from .accounting import ToolState
+from .printer_sync import WriteState, WrittenFilament
 from .records import ChargeRecord, EventRecord, Outbox
 from .state import PrinterState, Runout, State
 from .tags import SeenTag
@@ -37,6 +38,14 @@ CREATE TABLE seen_uuids (
     uuid TEXT NOT NULL,
     spool_id INTEGER,
     runout INTEGER NOT NULL,
+    PRIMARY KEY (printer, tool)
+);
+CREATE TABLE writes (
+    printer TEXT NOT NULL,
+    tool INTEGER NOT NULL,
+    due INTEGER NOT NULL,
+    attempts INTEGER NOT NULL,
+    written TEXT,
     PRIMARY KEY (printer, tool)
 );
 CREATE TABLE outbox (
@@ -77,6 +86,7 @@ _KEYED = {
     "tools": (("printer", "tool"), ("data",)),
     "printer_flags": (("printer", "spool_id"), ("texts",)),
     "seen_uuids": (("printer", "tool"), ("uuid", "spool_id", "runout")),
+    "writes": (("printer", "tool"), ("due", "attempts", "written")),
     "flagged": (("spool_id",), ()),
     "claimed": (("spool_id",), ()),
     "runouts": (("spool_id",), ("location", "remaining", "net", "used")),
@@ -379,6 +389,9 @@ def _rows(state: State) -> Rows:
             # What the bridge watched isn't saved (see `SeenTag`).
             if seen.uuid is not None:
                 rows["seen_uuids"][(name, tool)] = (seen.uuid, seen.spool_id, int(seen.runout))
+        for tool, w in p.writes.items():
+            written = None if w.written is None else _canonical(w.written.to_json())
+            rows["writes"][(name, tool)] = (int(w.due), w.attempts, written)
     for spool_id in state.flagged:
         rows["flagged"][(spool_id,)] = ()
     for spool_id in state.claimed:
@@ -412,6 +425,15 @@ def _read(conn: sqlite3.Connection) -> tuple[State, Rows]:
     for (printer, tool), (uuid, spool_id, runout) in rows["seen_uuids"].items():
         seen = state.printers.setdefault(printer, PrinterState()).seen_tags
         seen[tool] = SeenTag(uuid, spool_id, runout=bool(runout))
+    for (printer, tool), (due, attempts, written) in rows["writes"].items():
+        try:
+            filament = None if written is None else WrittenFilament.from_json(json.loads(written))
+        except KeyError as e:
+            raise ValueError(f"writes row ({printer!r}, {tool}): missing key {e}") from e
+        except (TypeError, ValueError) as e:
+            raise ValueError(f"writes row ({printer!r}, {tool}): a value of the wrong type") from e
+        writes = state.printers.setdefault(printer, PrinterState()).writes
+        writes[tool] = WriteState(bool(due), attempts, filament)
     state.printers = dict(sorted(state.printers.items()))
     state.flagged = [k for (k,) in rows["flagged"]]
     state.claimed = [k for (k,) in rows["claimed"]]
