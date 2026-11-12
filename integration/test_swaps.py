@@ -181,7 +181,7 @@ async def test_s1_untrusted_tag_is_left_alone(world: World):
     load = {"source": "tag", "name": PETG[0], "color": PETG[1], "uuid": tag}
     await w.swap_cycle(temperatures=(250, 170, 80), **load)
     for kept in w.bridge.state.printers.values():
-        kept.seen_uuids.clear()
+        kept.seen_tags.clear()
     w.bridge._save()
     await w.restart()
     for _ in range(3):

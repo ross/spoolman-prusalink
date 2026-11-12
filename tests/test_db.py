@@ -17,6 +17,7 @@ from spoolman_prusalink.db import (
 )
 from spoolman_prusalink.events import StagedAtPrint, StagedAtReboot
 from spoolman_prusalink.state import PrinterState, Runout, State
+from spoolman_prusalink.tags import SeenTag
 
 TAG = "91da34d9-c1c1-470f-bac7-185a2346f86a"
 
@@ -51,7 +52,7 @@ def full_state() -> State:
             "core": PrinterState(
                 tools={0: tool, 1: ToolState(boot_id=3)},
                 flags={7: ["unloaded", "drift"]},
-                seen_uuids={0: (TAG, 7, True), 1: (TAG.upper(), None, False)},
+                seen_tags={0: SeenTag(TAG, 7, runout=True), 1: SeenTag(TAG.upper())},
             ),
             "mk4s": PrinterState(tools={0: ToolState(boot_id=1, charged=5)}),
         },
