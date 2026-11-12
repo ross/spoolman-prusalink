@@ -227,8 +227,7 @@ def test_bridge_config_is_valid_toml_with_the_right_shape():
     assert core["url"] == "http://127.0.0.1:8001"
     assert core["api_key"] == "sim-core-one-l"
     assert core["tools"] == [{"index": 0, "location": "core-one-l"}]
-    assert "uuids" not in core
-    assert mk4s["uuids"] is False
+    assert set(mk4s) == {"name", "url", "api_key", "tools"}
     assert indx["tools"][3] == {"index": 3, "location": "indx T4"}
 
 
@@ -241,8 +240,6 @@ def test_bridge_config_loads_in_the_bridge(tmp_path):
     bridge = bridge_load(path, env={})
     assert [p.name for p in bridge.printers] == ["core-one-l", "mk4s", "indx"]
     assert bridge.printers[0].url == "http://127.0.0.1:8001"
-    assert bridge.printers[0].uuids is True
-    assert bridge.printers[1].uuids is False
     assert bridge.printers[2].tools == {
         0: "indx T1",
         1: "indx T2",

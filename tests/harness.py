@@ -244,7 +244,7 @@ def reported(material):
     return {**dict(zip(TEMPERATURE_KEYS, base, strict=True)), **material}
 
 
-PRINTER_KEYS = {"gcode_preamble", "sync_storage", "sync_file", "uuids"}
+PRINTER_KEYS = {"gcode_preamble", "sync_storage", "sync_file"}
 
 
 def make(tmp_path, spools, **cfg):

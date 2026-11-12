@@ -3048,13 +3048,9 @@ async def test_runout_leftover_then_a_claim_is_written_over(tmp_path):
     await bridge.aclose()
 
 
-UUIDS_OFF = [{"uuid_field": None}, {"uuids": False}]
-
-
-@pytest.mark.parametrize("cfg", UUIDS_OFF)
-async def test_tag_is_not_written_with_uuids_off(tmp_path, caplog, cfg):
+async def test_tag_is_not_written_with_uuids_off(tmp_path, caplog):
     """With UUIDs off, a new tag after a swap is still left alone, and isn't drift."""
-    bridge, fake, printer = make(tmp_path, [spool(19)], **cfg)
+    bridge, fake, printer = make(tmp_path, [spool(19)], uuid_field=None)
     await bridge.poll()  # baseline
     fake.spools[20] = spool(20)
     await bridge.poll()
@@ -3070,10 +3066,9 @@ async def test_tag_is_not_written_with_uuids_off(tmp_path, caplog, cfg):
     await bridge.aclose()
 
 
-@pytest.mark.parametrize("cfg", UUIDS_OFF)
-async def test_runout_leftover_is_written_over_with_uuids_off(tmp_path, cfg):
+async def test_runout_leftover_is_written_over_with_uuids_off(tmp_path):
     """With UUIDs off, a reload that keeps 19's tag with 20 active is still written over."""
-    bridge, fake, printer = make(tmp_path, [spool(19)], **cfg)
+    bridge, fake, printer = make(tmp_path, [spool(19)], uuid_field=None)
     printer.material = tagged()
     await bridge.poll()  # baseline: 19's tag, seen with 19
     fake.spools[20] = spool_x(20)
