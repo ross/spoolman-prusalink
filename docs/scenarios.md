@@ -153,8 +153,7 @@ bridge can't know. It answers Q1, Q2 and Q3. Decided and implemented.
   old one, as for a confirmed swap. It keeps a per-tool record of what it
   charged to each spool in that window (`since_load` in the database), so
   usage charged to more than one spool, such as across a correction, all
-  moves. State saved before claims has no record, so the first claim after
-  the upgrade moves only usage charged since then.
+  moves.
 - **When.** At the next poll, even during a print or while a job waits for
   its first extrusion. The user only claims a spool once they know it's
   loaded, so there's nothing to wait for.
