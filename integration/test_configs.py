@@ -23,17 +23,20 @@ from integration.conftest import (
     PLA,
     UUID_FIELD,
     World,
+    baseline,
     charges,
-    count,
     events,
     logged,
+    logged_once,
     print_spec,
 )
 from integration.faults import set_extra_text
 from integration.temperatures import TEMPERATURES, WRITTEN
 from integration.test_writes import SYNC_FILE, gcode, write_due, wrote_b
 from simulator.model import Material
-from spoolman_prusalink.printer_sync import COREONEL_PREAMBLE
+from spoolman_prusalink.printer_sync import PRINTER_MODELS, default_preamble
+
+COREONEL_PREAMBLE = default_preamble(PRINTER_MODELS["8.1.0"])
 
 # Setups that leave the bridge with no instance UUIDs to write or compare: models with no
 # tag reader, and a Core One L with the Spoolman field off.
@@ -45,12 +48,6 @@ NO_UUIDS = [
 # The same on the Core One L, whose tag reader the other two keep working.
 TAG_READER_NO_UUIDS = NO_UUIDS[2:]
 WORLD = "world_model, world_config"
-
-
-async def baseline(w: World) -> None:
-    records = await w.poll()
-    assert len(events(records, "baseline")) == 1
-    assert charges(records) == []
 
 
 def record_patches(w: World) -> list[dict]:
@@ -146,8 +143,8 @@ async def test_s1_tag_uuid_is_not_adopted_without_uuids(world: World):
 
 # --- Features turned off ---
 @pytest.mark.parametrize(
-    "world_config",
-    [dict(flag_drift=False), dict(flag_field="")],
+    "world_config, world_printer",
+    [({}, dict(flag_drift=False)), (dict(flag_field=""), {})],
     ids=["flag_drift", "flag_field"],
     indirect=True,
 )
@@ -166,7 +163,7 @@ async def test_w9_drift_is_logged_but_not_flagged_with_flags_off(
     for _ in range(3):
         await w.poll()
         w.advance(1.0)
-    assert count(caplog, logging.WARNING, f"printer differs from spool {a}: color") == 1
+    assert logged_once(caplog, logging.WARNING, f"printer differs from spool {a}: color")
     assert await w.flag("A") is None
     assert [body for body in seen if FLAG_FIELD in body.get("extra", {})] == []
     assert w.requests("PUT") == []
@@ -246,10 +243,6 @@ async def test_s5_claim_is_ignored_with_claims_off(world: World, caplog: pytest.
 
 
 # --- Firmware without usage counters ---
-def messages(caplog: pytest.LogCaptureFixture, text: str, level: int) -> list[str]:
-    return [r.getMessage() for r in caplog.records if r.levelno == level and text in r.getMessage()]
-
-
 @pytest.mark.parametrize(
     "world_model", ["8.1.0", "2.1.0"], ids=["core_one_l", "mini"], indirect=True
 )
@@ -264,7 +257,7 @@ async def test_c8_firmware_without_usage_counters(world: World, caplog: pytest.L
         await w.poll()
         w.advance(1.0)
     assert w.since(mark) == []
-    assert len(messages(caplog, "has no usage counters", logging.ERROR)) == 1
+    assert logged_once(caplog, logging.ERROR, "has no usage counters")
     assert await w.used("A") == 0
     assert w.requests("PUT") == []
 
@@ -272,10 +265,10 @@ async def test_c8_firmware_without_usage_counters(world: World, caplog: pytest.L
     w.printer.set_firmware("full")
     records = await w.poll()
     assert len(events(records, "baseline")) == 1 and charges(records) == []
-    assert len(messages(caplog, "now reports filament; resuming", logging.ERROR)) == 1
+    assert logged_once(caplog, logging.ERROR, "now reports filament; resuming")
     w.printer.extrude(0, 5)
     assert w.charged(await w.poll(), "A") == 5
-    assert len(messages(caplog, "has no usage counters", logging.ERROR)) == 1
+    assert logged_once(caplog, logging.ERROR, "has no usage counters")
 
 
 # --- What the bridge writes ---
@@ -368,7 +361,9 @@ async def test_w7_spool_with_nothing_to_write_is_flagged(
     assert w.requests("PUT") == []
     problem = f"spool {b} has no material or name to write"
     assert await w.flag("B") == f"{w.tool_location}: {problem}"
-    assert count(caplog, logging.WARNING, f"] can't write spool {b} to the printer: {problem}") == 1
+    assert logged_once(
+        caplog, logging.WARNING, f"] can't write spool {b} to the printer: {problem}"
+    )
 
     await w.spoolman.edit_filament(b, material="PETG")
     await w.poll()
@@ -394,7 +389,9 @@ async def test_w7_malformed_instance_uuid_is_flagged(
     assert w.requests("PUT") == []
     problem = f"spool {b}'s instance UUID 'not-a-uuid' isn't a UUID; fix or clear it in Spoolman"
     assert await w.flag("B") == f"{w.tool_location}: {problem}"
-    assert count(caplog, logging.WARNING, f"] can't write spool {b} to the printer: {problem}") == 1
+    assert logged_once(
+        caplog, logging.WARNING, f"] can't write spool {b} to the printer: {problem}"
+    )
     assert await w.spoolman.extra(b, UUID_FIELD) == "not-a-uuid"  # Left as it was.
 
     # Cleared, the next write gives the spool a UUID of its own.
@@ -493,7 +490,7 @@ async def test_w14_edit_that_leaves_the_spool_unwritable_is_flagged(
     flag = await w.flag("B") or ""
     assert "needs the printer's HT idler-door setting" in flag
     assert "printer filament differs" not in flag
-    assert count(caplog, logging.WARNING, f"] can't write spool {b} to the printer") == 1
+    assert logged_once(caplog, logging.WARNING, f"] can't write spool {b} to the printer")
     assert not logged(caplog, logging.WARNING, "printer differs from spool")
 
     # Edited back, the printer matches the spool again and the flag goes.

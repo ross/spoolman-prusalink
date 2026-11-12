@@ -11,28 +11,16 @@ from integration.conftest import (
     LOAD_MM,
     PLA,
     World,
+    baseline,
     charges,
     count,
     events,
     logged,
+    logged_once,
+    messages,
     print_spec,
 )
 from simulator.model import State
-
-
-async def baseline(w: World) -> None:
-    records = await w.poll()
-    assert len(events(records, "baseline")) == 1
-    assert charges(records) == []
-
-
-def messages(caplog: pytest.LogCaptureFixture, text: str, level: int | None = None) -> list[str]:
-    """The bridge's log lines that contain `text`, at `level` if given."""
-    return [
-        r.getMessage()
-        for r in caplog.records
-        if text in r.getMessage() and (level is None or r.levelno == level)
-    ]
 
 
 async def test_c1_reboot_keeps_usage_held_at_the_reboot(world: World):
@@ -233,9 +221,9 @@ async def test_c2_printer_off_for_hours(world: World, caplog: pytest.LogCaptureF
         assert w.bridge.interval() == interval
         w.advance(interval)
     assert w.since(mark) == []
-    assert len(messages(caplog, "printer unreachable:", logging.WARNING)) == 1
+    assert logged_once(caplog, logging.WARNING, "printer unreachable:")
     # A reminder at the first poll an hour or more after the last line.
-    reminders = messages(caplog, "printer still unreachable after", logging.INFO)
+    reminders = messages(caplog, logging.INFO, "printer still unreachable after")
     assert [m.split("after ")[1][:3] for m in reminders] == ["1h ", "2h "]
 
     # Back on: a reboot, so the unseen 20 mm is lost and the counter starts again.
@@ -244,11 +232,11 @@ async def test_c2_printer_off_for_hours(world: World, caplog: pytest.LogCaptureF
     records = await w.poll()
     assert len(events(records, "reboot")) == 1
     assert w.charged(records, "A") == 30
-    back = messages(caplog, "printer reachable again after", logging.WARNING)
+    back = messages(caplog, logging.WARNING, "printer reachable again after")
     assert len(back) == 1 and back[0].endswith("after 2h 30m")
     assert w.bridge.interval() == interval
     await w.poll()
-    assert len(messages(caplog, "reachable again")) == 1
+    assert len(messages(caplog, None, "reachable again")) == 1
 
 
 async def test_c3_reboot_and_unload_in_one_poll(world: World):
@@ -374,14 +362,14 @@ async def test_c8_firmware_update(world: World, caplog: pytest.LogCaptureFixture
     w = world
     model = "printer is COREONEL (8.1.0)"
     await baseline(w)
-    assert messages(caplog, model, logging.INFO) == [model]
+    assert messages(caplog, logging.INFO, model) == [model]
 
     w.printer.reboot()
     w.printer.extrude(0, 10)
     records = await w.poll()
     assert len(events(records, "reboot")) == 1
     assert w.charged(records, "A") == 10
-    assert messages(caplog, model, logging.INFO) == [model, model]
+    assert messages(caplog, logging.INFO, model) == [model, model]
 
     # Updated to firmware without the filament endpoint: logged once, nothing charged.
     w.printer.set_firmware("no_endpoint")
@@ -392,17 +380,17 @@ async def test_c8_firmware_update(world: World, caplog: pytest.LogCaptureFixture
         await w.poll()
     assert w.since(mark) == []
     unsupported = "this firmware isn't supported, so nothing is charged"
-    assert len(messages(caplog, unsupported, logging.ERROR)) == 1
+    assert logged_once(caplog, logging.ERROR, unsupported)
 
     # Updated again, with it: resumes after a reboot, and the model is checked again.
     w.printer.set_firmware("full")
     w.printer.reboot()
     w.printer.extrude(0, 5)
     records = await w.poll()
-    assert messages(caplog, "printer now reports filament; resuming") != []
+    assert messages(caplog, None, "printer now reports filament; resuming") != []
     assert len(events(records, "reboot")) == 1
     assert w.charged(records, "A") == 5
-    assert messages(caplog, model, logging.INFO) == [model, model, model]
+    assert messages(caplog, logging.INFO, model) == [model, model, model]
 
 
 async def test_c9_printer_answers_with_an_error(world: World, caplog: pytest.LogCaptureFixture):
@@ -417,16 +405,16 @@ async def test_c9_printer_answers_with_an_error(world: World, caplog: pytest.Log
     mark = w.mark()
     for _ in range(3):
         await w.poll()
-    assert len(messages(caplog, failed, logging.WARNING)) == 1
-    assert "401 Unauthorized" in messages(caplog, failed)[0]
+    assert logged_once(caplog, logging.WARNING, failed)
+    assert "401 Unauthorized" in messages(caplog, None, failed)[0]
 
     # A different error is logged again, once.
     w.printer.set_fault("error")
     w.printer.extrude(0, 10)
     for _ in range(3):
         await w.poll()
-    assert len(messages(caplog, failed, logging.WARNING)) == 2
-    assert "500 Internal Server Error" in messages(caplog, failed)[1]
+    assert len(messages(caplog, logging.WARNING, failed)) == 2
+    assert "500 Internal Server Error" in messages(caplog, None, failed)[1]
     assert w.since(mark) == []
     assert not logged(caplog, logging.WARNING, "unreachable")
 
@@ -435,7 +423,7 @@ async def test_c9_printer_answers_with_an_error(world: World, caplog: pytest.Log
     w.printer.set_fault("none")
     records = await w.poll()
     records += await w.poll()
-    back = messages(caplog, "printer reads working again", logging.WARNING)
+    back = messages(caplog, logging.WARNING, "printer reads working again")
     assert [m.split(" after ")[0] for m in back] == ["printer reads working again"]
     assert events(records) == []
     assert [(r["use_length"], r["reason"]) for r in charges(records)] == [(30, "extruded")]

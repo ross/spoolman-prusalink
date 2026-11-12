@@ -22,6 +22,19 @@ url = "http://192.168.1.22"
 # Storage and file name for the sync job, which is overwritten each time.
 # sync_storage = "usb"
 # sync_file = "spoolman-sync.gcode"
+# After a swap or unload, write the loaded spool's name, color and UUID to the printer
+# once it's idle, through a job uploaded to the printer.
+# printer_sync = true
+# Seconds the printer must stay idle before that job runs, so it doesn't take over
+# the printer while you're at it choosing a print. 0 runs it on the first idle poll.
+# sync_delay = 0
+# Also overwrite the printer when it differs with no swap or unload to explain it.
+# sync_drift = false
+# Also flag a spool when the printer's filament name, color or UUID doesn't match it.
+# flag_drift = true
+# Multiplier applied to the printer's extruded length before charging. 1.0 charges
+# what the printer reports, which runs about 5% below slicer estimates.
+# length_factor = 1.0
 
 [spoolman]
 url = "http://spoolman:8000"
@@ -53,17 +66,6 @@ poll_idle = 60
 uuid_field = "instance_uuid"
 # Where the old spool goes when a swap takes effect. "" = no location.
 eviction_location = ""
-# After a swap or unload, write the loaded spool's name, color and UUID to the printer
-# once it's idle, through a job uploaded to the printer.
-printer_sync = true
-# Seconds the printer must stay idle before that job runs, so it doesn't take over
-# the printer while you're at it choosing a print. 0 runs it on the first idle poll.
-sync_delay = 0
-# Also overwrite the printer when it differs with no swap or unload to explain it.
-sync_drift = false
-# Multiplier applied to the printer's extruded length before charging. 1.0 charges
-# what the printer reports, which runs about 5% below slicer estimates.
-length_factor = 1.0
 # Spool extra field (type text) where the bridge writes flags, such as an unconfirmed
 # swap, for you to see in Spoolman. The bridge creates the field if it's missing and only
 # changes it on spools it flagged itself. "" disables flags.
@@ -73,8 +75,6 @@ flag_field = "bridge_flag"
 # it. Usage since the tool's last unload or the printer's last reboot moves to it. The
 # bridge creates the field if it's missing and clears the box. "" disables claims.
 claim_field = "bridge_claim"
-# Also flag a spool when the printer's filament name, color or UUID doesn't match it.
-flag_drift = true
 
 # Several printers: replace [printer] and [[tools]] with one [[printers]] entry per
 # printer. Each takes the [printer] settings above plus its own [[printers.tools]].
