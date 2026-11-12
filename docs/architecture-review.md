@@ -239,12 +239,6 @@ It's pure, well documented, and has 94 tests through its public signature.
 The order of the steps is real: unload, claim, assignment, print start,
 usage. The length isn't the problem. These are:
 
-- **The legal states aren't written down.** Which combinations of `active`,
-  `assigned`, `swap`, `provisional`, and `deleted_spool` can occur is known
-  only by reasoning. Three commits have removed branches that turned out to
-  be unreachable. The one invariant that's checked, that a provisional
-  charge is on the active spool, lives in a wrapper in
-  `tests/test_accounting.py`.
 - **Step 3 is a 13-branch `elif` chain** where order is priority.
 - **Event classification is split.** `WARNINGS` is in `accounting.py`,
   `_REPEATING` is in `app.py`, and `process()` has a special case for
@@ -256,8 +250,6 @@ tests are the check.
 
 Part 1, a small stack of its own:
 
-- **Write the invariants down.** One function checks that a `ToolState` is
-  a legal combination. The test wrapper calls it on every poll.
 - **One event table** gives each kind its severity and whether it repeats.
   Split the overloaded kinds.
 
@@ -267,10 +259,10 @@ call, so do the split in the same stack.
 
 Not planned: a formal state machine, with a named mode per tool and defined
 transitions. The conditions overlap (a provisional charge with a staged
-spool, a deleted spool with a staged spool), so the modes multiply. The
-invariants function from part 1 is what such a machine would be derived
-from. Reconsider it once that function exists and shows how many legal
-combinations there are.
+spool, a deleted spool with a staged spool), so the modes multiply.
+`violations()` in `accounting.py` lists the rules for a legal state, which
+is what such a machine would be derived from. Reconsider it against those
+rules.
 
 Size: small for part 1, medium for part 2.
 

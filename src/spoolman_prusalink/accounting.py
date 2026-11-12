@@ -323,6 +323,93 @@ class _Draft:
         return ToolState(**{name: getattr(self, name) for name in self.__slots__})
 
 
+# What holds for every state that `account()` and `hold_deleted()` return, given a legal
+# state. Each entry says a rule and tests whether a state keeps it.
+_INVARIANTS: tuple[tuple[str, Callable[[ToolState], bool]], ...] = (
+    (
+        "a tool the printer hasn't reported holds nothing",
+        lambda s: s.boot_id is not None or s == ToolState(),
+    ),
+    (
+        # Not `since_load`: a swap confirmed after a reboot refunds usage from before the
+        # reboot, which the usage since load no longer counts (#164).
+        "no counter or tally is negative",
+        lambda s: (
+            min(
+                s.charged,
+                s.unload_count,
+                s.pending_at,
+                s.held_mm,
+                s.extruded,
+                0 if s.swap is None else s.swap.mm,
+                0 if s.provisional is None else s.provisional.mm,
+            )
+            >= 0
+        ),
+    ),
+    (
+        "a spool awaits eviction once, and it's neither the active nor the assigned spool",
+        lambda s: (
+            len(set(s.evict)) == len(s.evict)
+            and s.active not in s.evict
+            and s.assigned not in s.evict
+        ),
+    ),
+    (
+        "with no spool active, a spool is assigned only while a deleted spool's usage is held",
+        lambda s: s.active is not None or s.assigned is None or s.deleted_spool is not None,
+    ),
+    (
+        "an unconfirmed swap is on the active spool, or no spool is active",
+        lambda s: s.swap is None or s.active in (None, s.swap.spool_id),
+    ),
+    (
+        "a swap that a print start would have closed stays open only while no spool is active",
+        lambda s: s.swap is None or s.swap.started_job is None or s.active is None,
+    ),
+    (
+        "a provisional charge is on the active spool",
+        lambda s: s.provisional is None or s.provisional.spool_id == s.active,
+    ),
+    (
+        "a swap and a provisional charge aren't open together",
+        lambda s: s.swap is None or s.provisional is None,
+    ),
+    (
+        "a deleted spool's usage is held only while no spool is active",
+        lambda s: s.deleted_spool is None or s.active is None,
+    ),
+    (
+        "no swap, provisional charge, or staged notice is open while a deleted spool's "
+        "usage is held",
+        lambda s: (
+            s.deleted_spool is None
+            or (s.swap is None and s.provisional is None and s.staged_notice is None)
+        ),
+    ),
+    (
+        "a staged notice is on the assigned spool, which isn't the active one",
+        lambda s: (
+            s.staged_notice is None
+            or (s.staged_notice.spool_id == s.assigned and s.assigned != s.active)
+        ),
+    ),
+    (
+        "a pending job isn't the job that last started",
+        lambda s: s.pending_job is None or s.pending_job != s.job_id,
+    ),
+)
+
+
+def violations(state: ToolState) -> list[str]:
+    """Return the rules for a legal `ToolState` that `state` breaks, empty if none.
+
+    Nothing in the bridge calls this. It writes down which combinations of fields can
+    occur, and the tests check it on every poll.
+    """
+    return [rule for rule, holds in _INVARIANTS if not holds(state)]
+
+
 def hold_deleted(state: ToolState, spool_id: int, mm: int = 0, queued: int = 0) -> ToolState:
     """Record that `spool_id` was deleted in Spoolman, holding `mm` of its usage.
 
