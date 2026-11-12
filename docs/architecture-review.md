@@ -17,8 +17,6 @@ Counts are as of `9402330`.
   test deployment, so a rework can change the saved state, the ledger
   records, or the config without a migration. Say in the PR what the
   deployment has to do, such as starting from an empty database.
-- Settle the [open decision](#open-decision) before the part of B11 it
-  covers.
 - When a workstream merges, delete its findings from this document. When the
   last one goes, delete the document.
 
@@ -337,12 +335,13 @@ printer and are read by `PrinterBridge` through `bridge.config`:
 `uuid_field`, `flag_field`, and `claim_field` name Spoolman fields and stay
 global.
 
-The per-printer `uuids` setting is a different case. `PrinterModel.uuids`
-knows whether a printer can hold an instance UUID. `uuids = false` says the
-user doesn't want one written to a printer that can: `_uuids` requires the
-setting, `uuid_field`, and the model's capability together. So the setting
-isn't redundant, and it turns UUIDs off for one printer while another keeps
-them. Whether to keep it is the [open decision](#open-decision).
+The per-printer `uuids` setting goes the other way: it's per printer, and
+it shouldn't be a setting at all. `PrinterModel.uuids` knows whether a
+printer can hold an instance UUID. `uuids = false` turns UUIDs off for a
+printer that can, and nothing documents a reason to. The setting dates from
+before the bridge read the printer's model, when it had to be told what the
+printer could do. It leaves `_uuids` with a three-way condition: the
+setting, `uuid_field`, and the model's capability.
 
 Shape: move the five settings to `PrinterConfig`, set in the `[printer]`
 table or in each `[[printers]]` entry, with no global default. One place
@@ -350,6 +349,20 @@ per setting is less error prone than a default with overrides.
 `PrinterBridge` then reads them from its own config. It still reads
 `claim_field` and `uuid_field` through `bridge.config`, so this removes
 five of the reads that B4 lists, not the back-reference.
+
+Remove `uuids`, so that whether a printer uses UUIDs follows from its model
+alone. That drops a documented feature, so the work includes:
+
+- The `uuids_off` case in `integration/test_configs.py` and the scenario
+  tests that only it reaches. The `uuid_field = ""` case covers the rest.
+- The `uuids = false` tests in `tests/test_writes.py` and
+  `tests/test_app.py`.
+- The mentions in `README.md`, `config.example.toml`, `docs/scenarios.md`,
+  and `docs/multi-printer.md`.
+
+`uuid_field` stays: it names the Spoolman field, and `uuid_field = ""`
+still turns UUIDs off for the whole bridge, as `flag_field` and
+`claim_field` do for flags and claims.
 
 Size: small.
 
@@ -605,19 +618,6 @@ Size: medium.
   matches its seeded spool, and the demo starts with UUID drift (#135).
   This may be intended. Nothing says so.
 
-## Open decision
-
-**Keep the per-printer `uuids` opt-out, or remove it** (B11). It's a
-documented feature: `README.md`, `docs/scenarios.md`, and
-`docs/multi-printer.md` describe it, `integration/test_configs.py` runs a
-`uuids_off` config on a printer that holds UUIDs, and `tests/test_writes.py`
-and `tests/test_app.py` test it. Without it, the global `uuid_field = ""` is
-the only switch, and it turns UUIDs off for every printer.
-
-- If it stays, B11 doesn't touch it.
-- If it goes, that removes a feature, and the tests and documents above are
-  part of the work.
-
 ## Order and dependencies
 
 | # | Workstream | Findings | Depends on |
@@ -630,7 +630,7 @@ the only switch, and it turns UUIDs off for every printer.
 | 6 | Client errors | B8 | Nothing |
 | 7 | Unit suite on the simulator | T2, T6 | Nothing. Before workstreams 2 and 3 if possible, so their tests are ported once |
 | 8 | Simulator state | S1, S5, S6, then S2, S4 | S3, which changes the same code. Workstream 7 for S4, which continues the routing move in T2 |
-| 9 | Small items | B10, B11, T8, S3 | Nothing. The open decision covers `uuids` in B11 only |
+| 9 | Small items | B10, B11, T8, S3 | Nothing |
 | 10 | Accounting state | B9 (part 1) | Nothing |
 
 Workstreams 1, 6, 9, and 10 are independent and can run at any time. T3
