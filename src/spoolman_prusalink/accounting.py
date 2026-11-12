@@ -146,14 +146,6 @@ class ToolState:
     # A one-off notice for the user about the active spool (`notice.active`): a print
     # started while another spool was staged. Cleared at the next print start or unload.
     notice: StagedAtPrint | None = None
-    # The printer should be written with the active spool once idle: set when the
-    # active spool changes or the tool unloads (a menu load drops color and UUID).
-    needs_sync: bool = False
-    sync_attempts: int = 0
-    # The `M865` lines last written to the printer for this tool, so an edit in Spoolman
-    # can be told apart from a change on the printer. None when the bridge hasn't
-    # written this tool.
-    written: str | None = None
     # Usage held in raw extruded mm, charged to the next spool that becomes active in this
     # tool: after the active spool was deleted in Spoolman (`deleted_spool` is that
     # spool), or carried over a reboot (`deleted_spool` is None).
@@ -196,9 +188,6 @@ class ToolState:
             "pending_job": self.pending_job,
             "pending_at": self.pending_at,
             "notice": _notice_json(self.notice),
-            "needs_sync": self.needs_sync,
-            "sync_attempts": self.sync_attempts,
-            "written": self.written,
             "held_mm": self.held_mm,
             "deleted_spool": self.deleted_spool,
             "staged_notice": _notice_json(self.staged_notice),
@@ -236,9 +225,6 @@ class ToolState:
             pending_job=data["pending_job"],
             pending_at=int(data["pending_at"]),
             notice=_notice_from_json(data["notice"]),
-            needs_sync=bool(data["needs_sync"]),
-            sync_attempts=int(data["sync_attempts"]),
-            written=data["written"],
             held_mm=int(data["held_mm"]),
             deleted_spool=data["deleted_spool"],
             staged_notice=_notice_from_json(data["staged_notice"]),
@@ -290,6 +276,10 @@ class Result:
     # The spool that was in the tool when it unloaded during a started print: a runout,
     # a jam or tangle, or a planned color change, which all look the same.
     runout: int | None = None
+    # True when the active spool changed or the tool unloaded, so what the printer
+    # shows for the tool may no longer be the active spool's. A menu load drops the
+    # color and the UUID.
+    resync: bool = False
 
 
 class _Draft:
@@ -619,7 +609,7 @@ class _Poll:
         if self.claim is not None:
             current.active, self.out.claimed = self.claim, True
             self.event(ClaimConfirmed(self.claim, first_poll=True))
-        current.needs_sync = self.out.claimed
+        self.out.resync = self.out.claimed
         self.event(Baseline(reading.extruded, current.active))
 
     def reboot(self) -> None:
@@ -940,9 +930,6 @@ class _Poll:
 
     def finish(self) -> None:
         current, last = self.current, self.last
-        resync = self.unloaded or current.active != last.active or self.out.claimed
-        current.needs_sync = last.needs_sync or resync
-        if resync:
-            current.sync_attempts = 0
+        self.out.resync = self.unloaded or current.active != last.active or self.out.claimed
         current.extruded = self.reading.extruded
         current.reboot_pending = False

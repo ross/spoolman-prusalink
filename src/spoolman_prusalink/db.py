@@ -11,10 +11,17 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from .accounting import ToolState
+from .conditions import Condition
+from .printer_sync import WriteState, WrittenFilament
 from .records import ChargeRecord, EventRecord, Outbox
 from .state import PrinterState, Runout, State
 from .tags import SeenTag
 
+# Covers everything `save` writes: the tables below, and the shape of the JSON in their
+# text columns (`tools.data`, `conditions.data`, `writes.written`, `outbox.record`,
+# `ledger.extra`).
+# It stays at 1 until the first release, with saved state changed in place and no
+# migration. From then on, a change to either one bumps it.
 SCHEMA_VERSION = 1
 
 _SCHEMA = """
@@ -25,11 +32,11 @@ CREATE TABLE tools (
     data TEXT NOT NULL,
     PRIMARY KEY (printer, tool)
 );
-CREATE TABLE printer_flags (
+CREATE TABLE conditions (
     printer TEXT NOT NULL,
-    spool_id INTEGER NOT NULL,
-    texts TEXT NOT NULL,
-    PRIMARY KEY (printer, spool_id)
+    tool INTEGER NOT NULL,
+    data TEXT NOT NULL,
+    PRIMARY KEY (printer, tool)
 );
 CREATE TABLE seen_tags (
     printer TEXT NOT NULL,
@@ -37,6 +44,14 @@ CREATE TABLE seen_tags (
     uuid TEXT NOT NULL,
     spool_id INTEGER,
     runout INTEGER NOT NULL,
+    PRIMARY KEY (printer, tool)
+);
+CREATE TABLE writes (
+    printer TEXT NOT NULL,
+    tool INTEGER NOT NULL,
+    due INTEGER NOT NULL,
+    attempts INTEGER NOT NULL,
+    written TEXT,
     PRIMARY KEY (printer, tool)
 );
 CREATE TABLE outbox (
@@ -51,7 +66,8 @@ CREATE TABLE flagged (spool_id INTEGER PRIMARY KEY);
 CREATE TABLE claimed (spool_id INTEGER PRIMARY KEY);
 CREATE TABLE runouts (
     spool_id INTEGER PRIMARY KEY,
-    text TEXT NOT NULL,
+    location TEXT NOT NULL,
+    remaining REAL NOT NULL,
     net REAL,
     used REAL
 );
@@ -74,11 +90,12 @@ CREATE INDEX ledger_printer_time ON ledger (printer, time);
 # The tables `save` diffs by key: their key columns and their other columns.
 _KEYED = {
     "tools": (("printer", "tool"), ("data",)),
-    "printer_flags": (("printer", "spool_id"), ("texts",)),
+    "conditions": (("printer", "tool"), ("data",)),
     "seen_tags": (("printer", "tool"), ("uuid", "spool_id", "runout")),
+    "writes": (("printer", "tool"), ("due", "attempts", "written")),
     "flagged": (("spool_id",), ()),
     "claimed": (("spool_id",), ()),
-    "runouts": (("spool_id",), ("text", "net", "used")),
+    "runouts": (("spool_id",), ("location", "remaining", "net", "used")),
 }
 # Outbox columns copied out of each record; the `record` column holds the rest.
 _OUTBOX_COLUMNS = ("printer", "tool", "spool_id", "use_length")
@@ -114,7 +131,8 @@ class Database:
 
     def __init__(self, path: Path, conn: sqlite3.Connection, lock_fd: int) -> None:
         self.path = path
-        self._conn: sqlite3.Connection | None = conn
+        # The SQLite connection, or None once closed. A test can swap in one that fails.
+        self.conn: sqlite3.Connection | None = conn
         self._lock_fd: int | None = lock_fd
         self._rows: Rows = {name: {} for name in _KEYED}
 
@@ -142,9 +160,9 @@ class Database:
 
     def close(self) -> None:
         """Close the database and release the lock. Safe to call twice."""
-        if self._conn is not None:
-            self._conn.close()
-            self._conn = None
+        if self.conn is not None:
+            self.conn.close()
+            self.conn = None
         if self._lock_fd is not None:
             os.close(self._lock_fd)
             self._lock_fd = None
@@ -152,7 +170,7 @@ class Database:
     def load(self) -> State:
         """Read the state, and take it as what `save` compares against."""
         try:
-            state, self._rows = _read(self._conn)
+            state, self._rows = _read(self.conn)
         except (sqlite3.Error, ValueError) as e:
             raise DatabaseError(f"{self.path}: {e}") from e
         return state
@@ -177,7 +195,7 @@ class Database:
         }
         if not gone and not new and not ledger and not any(d or u for d, u in changes.values()):
             return False
-        conn = self._conn
+        conn = self.conn
         conn.execute("BEGIN IMMEDIATE")
         try:
             for name, (deleted, upserted) in changes.items():
@@ -372,18 +390,21 @@ def _rows(state: State) -> Rows:
     for name, p in state.printers.items():
         for tool, st in p.tools.items():
             rows["tools"][(name, tool)] = (_canonical(st.to_json()),)
-        for spool_id, texts in p.flags.items():
-            rows["printer_flags"][(name, spool_id)] = (json.dumps(list(texts)),)
+        for tool, found in p.conditions.items():
+            rows["conditions"][(name, tool)] = (_canonical([c.to_json() for c in found]),)
         for tool, seen in p.seen_tags.items():
             # What the bridge watched isn't saved (see `SeenTag`).
             if seen.uuid is not None:
                 rows["seen_tags"][(name, tool)] = (seen.uuid, seen.spool_id, int(seen.runout))
+        for tool, w in p.writes.items():
+            written = None if w.written is None else _canonical(w.written.to_json())
+            rows["writes"][(name, tool)] = (int(w.due), w.attempts, written)
     for spool_id in state.flagged:
         rows["flagged"][(spool_id,)] = ()
     for spool_id in state.claimed:
         rows["claimed"][(spool_id,)] = ()
     for spool_id, r in state.runouts.items():
-        rows["runouts"][(spool_id,)] = (r.text, r.net, r.used)
+        rows["runouts"][(spool_id,)] = (r.location, r.remaining, r.net, r.used)
     return rows
 
 
@@ -406,11 +427,28 @@ def _read(conn: sqlite3.Connection) -> tuple[State, Rows]:
         except (TypeError, AttributeError) as e:
             raise ValueError(f"tools row ({printer!r}, {tool}): a value of the wrong type") from e
         state.printers.setdefault(printer, PrinterState()).tools[tool] = tool_state
-    for (printer, spool_id), (texts,) in rows["printer_flags"].items():
-        state.printers.setdefault(printer, PrinterState()).flags[spool_id] = json.loads(texts)
+    for (printer, tool), (data,) in rows["conditions"].items():
+        try:
+            found = [Condition.from_json(c) for c in json.loads(data)]
+        except KeyError as e:
+            raise ValueError(f"conditions row ({printer!r}, {tool}): missing key {e}") from e
+        except (TypeError, ValueError) as e:
+            raise ValueError(
+                f"conditions row ({printer!r}, {tool}): a value of the wrong type"
+            ) from e
+        state.printers.setdefault(printer, PrinterState()).conditions[tool] = found
     for (printer, tool), (uuid, spool_id, runout) in rows["seen_tags"].items():
         seen = state.printers.setdefault(printer, PrinterState()).seen_tags
         seen[tool] = SeenTag(uuid, spool_id, runout=bool(runout))
+    for (printer, tool), (due, attempts, written) in rows["writes"].items():
+        try:
+            filament = None if written is None else WrittenFilament.from_json(json.loads(written))
+        except KeyError as e:
+            raise ValueError(f"writes row ({printer!r}, {tool}): missing key {e}") from e
+        except (TypeError, ValueError) as e:
+            raise ValueError(f"writes row ({printer!r}, {tool}): a value of the wrong type") from e
+        writes = state.printers.setdefault(printer, PrinterState()).writes
+        writes[tool] = WriteState(bool(due), attempts, filament)
     state.printers = dict(sorted(state.printers.items()))
     state.flagged = [k for (k,) in rows["flagged"]]
     state.claimed = [k for (k,) in rows["claimed"]]

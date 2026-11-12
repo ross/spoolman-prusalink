@@ -384,7 +384,7 @@ def test_correction_moves_a_provisional_charge_like_a_claim():
     s = res.state
     assert (s.active, s.assigned, s.evict, s.provisional) == (9, 9, (7,), None)
     assert s.since_load == {7: 0, 9: 250}
-    assert s.needs_sync
+    assert res.resync
 
 
 def test_correction_of_a_provisional_charge_with_the_old_spool_moved_out():
@@ -1012,9 +1012,6 @@ def test_state_round_trip():
         pending_job=43,
         pending_at=120,
         notice=ev.StagedAtPrint(8, 7),
-        needs_sync=True,
-        sync_attempts=2,
-        written='M865 P0 F"PLA"',
         held_mm=30,
         deleted_spool=19,
         staged_notice=ev.StagedAtReboot(8, 7),
@@ -1027,8 +1024,6 @@ def test_state_round_trip():
     defaults = ToolState()
     assert all(getattr(s, f.name) != getattr(defaults, f.name) for f in fields(ToolState))
     assert ToolState.from_json(json.loads(json.dumps(s.to_json()))) == s
-    unwritten = replace(s, written=None)
-    assert ToolState.from_json(json.loads(json.dumps(unwritten.to_json()))) == unwritten
 
 
 def test_restart_from_saved_state_neither_double_charges_nor_drops():
@@ -1243,7 +1238,7 @@ def test_claim_on_staged_spool_moves_usage_since_unload():
     s = res.state
     assert (s.active, s.assigned, s.evict) == (9, 9, (7,))
     assert (s.provisional, s.swap, s.staged_notice) == (None, None, None)
-    assert s.needs_sync and s.sync_attempts == 0
+    assert res.resync
     assert s.since_load == {7: 0, 9: 600}
 
 
@@ -1323,7 +1318,7 @@ def test_claim_after_unload_moves_nothing_but_switches():
     res = account(state, BOOT, r(200, material=None, unloads=1, at_unload=200), loc(7, 9), claim=9)
     assert res.charges == []
     assert (res.state.active, res.state.evict, res.state.swap) == (9, (7,), None)
-    assert res.state.needs_sync
+    assert res.resync
 
 
 def test_claim_keeps_earlier_evictions():
@@ -1341,7 +1336,7 @@ def test_claim_on_first_sight_makes_the_spool_active():
     assert res.charges == []
     assert [e.kind for e in res.events] == [EventKind.CLAIM_CONFIRMED, EventKind.BASELINE]
     assert (res.state.active, res.state.assigned, res.state.boot_id) == (5, 5, BOOT)
-    assert res.state.needs_sync
+    assert res.resync
 
 
 def test_claim_waits_while_location_is_ambiguous():
@@ -1470,7 +1465,7 @@ def test_claim_takes_usage_held_for_a_deleted_spool():
     claimed = next(e for e in res.events if isinstance(e, ev.Claimed))
     assert (claimed.spool, claimed.replaced, claimed.deleted_spool) == (20, None, 19)
     s = res.state
-    assert (s.active, s.held_mm, s.deleted_spool, s.needs_sync) == (20, 0, None, True)
+    assert (s.active, s.held_mm, s.deleted_spool, res.resync) == (20, 0, None, True)
     assert s.since_load == {20: 150}
 
 
