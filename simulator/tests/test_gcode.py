@@ -19,7 +19,7 @@ BRIDGE_JOB = """M862.3 P "COREONEL" ; printer model check
 M862.5 P2 ; g-code level check
 M862.6 P"Input shaper" ; FW feature check
 G28 O ; home only if not homed, so the end-of-job bed move is safe
-M865 X R N"PETG" T230 B85 P170 C30 D15 E45 O"#1F6FB2" L0
+M865 X R N"PETG" T230 B85 P170 C30 D15 E45 O"#186BB5" L0
 M865.1 I0 C"44C406A5-C6F5-4440-BFBA-E8060564B717"
 M117 Spoolman: test
 """
@@ -37,7 +37,7 @@ def test_bridge_job():
             reset=True,
             adhoc=True,
             name="PETG",
-            color="#1f6fb2",
+            color="#186bb5",
             temps={
                 "nozzle": 230,
                 "bed": 85,
