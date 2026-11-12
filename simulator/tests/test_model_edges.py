@@ -324,6 +324,7 @@ def test_settings_construction_checks_every_field():
         ({"time_scale": float("inf")}, "time_scale must be a number of at least 0"),
         ({"scan_seconds": float("-inf")}, "scan_seconds must be a number of at least 0"),
         ({"purge_mm": True}, "purge_mm must be a number of at least 0"),
+        ({"purge_mm": 10**400}, "purge_mm must be a number of at least 0"),
         ({"start_blip": 1}, "start_blip must be true or false"),
     ):
         with pytest.raises(Invalid, match=message):

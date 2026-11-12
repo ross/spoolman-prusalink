@@ -7,9 +7,9 @@ it directly and the server calls it with scaled real time.
 from __future__ import annotations
 
 import asyncio
-import math
 import random
 import re
+import sys
 import uuid as uuidlib
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, field, fields, replace
@@ -209,8 +209,7 @@ class Settings:
             elif (
                 isinstance(value, bool)
                 or not isinstance(value, int | float)
-                or not math.isfinite(value)
-                or value < 0
+                or not 0 <= value <= sys.float_info.max
             ):
                 raise Invalid(f"{key} must be a number of at least 0")
             elif key in POSITIVE_SETTINGS and value <= 0:
