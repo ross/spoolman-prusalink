@@ -17,6 +17,7 @@ import httpx  # For the transport types `from_config` takes; errors come from .e
 
 from . import drift, printer_sync, tags
 from .accounting import Provisional, ToolState, account, hold_deleted
+from .conditions import CLAIM_FIELD_NAME, UUID_FIELD_NAME
 from .config import Config, PrinterConfig
 from .db import Database
 from .errors import Busy, NotFound, Rejected, ServiceError, Unreachable
@@ -37,8 +38,6 @@ Note = tuple[Hashable, str]
 _COMPARED = ("printer", "uuid")
 
 FLAG_FIELD_NAME = "Printer bridge flag"
-UUID_FIELD_NAME = "Instance UUID"
-CLAIM_FIELD_NAME = "Claim held usage"
 # Sorts a spool that's never been used before any that has.
 _NEVER = datetime.min.replace(tzinfo=UTC)
 # While a service stays in trouble, remind once per this many seconds.
@@ -650,7 +649,7 @@ class PrinterBridge:
                 if tagged:
                     self._no_write(tool, st)
                     if diffs:
-                        self._drift(location, active, "; ".join(diffs), notes, compared)
+                        self._drift(location, active, drift.describe(diffs), notes, compared)
                 elif not diffs and not edited:
                     self._no_write(tool, st)
                 else:
@@ -736,7 +735,9 @@ class PrinterBridge:
         if st.needs_sync or st.sync_attempts:
             self.tools[tool] = replace(st, needs_sync=False, sync_attempts=0)
 
-    def _tag_differences(self, material: Material, active: Spool, spools: list[Spool]) -> list[str]:
+    def _tag_differences(
+        self, material: Material, active: Spool, spools: list[Spool]
+    ) -> list[drift.Difference]:
         """Return why a loaded tag isn't the active spool's, or an empty list.
 
         That's when the tag's instance UUID is another spool's in Spoolman, or differs
@@ -752,9 +753,9 @@ class PrinterBridge:
             return []
         for s in spools:
             if s.id != active.id and (s.instance_uuid or "").lower() == value:
-                return [f"the loaded tag is spool {s.id}'s ({material.instance_uuid})"]
+                return [drift.Difference(drift.What.TAG, material.instance_uuid, s.id)]
         if have:
-            return [f"uuid printer={material.instance_uuid} spoolman={active.instance_uuid}"]
+            return [drift.Difference(drift.What.UUID, material.instance_uuid, active.instance_uuid)]
         return []
 
     def _uuid_conflict(
@@ -863,7 +864,7 @@ class PrinterBridge:
             "keeps the usage here."
         )
 
-    def _edited(self, tool: int, st: ToolState, material, spool: Spool) -> str | None:
+    def _edited(self, tool: int, st: ToolState, material, spool: Spool) -> drift.Difference | None:
         """Return why the printer should get Spoolman's edit of `spool`, or None.
 
         That's when the printer still shows the bridge's last write, but the write the
@@ -882,7 +883,7 @@ class PrinterBridge:
             return None
         if not printer_sync.printer_matches_write(material, st.written, self._uuids):
             return None
-        return "spool changed in Spoolman since the last write"
+        return drift.Difference(drift.What.EDIT)
 
     def _filament(
         self, tool: int, spool: Spool, uuid_value: str | None
@@ -903,7 +904,7 @@ class PrinterBridge:
         self, tool, location, st, active, diffs, notes, flags, edited: bool = False
     ) -> None:
         """Decide whether a printer/spool mismatch is a pending write or drift."""
-        detail = "; ".join(diffs)
+        detail = drift.describe(diffs)
         # With the location emptied, the active spool is still loaded but is leaving:
         # don't write it, report the mismatch as drift.
         expected = st.assigned is not None and (st.needs_sync or self.config.sync_drift or edited)

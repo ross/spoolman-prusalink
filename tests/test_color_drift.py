@@ -1,5 +1,5 @@
 from spoolman_prusalink.color import quantize, same_color
-from spoolman_prusalink.drift import differences
+from spoolman_prusalink.drift import Difference, What, describe, differences
 from spoolman_prusalink.models import Material, Spool
 
 # What the printer reports for the PLA preset, which `spool()` writes.
@@ -50,7 +50,9 @@ def test_name_compared_case_insensitively_and_truncated():
 
 def test_name_and_color_drift():
     diffs = differences(0, Material("PETG", "#ff0000", **PLA_TEMPS), spool())
-    assert len(diffs) == 2
+    assert describe(diffs) == (
+        "name printer='PETG' spoolman='PLA'; color printer=#ff0000 spoolman=#73767d"
+    )
 
 
 def test_uuid_only_checked_on_tool_0():
@@ -68,15 +70,18 @@ def test_mm_to_grams():
 def test_stale_printer_uuid_differs_from_spool_without_one():
     m = Material("PLA", "#73737b", "91da34d9-c1c1-470f-bac7-185a2346f86a", **PLA_TEMPS)
     assert differences(0, m, spool()) == [
-        "uuid printer=91da34d9-c1c1-470f-bac7-185a2346f86a spoolman=None"
+        Difference(What.UUID, "91da34d9-c1c1-470f-bac7-185a2346f86a", None)
     ]
+    assert describe(differences(0, m, spool())) == (
+        "uuid printer=91da34d9-c1c1-470f-bac7-185a2346f86a spoolman=None"
+    )
     assert differences(0, m, spool(), uuids=False) == []
 
 
 def test_temperature_differences():
     tagged = {"nozzle_temperature": 225, "preheat_temperature": 170, "bed_temperature": 60}
     assert differences(0, Material("PLA", "#73737b", **tagged), spool()) == [
-        "nozzle printer=225 spoolman=215"
+        Difference(What.NOZZLE, 225, 215)
     ]
     # Spoolman's temperatures take priority over the preset's.
     assert differences(0, Material("PLA", "#73737b", **tagged), spool(extruder_temp=225)) == []

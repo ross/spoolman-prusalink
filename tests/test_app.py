@@ -990,7 +990,8 @@ async def test_kept_uuid_is_checked_against_archived_spools_once(tmp_path):
     ],
 )
 async def test_tag_differences(printer, material, active, spools, want):
-    assert printer._tag_differences(material, active, [active, *spools]) == want
+    found = printer._tag_differences(material, active, [active, *spools])
+    assert [str(d) for d in found] == want
 
 
 class FakeBridge:
