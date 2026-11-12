@@ -33,6 +33,19 @@ FILAMENTS: dict[str, dict] = {
 }
 
 
+def _filament_for(material: str | None) -> str | None:
+    """Return the seed filament the bridge would write as `material`, or None.
+
+    The bridge names a filament by its material, else its name, so match on that rather
+    than on the Spoolman name, case-insensitively.
+    """
+    if material:
+        for name, fields in FILAMENTS.items():
+            if (fields.get("material") or name).casefold() == material.casefold():
+                return name
+    return None
+
+
 class SeedError(RuntimeError):
     pass
 
@@ -132,12 +145,14 @@ async def seed(
             position = loc.tool % len(CYCLE)
             # The tool's configured material and UUID, so the bridge starts in agreement
             # with the printer. A material seed has no filament for falls back to the cycle.
-            loaded = loc.material if loc.material in FILAMENTS else CYCLE[position]
+            loaded = _filament_for(loc.material) or CYCLE[position]
             extra = None
             if loc.uuids and loc.tool == 0:
-                # Minted only when the spool is created, so a rerun keeps the UUID.
-                value = loc.instance_uuid or str(uuid.uuid4())
-                extra = {uuid_field: json.dumps(value)}
+                # A configured material keeps its UUID, even none, as the printer reports it.
+                # Otherwise one is minted, only when the spool is created.
+                value = loc.instance_uuid if loc.material else str(uuid.uuid4())
+                if value:
+                    extra = {uuid_field: json.dumps(value)}
             await spool(f"sim: {loc.location} loaded", loaded, loc.location, extra)
             spare = CYCLE[(position + 1) % len(CYCLE)]
             await spool(f"sim: {loc.location} spare", spare, SHELF, None)

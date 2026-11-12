@@ -198,42 +198,56 @@ async def test_seed_falls_back_to_the_cycle_for_an_unknown_or_missing_material()
     assert names[spools["sim: b T3 loaded"]["filament_id"]] == "ASA"
 
 
-async def test_seed_mints_a_uuid_when_none_is_configured():
-    spools, _ = await _seed_one(Location("core", 0, "core", True, "PLA"))
+async def test_seed_mints_a_uuid_when_no_material_is_configured():
+    spools, _ = await _seed_one(Location("core", 0, "core", True))
     assert len(json.loads(spools["sim: core loaded"]["extra"]["instance_uuid"])) == 36
+
+
+async def test_seed_writes_no_uuid_for_a_material_configured_without_one():
+    spools, _ = await _seed_one(Location("core", 0, "core", True, "PLA"))
+    assert "extra" not in spools["sim: core loaded"]
+
+
+async def test_seed_matches_the_material_the_bridge_compares():
+    spools, names = await _seed_one(
+        Location("a", 0, "a", False, "NYLONX"),
+        Location("b", 1, "b T2", False, "pla"),
+    )
+    assert names[spools["sim: a loaded"]["filament_id"]] == "Nylon-X"
+    assert names[spools["sim: b T2 loaded"]["filament_id"]] == "PLA"
 
 
 async def test_a_seeded_example_tool_agrees_with_the_bridge_drift_check():
     from simulator.config import load, locations
-    from spoolman_prusalink import printer_sync
+    from simulator.model import Simulation
     from spoolman_prusalink.drift import differences
     from spoolman_prusalink.models import Material
     from spoolman_prusalink.spoolman import parse_spool
 
     cfg = load(Path(__file__).parent.parent / "sim.example.toml")
     locs = locations(cfg)
+    printers = Simulation.from_config(cfg).printers
     fake = FakeSpoolman()
     async with TestServer(fake.app) as server:
         await seed(str(server.make_url("")).rstrip("/"), locs)
     spools = {s["comment"]: s for s in fake.spools}
-    configured = {(p.name, t.index): t.material for p in cfg.printers for t in p.tools}
     checked = 0
     for loc in locs:
-        material = configured[(loc.printer, loc.tool)]
-        if not material:
+        if not loc.material:
             continue
+        sim = printers[loc.printer].tools[loc.tool].material
+        nozzle, preheat, bed = sim.temperatures()
+        have = Material(
+            sim.name,
+            sim.color,
+            sim.instance_uuid,
+            nozzle_temperature=nozzle,
+            preheat_temperature=preheat,
+            bed_temperature=bed,
+        )
         body = spools[f"sim: {loc.location} loaded"]
         filament = next(f for f in fake.filaments if f["id"] == body["filament_id"])
         spool = parse_spool({**body, "id": 1, "filament": filament}, "instance_uuid")
-        temps = printer_sync.temperatures(spool)
-        have = Material(
-            material["name"],
-            material["color"],
-            material["instance_uuid"],
-            nozzle_temperature=temps.nozzle,
-            preheat_temperature=temps.preheat,
-            bed_temperature=temps.bed,
-        )
         assert differences(loc.tool, have, spool, loc.uuids) == []
         checked += 1
     assert checked == 3
