@@ -374,21 +374,7 @@ process, so the format must stay callable without HTTP.
 Shape: a pure `prusalink.render(printer)` for the wire views, the G-code
 interpreter in its own module, and input checks in the control layer.
 
-Size: large. Do S5 first.
-
-### S5. Tool material rules are kept by convention
-
-`_set_material` (`model.py`) keeps a tool's material, its ad-hoc slot
-(`previous`), and `kept_type` in step. `_apply_uuid` (`model.py`),
-`_tool_from_config`, and test setup in `simulator/tests/util.py`,
-`tests/harness.py` (`fill`), and `integration/printers.py` (`start`) write
-the fields directly. `SimTool.temps` copies temperatures that `Material`
-already has.
-
-Shape: methods on `SimTool` own material writes, with a "loaded with"
-constructor for test setup. Fold `temps` into the slot's `Material`.
-
-Size: medium.
+Size: large.
 
 ### S6. Smaller items
 
@@ -403,8 +389,6 @@ Size: medium.
 - `Simulation` mixes the clock with web streaming, and `log()` always calls
   `changed()` (`model.py`). `Station.requests` (`integration/station.py`)
   and `jobs` (`tests/harness.py`) find requests by parsing log text.
-- "UUIDs only on tool 0 of a model that holds them" is written in about
-  seven places in `model.py`, `config.py`, and `seed.py`.
 - Snapshots are a dump of the internal dataclasses, with shims for older
   snapshots in `_process_from`, `_tool_from` (`kept_type`), and `Material`'s
   optional temperatures.
@@ -417,7 +401,7 @@ Size: medium.
 | 3 | Conditions and saved facts | B2, B3, B5, B7, T1 (rest) | Workstreams 2 and 10. B7 changes the part of `account()` that B9 part 1 restructures |
 | 4 | Typed records | B6, B9 (part 2), T7 | Workstream 10. Easier after 3 |
 | 5 | Narrow the bridge boundary | B4 | Workstreams 2 and 3 |
-| 8 | Simulator state | S5, S6, then S2, S4 | Nothing. S4 continues the move that put the PrusaLink routing in `prusalink.serve` |
+| 8 | Simulator state | S6, then S2, S4 | Nothing. S4 continues the move that put the PrusaLink routing in `prusalink.serve` |
 | 10 | Accounting state | B9 (part 1), B10 | Nothing |
 
 Workstream 10 is independent and can run at any time. T3
