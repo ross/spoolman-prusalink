@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from .accounting import ToolState
+from .conditions import Condition
 from .printer_sync import WriteState
 from .records import Outbox
 from .tags import SeenTag
@@ -40,9 +41,9 @@ class Runout:
 @dataclass
 class PrinterState:
     tools: dict[int, ToolState] = field(default_factory=dict)
-    # The flag texts this printer's tools last asked for, by spool. They stand in while
-    # the printer can't be read, so an outage doesn't clear its flags in Spoolman.
-    flags: dict[int, list[str]] = field(default_factory=dict)
+    # By tool: its conditions as of the last poll that read the printer. Their flags
+    # stand while the printer can't be read, so an outage doesn't clear them in Spoolman.
+    conditions: dict[int, list[Condition]] = field(default_factory=dict)
     # By tool: what the tool's instance UUID was last seen with. Kept so a runout reload
     # of one spool's tag isn't taken for the next spool's after a restart.
     seen_tags: dict[int, SeenTag] = field(default_factory=dict)

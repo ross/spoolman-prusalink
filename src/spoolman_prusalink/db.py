@@ -11,6 +11,7 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from .accounting import ToolState
+from .conditions import Condition
 from .printer_sync import WriteState, WrittenFilament
 from .records import ChargeRecord, EventRecord, Outbox
 from .state import PrinterState, Runout, State
@@ -26,11 +27,11 @@ CREATE TABLE tools (
     data TEXT NOT NULL,
     PRIMARY KEY (printer, tool)
 );
-CREATE TABLE printer_flags (
+CREATE TABLE conditions (
     printer TEXT NOT NULL,
-    spool_id INTEGER NOT NULL,
-    texts TEXT NOT NULL,
-    PRIMARY KEY (printer, spool_id)
+    tool INTEGER NOT NULL,
+    data TEXT NOT NULL,
+    PRIMARY KEY (printer, tool)
 );
 CREATE TABLE seen_uuids (
     printer TEXT NOT NULL,
@@ -84,7 +85,7 @@ CREATE INDEX ledger_printer_time ON ledger (printer, time);
 # The tables `save` diffs by key: their key columns and their other columns.
 _KEYED = {
     "tools": (("printer", "tool"), ("data",)),
-    "printer_flags": (("printer", "spool_id"), ("texts",)),
+    "conditions": (("printer", "tool"), ("data",)),
     "seen_uuids": (("printer", "tool"), ("uuid", "spool_id", "runout")),
     "writes": (("printer", "tool"), ("due", "attempts", "written")),
     "flagged": (("spool_id",), ()),
@@ -383,8 +384,8 @@ def _rows(state: State) -> Rows:
     for name, p in state.printers.items():
         for tool, st in p.tools.items():
             rows["tools"][(name, tool)] = (_canonical(st.to_json()),)
-        for spool_id, texts in p.flags.items():
-            rows["printer_flags"][(name, spool_id)] = (json.dumps(list(texts)),)
+        for tool, found in p.conditions.items():
+            rows["conditions"][(name, tool)] = (_canonical([c.to_json() for c in found]),)
         for tool, seen in p.seen_tags.items():
             # What the bridge watched isn't saved (see `SeenTag`).
             if seen.uuid is not None:
@@ -420,8 +421,16 @@ def _read(conn: sqlite3.Connection) -> tuple[State, Rows]:
         except (TypeError, AttributeError) as e:
             raise ValueError(f"tools row ({printer!r}, {tool}): a value of the wrong type") from e
         state.printers.setdefault(printer, PrinterState()).tools[tool] = tool_state
-    for (printer, spool_id), (texts,) in rows["printer_flags"].items():
-        state.printers.setdefault(printer, PrinterState()).flags[spool_id] = json.loads(texts)
+    for (printer, tool), (data,) in rows["conditions"].items():
+        try:
+            found = [Condition.from_json(c) for c in json.loads(data)]
+        except KeyError as e:
+            raise ValueError(f"conditions row ({printer!r}, {tool}): missing key {e}") from e
+        except (TypeError, ValueError) as e:
+            raise ValueError(
+                f"conditions row ({printer!r}, {tool}): a value of the wrong type"
+            ) from e
+        state.printers.setdefault(printer, PrinterState()).conditions[tool] = found
     for (printer, tool), (uuid, spool_id, runout) in rows["seen_uuids"].items():
         seen = state.printers.setdefault(printer, PrinterState()).seen_tags
         seen[tool] = SeenTag(uuid, spool_id, runout=bool(runout))

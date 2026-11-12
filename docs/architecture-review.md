@@ -42,51 +42,6 @@ literal level. Don't add a central object that owns levels.
 
 ## Bridge
 
-### B2. `process()` does five jobs
-
-`PrinterBridge.process()` (`app.py`) is about 180 lines. For each tool it
-runs the accounting, builds ledger records, collects flag texts, decides
-UUID trust, and classifies a mismatch as a pending write or drift.
-
-Most conditions are reported on two channels with separately worded text:
-`notes` for the log and `flags` for Spoolman. Symptoms of the two channels
-having no shared model:
-
-- `_notes` (`app.py`) reports an ended note by splitting its text on
-  `"] "` to recover the location.
-- `_COMPARED` (`app.py`) finds the notes about a comparison by testing
-  whether the key is a tuple whose first item is `"printer"` or `"uuid"`.
-  It keeps those notes standing while a tool is skipped.
-- `_compared_flags` and `_keep_compared` do the same job for flags, with
-  their own dictionary. The two mechanisms don't share a key.
-- `_provisional_shown` (`app.py`) is state that exists only so a flag's
-  text doesn't change on every poll, because the text has a growing number
-  in it.
-
-Shape: pure functions that turn a tool's state into a list of conditions.
-Each condition has a key, a spool, a log text, an optional flag text, and
-whether it depends on comparing the printer with the spool. The code that
-creates a condition gives it the literal level it logs at. One differ finds
-the starts and ends, logs each at its condition's level, and collects the
-flags. `process()` becomes the loop that calls them.
-
-Stack #105 left `_notes` as it was, because it already logs on change. This
-finding is about how notes are keyed and paired with flags, not about when
-they log.
-
-Size: large.
-
-### B3. Saved state stores presentation, not facts
-
-`Runout.text` and `PrinterState.flags` are saved as prose. A wording fix
-doesn't reach state that already exists.
-
-Shape: save runouts as a kind with parameters, as notices are saved as typed
-events (`events.py`). Render prose at the point of use. `PrinterState.flags`
-can then hold conditions from B2.
-
-Size: medium.
-
 ### B4. The `Bridge` and `PrinterBridge` boundary leaks both ways
 
 The split is "keyed by tool" against "keyed by spool", but each side works
@@ -141,7 +96,7 @@ Size: medium. Falls out of B2 for the most part.
 - The `tools` table holds a JSON blob per tool, `printer_flags` holds JSON,
   and `seen_uuids` has columns. `SCHEMA_VERSION` doesn't cover the blob's
   shape. The blob is `ToolState.to_json` in `accounting.py`. Do it last in
-  workstream 3, once B3 has changed what's saved per tool.
+  workstream 3.
 
 ## Tests and tooling
 
@@ -284,7 +239,7 @@ Size: medium.
 
 | # | Workstream | Findings | Depends on |
 | --- | --- | --- | --- |
-| 3 | Conditions and saved facts | B2, B3, B5, B10, T1 (rest) | Nothing |
+| 3 | Conditions and saved facts | B5, B10, T1 (rest) | Nothing |
 | 5 | Narrow the bridge boundary | B4, T1 (UUID registry tests) | Workstream 3 |
 | 8 | Simulator state | S1, S5, S6, then S2, S4 | Nothing. S4 continues the move that put the PrusaLink routing in `prusalink.serve` |
 

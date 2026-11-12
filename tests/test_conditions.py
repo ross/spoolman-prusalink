@@ -267,3 +267,21 @@ def test_a_condition_with_no_spool_is_logged_by_what_its_about(caplog):
         "[Core] printer doesn't report tool index 2",
         "[Core] location holds spools 7, 9; skipping until it's clear which one is loaded",
     ]
+
+
+def test_a_poll_that_cant_compare_ends_only_what_it_could_have_found(caplog):
+    drift = Drift(7, DIFFS, level=W)
+    ambiguous = Lasting(Ambiguous((7, 8)), level=W)
+    last = [drift, ambiguous]
+    logged = log_changes({}, last, CTX)
+    caplog.clear()
+    # The location is clear again, but the tool is skipped: the drift stands.
+    kept = standing(last, [], compared=False)
+    logged = log_changes(logged, kept, CTX)
+    assert [r.getMessage() for r in caplog.records] == [
+        "[Core] no longer: location holds spools 7, 8; skipping until it's clear which "
+        "one is loaded"
+    ]
+    assert flags(kept, replace(CTX, flag_drift=True)) == {
+        7: [f"Core: printer filament differs: {DETAIL}"]
+    }

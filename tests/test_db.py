@@ -9,6 +9,7 @@ from dataclasses import replace
 import pytest
 
 from spoolman_prusalink.accounting import Provisional, SwapFlag, ToolState
+from spoolman_prusalink.conditions import Drift, Lasting, StagedNotLoaded, UnloadUnconfirmed
 from spoolman_prusalink.db import (
     SCHEMA_VERSION,
     Database,
@@ -16,7 +17,8 @@ from spoolman_prusalink.db import (
     read_ledger,
     read_state,
 )
-from spoolman_prusalink.events import Baseline, StagedAtPrint, StagedAtReboot
+from spoolman_prusalink.drift import Difference, What
+from spoolman_prusalink.events import Ambiguous, Baseline, StagedAtPrint, StagedAtReboot
 from spoolman_prusalink.printer_sync import WriteState, WrittenFilament
 from spoolman_prusalink.records import ChargeRecord, EventRecord, Outbox
 from spoolman_prusalink.state import PrinterState, Runout, State
@@ -76,7 +78,14 @@ def full_state() -> State:
         printers={
             "core": PrinterState(
                 tools={0: tool, 1: ToolState(boot_id=3)},
-                flags={7: ["unloaded", "drift"]},
+                conditions={
+                    0: [
+                        UnloadUnconfirmed(7),
+                        Drift(7, (Difference(What.COLOR, "#ff0000", None),), level=30),
+                        StagedNotLoaded(StagedAtReboot(8, 7)),
+                    ],
+                    1: [Lasting(Ambiguous((7, 8)), level=30)],
+                },
                 seen_tags={0: SeenTag(TAG, 7, runout=True), 1: SeenTag(TAG.upper())},
                 writes={
                     0: WriteState(True, 1, WrittenFilament("PLA", 215, 60, color="#8c9099")),
@@ -128,7 +137,7 @@ def test_no_write_when_unchanged(path):
     assert db.save(loaded)
     assert not db.save(loaded)
     del loaded.runouts[8]
-    loaded.printers["core"].flags.clear()
+    loaded.printers["core"].conditions.clear()
     assert db.save(loaded)
     db.close()
     assert read_state(path) == loaded
@@ -607,4 +616,30 @@ def test_a_writes_row_that_cant_be_read_is_a_database_error(path, written, messa
     with pytest.raises(
         DatabaseError, match=re.escape(f"{path}: writes row ('core', 0): {message}")
     ):
+        Database.open(path)
+
+
+@pytest.mark.parametrize(
+    ("data", "message"),
+    [
+        ([{"kind": "drift", "spool": 7, "level": 30}], "a value of the wrong type"),
+        ([{"kind": "no_such_kind"}], "missing key 'no_such_kind'"),
+        ([{"spool": 7}], "missing key 'kind'"),
+        (["unloaded", "drift"], "a value of the wrong type"),  # An older bridge's flags.
+        (
+            [{"kind": "drift", "spool": 7, "level": 30, "differences": [["hue", 1, 2]]}],
+            "a value of the wrong type",
+        ),
+    ],
+)
+def test_a_conditions_row_that_cant_be_read_is_a_database_error(path, data, message):
+    db = Database.open(path)
+    db.save(full_state())
+    db.close()
+    conn = sqlite3.connect(path)
+    with conn:
+        conn.execute("UPDATE conditions SET data = ? WHERE tool = 0", (json.dumps(data),))
+    conn.close()
+    row = f"conditions row ('core', 0): {message}"
+    with pytest.raises(DatabaseError, match=re.escape(f"{path}: {row}")):
         Database.open(path)

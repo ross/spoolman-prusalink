@@ -23,7 +23,6 @@ from harness import (
 
 from spoolman_prusalink.db import read_state
 from spoolman_prusalink.errors import BadAnswer, Unreachable
-from spoolman_prusalink.events import EventKind
 
 TAG = "91da34d9-c1c1-470f-bac7-185a2346f86a"
 
@@ -305,55 +304,6 @@ async def test_printer_that_doesnt_report_a_configured_tool_is_noted_once(tmp_pa
     assert count(caplog, "[Tool 2] printer doesn't report tool index 1") == 1
     assert fake.used == {19: [500.0]}  # The tool it does report is charged.
     assert 1 not in printer_bridge.tools
-    await bridge.aclose()
-
-
-async def test_a_tool_note_that_goes_away_is_logged_once_at_its_level(tmp_path, caplog):
-    bridge, fake, station = make(tmp_path, [spool(19)])
-    caplog.set_level("INFO")
-    printer_bridge = bridge.printers[0]
-    gone = ("index", "[Tool 2] printer doesn't report tool index 1")
-    kept = ("other", "[Tool 2] another note")
-    printer_bridge._notes(1, [gone, kept])
-    printer_bridge._notes(1, [kept])  # Only the note that went away ends.
-    printer_bridge._notes(1, [kept])
-    printer_bridge._notes(1, [])
-    printer_bridge._notes(1, [])
-    ends = [(r.levelname, r.getMessage()) for r in caplog.records if "no longer" in r.getMessage()]
-    assert ends == [
-        ("WARNING", "[Tool 2] no longer: printer doesn't report tool index 1"),
-        ("WARNING", "[Tool 2] no longer: another note"),
-    ]
-    caplog.clear()
-    printer_bridge._notes(1, [gone])  # Back again: logged afresh.
-    assert [r.getMessage() for r in caplog.records] == [gone[1]]
-    await bridge.aclose()
-
-
-async def test_a_tool_note_with_new_detail_is_logged_without_an_end_line(tmp_path, caplog):
-    bridge, fake, station = make(tmp_path, [spool(19)])
-    caplog.set_level("INFO")
-    printer_bridge = bridge.printers[0]
-    what = ("printer", 19)
-    printer_bridge._notes(0, [(what, f"[{LOC}] printer differs from spool 19: color")])
-    printer_bridge._notes(0, [(what, f"[{LOC}] printer differs from spool 19: color; name")])
-    assert [r.getMessage() for r in caplog.records] == [
-        f"[{LOC}] printer differs from spool 19: color",
-        f"[{LOC}] printer differs from spool 19: color; name",
-    ]
-    # A poll that doesn't compare the printer with the spool leaves the note standing.
-    caplog.clear()
-    printer_bridge._notes(0, [(EventKind.AMBIGUOUS, f"[{LOC}] location holds spools")], False)
-    printer_bridge._notes(0, [], compared=False)
-    assert [r.getMessage() for r in caplog.records] == [
-        f"[{LOC}] location holds spools",
-        f"[{LOC}] no longer: location holds spools",
-    ]
-    caplog.clear()
-    printer_bridge._notes(0, [])
-    assert [r.getMessage() for r in caplog.records] == [
-        f"[{LOC}] no longer: printer differs from spool 19: color; name"
-    ]
     await bridge.aclose()
 
 
