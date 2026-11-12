@@ -986,6 +986,8 @@ async def test_m3_staged_spool_claimed_takes_held_usage(
     w = world
     a, b = w.spools["A"], w.spools["B"]
     await baseline(w)
+    w.printer.extrude(0, 15)  # A has usage since load, which a claim mustn't move.
+    await w.poll()
     await w.move("B", w.tool_location)
     records = await w.poll()
     assert len(events(records, "swap_staged")) == 1
@@ -1006,6 +1008,7 @@ async def test_m3_staged_spool_claimed_takes_held_usage(
     await w.claim("B")
     records = await w.poll()
     claimed = events(records, "claimed")
+    # Only the start: the rest names "spool None" for the deleted spool (#140).
     assert len(claimed) == 1 and claimed[0]["message"].startswith(f"spool {b} claimed in place of")
     assert [e["message"] for e in events(records, "held_charged")] == [
         f"spool {b} is active; charged it 20 mm held after spool {a} was deleted"

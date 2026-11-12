@@ -140,7 +140,7 @@ async def test_c1_usage_held_over_a_reboot_joins_the_provisional_charge(
     """Usage held over a reboot with a provisional charge open: it joins that charge."""
     caplog.set_level(logging.INFO, logger="spoolman_prusalink")
     w = world
-    a, b = w.spools["A"], w.spools["B"]
+    a = w.spools["A"]
     await baseline(w)
 
     # S4: A unloaded and reloaded with no Spoolman change, then a print charges it
@@ -210,7 +210,7 @@ async def test_c1_usage_held_over_a_reboot_joins_the_provisional_charge(
     assert w.charged(since_unload, "A") == provisional + 10
     assert w.charged(w.since(0), "B") == 0
     assert w.bridge.printers[0].tools[0].provisional is None
-    assert b not in w.bridge.state.runouts
+    assert a not in w.bridge.state.runouts
 
 
 async def test_c2_printer_off_for_hours(world: World, caplog: pytest.LogCaptureFixture):
