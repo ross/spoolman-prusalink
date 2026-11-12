@@ -16,12 +16,14 @@ from integration.conftest import (
     baseline,
     charged,
     charges,
+    event_fields,
     events,
     logged,
     print_spec,
 )
 from integration.faults import archive_spool
 from simulator.model import PrintSpec, Segment, State
+from spoolman_prusalink.events import StagedAtPrint, SwapAssumed
 
 
 async def test_p2_runout_with_spoolman_updated_during_pause(world: World):
@@ -198,8 +200,8 @@ async def test_p8_cancelled_during_preheat_is_not_a_print_start(
     await w.move("A", w.shelf)
     await w.move("B", w.tool_location)
     records = await w.poll()
-    assert [e["message"] for e in events(records, "swap_confirmed")] == [
-        f"swap confirmed: {LOAD_MM} mm moved from spool {a} to {b}"
+    assert event_fields(records, "swap_confirmed") == [
+        {"mm": LOAD_MM, "from_spool": a, "to_spool": b}
     ]
     assert w.charged(records, "B") == LOAD_MM
     assert w.charged(records, "A") == -LOAD_MM
@@ -222,12 +224,12 @@ async def test_p9_restart_after_a_failure_is_a_new_print_start(
     a, b = w.spools["A"], w.spools["B"]
     await baseline(w)
     await stage_b(w)
-    msg = f"print started while spool {b} is staged but not loaded; charging spool {a}"
+    msg = StagedAtPrint(staged=b, active=a).message
 
     start = w.counter
     mark = w.mark()
     records = await w.start_print(print_spec())
-    assert [e["message"] for e in events(records, "staged_at_print")] == [msg]
+    assert event_fields(records, "staged_at_print") == [{"staged": b, "active": a}]
     first = w.printer.job.id
 
     # The print fails part way and is cancelled.
@@ -238,7 +240,7 @@ async def test_p9_restart_after_a_failure_is_a_new_print_start(
 
     records = await w.start_print(print_spec())
     assert w.printer.job.id != first
-    assert [e["message"] for e in events(records, "staged_at_print")] == [msg]
+    assert event_fields(records, "staged_at_print") == [{"staged": b, "active": a}]
     await finish(w)
     records = w.since(mark) + await w.poll()
 
@@ -302,9 +304,7 @@ async def test_p10_spoolman_changed_mid_print_is_staged(world: World):
     w.printer.extrude(0, 10)
     await w.unload()
     records = await w.poll()
-    assert [e["message"] for e in events(records, "swap_committed")] == [
-        f"swap done: spool {a} -> {b}"
-    ]
+    assert event_fields(records, "swap_committed") == [{"from_spool": a, "to_spool": b}]
     assert w.charged(records, "A") == 10
 
     records = await w.swap_cycle(poll_every=0.3, source="tag", name=PETG[0], color=PETG[1])
@@ -334,19 +334,21 @@ async def test_p12_power_panic_resume_keeps_the_job(world: World, caplog: pytest
     assert logged(caplog, logging.WARNING, "unreachable")
     w.advance(3.0)
 
+    old_boot = w.printer.boot_id
     w.printer.set_power("on", resume=True)
     # Recovery: BUSY with the nozzle clean's 25 mm purge, PAUSED while unparking, PRINTING.
     records = await w.run_until(lambda: w.printer.state is not State.BUSY, poll_every=0.5)
     assert w.printer.state is State.PAUSED and w.counter == 25
     records += await w.run_until(lambda: w.printer.state is State.PRINTING, poll_every=0.5)
     assert w.printer.job.id == job
-    reboots = events(records, "reboot")
-    assert len(reboots) == 1 and "counters restart at 0" in reboots[0]["message"]
+    # The printing the bridge never saw is lost with the counter, not held.
+    assert event_fields(records, "reboot") == [
+        {"from_boot": old_boot, "to_boot": w.printer.boot_id, "kept_mm": 0}
+    ]
     assert logged(caplog, logging.WARNING, "reachable again")
     assert events(records, "staged_at_print") == []
     # The reboot flags the staged spool, as row S9 says.
-    assert len(events(records, "staged_at_reboot")) == 1
-    assert f"spool {b} is staged" in events(records, "staged_at_reboot")[0]["message"]
+    assert event_fields(records, "staged_at_reboot") == [{"staged": b, "active": a}]
 
     # After the reboot A is charged the counter from 0, the nozzle clean's purge included.
     await finish(w)
@@ -432,8 +434,8 @@ async def test_p3_runout_with_spoolman_updated_after_the_print(world: World):
     await w.move("B", w.tool_location)
     records = await w.poll()
     since_runout = w.counter - at_runout
-    assert [e["message"] for e in events(records, "swap_confirmed")] == [
-        f"swap confirmed: {since_runout} mm moved from spool {a} to {b}"
+    assert event_fields(records, "swap_confirmed") == [
+        {"mm": since_runout, "from_spool": a, "to_spool": b}
     ]
     assert w.charged(records, "B") == since_runout
     assert w.charged(records, "A") == -since_runout
@@ -468,11 +470,10 @@ async def test_p4_runout_reloaded_with_no_spoolman_change(
 
     # The next print's first extrusion closes the swap as the same spool, provisionally.
     records = await w.start_print(print_spec())
-    msg = (
-        "print started with no Spoolman change since the unload; assuming "
-        f"spool {a} was reloaded and charging it provisionally"
-    )
-    assert [e["message"] for e in events(records, "swap_assumed")] == [msg]
+    msg = SwapAssumed(spool=a, job=None).message
+    assert event_fields(records, "swap_assumed") == [
+        {"spool": a, "job": w.printer.job.id, "returned": False}
+    ]
     assert logged(caplog, logging.WARNING, f"[{w.tool_location}] {msg}")
     provisional = w.counter - at_runout
     flag = await w.flag("A")
@@ -485,9 +486,8 @@ async def test_p4_runout_reloaded_with_no_spoolman_change(
     w.printer.extrude(0, 10)
     await w.unload()
     records = await w.poll()
-    assert [e["message"] for e in events(records, "provisional_kept")] == [
-        f"unload keeps the {w.tool.extruded_at_unload - at_runout} mm charged "
-        f"provisionally to spool {a}"
+    assert event_fields(records, "provisional_kept") == [
+        {"mm": w.tool.extruded_at_unload - at_runout, "spool": a}
     ]
     assert len(events(records, "swap_unconfirmed")) == 1
     flag = await w.flag("A") or ""
@@ -549,8 +549,8 @@ async def test_p5_planned_color_changes_are_unloads(world: World):
     await w.move("C", w.tool_location)
     records = await w.poll()
     since_second = w.counter - second
-    assert [e["message"] for e in events(records, "swap_confirmed")] == [
-        f"swap confirmed: {since_second} mm moved from spool {b} to {c}"
+    assert event_fields(records, "swap_confirmed") == [
+        {"mm": since_second, "from_spool": b, "to_spool": c}
     ]
     records = w.since(0)
     assert w.charged(records, "B") == second - first
