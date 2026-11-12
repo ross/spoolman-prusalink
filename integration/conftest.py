@@ -32,7 +32,7 @@ from simulator.model import (
     Simulation,
     State,
 )
-from simulator.prusalink import make_app
+from simulator.prusalink import Reply, make_app
 from spoolman_prusalink.app import Bridge
 from spoolman_prusalink.config import Config, PrinterConfig
 from spoolman_prusalink.db import read_ledger
@@ -309,8 +309,10 @@ class World:
     fields: dict[str, str] = field(
         default_factory=lambda: {"uuid": UUID_FIELD, "flag": FLAG_FIELD, "claim": CLAIM_FIELD}
     )
-    # Runs before the simulator serves each request, with its method and path.
-    before_request: Callable[[str, str], None] | None = None
+    # Runs before the simulator serves each request, with its method and path. It can
+    # return a response to send instead, or `simulator.prusalink.DROP` to drop the
+    # connection; None serves the request as usual.
+    before_request: Callable[[str, str], Reply] | None = None
     # --- Several printers (world_printers; see integration/printers.py) ---
     # Printers other than "it", by name.
     others: dict[str, Station] = field(default_factory=dict)
@@ -585,9 +587,8 @@ async def world(
     sim.add(printer)
     w: World
 
-    def before_request(method: str, path: str) -> None:
-        if w.before_request is not None:
-            w.before_request(method, path)
+    def before_request(method: str, path: str) -> Reply:
+        return None if w.before_request is None else w.before_request(method, path)
 
     server = TestServer(make_app(sim, printer.name, before_request))
     await server.start_server()
