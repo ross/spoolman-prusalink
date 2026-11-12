@@ -8,12 +8,13 @@ from spoolman_prusalink.accounting import (
     EventKind,
     Notice,
     Provisional,
+    Result,
     SwapFlag,
     ToolState,
-    account,
     hold_deleted,
     resolve_assignment,
 )
+from spoolman_prusalink.accounting import account as _account
 from spoolman_prusalink.models import Material, ToolReading
 
 # What the printer reports for the PLA preset, which `spool()` writes.
@@ -21,6 +22,16 @@ PLA_TEMPS = {"nozzle_temperature": 215, "preheat_temperature": 170, "bed_tempera
 
 BOOT = 111
 PLA = Material("PLA", "#73737b", **PLA_TEMPS)
+
+
+def account(*args, **kwargs) -> Result:
+    """Call `account()`, and check the invariants every poll must keep."""
+    res = _account(*args, **kwargs)
+    # A provisional charge is only ever on the active spool: whatever changes the active
+    # spool resolves it first.
+    p = res.state.provisional
+    assert p is None or p.spool_id == res.state.active, res.state
+    return res
 
 
 def r(extruded, material=PLA, unloads=0, at_unload=0):
@@ -42,10 +53,6 @@ def run(steps, state=None, matches=lambda _id: False):
     for step in steps:
         boot, reading, ids, *job = step
         res = account(state, boot, reading, ids, job[0] if job else None, matches)
-        # A provisional charge is only ever on the active spool: whatever changes the
-        # active spool resolves it first.
-        p = res.state.provisional
-        assert p is None or p.spool_id == res.state.active, (step, res.state)
         charges += res.charges
         kinds += [e.kind for e in res.events]
         state = res.state
@@ -407,6 +414,7 @@ def test_correction_of_a_provisional_charge_with_the_old_spool_moved_out():
         Charge(7, -200, "moved to corrected spool"),
     ]
     assert (res.state.active, res.state.assigned, res.state.evict) == (9, 9, ())
+    assert res.state.provisional is None
 
 
 def test_correction_of_a_provisional_charge_moves_only_usage_since_a_reboot():
