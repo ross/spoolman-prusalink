@@ -35,7 +35,8 @@ asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 
 [tool.coverage.run]
-# Measured on the unit suite, `pytest --cov`. The integration tests don't count toward it.
+# Measured on the unit suite, `pytest --cov`. The integration tests don't count toward it;
+# CI reports their coverage of the bridge on its own, with no floor.
 source = ["spoolman_prusalink", "simulator"]
 omit = [
     "simulator/tests/*",
