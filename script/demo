@@ -86,7 +86,7 @@ children=($!)
 # Bash runs traps only once its foreground child exits, so the bridge runs in the
 # background too and the script waits on it: a signal to this script alone then
 # stops both.
-trap 'kill "${children[@]}" 2>/dev/null; wait "${children[@]}" 2>/dev/null' EXIT
+trap 'kill "${children[@]}" 2>/dev/null; wait "${children[@]}" 2>/dev/null || true' EXIT
 trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
