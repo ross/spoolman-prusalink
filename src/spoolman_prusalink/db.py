@@ -50,7 +50,8 @@ CREATE TABLE flagged (spool_id INTEGER PRIMARY KEY);
 CREATE TABLE claimed (spool_id INTEGER PRIMARY KEY);
 CREATE TABLE runouts (
     spool_id INTEGER PRIMARY KEY,
-    text TEXT NOT NULL,
+    location TEXT NOT NULL,
+    remaining REAL NOT NULL,
     net REAL,
     used REAL
 );
@@ -77,7 +78,7 @@ _KEYED = {
     "seen_uuids": (("printer", "tool"), ("uuid", "spool_id", "runout")),
     "flagged": (("spool_id",), ()),
     "claimed": (("spool_id",), ()),
-    "runouts": (("spool_id",), ("text", "net", "used")),
+    "runouts": (("spool_id",), ("location", "remaining", "net", "used")),
 }
 # Outbox columns copied out of each record; the `record` column holds the rest.
 _OUTBOX_COLUMNS = ("printer", "tool", "spool_id", "use_length")
@@ -395,7 +396,7 @@ def _rows(state: State) -> Rows:
     for spool_id in state.claimed:
         rows["claimed"][(spool_id,)] = ()
     for spool_id, r in state.runouts.items():
-        rows["runouts"][(spool_id,)] = (r.text, r.net, r.used)
+        rows["runouts"][(spool_id,)] = (r.location, r.remaining, r.net, r.used)
     return rows
 
 

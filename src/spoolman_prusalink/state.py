@@ -10,16 +10,29 @@ from .tags import SeenTag
 
 @dataclass
 class Runout:
-    """A runout flag, and the spool's weights in Spoolman as the bridge last knew them.
+    """A runout flag: a spool that unloaded mid-print while Spoolman showed plenty left.
+
+    `location` is the tool's, and `remaining` is the grams Spoolman showed then.
 
     `net` and `used` start as the weights when the flag was set, and `used` follows the
     bridge's own charges. Any other change to either is the user editing the weight,
     which answers the flag.
     """
 
-    text: str
+    location: str
+    remaining: float
     net: float
     used: float
+
+    @property
+    def flag(self) -> str:
+        return (
+            f"{self.location}: unloaded mid-print with {self.remaining:.0f} g left in "
+            "Spoolman. If it ran out, its usage is probably on another spool: check "
+            "recent swaps, then correct this spool's weight, which clears this. The "
+            "filament may also have jammed or tangled. Ignore this after a planned "
+            "color change."
+        )
 
 
 @dataclass

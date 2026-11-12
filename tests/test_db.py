@@ -63,8 +63,8 @@ def full_state() -> State:
         ],
         flagged=[7, 8],
         runouts={
-            7: Runout("ran out", 1000.0, 990.5),
-            8: Runout("ran out early", None, None),
+            7: Runout("Core", 9.5, 1000.0, 990.5),
+            8: Runout("Core", 400.0, None, None),
         },
         claimed=[3, 9],
     )

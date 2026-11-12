@@ -812,20 +812,15 @@ class PrinterBridge:
             return
         if spool.remaining_weight <= RUNOUT_LEFT * spool.net_weight:
             return
-        text = (
-            f"{location}: unloaded mid-print with {spool.remaining_weight:.0f} g left in "
-            "Spoolman. If it ran out, its usage is probably on another spool: check "
-            "recent swaps, then correct this spool's weight, which clears this. The "
-            "filament may also have jammed or tangled. Ignore this after a planned "
-            "color change."
-        )
         log.warning(
             "[%s] spool %d unloaded mid-print with %.0f g left in Spoolman",
             location,
             spool.id,
             spool.remaining_weight,
         )
-        self.bridge.state.runouts[spool.id] = Runout(text, spool.net_weight, spool.used_weight)
+        self.bridge.state.runouts[spool.id] = Runout(
+            location, spool.remaining_weight, spool.net_weight, spool.used_weight
+        )
 
     def _claim_handled(self, location: str, claim: int, others: list[int]) -> None:
         """Record a handled claim and the claims it beat, so their boxes are cleared."""
@@ -1407,7 +1402,7 @@ class Bridge:
         if self._check_runout_edits(by_id) or save:
             self._save()
         for spool_id, runout in self.state.runouts.items():
-            flags.setdefault(spool_id, []).append(runout.text)
+            flags.setdefault(spool_id, []).append(runout.flag)
         self._flags = {spool_id: " | ".join(texts) for spool_id, texts in flags.items()}
 
     def _follow_runout_charge(self, rec: dict, used: float | None) -> None:
