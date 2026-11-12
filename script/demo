@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Run the whole stack locally, with no hardware: a Spoolman, the printer
 # simulator, and the bridge pointed at both. Ctrl-C stops the simulator and the
-# bridge.
+# bridge, and so does a SIGTERM or SIGHUP to this script.
 #
 # Spoolman: with DEMO_SPOOLMAN_URL set, the demo uses that Spoolman. Otherwise it
 # runs the container spoolman-demo (Podman or Docker) on 127.0.0.1:7912, or on
@@ -82,8 +82,14 @@ TOML
 
 echo "==> Starting the simulator"
 .venv/bin/python -m simulator -c "$sim_config" run &
-sim=$!
-trap 'kill "$sim" 2>/dev/null; wait "$sim" 2>/dev/null' EXIT
+children=($!)
+# Bash runs traps only once its foreground child exits, so the bridge runs in the
+# background too and the script waits on it: a signal to this script alone then
+# stops both.
+trap 'kill "${children[@]}" 2>/dev/null; wait "${children[@]}" 2>/dev/null || true' EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 control_port=$(.venv/bin/python -c 'import sys; from simulator import config; print(config.load(sys.argv[1]).control_port)' "$sim_config")
 wait_for "http://127.0.0.1:$control_port/" simulator
 
@@ -95,4 +101,6 @@ MSG
 # an exported SPOOLMAN_URL would send the demo's writes to that Spoolman.
 env -u SPOOLMAN_URL -u PRUSALINK_URL -u PRUSALINK_API_KEY \
     -u SPOOLMAN_PRUSALINK_LOCATION -u SPOOLMAN_PRUSALINK_CONFIG \
-    .venv/bin/spoolman-prusalink -c "$bridge_config" "$@"
+    .venv/bin/spoolman-prusalink -c "$bridge_config" "$@" &
+children+=($!)
+wait "$!"
