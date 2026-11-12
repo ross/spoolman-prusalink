@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from dataclasses import replace
-
 from simulator.model import MODELS, Material, Settings, SimPrinter, SimTool, Simulation
 
 PLA = Material("PLA", "#73737b", "44c406a5-c6f5-4440-bfba-e8060564b717")
@@ -11,7 +9,7 @@ KEY = "sim-key"
 
 
 def loaded(index: int, material: Material = PLA, **kw) -> SimTool:
-    return SimTool(index, loaded=True, material=replace(material), previous=replace(material), **kw)
+    return SimTool.loaded_with(index, material, **kw)
 
 
 def make(

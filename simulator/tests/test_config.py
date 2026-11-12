@@ -127,15 +127,23 @@ BAD = {
     ),
     "material name pattern": (
         printer(tool('index = 0\nmaterial = { name = "TOOLONGNAME" }')),
-        "material.name must match",
+        "material.name: filament name 'TOOLONGNAME' must be 1 to 7",
     ),
     "bad color": (
         printer(tool('index = 0\nmaterial = { name = "PLA", color = "red" }')),
-        "material.color must look like #rrggbb",
+        "material.color: color 'red' must look like #rrggbb",
+    ),
+    "name ending in a newline": (
+        printer(tool('index = 0\nmaterial = { name = "PLA\\n" }')),
+        "material.name: filament name 'PLA\\n' must be 1 to 7",
+    ),
+    "color ending in a newline": (
+        printer(tool('index = 0\nmaterial = { name = "PLA", color = "#abcdef\\n" }')),
+        "material.color: color '#abcdef\\n' must look like #rrggbb",
     ),
     "bad uuid": (
         printer(tool('index = 0\nmaterial = { name = "PLA", instance_uuid = "x" }')),
-        "material.instance_uuid isn't a UUID",
+        "material.instance_uuid: 'x' isn't a UUID",
     ),
     "uuid on a model without uuids": (
         printer(
