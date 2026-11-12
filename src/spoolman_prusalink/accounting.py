@@ -58,79 +58,41 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass, field, fields, replace
-from enum import Enum, StrEnum, auto
 
+from .events import (
+    ActiveAtPrint,
+    ActiveReassigned,
+    ActiveUnassigned,
+    Ambiguous,
+    AssignmentChanged,
+    Baseline,
+    ClaimConfirmed,
+    Claimed,
+    Correction,
+    CounterAnomaly,
+    Event,
+    EventKind,
+    HeldCharged,
+    HoldDeleted,
+    HoldEmpty,
+    HoldUnassigned,
+    LostUnassigned,
+    Moved,
+    ProvisionalKept,
+    Reboot,
+    StagedAtPrint,
+    StagedAtReboot,
+    StagingCancelled,
+    SwapAssumed,
+    SwapCommitted,
+    SwapConfirmed,
+    SwapStaged,
+    SwapUnassigned,
+    SwapUnconfirmed,
+    Unload,
+    UnloadedUnassigned,
+)
 from .models import ToolReading
-
-
-class Report(Enum):
-    """How the bridge reports an event, by its kind."""
-
-    # Something that happened this poll: logged once and recorded in the ledger.
-    INFO = auto()
-    # The same, for an event that needs the user's attention.
-    WARNING = auto()
-    # A condition that `account()` repeats every poll while it lasts: logged when it
-    # starts, changes, and ends, and not recorded.
-    LASTING = auto()
-    # Not reported. It's only emitted on polls with usage, so the bridge reports the
-    # condition from the tool state instead.
-    STATE = auto()
-
-
-class EventKind(StrEnum):
-    """What an event is about, and how it's reported: `Report.INFO` unless it says."""
-
-    report: Report
-
-    def __new__(cls, value: str, report: Report = Report.INFO) -> EventKind:
-        kind = str.__new__(cls, value)
-        kind._value_ = value
-        kind.report = report
-        return kind
-
-    BASELINE = "baseline"
-    REBOOT = "reboot"
-    UNLOAD = "unload"
-    AMBIGUOUS = "ambiguous", Report.LASTING
-    SWAP_STAGED = "swap_staged"
-    SWAP_COMMITTED = "swap_committed"
-    SWAP_UNCONFIRMED = "swap_unconfirmed", Report.WARNING
-    SWAP_CONFIRMED = "swap_confirmed"
-    SWAP_ASSUMED = "swap_assumed", Report.WARNING
-    STAGED_AT_PRINT = "staged_at_print", Report.WARNING
-    STAGED_AT_REBOOT = "staged_at_reboot", Report.WARNING
-    PROVISIONAL_KEPT = "provisional_kept"
-    CLAIMED = "claimed"
-    CLAIM_CONFIRMED = "claim_confirmed"
-    CORRECTION = "correction"
-    STAGING_CANCELLED = "staging_cancelled"
-    # The active spool left the location with no unload: it's still charged.
-    ACTIVE_UNASSIGNED = "active_unassigned"
-    # The active spool is in the location again.
-    ACTIVE_REASSIGNED = "active_reassigned"
-    # The tool unloaded with nothing in the location: usage is held.
-    UNLOADED_UNASSIGNED = "unloaded_unassigned"
-    # The spool of an unconfirmed swap left the location: usage is held.
-    SWAP_UNASSIGNED = "swap_unassigned"
-    # A spool was assigned while none was active, and became active.
-    ASSIGNMENT_CHANGED = "assignment_changed"
-    # A print started with a deleted spool's usage held: the assigned spool became active.
-    ACTIVE_AT_PRINT = "active_at_print"
-    HOLD_EMPTY = "hold_empty", Report.LASTING
-    HOLD_UNASSIGNED = "hold_unassigned", Report.LASTING
-    # The bridge logs when a hold for a deleted spool starts, moves to another spool, and
-    # ends, from `ToolState.deleted_spool`.
-    HOLD_DELETED = "hold_deleted", Report.STATE
-    HELD_CHARGED = "held_charged"
-    LOST_UNASSIGNED = "lost_unassigned", Report.WARNING
-    COUNTER_ANOMALY = "counter_anomaly", Report.WARNING
-
-
-@dataclass(frozen=True)
-class Event:
-    kind: EventKind
-    message: str
 
 
 @dataclass(frozen=True)
@@ -165,13 +127,6 @@ class Provisional:
 
 
 @dataclass(frozen=True)
-class Notice:
-    spool_id: int
-    kind: EventKind
-    message: str
-
-
-@dataclass(frozen=True)
 class ToolState:
     boot_id: int | None = None
     charged: int = 0
@@ -188,9 +143,9 @@ class ToolState:
     # leveling changes nothing.
     pending_job: int | None = None
     pending_at: int = 0
-    # A one-off notice for the user about a spool, such as a print started while another
-    # spool is staged. Cleared at the next print start or unload.
-    notice: Notice | None = None
+    # A one-off notice for the user about the active spool (`notice.active`): a print
+    # started while another spool was staged. Cleared at the next print start or unload.
+    notice: StagedAtPrint | None = None
     # The printer should be written with the active spool once idle: set when the
     # active spool changes or the tool unloads (a menu load drops color and UUID).
     needs_sync: bool = False
@@ -207,7 +162,8 @@ class ToolState:
     # A notice on the staged spool: a print started, or the printer rebooted, while it
     # was staged. Cleared when it stops being staged, at an unload, by a claim, or when
     # the active spool is deleted.
-    staged_notice: Notice | None = None
+    # It's on `staged_notice.staged`.
+    staged_notice: StagedAtPrint | StagedAtReboot | None = None
     # Usage charged to the active spool on the assumption that it was reloaded.
     provisional: Provisional | None = None
     # Millimeters charged to each spool since the later of this tool's last unload and
@@ -303,16 +259,23 @@ def _evict_from_json(data: list[int]) -> tuple[int, ...]:
     return tuple(int(i) for i in data)
 
 
-def _notice_json(notice: Notice | None) -> dict | None:
+# The events a notice can be, by kind.
+_NOTICES: dict[str, type[StagedAtPrint | StagedAtReboot]] = {
+    EventKind.STAGED_AT_PRINT: StagedAtPrint,
+    EventKind.STAGED_AT_REBOOT: StagedAtReboot,
+}
+
+
+def _notice_json(notice: StagedAtPrint | StagedAtReboot | None) -> dict | None:
     if notice is None:
         return None
-    return {"spool_id": notice.spool_id, "kind": notice.kind.value, "message": notice.message}
+    return {"kind": notice.kind.value, "staged": notice.staged, "active": notice.active}
 
 
-def _notice_from_json(data: dict | None) -> Notice | None:
+def _notice_from_json(data: dict | None) -> StagedAtPrint | StagedAtReboot | None:
     if data is None:
         return None
-    return Notice(int(data["spool_id"]), EventKind(data["kind"]), data["message"])
+    return _NOTICES[data["kind"]](int(data["staged"]), int(data["active"]))
 
 
 @dataclass
@@ -414,7 +377,7 @@ _INVARIANTS: tuple[tuple[str, Callable[[ToolState], bool]], ...] = (
         "a staged notice is on the assigned spool, which isn't the active one",
         lambda s: (
             s.staged_notice is None
-            or (s.staged_notice.spool_id == s.assigned and s.assigned != s.active)
+            or (s.staged_notice.staged == s.assigned and s.assigned != s.active)
         ),
     ),
     (
@@ -430,6 +393,10 @@ def violations(state: ToolState) -> list[str]:
     Nothing in the bridge calls this. It writes down which combinations of fields can
     occur, and the tests check it on every state that goes into or comes out of
     `account()` and `hold_deleted()`.
+
+    These rules are what a formal state machine, with a named mode per tool, would be
+    derived from. There isn't one because the conditions overlap (a provisional charge
+    with a staged spool, a deleted spool with a staged spool), so the modes multiply.
     """
     return [rule for rule, holds in _INVARIANTS if not holds(state)]
 
@@ -453,7 +420,7 @@ def hold_deleted(state: ToolState, spool_id: int, mm: int = 0, queued: int = 0) 
         if swap is not None and swap.spool_id == spool_id:
             held += max(swap.mm - queued, 0)
             swap = None
-        notice = state.notice if state.notice is None or state.notice.spool_id != spool_id else None
+        notice = state.notice if state.notice is None or state.notice.active != spool_id else None
         state = replace(
             state,
             active=None,
@@ -511,23 +478,76 @@ def account(
     `claim` is a spool in `location_ids` that the user says is in the tool;
     `Result.claimed` tells whether it was handled. The caller must skip the poll (not
     call this) when Spoolman is unreachable.
-
-    Two states run through the function. `last` never changes, so `last.x` is always
-    the previous poll's value. `current` starts as a copy of it, every step writes this
-    poll's values to it, and at the end it's the new state. A field that no step writes
-    carries over.
     """
-    current = _Draft(last)
-    out = Result(state=last)
+    return _Poll(last, boot_id, reading, location_ids, job_id, matches, claim).run()
 
-    def done() -> Result:
-        out.state = current.freeze()
-        return out
 
-    def event(kind: EventKind, message: str) -> None:
-        out.events.append(Event(kind, message))
+class _Poll:
+    """One call of `account()`: its arguments, the two states, and the result so far.
 
-    def charge(target: int, mm: int, reason: str) -> None:
+    Two states run through it. `last` never changes, so `last.x` is always the previous
+    poll's value. `current` starts as a copy of it, every step writes this poll's values
+    to it, and at the end it's the new state. A field that no step writes carries over.
+
+    `run()` calls the steps in order, and the order is real: an unload, then a claim or
+    a change in Spoolman's assignment, then a print start, then usage.
+    """
+
+    def __init__(
+        self,
+        last: ToolState,
+        boot_id: int,
+        reading: ToolReading,
+        location_ids: list[int],
+        job_id: int | None,
+        matches: Callable[[int], bool],
+        claim: int | None,
+    ) -> None:
+        self.last = last
+        self.current = _Draft(last)
+        self.out = Result(state=last)
+        self.boot_id = boot_id
+        self.reading = reading
+        self.location_ids = location_ids
+        self.job_id = job_id
+        self.matches = matches
+        self.claim = claim
+        self.rebooted = last.boot_id is not None and boot_id != last.boot_id
+        self.unloaded = False  # Set by the unload step.
+
+    def run(self) -> Result:
+        assigned = resolve_assignment(self.last, self.location_ids)
+        if isinstance(assigned, list):
+            self.reboot()
+            self.skip(assigned)
+            return self.done()
+        if self.last.boot_id is None:
+            self.first_poll(assigned)
+            return self.done()
+        self.reboot()
+        self.current.assigned = assigned
+        self.current.evict = tuple(i for i in self.current.evict if i in self.location_ids)
+        self.check_counter()
+        self.unload()
+        if self.claim is not None:
+            self.take_claim(self.claim)
+        elif not self.unloaded:
+            self.assignment()
+        self.print_start()
+        self.charge_held()
+        self.usage()
+        self.notices()
+        self.finish()
+        return self.done()
+
+    def done(self) -> Result:
+        self.out.state = self.current.freeze()
+        return self.out
+
+    def event(self, ev: Event) -> None:
+        self.out.events.append(ev)
+
+    def charge(self, target: int, mm: int, reason: str) -> None:
         """Charge `mm` to a spool, and add it to each tally kept on that spool.
 
         Every charge goes through here, so no charge site updates a tally itself. A
@@ -537,7 +557,8 @@ def account(
         """
         if not mm:
             return
-        out.charges.append(Charge(target, mm, reason))
+        current = self.current
+        self.out.charges.append(Charge(target, mm, reason))
         window = current.since_load
         current.since_load = {**window, target: window.get(target, 0) + mm}
         swap, provisional = current.swap, current.provisional
@@ -546,38 +567,72 @@ def account(
         if provisional is not None and provisional.spool_id == target:
             current.provisional = replace(provisional, mm=provisional.mm + mm)
 
-    assigned = resolve_assignment(last, location_ids)
-    ambiguous = isinstance(assigned, list)
+    def retire(self, old: int | None) -> None:
+        """Mark the outgoing spool for eviction if it's still in the location."""
+        current = self.current
+        if (
+            old is not None
+            and old in self.location_ids
+            and old != current.assigned
+            and old not in current.evict
+        ):
+            current.evict = (*current.evict, old)
 
-    # First sight of this tool: take the current counter as the baseline. Usage before
-    # the bridge started isn't attributable.
-    if last.boot_id is None and not ambiguous:
-        current.boot_id = boot_id
+    def take(self, target: int, how: str) -> tuple[Moved, str]:
+        """Move the usage since load to `target` and make it active, as a claim does.
+
+        That settles which spool went in, so an open swap or a provisional charge is
+        closed. Returns what moved from which spool, and whether the usage moved is since
+        the last unload or reboot, for the event.
+        """
+        current = self.current
+        current.swap = None
+        current.provisional = None
+        # Charge before refunding: Spoolman clamps used_weight at 0, so a refund applied
+        # first could be truncated if the charge then fails.
+        moved = {i: mm for i, mm in sorted(current.since_load.items()) if i != target and mm > 0}
+        self.charge(target, sum(moved.values()), f"{how} usage since load")
+        for i, mm in moved.items():
+            self.charge(i, -mm, f"moved to {how} spool")
+        evict = tuple(i for i in current.evict if i != target)
+        old = current.active
+        if old is not None and old in self.location_ids and old not in evict:
+            evict = (*evict, old)
+        current.evict = evict
+        current.active = target
+        resolved = resolve_assignment(current, self.location_ids)
+        current.assigned = target if isinstance(resolved, list) else resolved
+        since = "reboot" if self.rebooted or not current.unload_count else "unload"
+        return tuple(moved.items()), since
+
+    def first_poll(self, assigned: int | None) -> None:
+        """First sight of this tool: take the current counter as the baseline.
+
+        Usage before the bridge started isn't attributable.
+        """
+        current, reading = self.current, self.reading
+        current.boot_id = self.boot_id
         current.charged = current.extruded = reading.extruded
         current.unload_count = reading.unload_count
         current.active = current.assigned = assigned
-        current.job_id = job_id
-        if claim is not None:
-            current.active, out.claimed = claim, True
-            event(EventKind.CLAIM_CONFIRMED, f"spool {claim} claimed; nothing to move")
-        current.needs_sync = out.claimed
-        spool = "none" if current.active is None else current.active
-        event(EventKind.BASELINE, f"baseline extruded={reading.extruded} spool={spool}")
-        return done()
+        current.job_id = self.job_id
+        if self.claim is not None:
+            current.active, self.out.claimed = self.claim, True
+            self.event(ClaimConfirmed(self.claim, first_poll=True))
+        current.needs_sync = self.out.claimed
+        self.event(Baseline(reading.extruded, current.active))
 
-    rebooted = last.boot_id is not None and boot_id != last.boot_id
-    if rebooted:
+    def reboot(self) -> None:
+        """A new boot restarts the counters."""
+        if not self.rebooted:
+            return
+        last, current = self.last, self.current
         # Usage held by not advancing `charged` would be lost with the counter.
         kept = max(last.extruded - last.charged, 0)
-        event(
-            EventKind.REBOOT,
-            f"boot_id {last.boot_id} -> {boot_id}; counters restart at 0 "
-            "(usage since the last poll before the reboot is lost)"
-            + (f"; {kept} mm held before the restart is kept" if kept else ""),
-        )
+        self.event(Reboot(last.boot_id, self.boot_id, kept))
         # Keep job_id: the firmware stores job IDs in EEPROM and never reuses them, so a
         # print resumed after a power loss keeps its ID and isn't a new print start.
-        current.boot_id = boot_id
+        current.boot_id = self.boot_id
         current.charged = 0
         current.unload_count = 0
         current.pending_at = 0
@@ -586,130 +641,67 @@ def account(
         # since the reboot.
         current.since_load = {}
 
-    if ambiguous:
-        ids = ", ".join(str(i) for i in assigned)
-        event(
-            EventKind.AMBIGUOUS,
-            f"location holds spools {ids}; skipping until it's clear which one is loaded",
-        )
-        out.skipped = True
-        if last.boot_id is not None:
+    def skip(self, ids: list[int]) -> None:
+        """The location is ambiguous: charge nothing, and record only the counter."""
+        self.event(Ambiguous(tuple(ids)))
+        self.out.skipped = True
+        if self.last.boot_id is not None:
             # Nothing is charged, so the usage is held: keep track of it over a reboot,
             # including one while the location stays ambiguous.
-            current.extruded = reading.extruded
-            current.reboot_pending = last.reboot_pending or rebooted
-        return done()
-    current.assigned = assigned
-    current.evict = tuple(i for i in current.evict if i in location_ids)
+            self.current.extruded = self.reading.extruded
+            self.current.reboot_pending = self.last.reboot_pending or self.rebooted
 
-    if reading.extruded < current.charged:
-        # Shouldn't happen within one boot. Resync rather than charge a negative amount.
-        event(
-            EventKind.COUNTER_ANOMALY,
-            f"extruded {reading.extruded} < charged {current.charged} within one boot; resyncing",
-        )
-        current.charged = reading.extruded
+    def check_counter(self) -> None:
+        current, extruded = self.current, self.reading.extruded
+        if extruded < current.charged:
+            # Shouldn't happen within one boot. Resync rather than charge a negative amount.
+            self.event(CounterAnomaly(extruded, current.charged))
+            current.charged = extruded
 
-    unloaded = False
-
-    def retire(old: int | None) -> None:
-        """Mark the outgoing spool for eviction if it's still in the location."""
-        if (
-            old is not None
-            and old in location_ids
-            and old != current.assigned
-            and old not in current.evict
-        ):
-            current.evict = (*current.evict, old)
-
-    def charge_held(target: int) -> None:
-        """Charge usage held over a reboot, with no deleted spool, to the active spool."""
-        held = current.held_mm
-        charge(target, held, "held before the printer restarted")
-        event(
-            EventKind.HELD_CHARGED,
-            f"spool {target} is active; charged it {held} mm held before the printer restarted",
-        )
-        current.held_mm = 0
-
-    def take(target: int, how: str) -> str:
-        """Move the usage since load to `target` and make it active, as a claim does.
-
-        That settles which spool went in, so an open swap or a provisional charge is
-        closed. Returns what moved, for the event.
-        """
-        current.swap = None
-        current.provisional = None
-        # Charge before refunding: Spoolman clamps used_weight at 0, so a refund applied
-        # first could be truncated if the charge then fails.
-        moved = {i: mm for i, mm in sorted(current.since_load.items()) if i != target and mm > 0}
-        charge(target, sum(moved.values()), f"{how} usage since load")
-        for i, mm in moved.items():
-            charge(i, -mm, f"moved to {how} spool")
-        evict = tuple(i for i in current.evict if i != target)
-        old = current.active
-        if old is not None and old in location_ids and old not in evict:
-            evict = (*evict, old)
-        current.evict = evict
-        current.active = target
-        resolved = resolve_assignment(current, location_ids)
-        current.assigned = target if isinstance(resolved, list) else resolved
-        since = "reboot" if rebooted or not current.unload_count else "unload"
-        sources = ", ".join(f"{mm} mm from spool {i}" for i, mm in moved.items())
-        return f"{sources or 'nothing'} (usage since the last {since})"
-
-    # 1. Unload since the last poll: usage before it goes to the active spool.
-    if reading.unload_count != current.unload_count:
+    def unload(self) -> None:
+        """1. An unload since the last poll: usage before it goes to the active spool."""
+        current, reading = self.current, self.reading
+        if reading.unload_count == current.unload_count:
+            return
         at = reading.extruded_at_unload or 0
         if (
             reading.unload_count < current.unload_count
             or at < current.charged
             or at > reading.extruded
         ):
-            event(
-                EventKind.COUNTER_ANOMALY,
-                f"unload_count {current.unload_count} -> {reading.unload_count}, "
-                f"extruded_at_unload={at}, charged={current.charged}, "
-                f"extruded={reading.extruded}",
+            self.event(
+                CounterAnomaly(
+                    reading.extruded,
+                    current.charged,
+                    unloads_from=current.unload_count,
+                    unloads_to=reading.unload_count,
+                    at_unload=at,
+                )
             )
             at = min(max(at, current.charged), reading.extruded)
         before = at - current.charged
-        n = reading.unload_count - current.unload_count
-        unloads = f"{n if n > 0 else 'some'} unload(s)"
-        if current.active is not None:
-            event(
-                EventKind.UNLOAD,
-                f"{unloads}; {before} mm before the unload goes to spool {current.active}",
+        self.event(
+            Unload(
+                reading.unload_count - current.unload_count,
+                before,
+                current.active,
+                current.deleted_spool,
             )
-        elif current.deleted_spool is not None:
-            event(
-                EventKind.UNLOAD,
-                f"{unloads}; {before} mm before the unload is held because spool "
-                f"{current.deleted_spool} was deleted",
-            )
-        else:
-            # The LOST_UNASSIGNED warning below reports the usage, so don't repeat it here.
-            event(EventKind.UNLOAD, f"{unloads} with no spool active")
+        )
         # Usage held over a reboot is usage before the unload too.
         carried = current.held_mm if current.deleted_spool is None else 0
         if current.active is not None and carried:
-            charge_held(current.active)
+            self.charge_reboot_hold(current.active)
         if before > 0 or carried:
             if current.active is not None:
-                charge(current.active, before, "before unload")
+                self.charge(current.active, before, "before unload")
             elif current.deleted_spool is not None:
                 current.held_mm += before
             else:
-                event(
-                    EventKind.LOST_UNASSIGNED, f"{before + carried} mm before unload had no spool"
-                )
+                self.event(LostUnassigned(before + carried))
                 current.held_mm = 0
         if current.provisional is not None:
-            event(
-                EventKind.PROVISIONAL_KEPT,
-                f"unload keeps the {current.provisional.mm} mm charged provisionally to "
-                f"spool {current.provisional.spool_id}",
-            )
+            self.event(ProvisionalKept(current.provisional.mm, current.provisional.spool_id))
             current.provisional = None
         current.charged = at
         current.unload_count = reading.unload_count
@@ -717,195 +709,144 @@ def account(
         current.swap = None  # A new unload supersedes any open swap.
         current.notice = None
         current.staged_notice = None
-        unloaded = True
-        if job_id is not None and job_id == last.job_id and current.active is not None:
-            out.runout = current.active
+        self.unloaded = True
+        if self.job_id is not None and self.job_id == self.last.job_id:
+            self.out.runout = current.active
 
         if current.assigned is None and current.active is not None:
             # S10: not a swap. Usage is held until a spool is assigned.
-            event(
-                EventKind.UNLOADED_UNASSIGNED,
-                f"spool {current.active} unloaded with no spool in "
-                "the location; holding usage until one is assigned",
-            )
-            retire(current.active)
+            self.event(UnloadedUnassigned(current.active))
+            self.retire(current.active)
             current.active = None
         elif current.assigned != current.active:
-            done_text = (
-                f"spool {current.active} -> {current.assigned}"
-                if current.active is not None
-                else f"spool {current.assigned}"
-            )
-            event(EventKind.SWAP_COMMITTED, f"swap done: {done_text}")
-            retire(current.active)
+            self.event(SwapCommitted(current.active, current.assigned))
+            self.retire(current.active)
             current.active = current.assigned
         elif current.active is not None:
             current.swap = SwapFlag(current.active)
-            event(
-                EventKind.SWAP_UNCONFIRMED,
-                f"filament unloaded but Spoolman still assigns spool {current.active}; if "
-                "a different spool went in, move it into this tool's location before the "
-                "next print starts",
-            )
+            self.event(SwapUnconfirmed(current.active))
 
-    # 2. A claim: the user says which spool is in the tool. It replaces the assignment
-    # handling below, which would only stage the claimed spool.
-    if claim is not None:
-        out.claimed = True
+    def take_claim(self, claim: int) -> None:
+        """2. A claim: the user says which spool is in the tool.
+
+        It replaces the assignment step, which would only stage the claimed spool.
+        """
+        current = self.current
+        self.out.claimed = True
         if claim == current.active:
-            closed = (
-                f"; the {current.provisional.mm} mm provisional charge stays"
-                if current.provisional is not None
-                else ""
-            )
-            event(
-                EventKind.CLAIM_CONFIRMED,
-                f"spool {claim} claimed: confirmed as loaded, nothing moves{closed}",
-            )
+            provisional = current.provisional
+            self.event(ClaimConfirmed(claim, None if provisional is None else provisional.mm))
         else:
-            if current.active is not None:
-                replaced = f"in place of spool {current.active}"
-            elif current.deleted_spool is not None:
-                replaced = f"in place of deleted spool {current.deleted_spool}"
-            else:
-                replaced = "with no spool active"
-            moved = take(claim, "claimed")
-            event(EventKind.CLAIMED, f"spool {claim} claimed {replaced}: moved {moved}")
+            replaced, deleted = current.active, current.deleted_spool
+            moved, since = self.take(claim, "claimed")
+            self.event(
+                Claimed(claim, replaced, None if replaced is not None else deleted, moved, since)
+            )
         current.swap = None
         current.provisional = None
         current.staged_notice = None
 
-    # 3. Spoolman assigns a different spool than the active one, with no unload.
-    elif unloaded:
-        pass
-    elif current.assigned != current.active:
+    def assignment(self) -> None:
+        """3. Spoolman's assignment changed, with no unload."""
+        current, last = self.current, self.last
+        if current.assigned != current.active:
+            self.reassigned()
+        elif current.active is None:
+            pass
+        elif last.assigned is None:
+            self.event(ActiveReassigned(current.active))
+        elif last.assigned != current.active:
+            self.event(StagingCancelled(last.assigned, current.active))
+
+    def reassigned(self) -> None:
+        """Spoolman assigns a spool other than the active one. The first case that fits
+        decides."""
+        current, last = self.current, self.last
         swap = current.swap
         if swap is not None and current.assigned is None:
             # The old spool left first, before the new one arrived. Keep the swap open and
             # hold usage until a spool is assigned: a new spool confirms the swap below.
-            event(
-                EventKind.SWAP_UNASSIGNED,
-                f"spool {current.active} is no longer in the "
-                "location; holding usage until a spool is assigned, which also takes "
-                f"the {swap.mm} mm since the unload",
-            )
+            self.event(SwapUnassigned(current.active, swap.mm))
             current.active = None
-        elif swap is not None and current.assigned == swap.spool_id:
-            # The old spool is back: as if it had never left, the swap stays open, or closes
-            # as of a print start while it was out.
-            event(EventKind.ACTIVE_REASSIGNED, f"spool {current.assigned} is back in the location")
+            return
+        if swap is not None and current.assigned == swap.spool_id:
+            # The old spool is back: as if it had never left, the swap stays open, or
+            # closes as of a print start while it was out.
+            self.event(ActiveReassigned(current.assigned))
             current.active = current.assigned
             if swap.started_job is not None:
-                event(
-                    EventKind.SWAP_ASSUMED,
-                    f"print {swap.started_job} started with no Spoolman change since the "
-                    f"unload; assuming spool {swap.spool_id} was reloaded and charging it "
-                    "provisionally",
-                )
+                self.event(SwapAssumed(swap.spool_id, swap.started_job, returned=True))
                 current.provisional = Provisional(swap.spool_id, swap.mm, swap.started_job)
                 current.swap = None
-        elif swap is not None:
+            return
+        if swap is not None:
             moved = swap.mm
             current.swap = None
             if moved > 0:
                 # Charge before refunding: Spoolman clamps used_weight at 0, so a refund
                 # applied first could be truncated if the charge then fails.
-                charge(current.assigned, moved, "usage since unconfirmed swap")
-                charge(swap.spool_id, -moved, "moved to confirmed swap spool")
-            event(
-                EventKind.SWAP_CONFIRMED,
-                f"swap confirmed: {moved} mm moved from spool {swap.spool_id} to "
-                f"{current.assigned}",
-            )
-            retire(current.active)
+                self.charge(current.assigned, moved, "usage since unconfirmed swap")
+                self.charge(swap.spool_id, -moved, "moved to confirmed swap spool")
+            self.event(SwapConfirmed(moved, swap.spool_id, current.assigned))
+            self.retire(current.active)
             current.active = current.assigned
-        elif (
+            return
+        if (
             current.deleted_spool is not None
             and current.active is None
             and current.assigned == last.assigned
         ):
             # Already in the location when the active spool was deleted: it may not be
             # loaded yet, so keep holding unless the printer reports its UUID.
-            if matches(current.assigned):
-                event(
-                    EventKind.CORRECTION,
-                    f"printer already has spool {current.assigned}'s filament; making it active",
-                )
+            if self.matches(current.assigned):
+                self.event(Correction(current.assigned, None))
                 current.active = current.assigned
-        elif current.active is None:
+            return
+        if current.active is None:
             # Nothing was active: switch now.
-            event(EventKind.ASSIGNMENT_CHANGED, f"spool {current.assigned} is active")
+            self.event(AssignmentChanged(current.assigned))
             current.active = current.assigned
-        elif current.assigned is None:
+            return
+        if current.assigned is None:
             # Not a swap: nothing is staged, and the active spool is still loaded.
             if last.assigned == current.active:
-                event(
-                    EventKind.ACTIVE_UNASSIGNED,
-                    f"spool {current.active} is no longer in the "
-                    "location; still charging it until the printer reports an unload",
-                )
+                self.event(ActiveUnassigned(current.active))
             elif last.assigned is not None:
                 # The staged spool left. The active one was already gone, or left with it.
-                event(
-                    EventKind.STAGING_CANCELLED,
-                    f"spool {last.assigned} is no longer staged; still charging spool "
-                    f"{current.active}",
-                )
-                event(
-                    EventKind.ACTIVE_UNASSIGNED,
-                    f"spool {current.active} isn't in the location "
-                    "either; still charging it until the printer reports an unload",
-                )
-        elif matches(current.assigned) and current.provisional is not None:
-            # The printer settles which spool went in at the unload, as a claim would:
-            # the usage charged provisionally moves to it.
+                self.event(StagingCancelled(last.assigned, current.active))
+                self.event(ActiveUnassigned(current.active, staged_left=True))
+            return
+        if self.matches(current.assigned):
             old = current.active
-            moved = take(current.assigned, "corrected")
-            event(
-                EventKind.CORRECTION,
-                f"printer already has spool {current.active}'s filament; switching from "
-                f"spool {old} now and moving {moved}",
-            )
-        elif matches(current.assigned):
-            event(
-                EventKind.CORRECTION,
-                f"printer already has spool {current.assigned}'s filament; "
-                f"switching from spool {current.active} now",
-            )
-            retire(current.active)
-            current.active = current.assigned
-        elif current.assigned != last.assigned:
-            event(
-                EventKind.SWAP_STAGED,
-                f"spool {current.assigned} staged; still charging spool "
-                f"{current.active} until the printer reports an unload",
-            )
+            if current.provisional is not None:
+                # The printer settles which spool went in at the unload, as a claim would:
+                # the usage charged provisionally moves to it.
+                moved, since = self.take(current.assigned, "corrected")
+                self.event(Correction(current.active, old, moved, since))
+            else:
+                self.event(Correction(current.assigned, old))
+                self.retire(old)
+                current.active = current.assigned
+            return
+        if current.assigned != last.assigned:
+            self.event(SwapStaged(current.assigned, current.active))
 
-    elif (
-        current.active is not None and last.assigned is None and current.assigned == current.active
-    ):
-        event(EventKind.ACTIVE_REASSIGNED, f"spool {current.active} is back in the location")
-    elif (
-        current.active is not None
-        and last.assigned != current.active
-        and current.assigned == current.active
-    ):
-        event(
-            EventKind.STAGING_CANCELLED,
-            f"spool {last.assigned} is no longer staged; still charging spool {current.active}",
-        )
+    def print_start(self) -> None:
+        """4. A print starting closes the confirmation window.
 
-    # 4. A print starting closes the confirmation window. A print starts at its first
-    # extrusion: a new job is pending until the counter passes where it was first seen.
-    started = False
-    if job_id is None or job_id == last.job_id:
+        A print starts at its first extrusion: a new job is pending until the counter
+        passes where it was first seen.
+        """
+        current, job_id = self.current, self.job_id
+        if job_id is None or job_id == self.last.job_id:
+            current.pending_job = None
+            return
+        if current.pending_job != job_id:
+            current.pending_job, current.pending_at = job_id, self.reading.extruded
+            return
+        if self.reading.extruded <= current.pending_at:
+            return
         current.pending_job = None
-    elif current.pending_job != job_id:
-        current.pending_job, current.pending_at = job_id, reading.extruded
-    elif reading.extruded > current.pending_at:
-        started = True
-        current.pending_job = None
-    if started:
         current.job_id = job_id
         current.notice = None
         if (
@@ -913,11 +854,7 @@ def account(
             and current.active is None
             and current.assigned is not None
         ):
-            event(
-                EventKind.ACTIVE_AT_PRINT,
-                f"print started with spool {current.assigned} assigned; making it active "
-                f"in place of deleted spool {current.deleted_spool}",
-            )
+            self.event(ActiveAtPrint(current.assigned, current.deleted_spool))
             current.active = current.assigned
         # With the location emptied, no spool is charged to assume: the swap stays open
         # for the next spool assigned. The old spool coming back closes it as of now.
@@ -925,93 +862,87 @@ def account(
         if swap is not None and current.active is None and swap.started_job is None:
             current.swap = replace(swap, started_job=job_id)
         elif swap is not None and current.active is not None:
-            event(
-                EventKind.SWAP_ASSUMED,
-                f"print started with no Spoolman change since the unload; assuming "
-                f"spool {swap.spool_id} was reloaded and charging it provisionally",
-            )
+            self.event(SwapAssumed(swap.spool_id, job_id))
             current.provisional = Provisional(swap.spool_id, swap.mm, job_id)
             current.swap = None
         if current.assigned is not None and current.assigned != current.active:
-            msg = (
-                f"print started while spool {current.assigned} is staged but not loaded; "
-                f"charging spool {current.active}"
-            )
-            event(EventKind.STAGED_AT_PRINT, msg)
             # With a spool assigned, step 3 or the deleted-spool case above made one active.
             assert current.active is not None
-            current.notice = Notice(current.active, EventKind.STAGED_AT_PRINT, msg)
-            current.staged_notice = Notice(current.assigned, EventKind.STAGED_AT_PRINT, msg)
+            staged = StagedAtPrint(current.assigned, current.active)
+            self.event(staged)
+            current.notice = current.staged_notice = staged
 
-    # A spool is active again after a deletion, including by a claim: it takes the held
-    # usage.
-    if current.deleted_spool is not None and current.active is not None:
-        if current.held_mm:
-            charge(
-                current.active,
-                current.held_mm,
-                f"held after spool {current.deleted_spool} was deleted",
-            )
-            event(
-                EventKind.HELD_CHARGED,
-                f"spool {current.active} is active; charged it {current.held_mm} mm "
-                f"held after spool {current.deleted_spool} was deleted",
-            )
-        current.deleted_spool, current.held_mm = None, 0
-    elif current.held_mm and current.active is not None:
-        charge_held(current.active)
+    def charge_held(self) -> None:
+        """Held usage goes to a spool that's active, by any step of this poll."""
+        current = self.current
+        if current.active is None:
+            return
+        if current.deleted_spool is not None:
+            # A spool is active again after a deletion, including by a claim.
+            if current.held_mm:
+                self.charge(
+                    current.active,
+                    current.held_mm,
+                    f"held after spool {current.deleted_spool} was deleted",
+                )
+                self.event(HeldCharged(current.active, current.held_mm, current.deleted_spool))
+            current.deleted_spool, current.held_mm = None, 0
+        elif current.held_mm:
+            self.charge_reboot_hold(current.active)
 
-    # 5. Usage since the last charge goes to the active spool.
-    delta = reading.extruded - current.charged
-    if delta > 0:
-        if reading.material is None:
-            event(EventKind.HOLD_EMPTY, "holding usage until filament is reported")
-        elif current.active is None and current.deleted_spool is not None:
-            event(
-                EventKind.HOLD_DELETED,
-                f"holding usage since spool {current.deleted_spool} was deleted",
-            )
-            current.held_mm += delta
-            current.charged = reading.extruded
-        elif current.active is None:
-            event(EventKind.HOLD_UNASSIGNED, "holding usage: no spool assigned")
-        else:
-            charge(current.active, delta, "extruded")
-            current.charged = reading.extruded
-    elif current.held_mm and current.active is None and current.deleted_spool is None:
-        # Usage kept over a reboot is still held, though there's no new usage this poll.
-        if reading.material is None:
-            event(EventKind.HOLD_EMPTY, "holding usage until filament is reported")
-        else:
-            event(EventKind.HOLD_UNASSIGNED, "holding usage: no spool assigned")
+    def charge_reboot_hold(self, target: int) -> None:
+        """Charge usage held over a reboot, with no deleted spool, to the active spool."""
+        held = self.current.held_mm
+        self.charge(target, held, "held before the printer restarted")
+        self.event(HeldCharged(target, held))
+        self.current.held_mm = 0
 
-    # 6. Notices that depend on the outcome.
-    # After a deletion, the deleted-spool flag already covers the staged spool.
-    if (
-        (rebooted or last.reboot_pending)
-        and current.assigned is not None
-        and current.assigned != current.active
-        and current.deleted_spool is None
-    ):
-        # `unload_count` restarts with the printer, so an unload just before the reboot
-        # can be missed, leaving the staged spool loaded while the old one is charged.
-        msg = (
-            f"printer restarted while spool {current.assigned} is staged; an unload just "
-            f"before the restart can be missed, so check which spool is loaded. Still "
-            f"charging spool {current.active}"
-        )
-        event(EventKind.STAGED_AT_REBOOT, msg)
-        current.staged_notice = Notice(current.assigned, EventKind.STAGED_AT_REBOOT, msg)
-    staged = current.staged_notice
-    if staged is not None and (
-        staged.spool_id != current.assigned or current.assigned == current.active
-    ):
-        current.staged_notice = None
+    def usage(self) -> None:
+        """5. Usage since the last charge goes to the active spool."""
+        current, reading = self.current, self.reading
+        delta = reading.extruded - current.charged
+        if delta > 0:
+            if reading.material is None:
+                self.event(HoldEmpty())
+            elif current.active is None and current.deleted_spool is not None:
+                self.event(HoldDeleted(current.deleted_spool))
+                current.held_mm += delta
+                current.charged = reading.extruded
+            elif current.active is None:
+                self.event(HoldUnassigned())
+            else:
+                self.charge(current.active, delta, "extruded")
+                current.charged = reading.extruded
+        elif current.held_mm and current.active is None and current.deleted_spool is None:
+            # Usage kept over a reboot is still held, though there's no new usage this poll.
+            self.event(HoldEmpty() if reading.material is None else HoldUnassigned())
 
-    resync = unloaded or current.active != last.active or out.claimed
-    current.needs_sync = last.needs_sync or resync
-    if resync:
-        current.sync_attempts = 0
-    current.extruded = reading.extruded
-    current.reboot_pending = False
-    return done()
+    def notices(self) -> None:
+        """6. Notices that depend on the outcome."""
+        current = self.current
+        # After a deletion, the deleted-spool flag already covers the staged spool.
+        if (
+            (self.rebooted or self.last.reboot_pending)
+            and current.assigned is not None
+            and current.assigned != current.active
+            and current.deleted_spool is None
+        ):
+            # `unload_count` restarts with the printer, so an unload just before the
+            # reboot can be missed, leaving the staged spool loaded while the old one is
+            # charged.
+            current.staged_notice = StagedAtReboot(current.assigned, current.active)
+            self.event(current.staged_notice)
+        staged = current.staged_notice
+        if staged is not None and (
+            staged.staged != current.assigned or current.assigned == current.active
+        ):
+            current.staged_notice = None
+
+    def finish(self) -> None:
+        current, last = self.current, self.last
+        resync = self.unloaded or current.active != last.active or self.out.claimed
+        current.needs_sync = last.needs_sync or resync
+        if resync:
+            current.sync_attempts = 0
+        current.extruded = self.reading.extruded
+        current.reboot_pending = False

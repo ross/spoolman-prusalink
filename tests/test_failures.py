@@ -21,9 +21,9 @@ from harness import (
     two_printers,
 )
 
-from spoolman_prusalink.accounting import EventKind
 from spoolman_prusalink.db import read_state
 from spoolman_prusalink.errors import BadAnswer, Unreachable
+from spoolman_prusalink.events import EventKind
 
 TAG = "91da34d9-c1c1-470f-bac7-185a2346f86a"
 
@@ -453,7 +453,7 @@ async def test_run_polls_until_stopped(tmp_path, caplog, queued):
     assert count(caplog, "starting: printer=http://printer") == 1
     assert count(caplog, "1 charge(s) queued from before the restart") == int(queued)
     assert fake.used == ({19: [500.0]} if queued else {})
-    assert bridge.state.outbox == []
+    assert len(bridge.state.outbox) == 0
     await bridge.aclose()
 
 
