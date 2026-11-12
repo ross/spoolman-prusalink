@@ -81,7 +81,7 @@ script/integration --cov=spoolman_prusalink --cov-fail-under=0
   as `"1.4.0"` for an MK4, gets that single-tool model instead, with no UUID on
   spool A or the printer. `world_config` overrides the bridge's `Config`, such
   as `flag_field=""`, and `world_printer` overrides the printer's
-  `PrinterConfig`, such as `sync_file="other.gcode"`. All three are set with
+  `PrinterConfig`, such as `sync_drift=True`. All three are set with
   `@pytest.mark.parametrize(..., indirect=True)`.
 - **A second printer, when asked for.** A test that takes `world_printers`
   at 2 (`@pytest.mark.parametrize("world_printers", [2], indirect=True)`)

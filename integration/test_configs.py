@@ -146,8 +146,8 @@ async def test_s1_tag_uuid_is_not_adopted_without_uuids(world: World):
 
 # --- Features turned off ---
 @pytest.mark.parametrize(
-    "world_config",
-    [dict(flag_drift=False), dict(flag_field="")],
+    "world_config, world_printer",
+    [({}, dict(flag_drift=False)), (dict(flag_field=""), {})],
     ids=["flag_drift", "flag_field"],
     indirect=True,
 )

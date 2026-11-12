@@ -99,7 +99,9 @@ For multi-tool printers and the other settings, mount a config file based on
 `[[tools]]` entries, because the file's tools take precedence. In the file,
 `[printer]` also takes `api_key`, or `api_key_env` naming the variable that
 holds the key, and an optional `name` (`default` if unset) that keys the
-printer's state and appears in ledger records. `compose.example.yaml` runs
+printer's state and appears in ledger records. The settings that describe a
+printer (writes to it, drift, `length_factor`) go in `[printer]` too; under
+`[bridge]` they're an error. `compose.example.yaml` runs
 the bridge next to Spoolman.
 
 To verify, look for a `baseline` line for each tool in the log. After the
@@ -118,7 +120,10 @@ To serve several printers from one bridge, replace `[printer]` and `[[tools]]`
 in the config file with a `[[printers]]` list. Each entry has a `name`, a
 `url`, the API key as `api_key` or as `api_key_env` naming the environment
 variable that holds it, its own `[[printers.tools]]` entries, and any of
-`gcode_preamble`, `sync_storage` and `sync_file`:
+any of the other `[printer]` settings: `gcode_preamble`, `sync_storage`,
+`sync_file`, `printer_sync`, `sync_delay`, `sync_drift`, `flag_drift` and
+`length_factor`. Each printer has its own value, and an entry that doesn't set
+one takes the default:
 
 ```toml
 [[printers]]

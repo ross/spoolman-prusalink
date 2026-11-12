@@ -320,30 +320,6 @@ Size: small for part 1, medium for part 2.
 - `docs/sqlite.md` and `docs/multi-printer.md` describe plans that have
   merged, in the future tense.
 
-### B11. Printer settings are configured globally
-
-A setup can mix printers, so a setting that describes a printer belongs to
-that printer's config entry. Five settings under `[bridge]` describe a
-printer and are read by `PrinterBridge` through `bridge.config`:
-
-| Setting | What it describes |
-| --- | --- |
-| `length_factor` | How far the printer's extruded length is from real usage. Two printers can need different factors, and today they share one. |
-| `printer_sync`, `sync_delay`, `sync_drift` | Whether and when the bridge writes to the printer |
-| `flag_drift` | Whether drift on the printer becomes a flag |
-
-`uuid_field`, `flag_field`, and `claim_field` name Spoolman fields and stay
-global.
-
-Shape: move the five settings to `PrinterConfig`, set in the `[printer]`
-table or in each `[[printers]]` entry, with no global default. One place
-per setting is less error prone than a default with overrides.
-`PrinterBridge` then reads them from its own config. It still reads
-`claim_field` and `uuid_field` through `bridge.config`, so this removes
-five of the reads that B4 lists, not the back-reference.
-
-Size: small.
-
 ## Tests and tooling
 
 ### The test layers
@@ -591,11 +567,11 @@ Size: medium.
 | 2 | Tag-UUID owner | B1, T1 (UUID tests) | Nothing |
 | 3 | Conditions and saved facts | B2, B3, B5, B7, T1 (rest) | Workstreams 2 and 10. B7 changes the part of `account()` that B9 part 1 restructures |
 | 4 | Typed records | B6, B9 (part 2), T7 | Workstream 10. Easier after 3 |
-| 5 | Narrow the bridge boundary | B4 | Workstreams 2 and 3. Easier after B11 |
+| 5 | Narrow the bridge boundary | B4 | Workstreams 2 and 3 |
 | 6 | Client errors | B8 | Nothing |
 | 7 | Unit suite on the simulator | T2, T6 | Nothing. Before workstreams 2 and 3 if possible, so their tests are ported once |
 | 8 | Simulator state | S1, S5, S6, then S2, S4 | Workstream 7 for S4, which continues the routing move in T2 |
-| 9 | Small items | B10, B11, T8 | Nothing |
+| 9 | Small items | B10, T8 | Nothing |
 | 10 | Accounting state | B9 (part 1) | Nothing |
 
 Workstreams 1, 6, 9, and 10 are independent and can run at any time. T3

@@ -21,7 +21,8 @@ class ConfigError(ValueError):
 
 @dataclass(frozen=True)
 class PrinterConfig:
-    """One printer: how to reach it, its tools, and how to write to it."""
+    """One printer: how to reach it, its tools, how to charge its usage, and how to write
+    to it."""
 
     # Keys the printer's state and appears in ledger records, so it must stay stable.
     name: str
@@ -34,6 +35,16 @@ class PrinterConfig:
     # Where the sync job is uploaded, and its file name (overwritten each time).
     sync_storage: str = "usb"
     sync_file: str = "spoolman-sync.gcode"
+    # Multiplier applied to the printer's extruded length before charging.
+    length_factor: float = 1.0
+    # Whether a printer/spool mismatch (drift) is written as a flag.
+    flag_drift: bool = True
+    # Write the spool to the printer after a swap or unload, once the printer is idle.
+    printer_sync: bool = True
+    # Seconds the printer must stay idle before the sync job runs; 0 runs it at once.
+    sync_delay: float = 0.0
+    # Also overwrite drift (a mismatch with no swap or unload to explain it).
+    sync_drift: bool = False
 
 
 @dataclass(frozen=True)
@@ -47,21 +58,11 @@ class Config:
     uuid_field: str | None = "instance_uuid"
     # Where an evicted spool goes; "" means no location. Used from phase 3.
     eviction_location: str = ""
-    # Multiplier applied to the printer's extruded length before charging.
-    length_factor: float = 1.0
     # Spool extra field (type text) the bridge writes flags to; None disables flags.
     flag_field: str | None = "bridge_flag"
     # Spool extra field (type boolean) the user ticks to claim a spool is in a tool;
     # None disables claims.
     claim_field: str | None = "bridge_claim"
-    # Whether a printer/spool mismatch (drift) is written as a flag.
-    flag_drift: bool = True
-    # Write the spool to the printer after a swap or unload, once the printer is idle.
-    printer_sync: bool = True
-    # Seconds the printer must stay idle before the sync job runs; 0 runs it at once.
-    sync_delay: float = 0.0
-    # Also overwrite drift (a mismatch with no swap or unload to explain it).
-    sync_drift: bool = False
 
 
 def _bool(table: dict, key: str, default: bool, name: str) -> bool:
@@ -172,7 +173,7 @@ def _url_key(url: str, prefix: str) -> str:
 
 
 def _printer_settings(table: dict, prefix: str) -> dict:
-    """Parse the settings every printer form shares: the sync job."""
+    """Parse the settings every printer form shares: charging and writes to the printer."""
     sync_file = _str(table, "sync_file", "spoolman-sync.gcode", f"{prefix}.sync_file")
     if not re.fullmatch(r"[A-Za-z0-9_.-]+\.gcode", sync_file):
         raise ConfigError(f"{prefix}.sync_file must be a plain .gcode file name, got {sync_file!r}")
@@ -181,10 +182,18 @@ def _printer_settings(table: dict, prefix: str) -> dict:
         not isinstance(preamble, list) or not all(isinstance(x, str) for x in preamble)
     ):
         raise ConfigError(f"{prefix}.gcode_preamble must be a list of strings, got {preamble!r}")
+    length_factor = _number(table, "length_factor", 1.0, f"{prefix}.length_factor")
+    if not 0 < length_factor <= 2:
+        raise ConfigError(f"{prefix}.length_factor must be in (0, 2], got {length_factor}")
     return {
         "gcode_preamble": None if preamble is None else tuple(preamble),
         "sync_storage": _str(table, "sync_storage", "usb", f"{prefix}.sync_storage"),
         "sync_file": sync_file,
+        "length_factor": length_factor,
+        "flag_drift": _bool(table, "flag_drift", True, f"{prefix}.flag_drift"),
+        "printer_sync": _bool(table, "printer_sync", True, f"{prefix}.printer_sync"),
+        "sync_delay": _delay(table, "sync_delay", 0, f"{prefix}.sync_delay"),
+        "sync_drift": _bool(table, "sync_drift", False, f"{prefix}.sync_drift"),
     }
 
 
@@ -258,6 +267,10 @@ def _listed_printer(entry: object, index: int, env: dict[str, str]) -> PrinterCo
         name=name, url=url, api_key=api_key, tools=tools, **_printer_settings(entry, prefix)
     )
 
+
+# Settings that were under [bridge] before they moved to each printer. One left there is an
+# error rather than ignored, so a config written for the old layout can't silently lose it.
+_PRINTER_ONLY = ("length_factor", "flag_drift", "printer_sync", "sync_delay", "sync_drift")
 
 # Environment variables that configure the single-printer form only.
 _SINGLE_PRINTER_VARS = ("PRUSALINK_URL", "PRUSALINK_API_KEY", "SPOOLMAN_PRUSALINK_LOCATION")
@@ -342,9 +355,12 @@ def load(path: str | os.PathLike | None, env: dict[str, str] | None = None) -> C
     else:
         printers = _listed_printers(raw, env)
 
-    length_factor = _number(bridge, "length_factor", 1.0, "bridge.length_factor")
-    if not 0 < length_factor <= 2:
-        raise ConfigError(f"length_factor must be in (0, 2], got {length_factor}")
+    for key in _PRINTER_ONLY:
+        if key in bridge:
+            raise ConfigError(
+                f"bridge.{key} is a printer setting: set it in [printer] or in each "
+                "[[printers]] entry"
+            )
 
     uuid_field = _str(bridge, "uuid_field", "instance_uuid", "bridge.uuid_field") or None
     flag_field = _str(bridge, "flag_field", "bridge_flag", "bridge.flag_field") or None
@@ -364,11 +380,6 @@ def load(path: str | os.PathLike | None, env: dict[str, str] | None = None) -> C
         poll_idle=_interval(bridge, "poll_idle", 60, "bridge.poll_idle"),
         uuid_field=uuid_field,
         eviction_location=_str(bridge, "eviction_location", "", "bridge.eviction_location"),
-        length_factor=length_factor,
         flag_field=flag_field,
         claim_field=claim_field,
-        flag_drift=_bool(bridge, "flag_drift", True, "bridge.flag_drift"),
-        printer_sync=_bool(bridge, "printer_sync", True, "bridge.printer_sync"),
-        sync_delay=_delay(bridge, "sync_delay", 0, "bridge.sync_delay"),
-        sync_drift=_bool(bridge, "sync_drift", False, "bridge.sync_drift"),
     )

@@ -148,7 +148,7 @@ async def test_w3_upload_refused_busy(world: World, caplog: pytest.LogCaptureFix
     await wrote_b(w)
 
 
-@pytest.mark.parametrize("world_config", [dict(sync_delay=5.0)], indirect=True)
+@pytest.mark.parametrize("world_printer", [dict(sync_delay=5.0)], indirect=True)
 async def test_w4_print_soon_after_loading_runs_first(
     world: World, caplog: pytest.LogCaptureFixture
 ):
@@ -339,7 +339,7 @@ async def test_w8_pps_is_flagged_until_loaded_from_the_menu(
     assert count(caplog, logging.WARNING, f"] can't write spool {b} to the printer") == 1
 
 
-@pytest.mark.parametrize("world_config", [{}, dict(sync_drift=True)], indirect=True)
+@pytest.mark.parametrize("world_printer", [{}, dict(sync_drift=True)], indirect=True)
 async def test_w9_drift_is_flagged_unless_sync_drift(
     world: World, caplog: pytest.LogCaptureFixture
 ):
@@ -353,7 +353,7 @@ async def test_w9_drift_is_flagged_unless_sync_drift(
     # The color is changed on the printer, with no unload, as the menu's edit would.
     w.tool.material = Material(PLA[0], ASA[1], w.uuids["A"], **WRITTEN)
     await w.poll()
-    if not w.cfg.sync_drift:
+    if not w.cfg.printers[0].sync_drift:
         assert logged(caplog, logging.WARNING, f"printer differs from spool {a}: color")
         flag = await w.flag("A")
         assert flag is not None and "printer filament differs: color" in flag
@@ -367,7 +367,7 @@ async def test_w9_drift_is_flagged_unless_sync_drift(
     assert await w.flag("A") is None
 
 
-@pytest.mark.parametrize("world_config", [{}, dict(sync_drift=True)], indirect=True)
+@pytest.mark.parametrize("world_printer", [{}, dict(sync_drift=True)], indirect=True)
 async def test_w9_temperature_drift_is_flagged_unless_sync_drift(
     world: World, caplog: pytest.LogCaptureFixture
 ):
@@ -381,7 +381,7 @@ async def test_w9_temperature_drift_is_flagged_unless_sync_drift(
     w.tool.material = replace(w.tool.material, nozzle=235)
     await w.poll()
     detail = "nozzle printer=235 spoolman=220"
-    if not w.cfg.sync_drift:
+    if not w.cfg.printers[0].sync_drift:
         assert logged(caplog, logging.WARNING, f"printer differs from spool {a}: {detail}")
         flag = await w.flag("A")
         assert flag is not None and f"printer filament differs: {detail}" in flag

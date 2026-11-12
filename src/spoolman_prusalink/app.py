@@ -596,7 +596,7 @@ class PrinterBridge:
             for c in result.charges:
                 # An archived spool is still charged until the next unload, but isn't listed.
                 spool = by_id.get(c.spool_id) or self.bridge._archived.get(c.spool_id)
-                length = round(c.mm * self.bridge.config.length_factor, 1)
+                length = round(c.mm * self.config.length_factor, 1)
                 grams = spool.mm_to_grams(length) if spool else None
                 log.info(
                     "[%s] %s spool %d (%s): %+g mm%s (%s)",
@@ -997,7 +997,7 @@ class PrinterBridge:
         shown = self._provisional_shown.get(tool)
         if shown is None or shown[0] != key or status.job_id is None:
             shown = self._provisional_shown[tool] = (key, p.mm)
-        length = round(shown[1] * self.bridge.config.length_factor, 1)
+        length = round(shown[1] * self.config.length_factor, 1)
         grams = spool.mm_to_grams(length) if spool else None
         amount = f"{length:g} mm" + (f" (≈ {grams:.0f} g)" if grams is not None else "")
         how = (
@@ -1055,14 +1055,12 @@ class PrinterBridge:
         detail = "; ".join(diffs)
         # With the location emptied, the active spool is still loaded but is leaving:
         # don't write it, report the mismatch as drift.
-        expected = st.assigned is not None and (
-            st.needs_sync or self.bridge.config.sync_drift or edited
-        )
+        expected = st.assigned is not None and (st.needs_sync or self.config.sync_drift or edited)
         # Wait while a swap is staged: the active spool is about to change. During an
         # unconfirmed swap, write the assigned spool: the printer then shows what Spoolman
         # thinks is loaded, and confirming a different spool rewrites it.
         settled = st.assigned == st.active
-        if self.bridge.config.printer_sync and expected and st.sync_attempts < MAX_SYNC_ATTEMPTS:
+        if self.config.printer_sync and expected and st.sync_attempts < MAX_SYNC_ATTEMPTS:
             if settled and self._model_error:
                 notes.append(
                     (
@@ -1104,7 +1102,7 @@ class PrinterBridge:
                     )
                 )
             return
-        if self.bridge.config.printer_sync and expected:
+        if self.config.printer_sync and expected:
             notes.append(
                 (
                     ("printer", active.id),
@@ -1133,7 +1131,7 @@ class PrinterBridge:
                 f"[{location}] printer differs from spool {active.id}: {detail}",
             )
         )
-        if self.bridge.config.flag_drift:
+        if self.config.flag_drift:
             flags.setdefault(active.id, []).append(
                 f"{location}: printer filament differs: {detail}"
             )
@@ -1183,7 +1181,7 @@ class PrinterBridge:
             self._sync_delaying = False
             self._sync_busy = self._sync_failed = None
             return
-        delay = self.bridge.config.sync_delay
+        delay = self.config.sync_delay
         idle_for = 0.0 if self._idle_since is None else self.bridge.clock() - self._idle_since
         if idle_for < delay:
             # The printer may have only just become idle, with someone at it about to
