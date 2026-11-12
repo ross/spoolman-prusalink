@@ -289,11 +289,6 @@ class PrinterBridge:
         return self.config.name
 
     @property
-    def _prefix(self) -> str:
-        """`"printer NAME: "` when several printers share the log, else nothing."""
-        return f"{self.label}: " if self.label != "printer" else ""
-
-    @property
     def tools(self) -> dict[int, ToolState]:
         return self.bridge.state.tools(self.name)
 
@@ -318,9 +313,9 @@ class PrinterBridge:
             if not self._unsupported:
                 self._unsupported = True
                 log.error(
-                    "%s%s; this firmware isn't supported, so nothing is charged. "
+                    "%s: %s; this firmware isn't supported, so nothing is charged. "
                     "Checking again each poll.",
-                    self._prefix,
+                    self.label,
                     e,
                 )
             return None
@@ -372,7 +367,7 @@ class PrinterBridge:
         for spool_id in list(self._lookup_failing):
             if spool_id not in missing:
                 del self._lookup_failing[spool_id]
-                log.info("%sspool %d no longer needs looking up", self._prefix, spool_id)
+                log.info("%s: spool %d no longer needs looking up", self.label, spool_id)
         for tool, st in list(self.tools.items()):
             spool_id = st.active
             if spool_id not in missing:
@@ -457,7 +452,7 @@ class PrinterBridge:
         except (httpx.HTTPError, ValueError) as e:
             error = f"can't read the printer model ({e})"
             if error != self._model_error:
-                log.warning("%s%s; printer writes are off until it can", self._prefix, error)
+                log.warning("%s: %s; printer writes are off until it can", self.label, error)
             self._model_error = error
             return
         self._model_boot = boot_id
@@ -1194,8 +1189,8 @@ class PrinterBridge:
             # start a print. Give them time before taking it over.
             if not self._sync_delaying:
                 log.info(
-                    "%ssync job waits until the printer has been idle for %gs",
-                    self._prefix,
+                    "%s sync job waits until the printer has been idle for %gs",
+                    self.label,
                     delay,
                 )
             self._sync_delaying = True
