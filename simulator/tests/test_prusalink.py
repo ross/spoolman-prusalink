@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 
 import aiohttp
-import aiohttp.web
+import httpx
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
@@ -50,7 +50,11 @@ async def test_version_status_job_filament(setup):
     resp = await client.get("/api/v1/filament", headers=AUTH)
     assert resp.status == 404
 
-    assert (await client.get("/api/v1/nothing", headers=AUTH)).status == 404
+    resp = await client.get("/api/v1/nothing", headers=AUTH)
+    assert resp.status == 404 and await resp.json() == {"message": "Not Found"}
+    assert (await client.get("/api/v1/files/usb", headers=AUTH)).status == 404
+    assert (await client.post("/api/v1/status", headers=AUTH)).status == 405
+    assert (await client.get("/api/v1/files/usb/a.gcode", headers=AUTH)).status == 405
 
 
 async def test_requests_are_logged(setup):
@@ -146,6 +150,7 @@ async def test_model_check_over_http(setup):
 async def test_print_existing_file(setup):
     sim, p, client = setup
     assert (await client.post("/api/v1/files/usb/none.gcode", headers=AUTH)).status == 404
+    assert (await client.post("/api/v1/files/sd/a.gcode", headers=AUTH)).status == 404
     await client.put("/api/v1/files/usb/a.gcode", data="M117 a\n", headers=AUTH)
     assert (await client.post("/api/v1/files/usb/a.gcode", headers=AUTH)).status == 204
     assert (await client.post("/api/v1/files/usb/a.gcode", headers=AUTH)).status == 409
@@ -181,7 +186,7 @@ async def test_before_request_may_answer_or_drop_a_request():
 
     def hook(method: str, path: str) -> prusalink.Reply:
         if path == "/api/v1/job":
-            return aiohttp.web.Response(status=204)
+            return prusalink.Answer(204)
         if path == "/api/version":
             return prusalink.DROP
         return None
@@ -223,3 +228,57 @@ async def test_hung_printer_drops_the_request_once_it_comes_back(setup, monkeypa
     with pytest.raises(aiohttp.ClientConnectionError):
         await asyncio.wait_for(request, 2)
     assert (await client.get("/api/v1/status", headers=AUTH)).status == 200
+
+
+def test_serve_answers_without_a_socket():
+    sim, p = make()
+    answer = prusalink.serve(sim, "p", "GET", "/api/v1/status", {"x-API-key": KEY}, "")
+    assert answer.status == 200 and answer.json == p.status_json()
+    assert prusalink.serve(sim, "p", "GET", "/api/v1/job", AUTH, "") == prusalink.Answer(204)
+    assert prusalink.serve(sim, "p", "GET", "/api/v1/status", {}, "").status == 401
+    p.set_power("off")
+    assert prusalink.serve(sim, "p", "GET", "/api/v1/status", AUTH, "") == prusalink.DROP
+    requests = [e.text for e in sim.events if e.kind == "request"]
+    assert requests == ["GET /api/v1/status 200", "GET /api/v1/job 204", "GET /api/v1/status 401"]
+
+
+async def test_transport_serves_the_printer_in_process():
+    sim, p = make()
+    transport = prusalink.make_transport(sim, "p")
+    async with httpx.AsyncClient(transport=transport, base_url="http://p", headers=AUTH) as client:
+        assert (await client.get("/api/version")).json()["printer"] == "8.1.0"
+        resp = await client.get("/api/v1/job")
+        assert resp.status_code == 204 and resp.content == b""
+        resp = await client.put("/api/v1/files/usb/s.gcode", content=JOB, headers=UPLOAD)
+        assert resp.status_code == 201 and resp.json()["size"] == len(JOB)
+        assert (await client.get("/api/v1/status")).json()["printer"]["state"] == "PRINTING"
+        sim.tick(10)
+        assert p.tools[0].material.name == "PETG"
+        assert (await client.get("/api/v1/status", headers={"X-Api-Key": "no"})).status_code == 401
+    requests = [e for e in sim.events if e.kind == "request"]
+    assert requests[2].text == "PUT /api/v1/files/usb/s.gcode 201"
+    assert requests[2].data == {"body": JOB}
+
+
+async def test_transport_raises_when_the_printer_gives_no_answer():
+    sim, p = make()
+
+    def hook(method: str, path: str) -> prusalink.Reply:
+        if path == "/api/v1/job":
+            return prusalink.Answer(503, {"message": "busy"})
+        return prusalink.DROP if path == "/api/version" else None
+
+    transport = prusalink.make_transport(sim, "p", hook)
+    async with httpx.AsyncClient(transport=transport, base_url="http://p", headers=AUTH) as client:
+        resp = await client.get("/api/v1/job")
+        assert resp.status_code == 503 and resp.json() == {"message": "busy"}
+        with pytest.raises(httpx.RemoteProtocolError):
+            await client.get("/api/version")
+        p.set_power("hung")
+        with pytest.raises(httpx.ReadTimeout):
+            await client.get("/api/v1/status")
+        p.set_power("off")
+        with pytest.raises(httpx.ConnectError):
+            await client.get("/api/v1/status")
+        p.set_power("on")
+        assert (await client.get("/api/v1/status")).status_code == 200
