@@ -9,6 +9,7 @@ from dataclasses import replace
 import pytest
 
 from spoolman_prusalink.accounting import Provisional, SwapFlag, ToolState
+from spoolman_prusalink.conditions import Drift, Lasting, StagedNotLoaded, UnloadUnconfirmed
 from spoolman_prusalink.db import (
     SCHEMA_VERSION,
     Database,
@@ -16,7 +17,9 @@ from spoolman_prusalink.db import (
     read_ledger,
     read_state,
 )
-from spoolman_prusalink.events import Baseline, StagedAtPrint, StagedAtReboot
+from spoolman_prusalink.drift import Difference, What
+from spoolman_prusalink.events import Ambiguous, Baseline, StagedAtPrint, StagedAtReboot
+from spoolman_prusalink.printer_sync import WriteState, WrittenFilament
 from spoolman_prusalink.records import ChargeRecord, EventRecord, Outbox
 from spoolman_prusalink.state import PrinterState, Runout, State
 from spoolman_prusalink.tags import SeenTag
@@ -63,9 +66,6 @@ def full_state() -> State:
         pending_job=12,
         pending_at=1190,
         notice=StagedAtPrint(8, 7),
-        needs_sync=True,
-        sync_attempts=1,
-        written="M865 T0",
         held_mm=30,
         deleted_spool=4,
         staged_notice=StagedAtReboot(8, 7),
@@ -78,8 +78,19 @@ def full_state() -> State:
         printers={
             "core": PrinterState(
                 tools={0: tool, 1: ToolState(boot_id=3)},
-                flags={7: ["unloaded", "drift"]},
+                conditions={
+                    0: [
+                        UnloadUnconfirmed(7),
+                        Drift(7, (Difference(What.COLOR, "#ff0000", None),), level=30),
+                        StagedNotLoaded(StagedAtReboot(8, 7)),
+                    ],
+                    1: [Lasting(Ambiguous((7, 8)), level=30)],
+                },
                 seen_tags={0: SeenTag(TAG, 7, runout=True), 1: SeenTag(TAG.upper())},
+                writes={
+                    0: WriteState(True, 1, WrittenFilament("PLA", 215, 60, color="#8c9099")),
+                    1: WriteState(due=True),
+                },
             ),
             "mk4s": PrinterState(tools={0: ToolState(boot_id=1, charged=5)}),
         },
@@ -89,8 +100,8 @@ def full_state() -> State:
         ),
         flagged=[7, 8],
         runouts={
-            7: Runout("ran out", 1000.0, 990.5),
-            8: Runout("ran out early", None, None),
+            7: Runout("Core", 9.5, 1000.0, 990.5),
+            8: Runout("Core", 400.0, None, None),
         },
         claimed=[3, 9],
     )
@@ -126,7 +137,7 @@ def test_no_write_when_unchanged(path):
     assert db.save(loaded)
     assert not db.save(loaded)
     del loaded.runouts[8]
-    loaded.printers["core"].flags.clear()
+    loaded.printers["core"].conditions.clear()
     assert db.save(loaded)
     db.close()
     assert read_state(path) == loaded
@@ -378,8 +389,8 @@ def test_a_failed_save_writes_nothing(path, fail):
     db = Database.open(path)
     state = full_state()
     assert db.save(state, LEDGER[:1])
-    conn = db._conn
-    db._conn = FailingConnection(conn, fail)
+    conn = db.conn
+    db.conn = FailingConnection(conn, fail)
     state.outbox.pop()
     state.outbox.push(charge(7))
     state.tools("core")[1] = ToolState(boot_id=4)
@@ -388,7 +399,7 @@ def test_a_failed_save_writes_nothing(path, fail):
     assert read_state(path) == full_state()
     assert read_ledger(path) == READ[:1]
     # The next save writes all of it.
-    db._conn = conn
+    db.conn = conn
     assert db.save(state, LEDGER[1:2])
     db.close()
     assert read_state(path) == state
@@ -583,3 +594,67 @@ def test_an_outbox_row_without_outcomes_loads_with_none(path):
     assert all(
         (r.applied, r.failed, r.held) == (None, None, False) for r in read_state(path).outbox
     )
+
+
+@pytest.mark.parametrize(
+    ("written", "message"),
+    [
+        # The G-code text an older bridge saved, as JSON and as it was.
+        (json.dumps('M865 X R N"PLA" T215 B60 L0'), "a value of the wrong type"),
+        ('M865 X R N"PLA" T215 B60 L0', "a value of the wrong type"),
+        (json.dumps({"name": "PLA", "bed": 60}), "missing key 'chamber'"),
+    ],
+)
+def test_a_writes_row_that_cant_be_read_is_a_database_error(path, written, message):
+    db = Database.open(path)
+    db.save(full_state())
+    db.close()
+    conn = sqlite3.connect(path)
+    with conn:
+        conn.execute("UPDATE writes SET written = ? WHERE tool = 0", (written,))
+    conn.close()
+    with pytest.raises(
+        DatabaseError, match=re.escape(f"{path}: writes row ('core', 0): {message}")
+    ):
+        Database.open(path)
+
+
+@pytest.mark.parametrize(
+    ("data", "message"),
+    [
+        ([{"kind": "drift", "spool": 7, "level": 30}], "a value of the wrong type"),
+        ([{"kind": "no_such_kind"}], "missing key 'no_such_kind'"),
+        ([{"spool": 7}], "missing key 'kind'"),
+        (["unloaded", "drift"], "a value of the wrong type"),  # An older bridge's flags.
+        (
+            [{"kind": "drift", "spool": 7, "level": 30, "differences": [["hue", 1, 2]]}],
+            "a value of the wrong type",
+        ),
+    ],
+)
+def test_a_conditions_row_that_cant_be_read_is_a_database_error(path, data, message):
+    db = Database.open(path)
+    db.save(full_state())
+    db.close()
+    conn = sqlite3.connect(path)
+    with conn:
+        conn.execute("UPDATE conditions SET data = ? WHERE tool = 0", (json.dumps(data),))
+    conn.close()
+    row = f"conditions row ('core', 0): {message}"
+    with pytest.raises(DatabaseError, match=re.escape(f"{path}: {row}")):
+        Database.open(path)
+
+
+def test_a_runout_flag_is_rendered_from_the_saved_facts(path):
+    runout = Runout("Tool a", 900.4, 1000.0, 100.0)
+    text = (
+        "Tool a: unloaded mid-print with 900 g left in Spoolman. If it ran out, its usage "
+        "is probably on another spool: check recent swaps, then correct this spool's "
+        "weight, which clears this. The filament may also have jammed or tangled. Ignore "
+        "this after a planned color change."
+    )
+    assert runout.flag == text
+    db = Database.open(path)
+    db.save(State(runouts={7: runout}))
+    db.close()
+    assert read_state(path).runouts[7].flag == text
