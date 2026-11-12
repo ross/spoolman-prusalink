@@ -317,7 +317,7 @@ async def test_m3_staged_spool_takes_held_usage_at_print_start(
 
     # A print starts with no unload: B is made active and takes everything held.
     records = await w.start_print(print_spec())
-    assert [e["message"] for e in events(records, "assignment_changed")] == [
+    assert [e["message"] for e in events(records, "active_at_print")] == [
         f"print started with spool {b} assigned; making it active in place of deleted spool {a}"
     ]
     held = events(records, "held_charged")
@@ -416,7 +416,7 @@ async def test_m3a_archived_active_spool(world: World, caplog: pytest.LogCapture
     # The unload ends it: the flag clears and usage is held for the next spool assigned.
     await w.unload()
     records = await w.poll()
-    assert [e["event"] for e in events(records)] == ["unload", "active_unassigned"]
+    assert [e["event"] for e in events(records)] == ["unload", "unloaded_unassigned"]
     assert w.bridge.printers[0].tools[0].active is None
     assert await w.flag("A") is None
     await w.swap_cycle(source="tag", name=PETG[0], color=PETG[1])
@@ -454,7 +454,7 @@ async def test_m4_location_renamed(world: World, caplog: pytest.LogCaptureFixtur
     await w.unload()
     records = await w.poll()
     unassigned = f"spool {a} unloaded with no spool in the location; holding usage"
-    assert [e["message"] for e in events(records, "active_unassigned")] == [
+    assert [e["message"] for e in events(records, "unloaded_unassigned")] == [
         unassigned + " until one is assigned"
     ]
     await w.swap_cycle(source="tag", name=PETG[0], color=PETG[1])

@@ -8,13 +8,15 @@ from spoolman_prusalink.accounting import (
     EventKind,
     Notice,
     Provisional,
+    Report,
     Result,
     SwapFlag,
     ToolState,
-    hold_deleted,
     resolve_assignment,
+    violations,
 )
 from spoolman_prusalink.accounting import account as _account
+from spoolman_prusalink.accounting import hold_deleted as _hold_deleted
 from spoolman_prusalink.models import Material, ToolReading
 
 # What the printer reports for the PLA preset, which `spool()` writes.
@@ -24,14 +26,20 @@ BOOT = 111
 PLA = Material("PLA", "#73737b", **PLA_TEMPS)
 
 
-def account(*args, **kwargs) -> Result:
-    """Call `account()`, and check the invariants every poll must keep."""
-    res = _account(*args, **kwargs)
-    # A provisional charge is only ever on the active spool: whatever changes the active
-    # spool resolves it first.
-    p = res.state.provisional
-    assert p is None or p.spool_id == res.state.active, res.state
+def account(state, *args, **kwargs) -> Result:
+    """Call `account()`, and check that a legal state in gives a legal state out."""
+    assert violations(state) == [], state
+    res = _account(state, *args, **kwargs)
+    assert violations(res.state) == [], res.state
     return res
+
+
+def hold_deleted(state, *args, **kwargs) -> ToolState:
+    """Call `hold_deleted()`, and check that a legal state in gives a legal state out."""
+    assert violations(state) == [], state
+    state = _hold_deleted(state, *args, **kwargs)
+    assert violations(state) == [], state
+    return state
 
 
 def r(extruded, material=PLA, unloads=0, at_unload=0):
@@ -270,7 +278,7 @@ def test_spool_moved_out_with_no_replacement_is_not_staging():
     assert res.events == [] and res.state.notice is None
     res = account(res.state, BOOT, r(260), loc(7), 42)
     assert [(e.kind, e.message) for e in res.events] == [
-        (EventKind.ACTIVE_UNASSIGNED, "spool 7 is back in the location")
+        (EventKind.ACTIVE_REASSIGNED, "spool 7 is back in the location")
     ]
     assert res.charges == [Charge(7, 10, "extruded")]
 
@@ -306,7 +314,7 @@ def test_both_spools_leaving_the_location_is_reported():
     assert [(e.kind, e.message) for e in res.events] == STAGED_8_LEFT
     res = account(res.state, BOOT, r(160), loc(7))
     assert [(e.kind, e.message) for e in res.events] == [
-        (EventKind.ACTIVE_UNASSIGNED, "spool 7 is back in the location")
+        (EventKind.ACTIVE_REASSIGNED, "spool 7 is back in the location")
     ]
 
 
@@ -317,7 +325,7 @@ def test_unload_after_the_location_empties_holds_usage():
     assert [(e.kind, e.message) for e in res.events] == [
         (EventKind.UNLOAD, "1 unload(s); 30 mm before the unload goes to spool 7"),
         (
-            EventKind.ACTIVE_UNASSIGNED,
+            EventKind.UNLOADED_UNASSIGNED,
             "spool 7 unloaded with no spool in the location; holding usage until one is assigned",
         ),
         (EventKind.HOLD_UNASSIGNED, "holding usage: no spool assigned"),
@@ -581,7 +589,7 @@ def test_swap_kept_open_when_spool_removed():
     )
     assert charges == [Charge(7, 500, "before unload"), Charge(7, 300, "extruded")]
     assert EventKind.SWAP_CONFIRMED not in kinds
-    assert kinds[-2:] == [EventKind.ACTIVE_UNASSIGNED, EventKind.HOLD_UNASSIGNED]
+    assert kinds[-2:] == [EventKind.SWAP_UNASSIGNED, EventKind.HOLD_UNASSIGNED]
     assert (state.swap, state.active, state.charged) == (SwapFlag(7, 300), None, 900)
 
 
@@ -615,7 +623,7 @@ def test_old_spool_moved_back_keeps_swap_open():
     _, _, state = run(TWO_STEP)
     charges, kinds, state = run([(BOOT, r(1000, unloads=1, at_unload=600), loc(7))], state)
     assert charges == [Charge(7, 100, "extruded")]
-    assert kinds == [EventKind.ACTIVE_UNASSIGNED]
+    assert kinds == [EventKind.ACTIVE_REASSIGNED]
     assert (state.swap, state.active) == (SwapFlag(7, 400), 7)
     # A different spool later still takes everything since the unload.
     charges, _, _ = run([(BOOT, r(1000, unloads=1, at_unload=600), loc(7, 9))], state)
@@ -1091,11 +1099,6 @@ def test_hold_deleted_clears_the_active_spool():
         50,
     )
     assert hold_deleted(state, 19, 30).held_mm == 80  # Another rejected charge.
-
-
-def test_hold_deleted_drops_only_the_deleted_spool_from_evict():
-    state = ToolState(BOOT, 100, 0, 19, 19, evict=(5, 19, 8))
-    assert hold_deleted(state, 19).evict == (5, 8)
 
 
 def test_deletion_drops_the_staged_notice():
@@ -1596,3 +1599,108 @@ def test_claim_while_a_job_waits_for_its_first_extrusion():
 def test_baseline_with_an_empty_location_names_no_spool():
     res = account(ToolState(), BOOT, r(100), loc())
     assert [e.message for e in res.events] == ["baseline extruded=100 spool=none"]
+
+
+# Legal states
+
+# A state that has seen the printer, with spool 7 active and assigned.
+LEGAL = ToolState(BOOT, 100, 0, 7, 7, extruded=100)
+STAGED = Notice(8, EventKind.STAGED_AT_PRINT, "staged")
+
+
+def test_a_new_tool_and_a_loaded_tool_are_legal():
+    assert violations(ToolState()) == []
+    assert violations(LEGAL) == []
+
+
+@pytest.mark.parametrize(
+    "state, rule",
+    [
+        (ToolState(active=7), "a tool the printer hasn't reported holds nothing"),
+        (replace(LEGAL, held_mm=-1), "no counter or tally is negative"),
+        (replace(LEGAL, swap=SwapFlag(7, -1)), "no counter or tally is negative"),
+        (
+            replace(LEGAL, evict=(5, 5)),
+            "a spool awaits eviction once, and it's neither the active nor the assigned spool",
+        ),
+        (
+            replace(LEGAL, evict=(7,)),
+            "a spool awaits eviction once, and it's neither the active nor the assigned spool",
+        ),
+        (
+            replace(LEGAL, assigned=8, evict=(8,)),
+            "a spool awaits eviction once, and it's neither the active nor the assigned spool",
+        ),
+        (
+            replace(LEGAL, active=None),
+            "with no spool active, a spool is assigned only while a deleted spool's usage is held",
+        ),
+        (
+            replace(LEGAL, swap=SwapFlag(8)),
+            "an unconfirmed swap is on the active spool, or no spool is active",
+        ),
+        (
+            replace(LEGAL, swap=SwapFlag(7, started_job=42)),
+            "a swap that a print start would have closed stays open only while no spool is active",
+        ),
+        (
+            replace(LEGAL, provisional=Provisional(8, 50)),
+            "a provisional charge is on the active spool",
+        ),
+        (
+            replace(LEGAL, swap=SwapFlag(7), provisional=Provisional(7, 50)),
+            "a swap and a provisional charge aren't open together",
+        ),
+        (
+            replace(LEGAL, deleted_spool=19),
+            "a deleted spool's usage is held only while no spool is active",
+        ),
+        (
+            replace(LEGAL, active=None, deleted_spool=19, staged_notice=STAGED, assigned=8),
+            "no swap, provisional charge, or staged notice is open while a deleted spool's "
+            "usage is held",
+        ),
+        (
+            replace(LEGAL, staged_notice=STAGED),
+            "a staged notice is on the assigned spool, which isn't the active one",
+        ),
+        (
+            replace(LEGAL, job_id=42, pending_job=42),
+            "a pending job isn't the job that last started",
+        ),
+    ],
+)
+def test_each_rule_for_a_legal_state_is_checked(state, rule):
+    assert violations(state) == [rule]
+
+
+def test_hold_deleted_keeps_a_state_legal():
+    # With everything open that a deletion closes: a swap after a first unload, then a
+    # print start that makes it provisional while spool 8 is staged.
+    for steps in (
+        [(BOOT, r(100), loc(7)), (BOOT, r(300, unloads=1, at_unload=100), loc(7))],
+        [
+            (BOOT, r(100), loc(7)),
+            (BOOT, r(300, unloads=1, at_unload=100), loc(7)),
+            (BOOT, r(300, unloads=1, at_unload=100), loc(7), 42),
+            (BOOT, r(350, unloads=1, at_unload=100), loc(7), 42),
+            (BOOT, r(400, unloads=1, at_unload=100), loc(7, 8), 43),
+            (BOOT, r(450, unloads=1, at_unload=100), loc(7, 8), 43),
+        ],
+    ):
+        _, _, state = run(steps)
+        assert state.swap is not None or state.provisional is not None
+        assert hold_deleted(state, 7, 25).deleted_spool == 7
+
+
+# Event kinds
+
+
+def test_an_event_kind_says_how_it_is_reported():
+    assert EventKind.UNLOAD.report is Report.INFO  # The default.
+    assert EventKind.SWAP_UNCONFIRMED.report is Report.WARNING
+    assert EventKind.AMBIGUOUS.report is Report.LASTING
+    assert EventKind.HOLD_DELETED.report is Report.STATE
+    # The value is the name alone, as the ledger and saved notices store it.
+    assert EventKind("ambiguous") is EventKind.AMBIGUOUS
+    assert json.dumps(EventKind.AMBIGUOUS) == '"ambiguous"'
