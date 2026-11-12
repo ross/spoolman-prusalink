@@ -2186,7 +2186,7 @@ async def test_failed_lookup_of_a_spool_missing_from_the_list_is_logged_once(
     # Looked up again each poll, but the problem is logged once.
     assert fake.lookups == [19, 19, 19]
     assert caplog.text.count("can't look up spool 19, which is missing") == 1
-    assert bridge._archived == {}
+    assert not bridge.archived
     assert "archived" not in caplog.text and "deleted" not in caplog.text
     # Each poll is still charged, without filament data, as for a spool that's merely unlisted.
     assert fake.used == {19: [100.0, 100.0, 100.0]}
@@ -2251,7 +2251,7 @@ async def test_spool_missing_from_a_stale_list_is_looked_up_again_only_if_still_
         await bridge.poll()
     assert fake.lookups == [19, 19]
     assert "archived" not in caplog.text and "deleted" not in caplog.text
-    assert bridge._archived == {}
+    assert not bridge.archived
     # Charged without its filament data while it's missing.
     assert "spool 19 (unknown): +100 mm" in caplog.text
     charged = [r for r in ledger(tmp_path) if r.get("spool_id") == 19 and "use_length" in r]

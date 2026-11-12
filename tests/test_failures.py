@@ -401,7 +401,7 @@ async def test_flagged_spool_unarchived_since_the_list_was_read_is_kept_current(
     await bridge.sync_flags(await bridge.spoolman.spools(), {})
     assert fake.flag(19) is None
     assert bridge.state.flagged == []
-    assert bridge._archived == {}  # Not archived, so the next list has it.
+    assert not bridge.archived  # Not archived, so the next list has it.
     await bridge.aclose()
 
 
@@ -536,7 +536,7 @@ async def test_archived_flagged_spool_deleted_while_its_flag_fails_ends_once(tmp
     fake.fail_patch = 500
     for _ in range(2):
         await bridge.sync_flags(await bridge.spoolman.spools(), {})
-    assert 19 in bridge._archived
+    assert 19 in bridge.archived
     assert levels(caplog, "can't update the flag on spool 19") == ["WARNING", "DEBUG"]
 
     del fake.spools[19]
@@ -549,7 +549,7 @@ async def test_archived_flagged_spool_deleted_while_its_flag_fails_ends_once(tmp
     ]
     assert bridge.state.flagged == []
     assert read_state(tmp_path / "bridge.db").flagged == []
-    assert bridge._archived == {}
+    assert not bridge.archived
     assert bridge._flag_failing == {}
     assert fake.lookups == [19]  # Looked up once, while archived.
     assert levels(caplog, "can't update the flag on spool 19") == ["WARNING", "DEBUG"]
@@ -564,7 +564,7 @@ async def test_archived_active_spool_deleted_while_its_flag_fails_ends_once(tmp_
     fake.fail_patch = 500  # Setting the "archived but still loaded" flag fails.
     for _ in range(2):
         await bridge.poll()
-    assert 19 in bridge._archived
+    assert 19 in bridge.archived
     assert levels(caplog, "can't update the flag on spool 19") == ["WARNING", "DEBUG"]
     assert fake.lookups == [19]
 
@@ -577,7 +577,7 @@ async def test_archived_active_spool_deleted_while_its_flag_fails_ends_once(tmp_
     assert records_after(caplog, before) == [
         ("INFO", "spool 19 was deleted; its flag no longer needs updating")
     ]
-    assert bridge._archived == {}
+    assert not bridge.archived
     await bridge.poll()
     assert fake.lookups == [19, 19]
     assert bridge.printers[0].tools[0].active is None

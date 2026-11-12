@@ -17,6 +17,7 @@ import httpx  # For the transport types `from_config` takes; errors come from .e
 
 from . import conditions, drift, printer_sync, tags
 from .accounting import ToolState, account, hold_deleted
+from .archive import ArchivedSpools
 from .conditions import (
     CLAIM_FIELD_NAME,
     UUID_FIELD_NAME,
@@ -353,18 +354,12 @@ class PrinterBridge:
         data this poll, and the next poll's list has it, so nothing is remembered.
         """
         listed = {s.id for s in spools}
-        # The cache is shared, so keep every printer's active spools, not only this one's.
-        keep = {st.active for p in self.bridge.printers for st in p.tools.values()}
-        keep |= set(self.bridge.state.flagged)
-        self.bridge._archived = {
-            i: s for i, s in self.bridge._archived.items() if i not in listed and i in keep
-        }
         missing = {
             st.active
             for st in self.tools.values()
             if st.active is not None
             and st.active not in listed
-            and st.active not in self.bridge._archived
+            and st.active not in self.bridge.archived
         }
         # A spool that's listed again, or unloaded, no longer needs looking up.
         for spool_id in list(self._lookup_failing):
@@ -401,7 +396,7 @@ class PrinterBridge:
             if found is None:
                 held = self._hold_deleted(tool, spool_id) or held
             elif found.archived:
-                self.bridge._archived[spool_id] = found
+                self.bridge.archived.add(found)
                 log.warning(
                     "[%s] spool %d is archived but still loaded; charging it until the next unload",
                     location,
@@ -595,7 +590,7 @@ class PrinterBridge:
 
             for c in result.charges:
                 # An archived spool is still charged until the next unload, but isn't listed.
-                spool = by_id.get(c.spool_id) or self.bridge._archived.get(c.spool_id)
+                spool = by_id.get(c.spool_id) or self.bridge.archived.get(c.spool_id)
                 length = round(c.mm * self.config.length_factor, 1)
                 grams = spool.mm_to_grams(length) if spool else None
                 log.info(
@@ -712,7 +707,7 @@ class PrinterBridge:
         found: list[Condition] = []
         if st.deleted_spool is not None and st.assigned is not None:
             found.append(HeldForDeleted(st.assigned, st.deleted_spool))
-        if st.active in self.bridge._archived:
+        if st.active in self.bridge.archived:
             found.append(ArchivedLoaded(st.active))
         if st.swap is not None and st.active is None:
             found.append(UnloadedMovedOut(st.swap.spool_id))
@@ -1040,10 +1035,8 @@ class Bridge:
     _field_failing: dict[str, str] = field(default_factory=dict)
     # The status or error code of a charge that's stuck in the outbox, if one is.
     _charge_failing: str | None = None
-    # Active or flagged spools missing from Spoolman's list that turned out to be
-    # archived, looked up once each. Kept while active or flagged, so their flag can be
-    # set and cleared.
-    _archived: dict[int, Spool] = field(default_factory=dict)
+    # Active or flagged spools missing from Spoolman's list that turned out to be archived.
+    archived: ArchivedSpools = field(default_factory=ArchivedSpools)
     # Claimed spools outside every tool's location, with the location each was last
     # logged in.
     _unplaced: dict[int, str | None] = field(default_factory=dict)
@@ -1154,6 +1147,10 @@ class Bridge:
         _log_ok(self._spoolman_reach)
         claims, flags = self._claims(spools)
         by_id = {s.id: s for s in spools}
+        self.archived.prune(
+            set(by_id),
+            {st.active for p in self.printers for st in p.tools.values()} | set(self.state.flagged),
+        )
         plans: dict[str, Plan] = {}
         for printer in self.printers:
             if printer.name in reads:
@@ -1618,7 +1615,7 @@ class Bridge:
         assert key
         if not await self._ensure_field(key, FLAG_FIELD_NAME):
             return
-        current = {s.id: s.flag for s in [*spools, *self._archived.values()]}
+        current = {s.id: s.flag for s in [*spools, *self.archived]}
         changed = False
         for spool_id in sorted(set(flags) | set(self.state.flagged)):
             want = flags.get(spool_id)
@@ -1638,7 +1635,7 @@ class Bridge:
                     changed |= self._flag_spool_deleted(spool_id)
                     continue
                 if found.archived:
-                    self._archived[spool_id] = found
+                    self.archived.add(found)
                 # Otherwise it was unarchived since the list was read; next poll lists it.
                 current[spool_id] = found.flag
             if spool_id not in current:
@@ -1649,7 +1646,7 @@ class Bridge:
                 except NotFound:
                     # Deleted since it was listed or cached. An active spool that was
                     # cached as archived is looked up again, as deleted.
-                    self._archived.pop(spool_id, None)
+                    self.archived.drop(spool_id)
                     changed |= self._flag_spool_deleted(spool_id)
                     continue
                 except ServiceError as e:
@@ -1658,8 +1655,7 @@ class Bridge:
                     else:
                         log.debug("can't update the flag on spool %d: %s", spool_id, e)
                     continue
-                if spool_id in self._archived:
-                    self._archived[spool_id] = replace(self._archived[spool_id], flag=want)
+                self.archived.set_flag(spool_id, want)
                 self._flag_failing.pop(spool_id, None)
                 log.info(
                     "%s flag on spool %d%s",
