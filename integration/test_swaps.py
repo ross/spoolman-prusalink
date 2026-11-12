@@ -1308,10 +1308,6 @@ async def test_s11_drift_note_stands_while_the_tool_is_skipped(
     assert await w.flag("A") is None
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="a skipped tool's drift flag is cleared while its note stands, then set again",
-)
 async def test_s11_drift_flag_stands_while_the_tool_is_skipped(
     world: World, caplog: pytest.LogCaptureFixture
 ):

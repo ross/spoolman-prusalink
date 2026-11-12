@@ -161,6 +161,7 @@ class Printer:
         self.upload_error = None  # Status code for sync job uploads.
         self.counters = True  # MINI and MK3.5 firmware report only the material.
         self.states = []  # States the next status reads report, before the usual one.
+        self.hidden = False  # Report no tools, as with the tool disabled (T5).
 
     def handle(self, request: httpx.Request) -> httpx.Response:
         if self.down:
@@ -185,7 +186,8 @@ class Printer:
                 return httpx.Response(200, json={"tools": [tool]})
             if self.material:
                 tool["material"] = reported(self.material)
-            return httpx.Response(200, json={"boot_id": self.boot_id, "tools": [tool]})
+            tools = [] if self.hidden else [tool]
+            return httpx.Response(200, json={"boot_id": self.boot_id, "tools": tools})
         if request.url.path == "/api/v1/job":
             if not self.job:
                 return httpx.Response(204)
@@ -550,6 +552,60 @@ async def test_drift_flag_is_optional(tmp_path):
     printer.material = {"name": "PLA"}
     await bridge.poll()
     assert fake.flag(19) is None
+    await bridge.aclose()
+
+
+async def test_a_skipped_tool_keeps_its_drift_flag(tmp_path, caplog):
+    """While the location is ambiguous (S11), the drift flag stands, like the drift note."""
+    caplog.set_level("INFO")
+    bridge, fake, printer = make(
+        tmp_path, [spool(19), spool(20, location="Shelf"), spool(21, location="Shelf")]
+    )
+    printer.material = {"name": "PLA"}  # Menu load: color gone.
+    await bridge.poll()
+    flag = fake.flag(19)
+    assert "printer filament differs" in flag
+    patches = fake.writes.count(("patch", 19))
+    for spool_id in (20, 21):
+        fake.spools[spool_id]["location"] = LOC
+    for _ in range(2):
+        await bridge.poll()
+    assert "location holds spools" in caplog.text
+    assert fake.flag(19) == flag
+    for spool_id in (20, 21):
+        fake.spools[spool_id]["location"] = "Shelf"
+    await bridge.poll()
+    assert fake.flag(19) == flag
+    assert fake.writes.count(("patch", 19)) == patches
+    assert levels(caplog, "flag on spool 19") == ["INFO"]
+
+    # Compared again with the printer put back: the flag clears.
+    printer.material = {"name": "PLA", "color": "#73737b"}
+    await bridge.poll()
+    assert fake.flag(19) is None
+    await bridge.aclose()
+
+
+async def test_a_tool_the_printer_stops_reporting_keeps_its_flags(tmp_path, caplog):
+    """A tool the printer doesn't report (T5) keeps its state and drift flags meanwhile."""
+    caplog.set_level("INFO")
+    bridge, fake, printer = make(tmp_path, [spool(19)], printer_sync=False)
+    printer.material = {"name": "PLA"}
+    await bridge.poll()
+    printer.unloads, printer.at_unload = 1, 1000
+    await bridge.poll()
+    flag = fake.flag(19)
+    assert "unloaded with no Spoolman change" in flag and "printer filament differs" in flag
+    patches = fake.writes.count(("patch", 19))
+    printer.hidden = True
+    for _ in range(2):
+        await bridge.poll()
+    assert "doesn't report tool index 0" in caplog.text
+    assert fake.flag(19) == flag
+    printer.hidden = False
+    await bridge.poll()
+    assert fake.flag(19) == flag
+    assert fake.writes.count(("patch", 19)) == patches
     await bridge.aclose()
 
 
