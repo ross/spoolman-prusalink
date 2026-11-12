@@ -1267,7 +1267,7 @@ class Bridge:
     state: State = field(default_factory=State)
     printers: list[PrinterBridge] = field(init=False, default_factory=list)
     _ready_fields: set[str] = field(default_factory=set)
-    # Field keys whose last setup failure needs someone to fix it (`_unusable`).
+    # Field keys whose last setup failure was `Rejected`: it needs someone to fix it.
     _unusable_fields: set[str] = field(default_factory=set)
     _flags: dict[int, str] = field(default_factory=dict)  # Desired flags from the last poll.
     _spoolman_reach: Reachability = field(default_factory=lambda: Reachability("Spoolman"))
@@ -1612,7 +1612,8 @@ class Bridge:
         A charge leaves the outbox only once Spoolman accepts it, so a crash or an
         outage delays charges instead of dropping them. A 404 for the tool's active (or
         already deleted) spool means it was deleted: the charge is held for the tool's
-        next spool. Any other 4xx drops the charge with an error so it can't block the rest.
+        next spool. Any other 4xx except a timeout (408) or a rate limit (429) drops the
+        charge with an error so it can't block the rest.
         """
         outbox = self.state.outbox
         sent = held = dropped = 0
