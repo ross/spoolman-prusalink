@@ -42,36 +42,6 @@ literal level. Don't add a central object that owns levels.
 
 ## Bridge
 
-### B1. Tag-UUID trust has no owner
-
-The rules for trusting an instance UUID read from a tag are a state machine
-spread over `PrinterBridge` and `Bridge`:
-
-- `_seen_uuid` (`app.py`) is a positional 4-tuple of UUID, spool,
-  appeared, and runout. Code reads it as `seen[1]`, `seen[2]`, and `seen[3]`.
-  A 14-line comment explains the field.
-- `PrinterState.seen_uuids` (`state.py`) is a 3-tuple copy of the same
-  data. `_see_uuid` and `_seen_unload` write both by hand.
-- `_uuid_gap`, `_adopts` (a 3-tuple per tool), `Bridge._refused_uuids`, and
-  `Bridge._unowned_uuids` hold the rest.
-- `_tag_uuid` (`app.py`) is named like a query, but it records what it
-  saw and changes saved state. It returns `("adopt", uuid)`,
-  `("keep", uuid)`, or `("conflict", uuid)` as strings.
-- Nothing saves the change. It relies on the `_save()` at the end of
-  `process()`.
-
-Why it hurts: a change to any one rule means tracing six fields through five
-methods. The tests pin the tuple layout (see T1), so the shape can't change
-without rewriting them.
-
-Shape: a typed per-tool record, such as a `SeenTag` dataclass, that the
-database stores as is. A pure function takes the record, the reported
-material, the active spool, whether that spool is certain, and the spool
-list. It returns the new record and a decision from an enum. That's the form
-`accounting.account()` already has. The caller saves and acts.
-
-Size: large. Do it with T1.
-
 ### B2. `process()` does five jobs
 
 `PrinterBridge.process()` (`app.py`) is about 180 lines. For each tool it
@@ -149,7 +119,7 @@ and the flags. `PrinterBridge` gets the few it needs instead of a
 back-reference to the whole `Bridge`. `Bridge` asks a printer for what it
 needs through public methods.
 
-Size: medium. Easier after B1 and B2, which remove most of the reach-ins.
+Size: medium. Easier after B2, which removes most of the reach-ins.
 
 ### B5. The poll order is an implicit protocol
 
@@ -261,30 +231,31 @@ coverage out of the unit suite to remove it.
 
 ### T1. Tests pin the bridge's private state
 
-Tests read, set, or call private attributes of the bridge in about 150
-places. The most used are `_tag_uuid` (17), `db._conn` (16), `_adopt_uuid`
-(13), `_seen_uuid` (12), `_notes` (11), and `_loaded_tag` (10).
+Tests read, set, or call private attributes of the bridge in about 100
+places. The most used are `db._conn` (16), `_adopt_uuid` (13), `_notes`
+(11), `_flags` (11), and `_mint_uuid` (8).
 
-- Tests write `_seen_uuid` as a positional 4-tuple, for example
-  `tests/test_app.py`.
+- `tests/test_failures.py` calls `_adopt_uuid` and `_mint_uuid` to reach
+  each failure. Those belong to the UUID registry in B4, so their tests
+  move when it gets public methods.
 - `tests/test_failures.py` sets `_sync_busy`, `_sync_failed`, and
   `_sync_delaying` to reach each log line.
 - `tests/test_writes.py` replaces `bridge.db._conn` with a failing
   connection.
 
-Why it hurts: B1, B2, and B5 can't land without rewriting these tests. The
+Why it hurts: B2 and B5 can't land without rewriting these tests. The
 unit suite has to reach every branch, and while the logic sits inside
 `process()`, calling a private method or setting a private field is the
 cheapest way to do that.
 
-Shape: make the branches cheap to reach in public. Once B1 and B2 turn the
+Shape: make the branches cheap to reach in public. Once B2 turns the
 decisions into pure public functions, test those functions directly, as
-`tests/test_accounting.py` tests `account()`. Drive problem states through
+`tests/test_tags.py` tests `tags.decide()`. Drive problem states through
 the fake Spoolman's settings and the simulated printer's faults and
 `before_request` hook, as `tests/harness.py` does. Give `Database` a way to
 inject a failing connection.
 
-Size: large. Do it with B1.
+Size: large. Do it with B2.
 
 ### T3. A behavior change is made in two suites
 
@@ -367,15 +338,11 @@ Size: medium.
 
 | # | Workstream | Findings | Depends on |
 | --- | --- | --- | --- |
-| 2 | Tag-UUID owner | B1, T1 (UUID tests) | Nothing |
-| 3 | Conditions and saved facts | B2, B3, B5, B7, T1 (rest) | Workstream 2 |
+| 3 | Conditions and saved facts | B2, B3, B5, B7, T1 (rest) | Nothing |
 | 4 | Typed records | B6, B9, T7 | Nothing. Easier after 3 |
-| 5 | Narrow the bridge boundary | B4 | Workstreams 2 and 3 |
+| 5 | Narrow the bridge boundary | B4, T1 (UUID registry tests) | Workstream 3 |
 | 8 | Simulator state | S5, S6, then S2, S4 | Nothing. S4 continues the move that put the PrusaLink routing in `prusalink.serve` |
 | 10 | Accounting state | B10 | Nothing |
 
 Workstream 10 is independent and can run at any time. T3
 has no work, so it isn't in a workstream.
-Of the large ones, workstream 2 is best first: it has the least clear state
-and the most pinned tests, and workstreams 3 and 5 get simpler once it's
-done.
