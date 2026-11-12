@@ -163,6 +163,16 @@ async def test_b5_field_with_the_wrong_type(world: World, caplog: pytest.LogCapt
     key = w.fields["flag"]
     await w.spoolman.create_field(key, "Not the bridge's", "integer")
 
+    # Record every request that would write the key, so the test sees the bridge never
+    # tried, not only that Spoolman refused.
+    writes: list[str] = []
+
+    async def note_writes(request):
+        if request.method == "PATCH" and key.encode() in request.content:
+            writes.append(str(request.url))
+        return None
+
+    w.spoolman_faults.hook = note_writes
     await w.poll()
     w.printer.extrude(0, 30)
     await w.unload()
@@ -184,3 +194,5 @@ async def test_b5_field_with_the_wrong_type(world: World, caplog: pytest.LogCapt
     trouble = f"can't set up the {key!r} spool field: spool extra field {key!r} exists"
     assert count(caplog, logging.WARNING, trouble) == 1
     assert not any(r.levelno > logging.WARNING for r in caplog.records)
+    assert writes == []
+    assert not any("can't update the flag" in r.getMessage() for r in caplog.records)
