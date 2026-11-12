@@ -591,3 +591,118 @@ async def test_m7_density_edit_applies_to_later_charges(world: World):
     await w.poll()
     assert w.bridge.state.outbox == []
     assert await w.used("A") == pytest.approx(6 * before, abs=0.01)
+
+
+# --- Notes and flags for M3 and M5 (#111) ---
+
+
+async def test_m3_staged_spool_flag_and_unload(world: World, caplog: pytest.LogCaptureFixture):
+    """Active spool deleted with B staged: B's flag says why, and the unload gives B the usage."""
+    caplog.set_level(logging.INFO, logger="spoolman_prusalink")
+    w = world
+    a, b = w.spools["A"], w.spools["B"]
+    await baseline(w)
+    await w.move("B", w.tool_location)
+    records = await w.poll()
+    assert len(events(records, "swap_staged")) == 1
+
+    await delete_spool(w.spoolman.client, a)
+    w.printer.extrude(0, 20)
+    await w.poll()
+    w.printer.extrude(0, 10)
+    await w.poll()
+    loc = w.tool_location
+    assert await w.flag("B") == (
+        f"{loc}: usage is being held because spool {a} was deleted. It goes to this spool "
+        "at the next unload or print start, or when this spool is claimed."
+    )
+    found = f"[{loc}] spool {a} was deleted in Spoolman; holding its usage"
+    assert count(caplog, logging.WARNING, found) == 1
+    assert count(caplog, logging.INFO, f"set flag on spool {b}") == 1
+
+    # The unload makes B active: it takes the 30 mm held, and the hold and flag end once.
+    await w.unload()
+    records = await w.poll()
+    assert [e["message"] for e in events(records, "held_charged")] == [
+        f"spool {b} is active; charged it 30 mm held after spool {a} was deleted"
+    ]
+    assert w.charged(records, "B") == 30
+    tool = w.bridge.printers[0].tools[0]
+    assert tool.active == b and tool.deleted_spool is None and tool.held_mm == 0
+    await w.poll()
+    assert await w.flag("B") is None
+    ended = f"[{loc}] no longer holding usage for a deleted spool"
+    assert count(caplog, logging.WARNING, ended) == 1
+    assert count(caplog, logging.INFO, f"cleared flag on spool {b}") == 1
+    assert count(caplog, logging.WARNING, found) == 1
+
+
+async def test_m3_deleted_spool_replaced_with_nothing_held(
+    world: World, caplog: pytest.LogCaptureFixture
+):
+    """Active spool deleted, then B moved in before any use: B is active with nothing to charge."""
+    caplog.set_level(logging.INFO, logger="spoolman_prusalink")
+    w = world
+    a, b = w.spools["A"], w.spools["B"]
+    await baseline(w)
+
+    await delete_spool(w.spoolman.client, a)
+    await w.poll()
+    loc = w.tool_location
+    found = f"[{loc}] spool {a} was deleted in Spoolman; holding its usage"
+    assert count(caplog, logging.WARNING, found) == 1
+    assert w.bridge.printers[0].tools[0].held_mm == 0
+
+    await w.move("B", loc)
+    records = await w.poll()
+    assert [e["message"] for e in events(records)] == [f"spool {b} is active"]
+    assert charges(records) == []
+    tool = w.bridge.printers[0].tools[0]
+    assert tool.active == b and tool.deleted_spool is None
+    ended = f"[{loc}] no longer holding usage for a deleted spool"
+    assert count(caplog, logging.WARNING, ended) == 1
+
+    # The printer still shows A's PLA, so B is written to it; then B's use is charged.
+    await w.run_until(lambda: w.printer.job is None)
+    w.printer.extrude(0, 10)
+    records = await w.poll()
+    assert w.charged(records, "B") == 10
+    assert count(caplog, logging.WARNING, found) == 1
+    assert count(caplog, logging.WARNING, ended) == 1
+
+
+@pytest.mark.parametrize("end", ["edit", "unload"])
+async def test_m5_negative_weight_ends(world: World, caplog: pytest.LogCaptureFixture, end: str):
+    """A negative weight ends with one line when edited, and silently when the spool unloads."""
+    caplog.set_level(logging.INFO, logger="spoolman_prusalink")
+    w = world
+    a = w.spools["A"]
+    await baseline(w)
+    await set_used(w, "A", 999.0)
+    w.printer.extrude(0, 1000)
+    await w.poll()
+    await w.poll()  # Spoolman's list is read before the poll's charge is sent.
+    negative = f"spool {a} shows -"
+    recovered = f"spool {a} no longer shows a negative weight remaining in Spoolman"
+    assert count(caplog, logging.INFO, negative) == 1
+
+    if end == "edit":
+        await set_used(w, "A", 500.0)
+        await w.poll()
+        assert count(caplog, logging.INFO, recovered) == 1
+    else:
+        # S1 to B: A is unloaded and moved out, still negative.
+        await w.move("B", w.tool_location)
+        await w.poll()
+        await w.unload()
+        records = await w.poll()
+        assert len(events(records, "swap_committed")) == 1
+        await w.swap_cycle(source="tag", name=PETG[0], color=PETG[1])
+        assert not logged(caplog, logging.INFO, recovered)
+    assert w.bridge._negative == set()
+
+    for _ in range(2):
+        w.printer.extrude(0, 10)
+        await w.poll()
+    assert count(caplog, logging.INFO, negative) == 1
+    assert count(caplog, logging.INFO, recovered) == (1 if end == "edit" else 0)
