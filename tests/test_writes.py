@@ -1677,6 +1677,23 @@ async def test_negative_remaining_is_logged_once(tmp_path, caplog):
     await bridge.aclose()
 
 
+async def test_negative_remaining_that_recovers_while_loaded_logs_both_at_info(tmp_path, caplog):
+    caplog.set_level("INFO")
+    bridge, fake, printer = make(tmp_path, [spool(19)])
+    await bridge.poll()
+    assert "remaining" not in caplog.text
+    weighted(fake.spools[19], -3.0)
+    for _ in range(2):
+        await bridge.poll()
+    assert levels(caplog, "spool 19 shows -3 g remaining") == ["INFO"]
+    weighted(fake.spools[19], 40.0)
+    for _ in range(2):
+        await bridge.poll()
+    assert levels(caplog, "spool 19 no longer shows a negative weight") == ["INFO"]
+    assert bridge._negative == set()
+    await bridge.aclose()
+
+
 async def test_negative_remaining_ends_when_the_spool_is_unloaded(tmp_path, caplog):
     caplog.set_level("INFO")
     bridge, fake, printer = make(tmp_path, [weighted(spool(19), -12.0)])
@@ -1688,8 +1705,9 @@ async def test_negative_remaining_ends_when_the_spool_is_unloaded(tmp_path, capl
     for _ in range(2):
         await bridge.poll()
     assert bridge.printers[0].tools[0].active == 20
-    assert ("negative", 19) not in bridge._problems._seen
-    assert levels(caplog, "spool 19 with a negative weight is unloaded") == ["INFO"]
+    assert bridge._negative == set()
+    assert "negative weight" not in caplog.text
+    assert levels(caplog, "shows -12 g remaining") == ["INFO"]
     await bridge.aclose()
 
 
@@ -1809,6 +1827,42 @@ async def test_deleted_spool_hold_restored_after_a_restart_is_logged_and_ends(tm
     await bridge.poll()
     assert fake.used[20][0] == 500.0
     assert levels(caplog, "no longer holding usage for a deleted spool") == ["WARNING"]
+    await bridge.aclose()
+
+
+async def test_deleted_spool_hold_restored_after_a_restart_is_logged_once(tmp_path, caplog):
+    bridge, fake, printer = make(tmp_path, [spool(19)])
+    await bridge.poll()
+    printer.extruded = 1500
+    await bridge.poll()
+    del fake.spools[19]
+    printer.extruded = 1700
+    await bridge.poll()
+    caplog.set_level("INFO")
+    caplog.clear()
+    bridge = restart(bridge)
+    for extruded in (1800, 1900, 2000):
+        printer.extruded = extruded
+        await bridge.poll()
+    assert levels(caplog, "spool 19 was deleted in Spoolman") == ["WARNING"]
+    await bridge.aclose()
+
+
+async def test_deleted_spool_hold_moving_to_another_spool_logs_again(tmp_path, caplog):
+    bridge, fake, printer = make(tmp_path, [spool(19)])
+    await bridge.poll()
+    printer.extruded = 1500
+    await bridge.poll()
+    del fake.spools[19]
+    printer.extruded = 1700
+    await bridge.poll()
+    caplog.set_level("INFO")
+    caplog.clear()
+    bridge.printers[0].tools[0] = replace(bridge.printers[0].tools[0], deleted_spool=21)
+    await bridge.poll()
+    await bridge.poll()
+    assert levels(caplog, "spool 21 was deleted in Spoolman") == ["WARNING"]
+    assert "no longer holding" not in caplog.text
     await bridge.aclose()
 
 
@@ -2237,6 +2291,21 @@ async def test_claim_outside_tool_location_is_flagged_until_moved_in(tmp_path, c
     assert levels(caplog, "claimed spool 20 is no longer waiting on a location") == ["WARNING"]
     assert fake.flag(20) is None
     assert fake.spools[19]["location"] is None
+    await bridge.aclose()
+
+
+async def test_claim_outside_tool_location_logs_again_when_the_location_changes(tmp_path, caplog):
+    bridge, fake, printer = make(tmp_path, [spool(19)])
+    caplog.set_level("INFO")
+    fake.spools[20] = spool_x(20, location="Shelf", extra=dict(CLAIMED))
+    await bridge.poll()
+    await bridge.poll()
+    fake.spools[20]["location"] = "Drawer"
+    await bridge.poll()
+    await bridge.poll()
+    waiting = "spool 20 is claimed but isn't in a tool's location"
+    assert levels(caplog, waiting) == ["WARNING", "WARNING"]
+    assert "'Drawer'" in caplog.text
     await bridge.aclose()
 
 

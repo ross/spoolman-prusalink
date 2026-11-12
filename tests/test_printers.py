@@ -235,6 +235,22 @@ async def test_x6_shared_spool_logs_again_when_it_recurs(tmp_path, caplog):
     await bridge.aclose()
 
 
+async def test_shared_spool_logs_again_when_its_locations_change(tmp_path, caplog):
+    bridge, fake, printers = two_printers(tmp_path, [spool(19, A), spool(20, B)])
+    a_tools, b_tools = bridge.state.tools("a"), bridge.state.tools("b")
+    a_tools[0] = ToolState(boot_id=1, active=19, assigned=19)
+    b_tools[0] = ToolState(boot_id=1, active=19, assigned=20)
+    bridge._check_shared({})
+    bridge._check_shared({})
+    assert caplog.text.count("spool 19 is active in Tool a and Tool b at once") == 1
+    bridge.printers[0].config.tools[0] = "Tool c"
+    bridge._check_shared({})
+    bridge._check_shared({})
+    assert caplog.text.count("spool 19 is active in Tool c and Tool b at once") == 1
+    assert "no longer active" not in caplog.text
+    await bridge.aclose()
+
+
 async def test_archived_spool_on_the_first_printer_is_looked_up_once(tmp_path, caplog):
     # The archived-spool cache is shared: b's check must not drop what a found.
     bridge, fake, printers = await baseline(tmp_path, [spool(19, A), spool(20, B)])

@@ -265,6 +265,9 @@ class PrinterBridge:
     # Per tool: the provisional charge and the amount its flag shows. The amount is
     # updated only between prints, so the flag isn't rewritten on every poll.
     _provisional_shown: dict[int, tuple[tuple[int, int | None], int]] = field(default_factory=dict)
+    # Per tool: the deleted spool a hold was last logged for. Starts empty, so a hold
+    # restored after a restart is logged once.
+    _hold_logged: dict[int, int] = field(default_factory=dict)
     # When the printer was first seen idle since it was last busy or unreachable.
     _idle_since: float | None = None
     # Per tool: the instance UUID the printer last reported while the active spool was
@@ -439,20 +442,28 @@ class PrinterBridge:
             and int(r.get("extruded_mm", 0)) > 0
         )
         self.tools[tool] = hold_deleted(st, spool_id, mm, queued)
-        self._holding_for_deleted(tool, spool_id)
+        self._note_hold(tool)
         # Not saved here: flush() saves with the record popped, and process() saves after.
         return True
 
-    def _holding_for_deleted(self, tool: int, spool_id: int) -> None:
-        """Log, once while it lasts, that a tool holds usage for a deleted spool."""
+    def _note_hold(self, tool: int) -> None:
+        """Log when a tool's hold for a deleted spool starts, moves to another spool, or ends."""
+        st = self.tools.get(tool)
+        held = st.deleted_spool if st is not None else None
+        logged = self._hold_logged.get(tool)
+        if held == logged:
+            return
         location = self.config.tools.get(tool, str(tool))
-        self.bridge._problems.fail(
-            (self._key, "deleted", tool),
-            spool_id,
+        if held is None:
+            del self._hold_logged[tool]
+            log.warning("[%s] no longer holding usage for a deleted spool", location)
+            return
+        self._hold_logged[tool] = held
+        log.warning(
             "[%s] spool %d was deleted in Spoolman; holding its usage for the next spool "
             "that becomes active in %s",
             location,
-            spool_id,
+            held,
             location,
         )
 
@@ -633,15 +644,9 @@ class PrinterBridge:
                 )
 
             st = self.tools.get(tool, ToolState())
-            if st.deleted_spool is None:
-                self.bridge._problems.clear(
-                    (self._key, "deleted", tool),
-                    "[%s] no longer holding usage for a deleted spool",
-                    location,
-                )
-            else:
-                # Also logs a hold restored from the database after a restart.
-                self._holding_for_deleted(tool, st.deleted_spool)
+            # Also logs a hold restored from the database after a restart, since
+            # nothing is logged for it yet.
+            self._note_hold(tool)
             if st.deleted_spool is not None and st.assigned is not None:
                 flags.setdefault(st.assigned, []).append(
                     f"{location}: usage is being held because spool {st.deleted_spool} was "
@@ -682,10 +687,8 @@ class PrinterBridge:
                     )
                 )
             active = by_id.get(st.active) if st.active is not None else None
-            if active is not None:
-                if active.id != before.active:
-                    self.bridge.state.runouts.pop(active.id, None)
-                self._check_remaining(active)
+            if active is not None and active.id != before.active:
+                self.bridge.state.runouts.pop(active.id, None)
             tag = None
             if tool == 0 and (material is None or not material.instance_uuid):
                 self._uuid_gap.add(tool)
@@ -967,24 +970,6 @@ class PrinterBridge:
         self.bridge.state.runouts[spool.id] = Runout(
             text, spool.net_weight, spool.used_weight, self.name
         )
-
-    def _check_remaining(self, spool: Spool) -> None:
-        """Log once when a loaded spool's remaining weight in Spoolman goes below 0."""
-        key = ("negative", spool.id)
-        if spool.remaining_weight is not None and spool.remaining_weight < 0:
-            self.bridge._problems.fail(
-                key,
-                "negative",
-                "spool %d shows %.0f g remaining in Spoolman but is still "
-                "loaded; its weight is probably off",
-                spool.id,
-                spool.remaining_weight,
-                level=logging.INFO,
-            )
-        else:
-            self.bridge._problems.clear(
-                key, "spool %d no longer shows a negative weight remaining in Spoolman", spool.id
-            )
 
     def _claim_handled(self, location: str, claim: int, others: list[int]) -> None:
         """Record a handled claim and the claims it beat, so their boxes are cleared."""
@@ -1305,9 +1290,13 @@ class Bridge:
     # Active spools missing from Spoolman's list that turned out to be archived, looked
     # up once each. Kept while active or flagged, so their flag can be set and cleared.
     _archived: dict[int, Spool] = field(default_factory=dict)
-    # Claimed spools outside every tool's location, logged once until that changes.
-    _unplaced: set[int] = field(default_factory=set)
-    _shared: set[int] = field(default_factory=set)  # Spools active in two tools last poll.
+    # Claimed spools outside every tool's location, with the location each was last
+    # logged in.
+    _unplaced: dict[int, str | None] = field(default_factory=dict)
+    # Spools active in two tools last poll, with the tool locations each was logged in.
+    _shared: dict[int, list[str]] = field(default_factory=dict)
+    # Loaded spools that showed a negative remaining weight last poll.
+    _negative: set[int] = field(default_factory=set)
     # Tag UUIDs not adopted because an archived spool has them, so the archived spools
     # aren't read again every poll.
     _refused_uuids: set[tuple[int, str]] = field(default_factory=set)
@@ -1413,10 +1402,7 @@ class Bridge:
             for spool_id, texts in own.items():
                 flags.setdefault(spool_id, []).extend(texts)
         self._check_shared(flags)
-        loaded = {st.active for p in self.printers for st in p.tools.values()}
-        for key in self._problems.failing("negative"):
-            if key[1] not in loaded:
-                self._problems.clear(key, "spool %d with a negative weight is unloaded", key[1])
+        self._check_negative(spools)
         self._finish_flags(flags, spools, changed)
         await self.flush()
         for printer in self.printers:
@@ -1430,6 +1416,32 @@ class Bridge:
                 await printer.sync_printer(spools)
         if self.config.flag_field:
             await self.sync_flags(spools)
+
+    def _check_negative(self, spools: list[Spool]) -> None:
+        """Log a loaded spool whose remaining weight in Spoolman goes below 0, and its recovery.
+
+        A spool that leaves the set because it's unloaded isn't logged: the unload is.
+        """
+        loaded = {st.active for p in self.printers for st in p.tools.values()}
+        negative = {
+            s.id: s.remaining_weight
+            for s in spools
+            if s.id in loaded and s.remaining_weight is not None and s.remaining_weight < 0
+        }
+        for spool_id in sorted(negative.keys() - self._negative):
+            log.info(
+                "spool %d shows %.0f g remaining in Spoolman but is still "
+                "loaded; its weight is probably off",
+                spool_id,
+                negative[spool_id],
+            )
+        listed = {s.id for s in spools}
+        for spool_id in sorted(self._negative - negative.keys()):
+            if spool_id in loaded and spool_id in listed:
+                log.info(
+                    "spool %d no longer shows a negative weight remaining in Spoolman", spool_id
+                )
+        self._negative = set(negative)
 
     def _check_shared(self, flags: dict[int, list[str]]) -> None:
         """Flag a spool that's active in more than one tool at once.
@@ -1445,26 +1457,22 @@ class Bridge:
                         printer.config.tools.get(tool, str(tool))
                     )
         shared = {spool_id for spool_id, locations in where.items() if len(locations) > 1}
-        for spool_id in self._shared - shared:
-            self._problems.clear(
-                ("shared", spool_id), "spool %d is no longer active in more than one tool", spool_id
-            )
-        self._shared = shared
+        for spool_id in sorted(self._shared.keys() - shared):
+            log.warning("spool %d is no longer active in more than one tool", spool_id)
+        previous, self._shared = self._shared, {i: where[i] for i in shared}
         for spool_id in sorted(shared):
             locations = where[spool_id]
-            key = ("shared", spool_id)
             names = " and ".join(locations)
             flags.setdefault(spool_id, []).append(
                 f"active in {names} at once. One of them missed an unload: unload and reload "
                 "there, or claim the spool that's loaded."
             )
-            self._problems.fail(
-                key,
-                tuple(locations),
-                "spool %d is active in %s at once; one of them missed an unload",
-                spool_id,
-                names,
-            )
+            if previous.get(spool_id) != locations:
+                log.warning(
+                    "spool %d is active in %s at once; one of them missed an unload",
+                    spool_id,
+                    names,
+                )
 
     def _claims(
         self, spools: list[Spool], flags: dict[int, list[str]]
@@ -1495,31 +1503,28 @@ class Bridge:
             for tool, location in printer.config.tools.items()
         }
         per_tool: dict[tuple[str, int], list[Spool]] = {}
-        unplaced: set[int] = set()
+        unplaced: dict[int, str | None] = {}
         for spool in ticked.values():
             if spool.id in handled:
                 continue
             tool = tools.get(spool.location or "")
             if tool is None:
-                unplaced.add(spool.id)
+                unplaced[spool.id] = spool.location
                 flags.setdefault(spool.id, []).append(
                     f"'{CLAIM_FIELD_NAME}' is ticked, but this spool isn't in a printer "
                     "tool's location. Move it into the location of the tool it's loaded in."
                 )
-                self._problems.fail(
-                    ("claim", spool.id),
-                    spool.location,
-                    "spool %d is claimed but isn't in a tool's location (it's in %s); "
-                    "waiting until it is",
-                    spool.id,
-                    repr(spool.location or "no location"),
-                )
+                if self._unplaced.get(spool.id, "") != spool.location:
+                    log.warning(
+                        "spool %d is claimed but isn't in a tool's location (it's in %s); "
+                        "waiting until it is",
+                        spool.id,
+                        repr(spool.location or "no location"),
+                    )
                 continue
             per_tool.setdefault(tool, []).append(spool)
-        for spool_id in self._unplaced - unplaced:
-            self._problems.clear(
-                ("claim", spool_id), "claimed spool %d is no longer waiting on a location", spool_id
-            )
+        for spool_id in sorted(self._unplaced.keys() - unplaced.keys()):
+            log.warning("claimed spool %d is no longer waiting on a location", spool_id)
         self._unplaced = unplaced
         chosen: dict[str, dict[int, tuple[int, list[int]]]] = {}
         for (name, tool), candidates in per_tool.items():
