@@ -45,6 +45,9 @@ NO_UUIDS = [
 ]
 # The same on the Core One L, whose tag reader the other two keep working.
 TAG_READER_NO_UUIDS = NO_UUIDS[2:]
+# `uuid_field = ""` hides every stored UUID from the bridge, so only this case can show a
+# UUID in Spoolman being compared.
+UUIDS_OFF = NO_UUIDS[3:]
 WORLD = "world_model, world_config, world_printer"
 
 
@@ -145,7 +148,7 @@ async def test_s1_tag_uuid_is_not_adopted_without_uuids(world: World):
     assert await w.flag("B") is None
 
 
-@pytest.mark.parametrize(WORLD, TAG_READER_NO_UUIDS, indirect=True)
+@pytest.mark.parametrize(WORLD, UUIDS_OFF, indirect=True)
 async def test_s1_tag_uuid_conflict_is_ignored_without_uuids(
     world: World, caplog: pytest.LogCaptureFixture
 ):
@@ -168,7 +171,7 @@ async def test_s1_tag_uuid_conflict_is_ignored_without_uuids(
     assert w.requests("PUT") == []
 
 
-@pytest.mark.parametrize(WORLD, TAG_READER_NO_UUIDS, indirect=True)
+@pytest.mark.parametrize(WORLD, UUIDS_OFF, indirect=True)
 async def test_w9_tag_of_another_spool_is_not_drift_without_uuids(
     world: World, caplog: pytest.LogCaptureFixture
 ):
@@ -280,9 +283,13 @@ async def test_s5_claim_is_ignored_with_claims_off(world: World, caplog: pytest.
     assert await w.spoolman.extra(c, CLAIM_FIELD) is True
     assert wrote(seen, CLAIM_FIELD) == []
     assert await w.spoolman.location(a) == w.tool_location  # Not evicted.
-    assert "tick" not in (await w.flag("B") or "")
     assert await w.flag("C") is None
     assert not logged(caplog, logging.WARNING, "is claimed but isn't in a tool's location")
+
+    # B is still staged, so the next print start flags it as not loaded, with no hint to tick.
+    await w.start_print(print_spec())
+    flag = await w.flag("B") or ""
+    assert "staged" in flag and "tick" not in flag
 
 
 # --- Firmware without usage counters ---
