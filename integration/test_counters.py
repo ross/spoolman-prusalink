@@ -77,6 +77,53 @@ async def test_c1_reboot_keeps_usage_held_at_the_reboot(world: World):
     assert w.charged(w.since(0), "A") == 0
 
 
+async def test_c1_usage_held_over_a_reboot_joins_the_open_swap(world: World):
+    """Usage held over a reboot with a swap open: charged to the old spool, moved with it."""
+    w = world
+    a, b = w.spools["A"], w.spools["B"]
+    await baseline(w)
+
+    # A sensor fault reads as an unload, and the tool shows no filament: the swap opens
+    # on A, and the next 20 mm is held.
+    w.printer.set_sensor_fault(0, True)
+    w.advance(0.1)
+    w.printer.extrude(0, 20)
+    records = await w.poll()
+    assert [e["event"] for e in events(records)] == ["unload", "swap_unconfirmed"]
+    assert charges(records) == []
+
+    # A reboot with the fault still on keeps the 20 mm, and A, still active, takes it.
+    w.printer.reboot()
+    assert w.material() == (None, None, None)
+    records = await w.poll()
+    reboots = events(records, "reboot")
+    assert len(reboots) == 1 and reboots[0]["message"].endswith(
+        "; 20 mm held before the restart is kept"
+    )
+    assert [e["message"] for e in events(records, "held_charged")] == [
+        f"spool {a} is active; charged it 20 mm held before the printer restarted"
+    ]
+    assert [(r["spool_id"], r["use_length"]) for r in charges(records)] == [(a, 20.0)]
+    tool = w.bridge.printers[0].tools[0]
+    assert tool.swap is not None and tool.swap.spool_id == a and tool.swap.mm == 20
+    assert tool.held_mm == 0
+
+    # Another reboot with the fault fixed, then B moved in: confirming the swap moves
+    # the 20 mm to B with the rest of the usage since the unload.
+    w.printer.set_sensor_fault(0, False)
+    w.printer.reboot()
+    records = await w.poll()
+    assert len(events(records, "reboot")) == 1 and charges(records) == []
+    await w.move("A", w.shelf)
+    await w.move("B", w.tool_location)
+    records = await w.poll()
+    assert [e["message"] for e in events(records, "swap_confirmed")] == [
+        f"swap confirmed: 20 mm moved from spool {a} to {b}"
+    ]
+    assert [(r["spool_id"], r["use_length"]) for r in charges(records)] == [(b, 20.0), (a, -20.0)]
+    assert w.charged(w.since(0), "A") == 0
+
+
 async def test_c2_printer_off_for_hours(world: World, caplog: pytest.LogCaptureFixture):
     """Printer off for hours: logged going, hourly and back, idle polls, nothing charged."""
     caplog.set_level(logging.INFO, logger="spoolman_prusalink")

@@ -10,6 +10,7 @@ from integration.conftest import (
     FLAG_FIELD,
     LOAD_MM,
     PETG,
+    UUID_FIELD,
     World,
     charges,
     count,
@@ -195,6 +196,187 @@ async def test_m3_charge_to_deleted_spool_is_held(world: World, caplog: pytest.L
     records = await w.poll()
     assert w.charged(records, "C") == 40
     assert count(caplog, logging.WARNING, found) == 1
+
+
+async def test_m3_404_for_a_spool_no_longer_active_is_dropped(
+    world: World, caplog: pytest.LogCaptureFixture
+):
+    """A 404 on a charge to a spool no longer active is dropped, not held for the next spool."""
+    caplog.set_level(logging.INFO, logger="spoolman_prusalink")
+    w = world
+    a, b = w.spools["A"], w.spools["B"]
+    await baseline(w)
+
+    # S1: B moved in, then A unloaded. The poll that commits the swap queues A's last
+    # charge, and A is deleted just before it's sent.
+    await w.move("B", w.tool_location)
+    await w.poll()
+    deleted = False
+
+    async def delete_first(request):
+        nonlocal deleted
+        if not deleted and request.method == "PUT" and request.url.path == use_path(a):
+            deleted = True
+            await delete_spool(w.spoolman.client, a)
+        return None
+
+    w.spoolman_faults.hook = delete_first
+    w.printer.extrude(0, 30)
+    await w.unload()
+    records = await w.poll()
+    assert deleted
+    assert len(events(records, "swap_committed")) == 1
+    failed = [r for r in records if "failed" in r]
+    assert [(r["spool_id"], r["use_length"], r["failed"]) for r in failed] == [(a, 30.0, "404")]
+    assert not failed[0].get("held")
+    assert charges(records) == []
+    msg = f"Spoolman rejected a +30 mm charge to spool {a} (404 "
+    assert count(caplog, logging.ERROR, msg) == 1
+    tool = w.bridge.printers[0].tools[0]
+    assert tool.active == b and tool.deleted_spool is None and tool.held_mm == 0
+    assert not logged(caplog, logging.WARNING, f"spool {a} was deleted in Spoolman")
+
+    # B's load is charged to B, and nothing of A's goes with it.
+    w.spoolman_faults.hook = None
+    records = await w.swap_cycle(poll_every=0.3, source="tag", name=PETG[0], color=PETG[1])
+    records += await w.poll()
+    assert w.charged(records, "B") == LOAD_MM
+    assert events(records, "held_charged") == []
+
+
+async def test_m3_deleted_during_an_unconfirmed_swap(world: World):
+    """Active spool deleted with an unconfirmed swap open: the swap's usage is held once."""
+    w = world
+    a = w.spools["A"]
+    faults = w.spoolman_faults
+    await baseline(w)
+
+    # S2: A unloaded and a spool loaded with no Spoolman change. The load is charged to A
+    # as the swap's usage.
+    w.printer.extrude(0, 30)
+    await w.unload()
+    records = await w.poll()
+    assert len(events(records, "swap_unconfirmed")) == 1
+    records = await w.swap_cycle(poll_every=0.3, source="tag", name=PETG[0], color=PETG[1])
+    records += await w.poll()
+    assert w.charged(records, "A") == LOAD_MM
+
+    # The next charge to A fails with 503 over two polls; the second doesn't get past it.
+    faults.answer("PUT", use_path(a), 503, times=None)
+    w.printer.extrude(0, 20)
+    await w.poll()
+    await w.poll()
+    assert [r["use_length"] for r in w.bridge.state.outbox] == [20.0]
+    tool = w.bridge.printers[0].tools[0]
+    assert tool.swap is not None and tool.swap.mm == LOAD_MM + 20
+
+    # A is deleted: the queued charge 404s, and the swap's usage is held, the queued
+    # part once.
+    await delete_spool(w.spoolman.client, a)
+    faults.restore()
+    records = await w.poll()
+    held = [r for r in records if r.get("held")]
+    assert [(r["spool_id"], r["use_length"], r["failed"]) for r in held] == [(a, 20.0, "404")]
+    tool = w.bridge.printers[0].tools[0]
+    assert tool.active is None and tool.deleted_spool == a and tool.swap is None
+    assert tool.held_mm == LOAD_MM + 20
+
+
+async def test_m3_staged_spool_takes_held_usage_at_print_start(
+    world: World, caplog: pytest.LogCaptureFixture
+):
+    """Active spool deleted with another staged: a print start makes it active and charges it."""
+    caplog.set_level(logging.INFO, logger="spoolman_prusalink")
+    w = world
+    a, b = w.spools["A"], w.spools["B"]
+    await baseline(w)
+    start = w.counter
+
+    await w.move("B", w.tool_location)
+    records = await w.poll()
+    assert len(events(records, "swap_staged")) == 1
+
+    await delete_spool(w.spoolman.client, a)
+    w.printer.extrude(0, 20)
+    records = await w.poll()
+    tool = w.bridge.printers[0].tools[0]
+    assert tool.active is None and tool.deleted_spool == a and tool.assigned == b
+    assert tool.held_mm == 20
+    assert charges(records) == []
+    flag = await w.flag("B")
+    assert flag is not None and f"because spool {a} was deleted" in flag
+
+    # A print starts with no unload: B is made active and takes everything held.
+    records = await w.start_print(print_spec())
+    assert [e["message"] for e in events(records, "assignment_changed")] == [
+        f"print started with spool {b} assigned; making it active in place of deleted spool {a}"
+    ]
+    held = events(records, "held_charged")
+    assert len(held) == 1
+    assert held[0]["message"].startswith(f"spool {b} is active; charged it ")
+    assert held[0]["message"].endswith(f" mm held after spool {a} was deleted")
+    tool = w.bridge.printers[0].tools[0]
+    assert tool.active == b and tool.deleted_spool is None and tool.held_mm == 0
+    assert w.charged(w.since(0), "B") == w.counter - start
+    assert w.charged(w.since(0), "A") == 0
+    await w.poll()
+    assert await w.flag("B") is None
+
+
+async def test_m3_unload_with_no_poll_after_the_extrusion(world: World):
+    """Deleted spool found, then extrusion and an unload in one poll: the extrusion is held."""
+    w = world
+    a = w.spools["A"]
+    await baseline(w)
+
+    await delete_spool(w.spoolman.client, a)
+    await w.poll()
+    tool = w.bridge.printers[0].tools[0]
+    assert tool.deleted_spool == a and tool.held_mm == 0
+
+    w.printer.extrude(0, 20)
+    await w.unload()
+    records = await w.poll()
+    assert [e["message"] for e in events(records, "unload")] == [
+        f"1 unload(s); 20 mm before the unload is held because spool {a} was deleted"
+    ]
+    assert charges(records) == []
+    tool = w.bridge.printers[0].tools[0]
+    assert tool.deleted_spool == a and tool.held_mm == 20
+
+
+async def test_m3_delete_and_recreate(world: World, caplog: pytest.LogCaptureFixture):
+    """Deleted spool re-created with the printer's UUID: a correction, charged the held usage."""
+    caplog.set_level(logging.INFO, logger="spoolman_prusalink")
+    w = world
+    a, b = w.spools["A"], w.spools["B"]
+    await baseline(w)
+
+    await w.move("B", w.tool_location)
+    await w.poll()
+    await delete_spool(w.spoolman.client, a)
+    w.printer.extrude(0, 20)
+    records = await w.poll()
+    tool = w.bridge.printers[0].tools[0]
+    assert tool.active is None and tool.deleted_spool == a and tool.held_mm == 20
+    assert events(records, "correction") == []
+
+    # B stands for A re-created: the user gives it the UUID the printer reports.
+    await set_extra_text(w.spoolman.client, b, UUID_FIELD, w.uuids["A"])
+    w.printer.extrude(0, 10)
+    records = await w.poll()
+    assert [e["message"] for e in events(records, "correction")] == [
+        f"printer already has spool {b}'s filament; making it active"
+    ]
+    assert [e["message"] for e in events(records, "held_charged")] == [
+        f"spool {b} is active; charged it 20 mm held after spool {a} was deleted"
+    ]
+    assert w.charged(records, "B") == 20 + 10
+    tool = w.bridge.printers[0].tools[0]
+    assert tool.active == b and tool.deleted_spool is None and tool.held_mm == 0
+    # The printer shows A's PLA under that UUID, so B's PETG is written, keeping the UUID.
+    w.advance(1.5)
+    assert w.material() == (PETG[0], PETG[1], w.uuids["A"])
 
 
 async def test_m3a_archived_active_spool(world: World, caplog: pytest.LogCaptureFixture):

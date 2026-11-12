@@ -20,6 +20,7 @@ from integration.conftest import (
     logged,
     print_spec,
 )
+from integration.faults import set_extra_text
 from integration.temperatures import TEMPERATURES, WRITTEN
 from simulator.model import MODELS, JobPhase, Material, ModelInfo, State
 from spoolman_prusalink.printer_sync import COREONEL_PREAMBLE
@@ -597,3 +598,37 @@ async def test_w14_spoolman_edit_is_written(world: World, caplog: pytest.LogCapt
     await w.poll()
     assert len(w.requests("PUT")) == 2
     assert await w.flag("B") is None
+
+
+async def test_w14_edit_after_the_uuid_is_cleared_keeps_the_printers(
+    world: World, caplog: pytest.LogCaptureFixture
+):
+    """UUID cleared in Spoolman, then a color edit: the rewrite keeps the printer's UUID."""
+    caplog.set_level(logging.INFO, logger="spoolman_prusalink")
+    w = world
+    b = w.spools["B"]
+    await write_due(w)
+    await w.poll()
+    await wrote_b(w)
+    await w.poll()  # Sees the write took.
+    assert len(w.requests("PUT")) == 1
+    written = w.material()[2]
+    assert count(caplog, logging.INFO, f"gave spool {b} instance UUID") == 1
+
+    # The user clears B's UUID and edits its color: the edit is written with the UUID
+    # the printer already shows, and no new one is minted.
+    await set_extra_text(w.spoolman.client, b, UUID_FIELD, "")
+    assert await w.spoolman.extra(b, UUID_FIELD) is None
+    await w.spoolman.edit_filament(b, color_hex="00aa55")
+    await w.poll()
+    assert len(w.requests("PUT")) == 2
+    assert (b, written) in w.bridge._unowned_uuids  # Checked against archived spools.
+    await w.run_until(lambda: w.printer.job is None)
+    assert w.material() == (PETG[0], "#00aa55", written)
+    m865 = [t for t in gcode(w) if t.startswith("M865.1 T0")]
+    assert len(m865) == 2 and written in m865[-1]
+    await w.poll()
+    assert count(caplog, logging.INFO, f"gave spool {b} instance UUID") == 1
+    assert await w.spoolman.extra(b, UUID_FIELD) is None  # Kept on the printer, not stored.
+    assert await w.flag("B") is None
+    assert len(w.requests("PUT")) == 2
