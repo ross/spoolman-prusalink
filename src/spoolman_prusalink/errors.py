@@ -18,7 +18,16 @@ _BODY = 200
 
 
 class ServiceError(Exception):
-    """A request to Spoolman or the printer failed. `str()` says how, for the log."""
+    """A request to Spoolman or the printer failed. `str()` says how, for the log.
+
+    `summary` is the same without the body of an error answer. Tell a new failure from
+    a repeat by it: a proxy's error page can change on every request, such as with a
+    request ID, and that mustn't log the failure again.
+    """
+
+    def __init__(self, message: str, summary: str | None = None) -> None:
+        super().__init__(message)
+        self.summary = message if summary is None else summary
 
 
 class Unreachable(ServiceError):
@@ -33,8 +42,8 @@ class BadAnswer(ServiceError):
     `BadAnswer` and not one of its subclasses.
     """
 
-    def __init__(self, message: str, status: int | None = None) -> None:
-        super().__init__(message)
+    def __init__(self, message: str, status: int | None = None, summary: str | None = None) -> None:
+        super().__init__(message, summary)
         self.status = status
 
 
@@ -69,17 +78,16 @@ def check(resp: httpx.Response) -> None:
     if resp.is_success:
         return
     code = resp.status_code
-    message = f"{code} {resp.reason_phrase} for {resp.request.method} {resp.request.url.path}"
+    summary = f"{code} {resp.reason_phrase} for {resp.request.method} {resp.request.url.path}"
     body = resp.text.strip()[:_BODY]
-    if body:
-        message = f"{message}: {body}"
+    message = f"{summary}: {body}" if body else summary
     if code == 404:
-        raise NotFound(message, code)
+        raise NotFound(message, code, summary)
     if code == 409:
-        raise Busy(message, code)
+        raise Busy(message, code, summary)
     if resp.is_client_error and code not in (408, 429):
-        raise Rejected(message, code)
-    raise BadAnswer(message, code)
+        raise Rejected(message, code, summary)
+    raise BadAnswer(message, code, summary)
 
 
 @contextmanager

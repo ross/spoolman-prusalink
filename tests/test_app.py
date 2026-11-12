@@ -17,6 +17,7 @@ from spoolman_prusalink.accounting import Provisional, SwapFlag, ToolState
 from spoolman_prusalink.app import Bridge, Reachability, _log_failed, _log_ok, _record
 from spoolman_prusalink.config import Config, ConfigError, PrinterConfig, load
 from spoolman_prusalink.db import Database, DatabaseError, read_ledger, read_state
+from spoolman_prusalink.errors import BadAnswer, Unreachable
 from spoolman_prusalink.models import Material
 from spoolman_prusalink.prusalink import NoFilamentEndpoint, PrusaLink, parse_filament
 from spoolman_prusalink.spoolman import FieldTypeError, Spoolman, parse_spool
@@ -1231,18 +1232,18 @@ async def test_from_config_opens_the_database_and_builds_the_clients(tmp_path):
 
 def test_record_says_whether_an_error_is_new_or_changed():
     failing: dict[int, str] = {}
-    assert _record(failing, 7, "boom") is True
-    assert _record(failing, 7, "boom") is False
-    assert _record(failing, 7, "bang") is True
-    assert _record(failing, 8, "bang") is True
+    assert _record(failing, 7, BadAnswer("boom")) is True
+    assert _record(failing, 7, BadAnswer("boom")) is False
+    assert _record(failing, 7, BadAnswer("bang")) is True
+    assert _record(failing, 8, BadAnswer("bang")) is True
     assert failing == {7: "bang", 8: "bang"}
 
 
-def test_record_compares_the_error_text():
+def test_record_compares_the_summary_not_the_body():
     failing: dict[int, str] = {}
-    assert _record(failing, 7, ValueError("boom")) is True
-    assert _record(failing, 7, KeyError("boom")) is True  # Its text is "'boom'".
-    assert _record(failing, 7, KeyError("boom")) is False
+    assert _record(failing, 7, BadAnswer("502: request 1", 502, "502")) is True
+    assert _record(failing, 7, BadAnswer("502: request 2", 502, "502")) is False
+    assert _record(failing, 7, BadAnswer("503: request 3", 503, "503")) is True
 
 
 def reach_lines(caplog):
@@ -1259,7 +1260,7 @@ def test_kind_change_restarts_the_clock(caplog):
     caplog.set_level("INFO")
     for t, unreachable in [(0, True), (3600, True), (7000, False), (7200, False)]:
         now["v"] = t
-        _log_failed(reach, ValueError("boom"), unreachable=unreachable)
+        _log_failed(reach, BadAnswer("boom"), unreachable=unreachable)
     now["v"] = 7260
     _log_ok(reach)
     assert reach_lines(caplog) == [
@@ -1274,11 +1275,11 @@ def test_bad_answers_then_unreachable_measures_the_unreachable_span(caplog):
     now = {"v": 0.0}
     reach = Reachability("svc", clock=lambda: now["v"])
     caplog.set_level("INFO")
-    _log_failed(reach, ValueError("boom"), unreachable=False)
+    _log_failed(reach, BadAnswer("boom"), unreachable=False)
     now["v"] = 3 * 3600
-    _log_failed(reach, ValueError("boom"), unreachable=False)  # The reminder.
+    _log_failed(reach, BadAnswer("boom"), unreachable=False)  # The reminder.
     now["v"] += 10
-    _log_failed(reach, OSError("off"), unreachable=True)
+    _log_failed(reach, Unreachable("off"), unreachable=True)
     now["v"] += 60
     _log_ok(reach)
     assert reach_lines(caplog) == [

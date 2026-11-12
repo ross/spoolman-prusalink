@@ -137,7 +137,8 @@ class Reachability:
 
 def _log_failed(reach: Reachability, error: Exception, *, unreachable: bool) -> None:
     """Record a failed read and log what it changed."""
-    trouble = reach.failed(unreachable, str(error))
+    # The printer client still raises httpx errors, which have no summary.
+    trouble = reach.failed(unreachable, getattr(error, "summary", str(error)))
     if trouble in (Trouble.STARTED, Trouble.CHANGED):
         if unreachable:
             log.warning("%s unreachable: %s; logging again when it's back", reach.name, error)
@@ -164,9 +165,9 @@ def _log_ok(reach: Reachability) -> None:
         log.warning("%s reads working again after %s", reach.name, _duration(recovery.lasted))
 
 
-def _record(failing: dict, key: Hashable, error: object) -> bool:
+def _record(failing: dict, key: Hashable, error: ServiceError) -> bool:
     """Note `error` as what's failing at `key`. Returns whether it's new or changed."""
-    text = str(error)
+    text = error.summary
     new = failing.get(key) != text
     failing[key] = text
     return new
@@ -1667,18 +1668,18 @@ class Bridge:
             log.warning("%s", _outbox_outcome(sent, held, dropped))
         return True
 
-    def _charge_stuck(self, spool_id: int, error: object, queued: int) -> None:
+    def _charge_stuck(self, spool_id: int, error: ServiceError, queued: int) -> None:
         """Log a charge that's stuck, once per distinct error."""
-        detail = str(error)
+        detail = error.summary
         if self._charge_failing != detail:
             log.warning(
-                "charge to spool %d failed (%s); %d queued, retrying", spool_id, detail, queued
+                "charge to spool %d failed (%s); %d queued, retrying", spool_id, error, queued
             )
         else:
             log.debug(
                 "charge to spool %d still failing (%s); %d queued, retrying",
                 spool_id,
-                detail,
+                error,
                 queued,
             )
         self._charge_failing = detail
