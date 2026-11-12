@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import json
-import math
 import os
 import re
+import sys
 import tomllib
 import uuid
 from dataclasses import dataclass, field, fields
@@ -85,8 +85,9 @@ def _int(value: object, name: str, minimum: int | None = None) -> int:
 def _number(value: object, name: str, minimum: float | None = None) -> float:
     if isinstance(value, bool) or not isinstance(value, int | float):
         raise ConfigError(f"{name} must be a number, got {value!r}")
-    if not math.isfinite(value):
-        raise ConfigError(f"{name} must be a number, not nan or inf, got {value!r}")
+    # A comparison, not math.isfinite, which overflows on an int too large for a float.
+    if not -sys.float_info.max <= value <= sys.float_info.max:
+        raise ConfigError(f"{name} must be a finite number, got {value!r}")
     if minimum is not None and value < minimum:
         raise ConfigError(f"{name} must be at least {minimum}, got {value!r}")
     return float(value)

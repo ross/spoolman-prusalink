@@ -296,7 +296,7 @@ function renderPrinter(p) {
   h += '<div class="btns">' +
     btn('Start print', 'toggle', { form: 'start', dis: !canStart, cls: isOpen(p, 'start') ? 'on' : '' }) +
     btn('Pause', 'pause', { dis: off || !(ph === 'PRINTING' || ph === 'PREHEAT') }) +
-    btn('Resume', 'resume', { dis: off || !(st === 'PAUSED' || ph === 'AWAIT_RESUME') }) +
+    btn('Resume', 'resume', { dis: off || !((st === 'PAUSED' && ph === 'PAUSED') || ph === 'AWAIT_RESUME') }) +
     btn('Cancel', 'cancel', { dis: off || !job || ph === 'PARKING', cls: 'danger' }) +
     btn('Dismiss', 'dismiss', { dis: off || !(st === 'FINISHED' || st === 'STOPPED') }) +
     btn('Home', 'home', { dis: off || !!job || !(st === 'IDLE' || st === 'FINISHED' || st === 'STOPPED') }) +
