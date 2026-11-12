@@ -10,7 +10,7 @@ import tomllib
 import uuid
 from dataclasses import dataclass, field, fields
 
-from simulator.model import MODELS, Firmware, Settings
+from simulator.model import MODELS, Firmware, Invalid, Settings
 
 _NAME_PATTERN = r"[A-Za-z0-9_.-]{1,64}"
 _MATERIAL_PATTERN = r"[A-Za-z0-9_-]{1,7}"
@@ -69,6 +69,9 @@ class Location:
     location: str
     # Whether the printer's model holds an instance UUID (tool 0 only).
     uuids: bool
+    # The tool's configured material name and instance UUID, if any.
+    material: str | None = None
+    instance_uuid: str | None = None
 
 
 def _int(value: object, name: str, minimum: int | None = None) -> int:
@@ -255,8 +258,10 @@ def load(path: str | os.PathLike) -> SimConfig:
     control_port = _port(raw.get("control_port", 8000), "control_port")
     data_dir = _str(raw.get("data_dir", "simulator/data"), "data_dir")
     settings = _settings(raw)
-    if settings.get("time_scale", 1.0) <= 0:
-        raise ConfigError(f"time_scale must be greater than 0, got {settings['time_scale']!r}")
+    try:
+        Settings(**settings)
+    except Invalid as e:
+        raise ConfigError(str(e)) from None
 
     entries = raw.get("printers", [])
     if not isinstance(entries, list):
@@ -285,7 +290,14 @@ def _location(printer: PrinterConfig, tool: ToolConfig) -> str:
 def locations(cfg: SimConfig) -> list[Location]:
     """Every tool's location, disabled tools included: the bridge can't tell them apart."""
     return [
-        Location(p.name, t.index, _location(p, t), MODELS[p.model].uuids)
+        Location(
+            p.name,
+            t.index,
+            _location(p, t),
+            MODELS[p.model].uuids,
+            t.material["name"] if t.material else None,
+            t.material["instance_uuid"] if t.material else None,
+        )
         for p in cfg.printers
         for t in p.tools
     ]

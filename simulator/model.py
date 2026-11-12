@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import random
 import re
+import sys
 import uuid as uuidlib
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, field, fields, replace
@@ -172,6 +173,9 @@ def preset_temperatures(name: str) -> dict[str, int]:
     return dict(zip(("nozzle", "preheat", "bed"), values, strict=True))
 
 
+POSITIVE_SETTINGS = frozenset({"time_scale", "load_rate_mm_s", "print_rate_mm_s"})
+
+
 @dataclass
 class Settings:
     time_scale: float = 1.0
@@ -194,24 +198,32 @@ class Settings:
     auto_accept_model_check: bool = False
     start_blip: bool = True
 
-    def update(self, values: dict[str, Any]) -> None:
-        """Apply a subset of fields, checking names and types first so a bad one changes nothing."""
-        known = {f.name: f for f in fields(self)}
-        checked = {}
-        for key, value in values.items():
-            if key not in known:
-                raise Invalid(f"unknown setting {key!r}")
-            if isinstance(known[key].default, bool):
+    def __post_init__(self) -> None:
+        """Check every field, so no way of building a `Settings` can hold a bad value."""
+        for f in fields(self):
+            key = f.name
+            value = getattr(self, key)
+            if isinstance(f.default, bool):
                 if not isinstance(value, bool):
                     raise Invalid(f"{key} must be true or false")
-            elif isinstance(value, bool) or not isinstance(value, int | float) or value < 0:
+            elif (
+                isinstance(value, bool)
+                or not isinstance(value, int | float)
+                or not 0 <= value <= sys.float_info.max
+            ):
                 raise Invalid(f"{key} must be a number of at least 0")
-            checked[key] = value
-        for key in ("time_scale", "load_rate_mm_s", "print_rate_mm_s"):
-            if key in checked and checked[key] <= 0:
+            elif key in POSITIVE_SETTINGS and value <= 0:
                 raise Invalid(f"{key} must be greater than 0")
-        for key, value in checked.items():
-            setattr(self, key, value)
+
+    def update(self, values: dict[str, Any]) -> None:
+        """Apply a subset of fields. A bad one raises and changes nothing."""
+        known = {f.name for f in fields(self)}
+        for key in values:
+            if key not in known:
+                raise Invalid(f"unknown setting {key!r}")
+        candidate = replace(self, **values)
+        for key in known:
+            setattr(self, key, getattr(candidate, key))
 
 
 @dataclass
@@ -1633,7 +1645,7 @@ class Simulation:
             printers = [_printer_from(d) for d in data["printers"]]
             settings = Settings(**data["settings"])
             now = float(data["now"])
-        except (KeyError, TypeError, ValueError) as e:
+        except (KeyError, TypeError, ValueError, Invalid) as e:
             raise Invalid(f"bad snapshot: {e}") from None
         if self.printers:
             ours = {(p.name, p.port) for p in self.printers.values()}

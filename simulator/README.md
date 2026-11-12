@@ -44,9 +44,15 @@ To point the bridge at the simulated printers:
 ```
 
 `seed` creates a vendor, a few filaments, and two spools per tool in Spoolman:
-one in the tool's location and a spare on the `shelf`. It never deletes or
-moves anything, and running it again changes nothing. `bridge-config` prints
-the bridge's `[[printers]]` list with the same locations. Add `[spoolman]`
+one in the tool's location and a spare on the `shelf`. A tool's spool gets the
+tool's configured material and instance UUID, so the demo starts in agreement, as
+with `sim.example.toml`. That holds when the material and color match one of
+`seed`'s filaments other than Nylon-X, whose temperatures differ from the
+simulator's defaults. A material `seed` has no filament for gets one from a fixed
+cycle instead. On tool 0 of a model that holds UUIDs, a tool with no material
+gets a new UUID. It never deletes or moves anything, and running it again
+changes nothing, so a Spoolman seeded earlier keeps its old spools and UUIDs.
+`bridge-config` prints the bridge's `[[printers]]` list with the same locations. Add `[spoolman]`
 and `[bridge]` tables to it, with short poll intervals, and run the bridge:
 
 ```toml
@@ -138,7 +144,9 @@ that trace. The points that matter for the bridge, in short:
   `resume`) keeps the job ID, restarts the counters, skips the idle sensor
   clear, and goes through `BUSY`, during which a nozzle clean purges
   `panic_purge_mm`, then a short `PAUSED`, then `PRINTING`. With `cold_bed`
-  it waits in `ATTENTION` for `resume` before the clean.
+  it waits in `ATTENTION` for `resume` before the clean. The page's
+  **Power-loss resume** sends `cold_bed` from its **cold bed** checkbox, and
+  **Resume** continues that wait.
 - An upload during the start blip is accepted and dropped: the firmware's
   state check passes while it reads `IDLE`, but the print start ignores it.
   The user's print goes on and the uploaded file never runs.

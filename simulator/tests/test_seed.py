@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 
 from aiohttp import web
 from aiohttp.test_utils import TestServer
@@ -166,3 +167,87 @@ async def test_seed_reports_an_error_response_with_the_request():
         with pytest.raises(SeedError) as e:
             await seed(url, LOCATIONS)
     assert str(e.value) == f"GET {url}/api/v1/vendor returned 503: down for maintenance"
+
+
+async def _seed_one(*locations: Location) -> tuple[dict[str, dict], dict[int, str]]:
+    fake = FakeSpoolman()
+    async with TestServer(fake.app) as server:
+        await seed(str(server.make_url("")).rstrip("/"), list(locations))
+    return (
+        {s["comment"]: s for s in fake.spools},
+        {f["id"]: f["name"] for f in fake.filaments},
+    )
+
+
+async def test_seed_gives_the_tool_its_configured_material_and_uuid():
+    configured = "44c406a5-c6f5-4440-bfba-e8060564b717"
+    spools, names = await _seed_one(Location("core", 0, "core", True, "PETG", configured))
+    loaded = spools["sim: core loaded"]
+    assert names[loaded["filament_id"]] == "PETG"
+    assert json.loads(loaded["extra"]["instance_uuid"]) == configured
+    # The spare follows the cycle from the tool position (PLA, then PETG), not the material.
+    assert names[spools["sim: core spare"]["filament_id"]] == "PETG"
+
+
+async def test_seed_falls_back_to_the_cycle_for_an_unknown_or_missing_material():
+    spools, names = await _seed_one(
+        Location("a", 1, "a T2", False, "Unobtainium"),
+        Location("b", 2, "b T3", False),
+    )
+    assert names[spools["sim: a T2 loaded"]["filament_id"]] == "PETG"
+    assert names[spools["sim: b T3 loaded"]["filament_id"]] == "ASA"
+
+
+async def test_seed_mints_a_uuid_when_no_material_is_configured():
+    spools, _ = await _seed_one(Location("core", 0, "core", True))
+    assert len(json.loads(spools["sim: core loaded"]["extra"]["instance_uuid"])) == 36
+
+
+async def test_seed_writes_no_uuid_for_a_material_configured_without_one():
+    spools, _ = await _seed_one(Location("core", 0, "core", True, "PLA"))
+    assert "extra" not in spools["sim: core loaded"]
+
+
+async def test_seed_matches_the_material_the_bridge_compares():
+    spools, names = await _seed_one(
+        Location("a", 0, "a", False, "NYLONX"),
+        Location("b", 1, "b T2", False, "pla"),
+    )
+    assert names[spools["sim: a loaded"]["filament_id"]] == "Nylon-X"
+    assert names[spools["sim: b T2 loaded"]["filament_id"]] == "PLA"
+
+
+async def test_a_seeded_example_tool_agrees_with_the_bridge_drift_check():
+    from simulator.config import load, locations
+    from simulator.model import Simulation
+    from spoolman_prusalink.drift import differences
+    from spoolman_prusalink.models import Material
+    from spoolman_prusalink.spoolman import parse_spool
+
+    cfg = load(Path(__file__).parent.parent / "sim.example.toml")
+    locs = locations(cfg)
+    printers = Simulation.from_config(cfg).printers
+    fake = FakeSpoolman()
+    async with TestServer(fake.app) as server:
+        await seed(str(server.make_url("")).rstrip("/"), locs)
+    spools = {s["comment"]: s for s in fake.spools}
+    checked = 0
+    for loc in locs:
+        if not loc.material:
+            continue
+        sim = printers[loc.printer].tools[loc.tool].material
+        nozzle, preheat, bed = sim.temperatures()
+        have = Material(
+            sim.name,
+            sim.color,
+            sim.instance_uuid,
+            nozzle_temperature=nozzle,
+            preheat_temperature=preheat,
+            bed_temperature=bed,
+        )
+        body = spools[f"sim: {loc.location} loaded"]
+        filament = next(f for f in fake.filaments if f["id"] == body["filament_id"])
+        spool = parse_spool({**body, "id": 1, "filament": filament}, "instance_uuid")
+        assert differences(loc.tool, have, spool, loc.uuids) == []
+        checked += 1
+    assert checked == 3
