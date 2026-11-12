@@ -191,6 +191,7 @@ end Status.
 | W12 | `test_writes.py::test_w12_staged_spool_waits_for_the_unload` | Write of B due, then C staged: nothing is written until C is unloaded and loaded. |
 | W13 | `test_writes.py::test_w13_sync_job_homes_an_unhomed_printer` | Unhomed after a boot: the sync job homes with G28 O before it writes and ends. |
 | W14 | `test_configs.py::test_w14_edit_that_leaves_the_spool_unwritable_is_flagged` | An edit to PPS after a write: flagged with why it can't be written, not drift. |
+| W14 | `test_writes.py::test_w14_a_color_the_printer_rounds_is_written_once` | The printer stores 5 bits a channel (F25), so an edit to `00aa55` reads back `00ad52`. |
 | W14 | `test_writes.py::test_w14_edit_after_the_uuid_is_cleared_keeps_the_printers` | UUID cleared in Spoolman, then a color edit: the rewrite keeps the printer's UUID. |
 | W14 | `test_writes.py::test_w14_spoolman_edit_is_written` | A color edit in Spoolman is written to the printer; a name-only edit isn't. |
 | W15 | `test_writes.py::test_w15_upload_fails` | Upload fails with a 500 or a dropped connection: logged once, retried each idle poll. |
