@@ -352,26 +352,8 @@ removes the cause for events. Keep one prose check per event kind.
 
 The simulator review read every file in `simulator/`.
 
-### S1. Printer state is stored beside the job phase
-
-`simulator/model.py` has 26 `_set_state()` calls, nearly all paired with a
-`job.phase = ...` write. While a job exists, the state follows from the
-phase. The `HOLD` phase covers three situations, told apart by `job.jam`,
-`job.id is None`, and comparing `attention` with the text `"model check"`.
-`static/app.js` reads the attention text too: with regular expressions to
-find a tool index, and with `===` and `startsWith` to enable a button.
-
-Shape: derive the state from the phase with one table and store only the
-idle screen. Make the attention reason an enum with a tool index. Split
-`SimJob` into a user job and a sync job.
-
-Size: medium.
-
 ### S2. The page reimplements the model's rules
 
-- The Resume button is disabled unless the state is `PAUSED`, but
-  `resume()` also handles the wait on a cold bed after a power panic, which
-  is `ATTENTION`. The page can't continue that print (#134).
 - The page's `SETTINGS` list (`app.js`) lacks `recover_seconds`,
   `unpark_seconds`, and `panic_purge_mm`.
 - `canStart`, `dLoad`, `dUnload`, and `IDLEISH` copy model rules, and the
@@ -392,7 +374,7 @@ process, so the format must stay callable without HTTP.
 Shape: a pure `prusalink.render(printer)` for the wire views, the G-code
 interpreter in its own module, and input checks in the control layer.
 
-Size: large. Do S1 and S5 first.
+Size: large. Do S5 first.
 
 ### S5. Tool material rules are kept by convention
 
@@ -426,10 +408,6 @@ Size: medium.
 - Snapshots are a dump of the internal dataclasses, with shims for older
   snapshots in `_process_from`, `_tool_from` (`kept_type`), and `Material`'s
   optional temperatures.
-- `seed` picks spool materials from `CYCLE[tool % 3]` (`seed.py`) and
-  mints a random UUID, so the demo printer's preloaded tag UUID never
-  matches its seeded spool, and the demo starts with UUID drift (#135).
-  This may be intended. Nothing says so.
 
 ## Order and dependencies
 
@@ -439,7 +417,7 @@ Size: medium.
 | 3 | Conditions and saved facts | B2, B3, B5, B7, T1 (rest) | Workstreams 2 and 10. B7 changes the part of `account()` that B9 part 1 restructures |
 | 4 | Typed records | B6, B9 (part 2), T7 | Workstream 10. Easier after 3 |
 | 5 | Narrow the bridge boundary | B4 | Workstreams 2 and 3 |
-| 8 | Simulator state | S1, S5, S6, then S2, S4 | Nothing. S4 continues the move that put the PrusaLink routing in `prusalink.serve` |
+| 8 | Simulator state | S5, S6, then S2, S4 | Nothing. S4 continues the move that put the PrusaLink routing in `prusalink.serve` |
 | 10 | Accounting state | B9 (part 1), B10 | Nothing |
 
 Workstream 10 is independent and can run at any time. T3
