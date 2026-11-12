@@ -191,7 +191,7 @@ async def test_s1_untrusted_tag_is_left_alone(world: World):
     await w.swap_cycle(temperatures=(250, 170, 80), **load)
     for kept in w.bridge.state.printers.values():
         kept.seen_tags.clear()
-    w.bridge._save()
+    w.bridge.db.save(w.bridge.state)
     await w.restart()
     for _ in range(3):
         await w.poll()

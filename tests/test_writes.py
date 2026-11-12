@@ -141,8 +141,8 @@ async def test_a_failed_save_in_process_saves_nothing(tmp_path):
     await bridge.poll()
     db = tmp_path / "bridge.db"
     state, records = read_state(db), ledger(tmp_path)
-    conn = bridge.db._conn
-    bridge.db._conn = FailingCommit(conn)
+    conn = bridge.db.conn
+    bridge.db.conn = FailingCommit(conn)
     station.tool.unload_count, station.tool.extruded_at_unload, station.tool.extruded = (
         1,
         1400,
@@ -151,14 +151,14 @@ async def test_a_failed_save_in_process_saves_nothing(tmp_path):
     with pytest.raises(sqlite3.OperationalError):
         await bridge.poll()
     # One transaction held the events, the queued charges and the tool's counters.
-    failed = bridge.db._conn.failed
-    assert bridge.db._conn.wrote("INSERT INTO ledger", failed) == 2
-    assert bridge.db._conn.wrote("INSERT INTO outbox", failed) == 2
-    assert bridge.db._conn.wrote("INSERT OR REPLACE INTO tools", failed) == 1
+    failed = bridge.db.conn.failed
+    assert bridge.db.conn.wrote("INSERT INTO ledger", failed) == 2
+    assert bridge.db.conn.wrote("INSERT INTO outbox", failed) == 2
+    assert bridge.db.conn.wrote("INSERT OR REPLACE INTO tools", failed) == 1
     assert read_state(db) == state
     assert ledger(tmp_path) == records
     assert fake.used == {}
-    bridge.db._conn = conn
+    bridge.db.conn = conn
 
     # The bridge stops on the error; started again, it charges the same usage.
     bridge = restart(bridge)
@@ -183,18 +183,18 @@ async def test_a_failed_save_in_flush_keeps_the_charge_queued(tmp_path):
     db = tmp_path / "bridge.db"
     state, records = read_state(db), ledger(tmp_path)
     assert [r.use_length for r in state.outbox] == [500.0]
-    conn = bridge.db._conn
-    bridge.db._conn = FailingCommit(conn)
+    conn = bridge.db.conn
+    bridge.db.conn = FailingCommit(conn)
     with pytest.raises(sqlite3.OperationalError):
         await bridge.flush()
     # One transaction held the record and the charge leaving the outbox.
-    failed = bridge.db._conn.failed
-    assert bridge.db._conn.wrote("INSERT INTO ledger", failed) == 1
-    assert bridge.db._conn.wrote("DELETE FROM outbox", failed) == 1
+    failed = bridge.db.conn.failed
+    assert bridge.db.conn.wrote("INSERT INTO ledger", failed) == 1
+    assert bridge.db.conn.wrote("DELETE FROM outbox", failed) == 1
     assert fake.used == {19: [500.0]}  # Spoolman took it,
     assert read_state(db) == state  # but it's still queued,
     assert ledger(tmp_path) == records  # with no record of it.
-    bridge.db._conn = conn
+    bridge.db.conn = conn
 
     # Sent again at restart: charges are at least once.
     bridge = restart(bridge)

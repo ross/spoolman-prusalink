@@ -95,6 +95,30 @@ def differences(
     return diffs
 
 
+def tag_differences(
+    material: Material, active: Spool, spools: list[Spool], uuids: bool = True
+) -> list[Difference]:
+    """Return why a loaded tag isn't the active spool's, or an empty list.
+
+    That's when the tag's instance UUID is another spool's in Spoolman, or differs
+    from the active spool's. Name, color and temperatures don't count: a tool loaded
+    from a tag is never written, so Spoolman's can't replace the tag's (Q11). With
+    `uuids` off, nothing counts.
+    """
+    if not uuids:
+        return []
+    value = (material.instance_uuid or "").lower()
+    have = (active.instance_uuid or "").lower()
+    if not value or value == have:
+        return []
+    for s in spools:
+        if s.id != active.id and (s.instance_uuid or "").lower() == value:
+            return [Difference(What.TAG, material.instance_uuid, s.id)]
+    if have:
+        return [Difference(What.UUID, material.instance_uuid, active.instance_uuid)]
+    return []
+
+
 def same_instance(material: Material | None, spool: Spool) -> bool:
     """Whether the printer reports this spool's instance UUID. Only a UUID identifies a
     spool: two spools of the same product share a name and color."""

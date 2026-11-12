@@ -389,8 +389,8 @@ def test_a_failed_save_writes_nothing(path, fail):
     db = Database.open(path)
     state = full_state()
     assert db.save(state, LEDGER[:1])
-    conn = db._conn
-    db._conn = FailingConnection(conn, fail)
+    conn = db.conn
+    db.conn = FailingConnection(conn, fail)
     state.outbox.pop()
     state.outbox.push(charge(7))
     state.tools("core")[1] = ToolState(boot_id=4)
@@ -399,7 +399,7 @@ def test_a_failed_save_writes_nothing(path, fail):
     assert read_state(path) == full_state()
     assert read_ledger(path) == READ[:1]
     # The next save writes all of it.
-    db._conn = conn
+    db.conn = conn
     assert db.save(state, LEDGER[1:2])
     db.close()
     assert read_state(path) == state

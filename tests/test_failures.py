@@ -9,11 +9,13 @@ import pytest
 from harness import (
     LOC,
     PLA,
+    answer,
     drop,
     fill,
     jobs,
     levels,
     make,
+    menu,
     restart,
     spool,
     spool_x,
@@ -122,23 +124,47 @@ async def test_sync_job_busy_and_failing_ends_with_one_line(tmp_path, caplog):
     bridge, fake, station = make(tmp_path, [spool(19)])
     caplog.set_level("INFO")
     await bridge.poll()
-    printer_bridge = bridge.printers[0]
-    # A 409 left the job waiting, then a later attempt failed outright.
-    printer_bridge._sync_busy, printer_bridge._sync_failed = "409", "500"
+    # A swap to spool 20, loaded from the menu: a write is due.
+    station.tool.unload_count, station.tool.extruded_at_unload = 1, 1000
+    fill(station.tool, menu("PLA"))
+    fake.spools[20] = spool_x(20)
+    # A 409 leaves the job waiting, then a later attempt fails outright.
+    station.before_request = answer(409, "PUT")
+    await bridge.poll()
+    station.before_request = answer(500, "PUT")
+    await bridge.poll()
+    assert levels(caplog, "busy; sync job waits") == ["INFO"]
+    assert levels(caplog, "sync job failed") == ["WARNING"]
+    fake.spools[20]["location"] = None  # The spool is leaving: nothing to write any more.
     caplog.clear()
-    await bridge.poll()  # Nothing to write any more.
+    await bridge.poll()
     assert levels(caplog, "sync job no longer needed") == ["WARNING"]
 
-    printer_bridge._sync_busy = "409"
+    # A job that only waited on a busy printer ends at INFO.
+    fake.spools[20]["location"] = LOC
+    station.before_request = answer(409, "PUT")
+    await bridge.poll()
+    fake.spools[20]["location"] = None
     caplog.clear()
     await bridge.poll()
     assert levels(caplog, "sync job no longer needed") == ["INFO"]
+    await bridge.aclose()
 
-    printer_bridge._sync_delaying = True  # A delay wait ends without a line.
-    caplog.clear()
+
+async def test_sync_job_waiting_out_the_delay_ends_without_a_line(tmp_path, caplog):
+    bridge, fake, station = make(tmp_path, [spool(19)], sync_delay=3600)
+    caplog.set_level("INFO")
+    await bridge.poll()
+    station.tool.unload_count, station.tool.extruded_at_unload = 1, 1000
+    fill(station.tool, menu("PLA"))
+    fake.spools[20] = spool_x(20)
+    await bridge.poll()
+    assert count(caplog, "sync job waits until the printer has been idle") == 1
+    fake.spools[20]["location"] = None
     await bridge.poll()
     await bridge.poll()
     assert count(caplog, "sync job no longer needed") == 0
+    assert jobs(station) == []
     await bridge.aclose()
 
 
@@ -344,7 +370,7 @@ async def test_flagged_spools_missing_from_the_list_are_looked_up(tmp_path):
     bridge, fake, station = make(tmp_path, [spool(19, flag="still wanted")])
     fake.spools[19]["archived"] = True
     bridge.state.flagged[:] = [19, 20]
-    bridge._save()
+    bridge.db.save(bridge.state)
     # 20 has no flag wanted and was deleted.
     await bridge.sync_flags([], {19: "still wanted"})
     assert bridge.state.flagged == [19]  # 19 is archived and keeps its flag; 20 is forgotten.
@@ -411,7 +437,7 @@ async def test_run_polls_until_stopped(tmp_path, caplog, queued):
 async def test_cleared_flag_leaves_the_flagged_list_and_is_saved(tmp_path):
     bridge, fake, station = make(tmp_path, [spool(19, flag="was flagged"), spool(20)])
     bridge.state.flagged[:] = [19]
-    bridge._save()  # As an earlier poll left it.
+    bridge.db.save(bridge.state)  # As an earlier poll left it.
     # Nothing wanted any more.
     await bridge.sync_flags(await bridge.spoolman.spools(), {})
     assert fake.flag(19) is None
@@ -424,7 +450,7 @@ async def test_cleared_flag_leaves_the_flagged_list_and_is_saved(tmp_path):
 async def test_flagged_spool_that_leaves_the_list_is_forgotten_and_saved(tmp_path, how):
     bridge, fake, station = make(tmp_path, [spool(19, flag="x"), spool(20)])
     bridge.state.flagged[:] = [19]
-    bridge._save()  # As an earlier poll left it.
+    bridge.db.save(bridge.state)  # As an earlier poll left it.
     if how == "deleted":
         del fake.spools[19]
     else:

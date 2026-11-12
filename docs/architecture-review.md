@@ -90,31 +90,17 @@ coverage out of the unit suite to remove it.
 
 ### T1. Tests pin the bridge's private state
 
-Tests read, set, or call private attributes of the bridge in about 100
-places. The most used are `db._conn` (16), `_adopt_uuid` (13), `_notes`
-(11), `_flags` (11), and `_mint_uuid` (8).
+Tests read, set, or call private attributes of the bridge in about 45
+places. The most used are `_adopt_uuid` (13), `_mint_uuid` (8),
+`_check_shared` (7), and `_archived` (7). The rest are the bridge's problem
+records, such as `_negative`, `_flag_failing`, `_evict_failing`, and the two
+`Reachability` fields.
 
-- `tests/test_failures.py` calls `_adopt_uuid` and `_mint_uuid` to reach
-  each failure. Those belong to the UUID registry in B4, so their tests
-  move when it gets public methods.
-- `tests/test_failures.py` sets `_sync_busy`, `_sync_failed`, and
-  `_sync_delaying` to reach each log line.
-- `tests/test_writes.py` replaces `bridge.db._conn` with a failing
-  connection.
+All of them belong to the spool-keyed owners in B4: the UUID registry, the
+archived-spool cache, and the flags. Their tests move when those owners get
+public methods.
 
-Why it hurts: B2 and B5 can't land without rewriting these tests. The
-unit suite has to reach every branch, and while the logic sits inside
-`process()`, calling a private method or setting a private field is the
-cheapest way to do that.
-
-Shape: make the branches cheap to reach in public. Once B2 turns the
-decisions into pure public functions, test those functions directly, as
-`tests/test_tags.py` tests `tags.decide()`. Drive problem states through
-the fake Spoolman's settings and the simulated printer's faults and
-`before_request` hook, as `tests/harness.py` does. Give `Database` a way to
-inject a failing connection.
-
-Size: large. Do it with B2.
+Size: medium. Do it with B4.
 
 ### T3. A behavior change is made in two suites
 
@@ -213,8 +199,8 @@ Size: medium.
 
 | # | Workstream | Findings | Depends on |
 | --- | --- | --- | --- |
-| 3 | Conditions and saved facts | B10, T1 (rest) | Nothing |
-| 5 | Narrow the bridge boundary | B4, T1 (UUID registry tests) | Workstream 3 |
+| 3 | Conditions and saved facts | B10 | Nothing |
+| 5 | Narrow the bridge boundary | B4, T1 | Workstream 3 |
 | 8 | Simulator state | S1, S5, S6, then S2, S4 | Nothing. S4 continues the move that put the PrusaLink routing in `prusalink.serve` |
 
 T3 has no work, so it isn't in a workstream.

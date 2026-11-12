@@ -42,7 +42,7 @@ from .config import Config, PrinterConfig
 from .db import Database
 from .errors import Busy, NotFound, Rejected, ServiceError, Unreachable
 from .events import Report, Unload
-from .models import FilamentReading, Material, Spool
+from .models import FilamentReading, Spool
 from .prusalink import BUSY_STATES, IDLE_STATES, NoFilamentEndpoint, PrinterStatus, PrusaLink
 from .records import ChargeRecord, EventRecord
 from .spoolman import Spoolman
@@ -669,7 +669,10 @@ class PrinterBridge:
                 tagged = self._tag_tool(tool) and tags.loaded_tag(seen, material, active)
                 if tagged:
                     # Never written, so only whose tag it is matters (Q11).
-                    diffs, edited = self._tag_differences(material, active, spools), None
+                    diffs, edited = (
+                        drift.tag_differences(material, active, spools, self._uuids),
+                        None,
+                    )
                 elif printer_sync.loaded_from_menu(material.name, active):
                     diffs, edited = [], None  # As the "can't write" flag asked.
                 else:
@@ -785,29 +788,6 @@ class PrinterBridge:
         write = self._write(tool)
         if write.due or write.attempts:
             self.writes[tool] = write.settled()
-
-    def _tag_differences(
-        self, material: Material, active: Spool, spools: list[Spool]
-    ) -> list[drift.Difference]:
-        """Return why a loaded tag isn't the active spool's, or an empty list.
-
-        That's when the tag's instance UUID is another spool's in Spoolman, or differs
-        from the active spool's. Name, color and temperatures don't count: the tool is
-        never written, so Spoolman's can't replace the tag's (Q11). With UUIDs off,
-        nothing counts.
-        """
-        if not self._uuids:
-            return []
-        value = (material.instance_uuid or "").lower()
-        have = (active.instance_uuid or "").lower()
-        if not value or value == have:
-            return []
-        for s in spools:
-            if s.id != active.id and (s.instance_uuid or "").lower() == value:
-                return [drift.Difference(drift.What.TAG, material.instance_uuid, s.id)]
-        if have:
-            return [drift.Difference(drift.What.UUID, material.instance_uuid, active.instance_uuid)]
-        return []
 
     async def adopt_uuids(self, plan: Plan) -> Plan:
         """Store the UUIDs of tags `process()` found on spools that have none.

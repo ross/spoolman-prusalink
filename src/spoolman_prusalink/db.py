@@ -126,7 +126,8 @@ class Database:
 
     def __init__(self, path: Path, conn: sqlite3.Connection, lock_fd: int) -> None:
         self.path = path
-        self._conn: sqlite3.Connection | None = conn
+        # The SQLite connection, or None once closed. A test can swap in one that fails.
+        self.conn: sqlite3.Connection | None = conn
         self._lock_fd: int | None = lock_fd
         self._rows: Rows = {name: {} for name in _KEYED}
 
@@ -154,9 +155,9 @@ class Database:
 
     def close(self) -> None:
         """Close the database and release the lock. Safe to call twice."""
-        if self._conn is not None:
-            self._conn.close()
-            self._conn = None
+        if self.conn is not None:
+            self.conn.close()
+            self.conn = None
         if self._lock_fd is not None:
             os.close(self._lock_fd)
             self._lock_fd = None
@@ -164,7 +165,7 @@ class Database:
     def load(self) -> State:
         """Read the state, and take it as what `save` compares against."""
         try:
-            state, self._rows = _read(self._conn)
+            state, self._rows = _read(self.conn)
         except (sqlite3.Error, ValueError) as e:
             raise DatabaseError(f"{self.path}: {e}") from e
         return state
@@ -189,7 +190,7 @@ class Database:
         }
         if not gone and not new and not ledger and not any(d or u for d, u in changes.values()):
             return False
-        conn = self._conn
+        conn = self.conn
         conn.execute("BEGIN IMMEDIATE")
         try:
             for name, (deleted, upserted) in changes.items():
