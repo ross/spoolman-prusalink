@@ -600,8 +600,8 @@ class PrinterBridge:
             notes: list[Note] = []
             for ev in result.events:
                 if ev.kind is EventKind.HOLD_DELETED:
-                    # Only reported on polls with usage to hold; the ("deleted", tool)
-                    # problem logs the hold's start and end.
+                    # Only reported on polls with usage to hold; _note_hold logs the
+                    # hold's start and end.
                     continue
                 if ev.kind in _REPEATING:
                     notes.append((ev.kind, f"[{location}] {ev.message}"))
@@ -1448,7 +1448,9 @@ class Bridge:
                 log.info(
                     "spool %d no longer shows a negative weight remaining in Spoolman", spool_id
                 )
-        self._negative = set(negative)
+        # A loaded spool the list misses (archived, say) stays, so it logs no second start.
+        kept = {i for i in self._negative if i in loaded and i not in listed}
+        self._negative = set(negative) | kept
 
     def _check_shared(self, flags: dict[int, list[str]]) -> None:
         """Flag a spool that's active in more than one tool at once.

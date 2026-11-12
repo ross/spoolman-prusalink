@@ -1694,6 +1694,19 @@ async def test_negative_remaining_that_recovers_while_loaded_logs_both_at_info(t
     await bridge.aclose()
 
 
+async def test_negative_spool_that_leaves_and_rejoins_the_list_logs_one_start(tmp_path, caplog):
+    caplog.set_level("INFO")
+    bridge, fake, printer = make(tmp_path, [weighted(spool(19), -12.0)])
+    await bridge.poll()
+    fake.spools[19]["archived"] = True  # Spoolman's list leaves it out.
+    await bridge.poll()
+    fake.spools[19]["archived"] = False
+    await bridge.poll()
+    assert levels(caplog, "shows -12 g remaining") == ["INFO"]
+    assert "no longer shows a negative" not in caplog.text
+    await bridge.aclose()
+
+
 async def test_negative_remaining_ends_when_the_spool_is_unloaded(tmp_path, caplog):
     caplog.set_level("INFO")
     bridge, fake, printer = make(tmp_path, [weighted(spool(19), -12.0)])
@@ -1785,6 +1798,33 @@ async def test_deleted_spool_holds_usage_for_the_next_spool(tmp_path, caplog):
     st = read_state(tmp_path / "bridge.db").printers["default"].tools[0]
     assert (st.active, st.deleted_spool, st.held_mm) == (20, None, 0)
     assert levels(caplog, "no longer holding usage for a deleted spool") == ["WARNING"]
+    await bridge.aclose()
+
+
+async def test_deleted_spool_hold_that_ends_and_starts_again_logs_each(tmp_path, caplog):
+    bridge, fake, printer = make(tmp_path, [spool(19)])
+    caplog.set_level("INFO")
+    await bridge.poll()
+    printer.extruded = 1500
+    await bridge.poll()
+    del fake.spools[19]
+    printer.extruded = 1700
+    await bridge.poll()
+    fake.spools[20] = spool(20)  # Takes the held usage, which ends the hold.
+    await bridge.poll()
+    await bridge.poll()
+    del fake.spools[20]
+    printer.extruded = 1900
+    await bridge.poll()
+    printer.extruded = 2000
+    await bridge.poll()
+    messages = [
+        r.getMessage()
+        for r in caplog.records
+        if "was deleted in Spoolman" in r.getMessage() or "no longer holding" in r.getMessage()
+    ]
+    assert [m.split("] ")[1].split(" ")[0] for m in messages] == ["spool", "no", "spool"]
+    assert "spool 19 was deleted" in messages[0] and "spool 20 was deleted" in messages[2]
     await bridge.aclose()
 
 
