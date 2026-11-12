@@ -3352,3 +3352,20 @@ async def test_kept_uuid_of_an_archived_spool_is_replaced(tmp_path, caplog):
     assert len(jobs(station)) == 2
     assert caplog.text.count("archived spool 18 has it") == 1
     await bridge.aclose()
+
+
+async def test_a_sync_job_asks_for_the_next_poll_soon(tmp_path):
+    bridge, fake, station = make(tmp_path, [spool(19)])
+    await bridge.poll()
+    assert bridge.interval() == bridge.config.poll_idle
+    station.tool.unload_count, station.tool.extruded_at_unload = 1, 1000
+    fill(station.tool, menu("PLA"))
+    fake.spools[20] = spool_x(20)
+    await bridge.poll()
+    assert len(jobs(station)) == 1
+    # The printer read idle this poll, but the job is starting: check on it soon.
+    assert bridge.interval() == bridge.config.poll_printing
+    station.finish_job()
+    await bridge.poll()
+    assert bridge.interval() == bridge.config.poll_idle
+    await bridge.aclose()
