@@ -16,6 +16,20 @@ from aiohttp import web
 from simulator.model import Event, PrintSpec, SimPrinter, SimTool, Simulation, State
 from simulator.prusalink import Hook, Reply, make_app, make_transport
 
+# Short phases keep a scenario to a few hundred ticks. None is zero, so every phase
+# still takes at least one tick and the bridge can see it if a test polls there.
+SETTINGS = dict(
+    unload_seconds=1.0,
+    load_rate_mm_s=100.0,
+    scan_seconds=0.2,
+    blip_seconds=0.2,
+    park_seconds=0.2,
+    sync_job_seconds=0.5,
+    preheat_seconds=0.5,
+    print_rate_mm_s=100.0,
+    start_blip=True,
+)
+
 # The simulator's clock task ticks in steps of this many seconds, so tests do too.
 STEP = 0.1
 
@@ -28,7 +42,7 @@ def advance(sim: Simulation, seconds: float) -> None:
         t += STEP
 
 
-@dataclass
+@dataclass(slots=True)
 class Station:
     """A simulated printer, with the bridge's poll for the moves that poll while they wait."""
 
@@ -83,6 +97,18 @@ class Station:
 
     def advance(self, seconds: float) -> None:
         advance(self.sim, seconds)
+
+    def tick_until(self, done: Callable[[], bool], *, limit: float = 30.0) -> None:
+        """Tick until `done()`. Fails rather than spin if that takes over `limit` seconds."""
+        t = 0.0
+        while not done():
+            assert t < limit, f"not done after {limit} simulated seconds"
+            self.sim.tick(STEP)
+            t += STEP
+
+    def finish_job(self) -> None:
+        """Tick until the printer has no job, as when a sync job runs to its end."""
+        self.tick_until(lambda: self.printer.job is None)
 
     async def run_until(
         self, done: Callable[[], bool], *, limit: float = 30.0, poll_every: float | None = None

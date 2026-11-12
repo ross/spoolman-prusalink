@@ -21,6 +21,7 @@ from aiohttp.test_utils import TestServer
 
 from integration.faults import SpoolmanFaults
 from integration.printers import Station, add_printers
+from integration.station import SETTINGS
 from integration.temperatures import WRITTEN
 from simulator.model import (
     MODELS,
@@ -38,19 +39,6 @@ from spoolman_prusalink.app import Bridge
 from spoolman_prusalink.config import Config, PrinterConfig
 from spoolman_prusalink.db import read_ledger
 
-# Short phases keep a scenario to a few hundred ticks. None is zero, so every phase
-# still takes at least one tick and the bridge can see it if a test polls there.
-SETTINGS = dict(
-    unload_seconds=1.0,
-    load_rate_mm_s=100.0,
-    scan_seconds=0.2,
-    blip_seconds=0.2,
-    park_seconds=0.2,
-    sync_job_seconds=0.5,
-    preheat_seconds=0.5,
-    print_rate_mm_s=100.0,
-    start_blip=True,
-)
 KEY = "it-key"
 FLAG_FIELD = "bridge_flag"
 UUID_FIELD = "instance_uuid"

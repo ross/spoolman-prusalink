@@ -1,17 +1,32 @@
-"""The unit suite's bridge harness: a fake Spoolman, a fake printer, and a bridge on both."""
+"""The unit suite's bridge harness: a fake Spoolman, a simulated printer, and a bridge on both.
+
+The printer is the simulator's `SimPrinter`, served in process. A test sets its state
+directly, mostly tool 0's counters and filament, and time passes only when the test ticks.
+"""
 
 import json
 import math
-import re
 from dataclasses import replace
 
 import httpx
 
+from integration.station import SETTINGS, Station
+from simulator.model import (
+    MODELS,
+    Material,
+    PrintSpec,
+    Segment,
+    Settings,
+    SimPrinter,
+    SimTool,
+    Simulation,
+    State,
+    preset_temperatures,
+)
+from simulator.prusalink import DROP, Answer
 from spoolman_prusalink.app import Bridge
-from spoolman_prusalink.color import quantize
 from spoolman_prusalink.config import Config, PrinterConfig
 from spoolman_prusalink.db import Database, read_ledger
-from spoolman_prusalink.printer_sync import PRESETS
 from spoolman_prusalink.prusalink import PrusaLink
 from spoolman_prusalink.spoolman import Spoolman
 
@@ -140,115 +155,50 @@ def spool(id, location=LOC, flag=None):
     }
 
 
-class Printer:
-    def __init__(self):
-        self.extruded = 1000
-        self.unloads = 0
-        self.at_unload = 0
-        self.material = {"name": "PLA", "color": "#73737b"}
-        self.job = None
-        self.job_name = None
-        self.down = False
-        self.uploads = []  # (path, gcode)
-        self.busy = False  # Reject uploads with 409, as while printing.
-        self.refused = 0  # Uploads rejected with 409.
-        self.printer_type = "8.1.0"  # Core One L
-        self.boot_id = 1
-        self.filament_endpoint = True
-        self.error = None  # Status code for every request, such as 401.
-        self.upload_error = None  # Status code for sync job uploads.
-        self.counters = True  # MINI and MK3.5 firmware report only the material.
-        self.states = []  # States the next status reads report, before the usual one.
-        self.hidden = False  # Report no tools, as with the tool disabled (T5).
-
-    def handle(self, request: httpx.Request) -> httpx.Response:
-        if self.down:
-            raise httpx.ConnectError("printer offline")
-        if self.error:
-            return httpx.Response(self.error, text="oops")
-        if request.url.path == "/api/version":
-            return httpx.Response(200, json={"text": "PrusaLink", "printer": self.printer_type})
-        if request.url.path == "/api/v1/filament":
-            if not self.filament_endpoint:
-                return httpx.Response(404)
-            tool = {
-                "index": 0,
-                "extruded": self.extruded,
-                "unload_count": self.unloads,
-                "extruded_at_unload": self.at_unload,
-            }
-            if not self.counters:
-                tool = {"index": 0}
-                if self.material:
-                    tool["material"] = reported(self.material)
-                return httpx.Response(200, json={"tools": [tool]})
-            if self.material:
-                tool["material"] = reported(self.material)
-            tools = [] if self.hidden else [tool]
-            return httpx.Response(200, json={"boot_id": self.boot_id, "tools": tools})
-        if request.url.path == "/api/v1/job":
-            if not self.job:
-                return httpx.Response(204)
-            return httpx.Response(
-                200, json={"id": self.job, "file": {"display_name": self.job_name}}
-            )
-        if request.method == "PUT" and request.url.path.startswith("/api/v1/files/"):
-            if self.busy or self.job:
-                self.refused += 1
-                return httpx.Response(409)
-            if self.upload_error:
-                return httpx.Response(self.upload_error, text="oops")
-            assert request.headers["Print-After-Upload"] == "?1"
-            gcode = request.content.decode()
-            self.uploads.append((request.url.path, gcode))
-            self.run_job(gcode)
-            return httpx.Response(201)
-        if request.url.path == "/api/v1/status":
-            state = self.states.pop(0) if self.states else "PRINTING" if self.job else "IDLE"
-            data = {"printer": {"state": state}}
-            if self.job:
-                data["job"] = {"id": self.job}
-            return httpx.Response(200, json=data)
-        raise AssertionError(f"unexpected printer request {request.method} {request.url}")
-
-    def run_job(self, gcode):
-        """Apply the job's M865 lines, as the firmware would, and finish at once."""
-        for line in gcode.splitlines():
-            if line.startswith("M865 X"):
-                name = line.split('N"')[1].split('"')[0]
-                # R resets every temperature to the firmware default first.
-                reset = zip(TEMPERATURE_KEYS, DEFAULT_TEMPERATURES, strict=True)
-                material = {"name": name, **dict(reset)}
-                for key, letter in zip(TEMPERATURE_KEYS, "TPB", strict=True):
-                    if m := re.search(rf"\s{letter}(\d+)\b", line):
-                        material[key] = int(m.group(1))
-                if 'O"' in line:
-                    material["color"] = quantize("#" + line.split('O"#')[1][:6])
-                self.material = material
-            if line.startswith("M865.1"):
-                self.material = {**self.material, "instance_uuid": line.split('C"')[1][:36]}
+PLA = Material("PLA", "#73737b", **preset_temperatures("PLA"))
 
 
-TEMPERATURE_KEYS = ("nozzle_temperature", "preheat_temperature", "bed_temperature")
+def menu(name="PLA", color=None, **fields):
+    """A material loaded from the printer's menu: the preset's temperatures and no UUID.
+
+    `fields` are `Material` fields that differ, such as `bed=70` for an edit on the
+    printer's screen.
+    """
+    values = {**preset_temperatures(name), **fields}
+    return Material(name, color, adhoc=color is not None, **values)
 
 
-DEFAULT_TEMPERATURES = (215, 170, 60)
+def fill(tool, material):
+    """Leave `tool` as a finished load of `material` leaves it, or a finished unload for None.
+
+    Only the filament and its stored type change. The test sets the counters itself.
+    """
+    tool.material = None if material is None else replace(material)
+    tool.loaded = material is not None
+    if material is not None and material.adhoc:
+        tool.previous = replace(material)
 
 
-PRESET_TEMPERATURES = {k: (p.nozzle, p.preheat, p.bed) for k, p in PRESETS.items()}
-
-
-def reported(material):
-    """`material` as the printer reports it: a menu load takes the preset's temperatures."""
-    base = PRESET_TEMPERATURES.get(material["name"].upper(), DEFAULT_TEMPERATURES)
-    return {**dict(zip(TEMPERATURE_KEYS, base, strict=True)), **material}
+def add_station(sim, name="default"):
+    """Add a Core One L to `sim`: tool 0 loaded with grey PLA and 1000 mm on its counter."""
+    tool = SimTool(0, extruded=1000.0)
+    fill(tool, PLA)
+    printer = SimPrinter(name, 0, "k", MODELS["8.1.0"], boot_id=1, tools={0: tool})
+    sim.add(printer)
+    return Station(sim, printer)
 
 
 PRINTER_KEYS = {"gcode_preamble", "sync_storage", "sync_file"}
 
 
 def make(tmp_path, spools, **cfg):
-    fake, printer = FakeSpoolman(spools), Printer()
+    """A bridge on a fake Spoolman and one simulated printer, "default", served in process.
+
+    Returns the bridge, the fake Spoolman and the printer's `Station`. A sync job the
+    bridge uploads runs only as the test ticks: `Station.finish_job()` runs it to its end.
+    """
+    fake = FakeSpoolman(spools)
+    printer = add_station(Simulation(Settings(**SETTINGS)))
     printer_cfg = PrinterConfig(
         name="default",
         url="http://printer",
@@ -267,11 +217,7 @@ def make(tmp_path, spools, **cfg):
         config=config,
         state=db.load(),
         db=db,
-        clients={
-            "default": PrusaLink(
-                "http://printer", "k", transport=httpx.MockTransport(printer.handle)
-            )
-        },
+        clients={"default": PrusaLink("http://printer", "k", transport=printer.transport())},
         spoolman=Spoolman(
             "http://spoolman",
             uuid_field=config.uuid_field,
@@ -300,18 +246,63 @@ def spool_x(id, location=LOC, material="PLA", color="ff0000", temps=(None, None)
     return s
 
 
-def jobs(printer):
-    return [g for _, g in printer.uploads]
+def jobs(station):
+    """The G-code of each sync job the printer accepted."""
+    return [e.data["body"] for e in station.requests("PUT") if e.text.endswith(" 201")]
 
 
-async def swap_to_spool_20(bridge, fake, printer):
+def refused(station):
+    """How many uploads the printer refused with 409."""
+    return sum(1 for e in station.requests("PUT") if e.text.endswith(" 409"))
+
+
+def answer(status, method=None):
+    """A `Station.before_request` hook that answers `status` to every request, or to
+    every request with `method`, in place of the printer."""
+
+    def hook(request_method, path):
+        if method is None or request_method == method:
+            return Answer(status, {"message": f"answered by the test with {status}"})
+        return None
+
+    return hook
+
+
+def drop(method, path):
+    """A `Station.before_request` hook that drops every request, as a lost link does."""
+    return DROP
+
+
+def start_job(station, name="part.bgcode"):
+    """Start a print and tick until the printer reports the job; return the job's ID.
+
+    The print is slow enough that its own extrusion never shows in the counter, so the
+    test moves the counter itself.
+    """
+    spec = PrintSpec([Segment(0, 1000)], duration_s=1e9, preheat_s=0, name=name)
+    station.printer.start_print(spec)
+    station.tick_until(
+        lambda: station.printer.job_visible() and station.printer.state is State.PRINTING
+    )
+    return station.printer.job.id
+
+
+def end_job(station):
+    """Cancel the running job and tick until the printer has none."""
+    station.printer.cancel()
+    station.finish_job()
+
+
+async def swap_to_spool_20(bridge, fake, station):
     """Baseline on spool 19, then a Spoolman-first swap to spool 20 and a menu load."""
     await bridge.poll()
     fake.spools[20] = spool_x(20)
     await bridge.poll()
-    printer.unloads, printer.at_unload, printer.material = 1, 1000, None
+    station.tool.unload_count, station.tool.extruded_at_unload = 1, 1000
+    fill(station.tool, None)
     await bridge.poll()
-    printer.extruded, printer.material = 1116, {"name": "PLA"}
+    station.tool.extruded = 1116
+    fill(station.tool, menu("PLA"))
     await bridge.poll()
 
 
@@ -335,10 +326,12 @@ CLAIMED = {"bridge_claim": "true"}
 def two_printers(tmp_path, spools, **cfg):
     """A bridge with printers "a" and "b", each with one tool, against one fake Spoolman.
 
-    Returns the bridge, the fake Spoolman and the two fake printers by name.
+    Returns the bridge, the fake Spoolman and the two printers' stations by name. They
+    share one simulation, so a tick moves both.
     """
     fake = FakeSpoolman(spools)
-    printers = {"a": Printer(), "b": Printer()}
+    sim = Simulation(Settings(**SETTINGS))
+    printers = {name: add_station(sim, name) for name in ("a", "b")}
     config = Config(
         spoolman_url="http://spoolman",
         printers=tuple(
@@ -362,7 +355,7 @@ def two_printers(tmp_path, spools, **cfg):
             transport=httpx.MockTransport(lambda request: fake.handle(request)),
         ),
         clients={
-            name: PrusaLink(f"http://{name}", "k", transport=httpx.MockTransport(p.handle))
+            name: PrusaLink(f"http://{name}", "k", transport=p.transport())
             for name, p in printers.items()
         },
     )
