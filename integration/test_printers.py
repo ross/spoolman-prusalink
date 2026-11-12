@@ -278,6 +278,7 @@ async def test_x4a_eviction_rereads_the_spool(world: World):
 
     faults = w.spoolman_faults
     faults.hook = race
+    faults.requests.clear()  # Only this poll's requests, for the order check below.
     records = await w.poll()
     assert kinds(records) == [(IT, "unload"), (IT, "swap_committed")]
     assert it.state.active == c and it.state.evict == (a,)
