@@ -1008,8 +1008,10 @@ async def test_m3_staged_spool_claimed_takes_held_usage(
     await w.claim("B")
     records = await w.poll()
     claimed = events(records, "claimed")
-    # Only the start: the rest names "spool None" for the deleted spool (#140).
-    assert len(claimed) == 1 and claimed[0]["message"].startswith(f"spool {b} claimed in place of")
+    assert [e["message"] for e in claimed] == [
+        f"spool {b} claimed in place of deleted spool {a}: "
+        "moved nothing (usage since the last reboot)"
+    ]
     assert [e["message"] for e in events(records, "held_charged")] == [
         f"spool {b} is active; charged it 20 mm held after spool {a} was deleted"
     ]

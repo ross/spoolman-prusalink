@@ -614,12 +614,14 @@ def account(
                 f"spool {claim} claimed: confirmed as loaded, nothing moves{closed}",
             )
         else:
-            old = active
+            if active is not None:
+                replaced = f"in place of spool {active}"
+            elif deleted is not None:
+                replaced = f"in place of deleted spool {deleted}"
+            else:
+                replaced = "with no spool active"
             moved = take(claim, "claimed")
-            event(
-                EventKind.CLAIMED,
-                f"spool {claim} claimed in place of spool {old}: moved {moved}",
-            )
+            event(EventKind.CLAIMED, f"spool {claim} claimed {replaced}: moved {moved}")
         swap = None
         provisional = None
         staged_notice = None
