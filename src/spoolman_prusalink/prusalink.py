@@ -6,6 +6,7 @@ from typing import NamedTuple
 
 import httpx
 
+from .errors import check, parsing, send
 from .models import FilamentReading, Material, ToolReading
 
 # Printer states in which a job file can start, such as the sync job.
@@ -71,53 +72,60 @@ class PrusaLink:
         await self._client.aclose()
 
     async def filament(self) -> FilamentReading:
-        resp = await self._client.get("/api/v1/filament")
+        resp = await send(self._client, "GET", "/api/v1/filament")
         if resp.status_code == 404:
             raise NoFilamentEndpoint("firmware has no /api/v1/filament")
-        resp.raise_for_status()
-        data = resp.json()
-        # MINI and MK3.5 firmware report only the loaded material, with no counters. Firmware
-        # that reports `extruded` without `unload_count` isn't supported either.
-        if "boot_id" not in data or any(
-            "extruded" not in t or "unload_count" not in t for t in data.get("tools", [])
-        ):
-            raise NoFilamentEndpoint("/api/v1/filament has no usage counters")
-        return parse_filament(data)
+        check(resp)
+        with parsing("the printer's filament"):
+            data = resp.json()
+            # MINI and MK3.5 firmware report only the loaded material, with no counters.
+            # Firmware that reports `extruded` without `unload_count` isn't supported either.
+            counters = "boot_id" in data and all(
+                "extruded" in t and "unload_count" in t for t in data.get("tools", [])
+            )
+            if counters:
+                return parse_filament(data)
+        raise NoFilamentEndpoint("/api/v1/filament has no usage counters")
 
     async def printer_type(self) -> str | None:
         """Return the printer type code from `GET /api/version`, such as `8.1.0`."""
-        resp = await self._client.get("/api/version")
-        resp.raise_for_status()
-        value = resp.json().get("printer")
+        resp = await send(self._client, "GET", "/api/version")
+        check(resp)
+        with parsing("the printer's version"):
+            value = resp.json().get("printer")
         return None if value is None else str(value)
 
     async def job_display_name(self) -> str | None:
         """Return the current job's long file name, or None when no job is running."""
-        resp = await self._client.get("/api/v1/job")
+        resp = await send(self._client, "GET", "/api/v1/job")
         if resp.status_code == 204:
             return None
-        resp.raise_for_status()
-        file = resp.json().get("file") or {}
-        return file.get("display_name") or file.get("name")
+        check(resp)
+        with parsing("the printer's job"):
+            file = resp.json().get("file") or {}
+            return file.get("display_name") or file.get("name")
 
     async def upload_and_print(self, storage: str, name: str, gcode: str) -> None:
         """Upload a G-code file, overwriting any old copy, and start it as a print.
 
-        The printer refuses (409) unless it's idle or finished.
+        The printer refuses with `Busy` (409) unless it's idle or finished.
         """
-        resp = await self._client.put(
+        resp = await send(
+            self._client,
+            "PUT",
             f"/api/v1/files/{storage}/{name}",
             content=gcode.encode(),
             headers={"Print-After-Upload": "?1", "Overwrite": "?1", "Content-Type": "text/x.gcode"},
         )
-        resp.raise_for_status()
+        check(resp)
 
     async def status(self) -> PrinterStatus:
         """Return the printer state and the current job's id from `GET /api/v1/status`."""
-        resp = await self._client.get("/api/v1/status")
-        resp.raise_for_status()
-        data = resp.json()
-        state = str(data.get("printer", {}).get("state", "UNKNOWN")).upper()
-        job = data.get("job") or {}
-        job_id = job.get("id")
-        return PrinterStatus(state, None if job_id is None else int(job_id))
+        resp = await send(self._client, "GET", "/api/v1/status")
+        check(resp)
+        with parsing("the printer's status"):
+            data = resp.json()
+            state = str(data.get("printer", {}).get("state", "UNKNOWN")).upper()
+            job = data.get("job") or {}
+            job_id = job.get("id")
+            return PrinterStatus(state, None if job_id is None else int(job_id))

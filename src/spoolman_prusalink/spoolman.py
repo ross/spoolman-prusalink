@@ -7,10 +7,11 @@ from datetime import UTC, datetime
 
 import httpx
 
+from .errors import Rejected, check, parsing, send
 from .models import Spool
 
 
-class FieldTypeError(ValueError):
+class FieldTypeError(Rejected):
     """A spool extra field's key exists in Spoolman with another type."""
 
 
@@ -113,20 +114,22 @@ class Spoolman:
         events, so a full read is the only reliable reconcile.
         """
         params = {"allow_archived": "true"} if archived else None
-        resp = await self._client.get("/api/v1/spool", params=params)
-        resp.raise_for_status()
-        return [
-            parse_spool(s, self._uuid_field, self._flag_field, self._claim_field)
-            for s in resp.json()
-        ]
+        resp = await send(self._client, "GET", "/api/v1/spool", params=params)
+        check(resp)
+        with parsing("Spoolman's spool list"):
+            return [self._parse(s) for s in resp.json()]
 
     async def spool(self, spool_id: int) -> Spool | None:
         """Return one spool, archived or not, or None if it doesn't exist (404)."""
-        resp = await self._client.get(f"/api/v1/spool/{spool_id}")
+        resp = await send(self._client, "GET", f"/api/v1/spool/{spool_id}")
         if resp.status_code == 404:
             return None
-        resp.raise_for_status()
-        return parse_spool(resp.json(), self._uuid_field, self._flag_field, self._claim_field)
+        check(resp)
+        with parsing(f"spool {spool_id}"):
+            return self._parse(resp.json())
+
+    def _parse(self, data: dict) -> Spool:
+        return parse_spool(data, self._uuid_field, self._flag_field, self._claim_field)
 
     async def use_length(self, spool_id: int, mm: float) -> float | None:
         """Charge (or, with a negative value, refund) filament length.
@@ -134,10 +137,14 @@ class Spoolman:
         Returns the spool's used weight after the charge, if Spoolman reports one.
         """
         # A generous timeout: a charge Spoolman applies after a timeout is sent again.
-        resp = await self._client.put(
-            f"/api/v1/spool/{spool_id}/use", json={"use_length": mm}, timeout=30.0
+        resp = await send(
+            self._client,
+            "PUT",
+            f"/api/v1/spool/{spool_id}/use",
+            json={"use_length": mm},
+            timeout=30.0,
         )
-        resp.raise_for_status()
+        check(resp)
         try:
             used = resp.json().get("used_weight")
         except (ValueError, AttributeError):
@@ -146,31 +153,37 @@ class Spoolman:
 
     async def ensure_field(self, key: str, name: str, field_type: str = "text") -> None:
         """Register a spool extra field of `field_type`, unless it already exists."""
-        resp = await self._client.get("/api/v1/field/spool")
-        resp.raise_for_status()
-        for f in resp.json():
-            if f.get("key") == key:
-                if f.get("field_type") != field_type:
-                    raise FieldTypeError(
-                        f"spool extra field {key!r} exists but isn't a {field_type} field"
-                    )
-                return
-        resp = await self._client.post(
-            f"/api/v1/field/spool/{key}", json={"name": name, "field_type": field_type}
+        resp = await send(self._client, "GET", "/api/v1/field/spool")
+        check(resp)
+        with parsing("Spoolman's spool fields"):
+            types = {f.get("key"): f.get("field_type") for f in resp.json()}
+        if key in types:
+            if types[key] != field_type:
+                raise FieldTypeError(
+                    f"spool extra field {key!r} exists but isn't a {field_type} field"
+                )
+            return
+        resp = await send(
+            self._client,
+            "POST",
+            f"/api/v1/field/spool/{key}",
+            json={"name": name, "field_type": field_type},
         )
-        resp.raise_for_status()
+        check(resp)
 
     async def set_location(self, spool_id: int, location: str | None) -> None:
         """Move a spool. None (or "") leaves it with no location."""
-        resp = await self._client.patch(
-            f"/api/v1/spool/{spool_id}", json={"location": location or None}
+        resp = await send(
+            self._client, "PATCH", f"/api/v1/spool/{spool_id}", json={"location": location or None}
         )
-        resp.raise_for_status()
+        check(resp)
 
     async def set_extra(self, spool_id: int, key: str, value: object) -> None:
         """Set an extra field to a JSON value, or delete it with None."""
-        resp = await self._client.patch(
+        resp = await send(
+            self._client,
+            "PATCH",
             f"/api/v1/spool/{spool_id}",
             json={"extra": {key: None if value is None else json.dumps(value)}},
         )
-        resp.raise_for_status()
+        check(resp)

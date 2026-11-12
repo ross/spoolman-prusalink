@@ -314,11 +314,13 @@ async def test_usage_while_ambiguous_is_kept_over_a_reboot(tmp_path):
     await bridge.aclose()
 
 
-async def test_spoolman_outage_queues_and_retries_in_order(tmp_path):
+# A timeout (408) or a rate limit (429) may pass, like a server error.
+@pytest.mark.parametrize("code", [503, 408, 429])
+async def test_spoolman_outage_queues_and_retries_in_order(tmp_path, code):
     bridge, fake, printer = make(tmp_path, [spool(19)])
     await bridge.poll()
     printer.extruded = 1500
-    fake.fail_use = [503]
+    fake.fail_use = [code]
     await bridge.poll()
     assert fake.used == {}
     assert [r["use_length"] for r in read_state(tmp_path / "bridge.db").outbox] == [500.0]
@@ -833,7 +835,7 @@ async def test_failed_uuid_mint_leaves_a_failing_sync_job_failing(tmp_path, capl
     await swap_to_menu_loaded_20(bridge, fake, printer)
     printer.upload_error = 500
     await bridge.poll()
-    assert caplog.text.count("sync job failed (500)") == 1
+    assert caplog.text.count("sync job failed: 500 Internal Server Error") == 1
 
     # Someone clears the UUID minted for the failed job, and Spoolman won't take another.
     fake.spools[20]["extra"].pop("instance_uuid")

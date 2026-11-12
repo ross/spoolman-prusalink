@@ -273,10 +273,10 @@ Claiming the spool that's already active confirms it, and nothing moves.
 
 Each charge is saved to the database before it's sent to Spoolman, in the
 same transaction as the counters it came from, and removed once
-Spoolman accepts it, in the same transaction as its ledger record. If Spoolman is unreachable or returns a server error,
-charges stay queued and are retried in order on the next poll, including
-after a restart. If Spoolman rejects a charge with a client error (4xx), the
-bridge logs an error, records it in the ledger with `failed`, and drops it.
+Spoolman accepts it, in the same transaction as its ledger record. If Spoolman is unreachable or returns a server error, a timeout (408), or a
+rate limit (429), charges stay queued and are retried in order on the next
+poll, including after a restart. If Spoolman rejects a charge with any other
+client error (4xx), the bridge logs an error, records it in the ledger with `failed`, and drops it.
 The exception is a 404 on a charge to the tool's active spool, or to a spool
 already found deleted, described next.
 
