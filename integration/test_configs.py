@@ -1,7 +1,7 @@
 """The scenario rows under other configurations: no UUIDs, features off, odd spools.
 
 Each test is named after the row it runs under another setup: a printer with no tag
-reader (MK4, MK3.9), `uuid_field`, `uuids`, `flag_field`, `flag_drift` or `claim_field`
+reader (MK4, MK3.9), `uuid_field`, `flag_field`, `flag_drift` or `claim_field`
 turned off, firmware with no usage counters, spools Spoolman knows little about, and
 the corners of what the bridge writes.
 """
@@ -36,19 +36,15 @@ from simulator.model import Material
 from spoolman_prusalink.printer_sync import COREONEL_PREAMBLE
 
 # Setups that leave the bridge with no instance UUIDs to write or compare: models with no
-# tag reader, and a Core One L with the Spoolman field or the printer's `uuids` off.
+# tag reader, and a Core One L with the Spoolman field off.
 NO_UUIDS = [
-    pytest.param("1.4.0", {}, {}, id="mk4"),
-    pytest.param("1.3.9", {}, {}, id="mk39"),
-    pytest.param("8.1.0", dict(uuid_field=""), {}, id="uuid_field_off"),
-    pytest.param("8.1.0", {}, dict(uuids=False), id="uuids_off"),
+    pytest.param("1.4.0", {}, id="mk4"),
+    pytest.param("1.3.9", {}, id="mk39"),
+    pytest.param("8.1.0", dict(uuid_field=""), id="uuid_field_off"),
 ]
 # The same on the Core One L, whose tag reader the other two keep working.
 TAG_READER_NO_UUIDS = NO_UUIDS[2:]
-# `uuid_field = ""` hides every stored UUID from the bridge, so only this case can show a
-# UUID in Spoolman being compared.
-UUIDS_OFF = NO_UUIDS[3:]
-WORLD = "world_model, world_config, world_printer"
+WORLD = "world_model, world_config"
 
 
 async def baseline(w: World) -> None:
@@ -146,49 +142,6 @@ async def test_s1_tag_uuid_is_not_adopted_without_uuids(world: World):
     assert w.requests("PUT") == []
     assert w.material() == (PETG[0], PETG[1], tag)
     assert await w.flag("B") is None
-
-
-@pytest.mark.parametrize(WORLD, UUIDS_OFF, indirect=True)
-async def test_s1_tag_uuid_conflict_is_ignored_without_uuids(
-    world: World, caplog: pytest.LogCaptureFixture
-):
-    """UUIDs off, and the tag's differs from the spool's in Spoolman: no conflict, no flag."""
-    caplog.set_level(logging.INFO, logger="spoolman_prusalink")
-    w = world
-    b = w.spools["B"]
-    theirs = str(uuid.uuid4())
-    await set_extra_text(w.spoolman.client, b, UUID_FIELD, theirs)
-    await s1_swap_to_b(w)
-    tag = str(uuid.uuid4())
-    seen = record_patches(w)
-    records = await load_tag(w, tag)
-    assert w.charged(records, "B") == LOAD_MM
-    assert not logged(caplog, logging.WARNING, "the tag loaded has instance UUID")
-    assert not logged(caplog, logging.WARNING, "printer differs from spool")
-    assert await w.flag("B") is None
-    assert wrote(seen, UUID_FIELD) == [] and wrote(seen, w.fields["flag"]) == []
-    assert await w.spoolman.extra(b, UUID_FIELD) == theirs
-    assert w.requests("PUT") == []
-
-
-@pytest.mark.parametrize(WORLD, UUIDS_OFF, indirect=True)
-async def test_w9_tag_of_another_spool_is_not_drift_without_uuids(
-    world: World, caplog: pytest.LogCaptureFixture
-):
-    """UUIDs off, and the tag is another spool's UUID in Spoolman: not drift, not flagged."""
-    caplog.set_level(logging.INFO, logger="spoolman_prusalink")
-    w = world
-    c = w.spools["C"]
-    tag = str(uuid.uuid4())
-    await set_extra_text(w.spoolman.client, c, UUID_FIELD, tag)
-    await s1_swap_to_b(w)
-    seen = record_patches(w)
-    records = await load_tag(w, tag)
-    assert w.charged(records, "B") == LOAD_MM
-    assert not logged(caplog, logging.WARNING, "printer differs from spool")
-    assert await w.flag("B") is None
-    assert wrote(seen, w.fields["flag"]) == []
-    assert w.requests("PUT") == []
 
 
 # --- Features turned off ---

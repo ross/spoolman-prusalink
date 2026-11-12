@@ -335,41 +335,12 @@ printer and are read by `PrinterBridge` through `bridge.config`:
 `uuid_field`, `flag_field`, and `claim_field` name Spoolman fields and stay
 global.
 
-The per-printer `uuids` setting goes the other way: it's per printer, and
-it shouldn't be a setting at all. `PrinterModel.uuids` knows whether a
-printer can hold an instance UUID. `uuids = false` turns UUIDs off for a
-printer that can, and nothing documents a reason to. The setting dates from
-before the bridge read the printer's model, when it had to be told what the
-printer could do. It leaves `_uuids` with a three-way condition: the
-setting, `uuid_field`, and the model's capability.
-
 Shape: move the five settings to `PrinterConfig`, set in the `[printer]`
 table or in each `[[printers]]` entry, with no global default. One place
 per setting is less error prone than a default with overrides.
 `PrinterBridge` then reads them from its own config. It still reads
 `claim_field` and `uuid_field` through `bridge.config`, so this removes
 five of the reads that B4 lists, not the back-reference.
-
-Remove `uuids`, so that whether a printer uses UUIDs follows from its model
-alone. That drops a documented feature, so the work includes:
-
-- The `uuids_off` case in `integration/test_configs.py` and the scenario
-  tests that only it reaches. The `uuid_field = ""` case covers the rest.
-- The `uuids = false` tests in `tests/test_writes.py` and
-  `tests/test_app.py`.
-- `uuids` in `PRINTER_KEYS` in `tests/test_writes.py`, and the two
-  wrong-type cases in `tests/test_app.py`.
-- The simulator's generated bridge config, which writes `uuids = false` for
-  a model without UUIDs (`simulator/config.py` and its test).
-- The `uuids` arguments in the integration harness, in `world` and
-  `add_printers`. Both raise `TypeError` once the field is gone, so every
-  integration world depends on removing them.
-- The mentions in `README.md`, `config.example.toml`, `docs/scenarios.md`,
-  `docs/multi-printer.md`, and the examples and comments in `integration/`.
-
-`uuid_field` stays: it names the Spoolman field, and `uuid_field = ""`
-still turns UUIDs off for the whole bridge, as `flag_field` and
-`claim_field` do for flags and claims.
 
 Size: small.
 
@@ -539,19 +510,6 @@ the setting fields, and the enum values. The page renders them.
 
 Size: medium.
 
-### S3. Settings are validated three ways
-
-`Settings.update` (`model.py`) accepts NaN and infinity. The config
-loader (`config.py`) rejects NaN but sets no minimum except for
-`time_scale`, so it accepts negative values. `from_config` and `restore`
-build `Settings` with no checks. `load_rate_mm_s = 0` in the config divides
-by zero on every tick once a load starts, which stops that printer's load
-and every printer ticked after it (#133).
-
-Shape: one checked constructor on `Settings`, used by all three.
-
-Size: small.
-
 ### S4. `SimPrinter` holds too much
 
 `SimPrinter` (`model.py`) holds the physical and job state machine,
@@ -611,8 +569,8 @@ Size: medium.
 | 5 | Narrow the bridge boundary | B4 | Workstreams 2 and 3. Easier after B11 |
 | 6 | Client errors | B8 | Nothing |
 | 7 | Unit suite on the simulator | T2, T6 | Nothing. Before workstreams 2 and 3 if possible, so their tests are ported once |
-| 8 | Simulator state | S1, S5, S6, then S2, S4 | S3, which changes the same code. Workstream 7 for S4, which continues the routing move in T2 |
-| 9 | Small items | B10, B11, T8, S3 | Nothing |
+| 8 | Simulator state | S1, S5, S6, then S2, S4 | Workstream 7 for S4, which continues the routing move in T2 |
+| 9 | Small items | B10, B11, T8 | Nothing |
 | 10 | Accounting state | B9 (part 1) | Nothing |
 
 Workstreams 6, 9, and 10 are independent and can run at any time. T3

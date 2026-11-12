@@ -120,6 +120,5 @@ async def add_printers(
         url=f"http://{server.host}:{server.port}",
         api_key=key,
         tools={0: location},
-        uuids=True,
     )
     return [(SECOND, printer, location, server, config)]
