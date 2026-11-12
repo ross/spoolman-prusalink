@@ -6,8 +6,8 @@ request fail to connect, as a stopped Spoolman would, and `answer()` replies to
 matching requests with a status of the test's choosing instead of sending them. A
 `hook` runs before each request, to change Spoolman between two of the bridge's
 requests or to answer one itself.
-`World.spoolman_faults` installs it on the bridge's client the first time a test
-asks for it, so worlds that don't ask talk to Spoolman directly.
+Every bridge a `World` starts has one, passed to `Bridge.from_config`, as
+`World.spoolman_faults`.
 
 The rest are changes a user makes in Spoolman's UI that the conftest helper doesn't
 cover: deleting, archiving or unarchiving a spool, writing a text field, renaming a location.
@@ -21,8 +21,6 @@ from dataclasses import dataclass
 from urllib.parse import quote
 
 import httpx
-
-from spoolman_prusalink.app import Bridge
 
 Hook = Callable[[httpx.Request], Awaitable[httpx.Response | None]]
 
@@ -129,14 +127,6 @@ class SpoolmanFaults(httpx.AsyncBaseTransport):
 
     async def aclose(self) -> None:
         await self.inner.aclose()
-
-
-def install(bridge: Bridge) -> SpoolmanFaults:
-    """Put a `SpoolmanFaults` in front of the bridge's Spoolman client, once; return it."""
-    client = bridge.spoolman._client
-    if not isinstance(client._transport, SpoolmanFaults):
-        client._transport = SpoolmanFaults(client._transport)
-    return client._transport
 
 
 async def delete_spool(client: httpx.AsyncClient, spool_id: int) -> None:
