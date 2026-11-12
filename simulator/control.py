@@ -56,7 +56,8 @@ async def _body(request: web.Request) -> dict:
         return {}
     try:
         data = await request.json()
-    except json.JSONDecodeError as e:
+    # ValueError covers JSONDecodeError and an int too long to convert, which json raises bare.
+    except ValueError as e:
         raise Invalid(f"bad JSON: {e}") from None
     if not isinstance(data, dict):
         raise Invalid("the body must be a JSON object")
@@ -184,7 +185,7 @@ def make_app(sim: Simulation) -> web.Application:
             if not path.is_file():
                 return _error(f"no snapshot {path.stem!r}", 404)
             sim.restore(json.loads(path.read_text()))
-        except (Invalid, OSError, json.JSONDecodeError) as e:
+        except (Invalid, OSError, ValueError) as e:
             return _error(str(e), 400)
         return web.json_response({"ok": True})
 

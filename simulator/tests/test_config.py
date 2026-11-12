@@ -193,6 +193,9 @@ def test_accepts_each_firmware(tmp_path):
 def test_unparseable_file(tmp_path):
     with pytest.raises(ConfigError, match="can't parse"):
         load(write(tmp_path, "this is = = not toml"))
+    # tomllib raises a bare ValueError for an int too long to convert.
+    with pytest.raises(ConfigError, match="can't parse"):
+        load(write(tmp_path, "time_scale = 1" + "0" * 5000 + "\n" + printer()))
 
 
 def test_locations(tmp_path):

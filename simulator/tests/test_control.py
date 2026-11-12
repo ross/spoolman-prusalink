@@ -65,6 +65,9 @@ async def test_settings_and_snapshots(setup):
     assert (await client.post("/api/settings", json={"time_scale": 0})).status == 400
     assert (await client.post("/api/settings", json={"nope": 1})).status == 400
     assert (await client.post("/api/settings", json={"start_blip": 1})).status == 400
+    huge = '{"purge_mm": 1' + "0" * 5000 + "}"
+    resp = await client.post("/api/settings", data=huge)
+    assert resp.status == 400 and "bad JSON" in (await resp.json())["error"]
 
     assert (await client.post("/api/snapshot/one")).status == 200
     assert await (await client.get("/api/snapshots")).json() == ["one"]
@@ -81,6 +84,8 @@ async def test_snapshot_listing_and_file_errors(setup):
     (sim.data_dir / "good.json").write_text("{}")
     assert await (await client.get("/api/snapshots")).json() == ["good"]
     assert (await client.post("/api/restore/good")).status == 400
+    (sim.data_dir / "huge.json").write_text('{"now": 1' + "0" * 5000 + "}")
+    assert (await client.post("/api/restore/huge")).status == 400
     sim.data_dir = sim.data_dir / "good.json"  # a file, so writing under it fails
     resp = await client.post("/api/snapshot/one")
     assert resp.status == 400 and "error" in await resp.json()

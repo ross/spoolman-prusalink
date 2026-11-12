@@ -251,7 +251,9 @@ def load(path: str | os.PathLike) -> SimConfig:
     with open(path, "rb") as f:
         try:
             raw = tomllib.load(f)
-        except (tomllib.TOMLDecodeError, UnicodeDecodeError) as e:
+        # ValueError covers TOMLDecodeError, UnicodeDecodeError, and an int too long
+        # to convert, which tomllib raises bare.
+        except ValueError as e:
             raise ConfigError(f"can't parse {path}: {e}") from e
 
     _unknown(raw, _TOP_KEYS | {f.name for f in fields(Settings)}, "")
