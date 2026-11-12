@@ -364,7 +364,7 @@ Spoolman. This
 holds whatever the UUID settings: with `uuid_field = ""`, the bridge still
 leaves a tagged tool alone.
 
-The bridge remembers the `M865` line it last wrote for each tool. If the
+The bridge remembers what it last wrote to each tool. If the
 printer still shows that write but the spool has changed in Spoolman (color,
 name, material, temperatures or UUID), the bridge writes the change when
 idle.
