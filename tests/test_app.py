@@ -473,17 +473,17 @@ CONFIG_BASE = (
         ("[printer]\nsync_drift = 1\n", "printer.sync_drift must be true or false"),
         ('[printer]\ngcode_preamble = "M862.3"\n', "gcode_preamble must be a list of strings"),
         ('[printer]\ngcode_preamble = ["M862.3", 1]\n', "gcode_preamble must be a list of strings"),
-        ("[bridge]\npoll_idle = 0\n", "bridge.poll_idle must be a number greater than 0"),
-        ("[printer]\nsync_delay = -1\n", "printer.sync_delay must be a number of seconds"),
-        ('[printer]\nsync_delay = "5m"\n', "printer.sync_delay must be a number of seconds"),
-        ("[bridge]\npoll_printing = -5\n", "bridge.poll_printing must be a number greater than 0"),
-        ('[bridge]\npoll_idle = "soon"\n', "bridge.poll_idle must be a number greater than 0"),
+        ("[bridge]\npoll_idle = 0\n", "bridge.poll_idle must be greater than 0"),
+        ("[printer]\nsync_delay = -1\n", "printer.sync_delay must be 0 or more"),
+        ('[printer]\nsync_delay = "5m"\n', "printer.sync_delay must be a number"),
+        ("[bridge]\npoll_printing = -5\n", "bridge.poll_printing must be greater than 0"),
+        ('[bridge]\npoll_idle = "soon"\n', "bridge.poll_idle must be a number"),
         ('[printer]\nlength_factor = "x"\n', "printer.length_factor must be a number"),
-        ("[bridge]\npoll_idle = nan\n", "bridge.poll_idle must be a number greater than 0"),
-        ("[bridge]\npoll_printing = inf\n", "bridge.poll_printing must be a number greater than 0"),
+        ("[bridge]\npoll_idle = nan\n", "bridge.poll_idle must be a finite number"),
+        ("[bridge]\npoll_printing = inf\n", "bridge.poll_printing must be a finite number"),
         (
             "[bridge]\npoll_printing = -nan\n",
-            "bridge.poll_printing must be a number greater than 0",
+            "bridge.poll_printing must be a finite number",
         ),
         ("[printer]\nlength_factor = nan\n", "printer.length_factor must be a finite number"),
         ("[printer]\nlength_factor = inf\n", "printer.length_factor must be a finite number"),
@@ -493,11 +493,11 @@ CONFIG_BASE = (
         ),
         (
             "[bridge]\npoll_idle = 1" + "0" * 400 + "\n",
-            "bridge.poll_idle must be a number greater than 0",
+            "bridge.poll_idle must be a finite number",
         ),
         (
             "[printer]\nsync_delay = 1" + "0" * 400 + "\n",
-            "printer.sync_delay must be a number of seconds",
+            "printer.sync_delay must be a finite number",
         ),
         ("[bridge]\nuuid_field = 5\n", "bridge.uuid_field must be a string"),
         ("[bridge]\nflag_field = true\n", "bridge.flag_field must be a string"),
@@ -563,7 +563,11 @@ def test_config_malformed_file_is_a_config_error(tmp_path, text, error):
     "text, error",
     [
         ('[printer]\nurl = 5\n[spoolman]\nurl = "http://s"\n', "printer.url must be a string"),
-        ('[printer]\nurl = "http://p"\n[spoolman]\nurl = 5\n', "spoolman.url must be a string"),
+        (
+            '[printer]\nurl = "http://p"\n[spoolman]\nurl = 5\n'
+            '[[tools]]\nindex = 0\nlocation = "X"\n',
+            "spoolman.url must be a string",
+        ),
         (
             '[printer]\nurl = "http://p"\n[spoolman]\nurl = "http://s"\n'
             "[[tools]]\nindex = 0\nlocation = 5\n",
@@ -787,15 +791,26 @@ def test_config_url_keys_keep_ipv6_hosts_apart_from_their_port(tmp_path):
     [
         ("", {}, "set PRUSALINK_API_KEY or printer.api_key"),
         ("", {"PRUSALINK_API_KEY": "k"}, "set printer.url or PRUSALINK_URL"),
-        ("", {"PRUSALINK_API_KEY": "k", "PRUSALINK_URL": "http://p"}, "set spoolman.url"),
+        ("", {"PRUSALINK_API_KEY": "k", "PRUSALINK_URL": "http://p"}, "configure [[tools]]"),
+        (
+            "",
+            {"PRUSALINK_API_KEY": "k", "PRUSALINK_URL": "p", "SPOOLMAN_PRUSALINK_LOCATION": "X"},
+            "set spoolman.url",
+        ),
         ("[printer]\napi_key = 5\n[spoolman]\nurl = 5\n", {}, "printer.api_key must be a string"),
         ("[printer]\nurl = 5\n[spoolman]\nurl = 5\n", {}, "printer.url must be a string"),
         ("printer = 5\nspoolman = 5\n", {}, "[printer] must be a table"),
-        ("spoolman = 5\n[printer]\nurl = 5\n", {}, "[spoolman] must be a table"),
+        ("spoolman = 5\n[printer]\nurl = 5\n", {}, "printer.url must be a string"),
+        (
+            'spoolman = 5\n[printer]\nurl = "http://p"\n[[tools]]\nindex = 0\nlocation = "X"\n',
+            {"PRUSALINK_API_KEY": "k"},
+            "[spoolman] must be a table",
+        ),
     ],
 )
-def test_config_single_printer_reports_errors_in_the_old_order(tmp_path, text, env, error):
-    # The order of these first errors is what a bare start shows; it hasn't changed.
+def test_config_reports_the_printer_then_spoolman(tmp_path, text, env, error):
+    """The first error is the printer's, then Spoolman's: within the printer, a value of
+    the wrong type before a missing one."""
     p = tmp_path / "c.toml"
     p.write_text(text)
     with pytest.raises(ConfigError, match=re.escape(error)):

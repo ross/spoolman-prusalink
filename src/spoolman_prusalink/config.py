@@ -89,36 +89,26 @@ def _finite(value: int | float) -> bool:
     return -sys.float_info.max <= value <= sys.float_info.max
 
 
-def _number(table: dict, key: str, default: float, name: str) -> float:
+def _number(
+    table: dict,
+    key: str,
+    default: float,
+    name: str,
+    *,
+    above: float | None = None,
+    at_least: float | None = None,
+) -> float:
+    """Return a finite TOML number as a float, greater than `above` or at least `at_least`
+    when set. A bool is an error, not 0 or 1."""
     value = table.get(key, default)
     if isinstance(value, bool) or not isinstance(value, int | float):
         raise ConfigError(f"{name} must be a number, got {value!r}")
     if not _finite(value):
         raise ConfigError(f"{name} must be a finite number, got {value!r}")
-    return float(value)
-
-
-def _interval(table: dict, key: str, default: float, name: str) -> float:
-    value = table.get(key, default)
-    if (
-        isinstance(value, bool)
-        or not isinstance(value, int | float)
-        or not _finite(value)
-        or value <= 0
-    ):
-        raise ConfigError(f"{name} must be a number greater than 0, got {value!r}")
-    return float(value)
-
-
-def _delay(table: dict, key: str, default: float, name: str) -> float:
-    value = table.get(key, default)
-    if (
-        isinstance(value, bool)
-        or not isinstance(value, int | float)
-        or not _finite(value)
-        or value < 0
-    ):
-        raise ConfigError(f"{name} must be a number of seconds, 0 or more, got {value!r}")
+    if above is not None and value <= above:
+        raise ConfigError(f"{name} must be greater than {above:g}, got {value!r}")
+    if at_least is not None and value < at_least:
+        raise ConfigError(f"{name} must be {at_least:g} or more, got {value!r}")
     return float(value)
 
 
@@ -192,7 +182,7 @@ def _printer_settings(table: dict, prefix: str) -> dict:
         "length_factor": length_factor,
         "flag_drift": _bool(table, "flag_drift", True, f"{prefix}.flag_drift"),
         "printer_sync": _bool(table, "printer_sync", True, f"{prefix}.printer_sync"),
-        "sync_delay": _delay(table, "sync_delay", 0, f"{prefix}.sync_delay"),
+        "sync_delay": _number(table, "sync_delay", 0, f"{prefix}.sync_delay", at_least=0),
         "sync_drift": _bool(table, "sync_drift", False, f"{prefix}.sync_drift"),
     }
 
@@ -228,9 +218,15 @@ def _single_identity(env: dict[str, str], file_api_key: str, file_url: str) -> t
     return api_key, url
 
 
-def _single_printer(raw: dict, env: dict[str, str], api_key: str, url: str) -> PrinterConfig:
-    """Parse the rest of the `[printer]` and `[[tools]]` form."""
+def _single_printer(raw: dict, env: dict[str, str]) -> PrinterConfig:
+    """Parse the `[printer]` and `[[tools]]` form, with the environment on top."""
     printer = _table(raw, "printer")
+    # Check the file's values even when the environment overrides them.
+    api_key, url = _single_identity(
+        env,
+        _api_key_from_file(printer, "printer", env),
+        _str(printer, "url", "", "printer.url"),
+    )
     tools = _tools(raw.get("tools", []), "[[tools]]")
     if not tools and env.get("SPOOLMAN_PRUSALINK_LOCATION"):
         tools[0] = env["SPOOLMAN_PRUSALINK_LOCATION"]
@@ -334,26 +330,18 @@ def load(path: str | os.PathLike | None, env: dict[str, str] | None = None) -> C
             except ValueError as e:
                 raise ConfigError(f"can't parse {path}: {e}") from e
 
-    # The one-printer form's checks run in the order they always have: the printer's
-    # values before Spoolman's, and types before missing values.
-    single = raw.get("printers") is None
-    printer = _table(raw, "printer") if single else {}
+    # The sections are checked in turn: the printers, then Spoolman, then the bridge.
+    if raw.get("printers") is None:
+        printers: tuple[PrinterConfig, ...] = (_single_printer(raw, env),)
+    else:
+        printers = _listed_printers(raw, env)
     spoolman = _table(raw, "spoolman")
-    bridge = _table(raw, "bridge")
-    file_api_key = file_url = ""
-    if single:
-        file_api_key = _api_key_from_file(printer, "printer", env)
-        file_url = _str(printer, "url", "", "printer.url")
-    # Check the file's values even when the environment overrides them.
+    # Check the file's value even when the environment overrides it.
     file_spoolman_url = _str(spoolman, "url", "", "spoolman.url")
-    identity = _single_identity(env, file_api_key, file_url) if single else None
     spoolman_url = env.get("SPOOLMAN_URL") or file_spoolman_url
     if not spoolman_url:
         raise ConfigError("set spoolman.url or SPOOLMAN_URL")
-    if identity is not None:
-        printers: tuple[PrinterConfig, ...] = (_single_printer(raw, env, *identity),)
-    else:
-        printers = _listed_printers(raw, env)
+    bridge = _table(raw, "bridge")
 
     for key in _PRINTER_ONLY:
         if key in bridge:
@@ -376,8 +364,8 @@ def load(path: str | os.PathLike | None, env: dict[str, str] | None = None) -> C
         spoolman_url=spoolman_url,
         printers=printers,
         db_file=Path(_str(bridge, "db_file", "/data/bridge.db", "bridge.db_file")),
-        poll_printing=_interval(bridge, "poll_printing", 30, "bridge.poll_printing"),
-        poll_idle=_interval(bridge, "poll_idle", 60, "bridge.poll_idle"),
+        poll_printing=_number(bridge, "poll_printing", 30, "bridge.poll_printing", above=0),
+        poll_idle=_number(bridge, "poll_idle", 60, "bridge.poll_idle", above=0),
         uuid_field=uuid_field,
         eviction_location=_str(bridge, "eviction_location", "", "bridge.eviction_location"),
         flag_field=flag_field,
