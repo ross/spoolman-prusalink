@@ -34,8 +34,8 @@ class ToolReading:
     index: int
     extruded: int
     material: Material | None = None
-    # Pending firmware fields. None means the firmware doesn't report them.
-    unload_count: int | None = None
+    # Pending firmware fields.
+    unload_count: int = 0
     extruded_at_unload: int | None = None
 
 
@@ -56,8 +56,8 @@ class Spool:
     name: str
     material: str | None
     color_hex: str | None
-    diameter: float | None
-    density: float | None
+    diameter: float
+    density: float
     instance_uuid: str | None = None
     flag: str | None = None
     extruder_temp: float | None = None
@@ -69,10 +69,8 @@ class Spool:
     claim: bool = False  # The claim box is ticked.
     last_used: datetime | None = None
 
-    def mm_to_grams(self, mm: float) -> float | None:
+    def mm_to_grams(self, mm: float) -> float:
         """Convert a filament length to weight, as Spoolman does for `use_length`."""
-        if not self.diameter or not self.density:
-            return None
         radius_cm = self.diameter / 20
         length_cm = mm / 10
         return 3.141592653589793 * radius_cm * radius_cm * length_cm * self.density

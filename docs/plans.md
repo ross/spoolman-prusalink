@@ -73,7 +73,7 @@ failure shapes the bridge handles.
 | Endpoint | What the bridge uses | What the firmware does | Failure shapes the bridge handles |
 | --- | --- | --- | --- |
 | `GET /api/v1/status` | `printer.state`, `job.id`. Idle states for a write are `IDLE`, `FINISHED`, `READY`, `STOPPED`; busy are `PRINTING`, `PAUSED`, `BUSY`, `ATTENTION`. The state also sets the poll interval. | Emits `IDLE`, `BUSY`, `PRINTING`, `PAUSED`, `FINISHED`, `STOPPED`, `ATTENTION`. Never `READY`. `job` is present only while a job runs: it disappears the moment a print finishes or stops. | Connection refused or timeout (printer off, C2). Non-2xx (C9). |
-| `GET /api/v1/filament` | `boot_id`, and per tool `index`, `extruded`, `unload_count`, `extruded_at_unload`, `material{name,color,instance_uuid}`, or no `material` when empty. | One entry per enabled tool, in index order, with gaps for disabled tools. UUIDs only on Core One and Core One L, and only on tool 0. | 404 (stock firmware, X10). 200 without `boot_id` or `extruded` (MINI, MK3.5). Both read as `NoFilamentEndpoint`. |
+| `GET /api/v1/filament` | `boot_id`, and per tool `index`, `extruded`, `unload_count`, `extruded_at_unload`, `material{name,color,instance_uuid}`, or no `material` when empty. | One entry per enabled tool, in index order, with gaps for disabled tools. UUIDs only on Core One and Core One L, and only on tool 0. | 404 (stock firmware, X10). 200 without `boot_id`, `extruded` or `unload_count` (MINI, MK3.5). Both read as `NoFilamentEndpoint`. |
 | `GET /api/version` | `printer`, the type code, read once per boot for the model check (W10). | `type.version.subversion`, such as `8.1.0`. | Non-2xx: the model check is retried next boot. |
 | `GET /api/v1/job` | `file.display_name` or `file.name`, read once per new job ID, to recognize the sync job (W6). 204 when no job. | 204 whenever there's no job, including right after `FINISHED` or `STOPPED`. `state` is `PRINTING`, or `PAUSED` for both paused and attention. | None special. |
 | `PUT /api/v1/files/{storage}/{name}` | Headers `Print-After-Upload: ?1`, `Overwrite: ?1`, text body. Starts the sync job. | 201 with the file info, no job ID. 409 when the file exists without `Overwrite`, when the file is being printed, or when the state isn't `IDLE`, `READY`, `STOPPED` or `FINISHED` ("Can't print right now"; the file stays). | 409 (W3). Other 4xx/5xx logged once. |
@@ -213,7 +213,7 @@ the bridge miss an unload (Q2, X6).
 | Power off / on / hang | | Listener closed, open, or silent | C2, X8 |
 | Power loss and resume | | Reboot that keeps the job | P12 |
 | Fault | none, bad key, 500 | | C9 |
-| Firmware | full, no counters, no endpoint | | X10, no-`unload_count` paths |
+| Firmware | full, no counters, no endpoint | | X10 |
 | Sensor | report no material while loaded, and back | `material` omitted | C7 |
 | Counter anomaly | step `extruded` back; set `extruded_at_unload` out of range | | C4, C5 |
 | Tap through | | Clears a model-check `ATTENTION` | W10 |
