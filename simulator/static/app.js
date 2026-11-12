@@ -296,12 +296,14 @@ function renderPrinter(p) {
   h += '<div class="btns">' +
     btn('Start print', 'toggle', { form: 'start', dis: !canStart, cls: isOpen(p, 'start') ? 'on' : '' }) +
     btn('Pause', 'pause', { dis: off || !(ph === 'PRINTING' || ph === 'PREHEAT') }) +
-    btn('Resume', 'resume', { dis: off || st !== 'PAUSED' }) +
+    btn('Resume', 'resume', { dis: off || !(st === 'PAUSED' || ph === 'AWAIT_RESUME') }) +
     btn('Cancel', 'cancel', { dis: off || !job || ph === 'PARKING', cls: 'danger' }) +
     btn('Dismiss', 'dismiss', { dis: off || !(st === 'FINISHED' || st === 'STOPPED') }) +
     btn('Home', 'home', { dis: off || !!job || !(st === 'IDLE' || st === 'FINISHED' || st === 'STOPPED') }) +
     btn('Reboot', 'reboot', { dis: off }) +
     btn('Power-loss resume', 'power_loss', { dis: off, title: 'reboot, keeping the job' }) +
+    '<label title="the bed cools during the outage, so the print waits for Resume"><input type="checkbox" data-k="cold"' +
+    (getv(p.name, 'cold', false) ? ' checked' : '') + '>cold bed</label>' +
     btn('Tap through', 'tap_through', { dis: off || !tap }) +
     (canClearJam ? btn('Clear jam', 'clear_jam', {}) : '') +
     btn('Auto-accept: ' + (aa == null ? 'default' : aa ? 'on' : 'off'), 'auto_accept', { title: 'model check; cycles default, on, off' }) +
@@ -445,7 +447,7 @@ function onClick(e) {
       case 'pause': case 'resume': case 'cancel': case 'dismiss': case 'reboot': case 'home':
       case 'tap_through': case 'clear_jam':
         return go(act, {});
-      case 'power_loss': return go('reboot', { keep_job: true });
+      case 'power_loss': return go('reboot', { keep_job: true, cold_bed: !!getv(name, 'cold', false) });
       case 'auto_accept': {
         const cur = p.auto_accept_model_check;
         return go('set_auto_accept', { value: cur == null ? true : cur ? false : null });

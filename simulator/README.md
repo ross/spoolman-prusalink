@@ -138,7 +138,9 @@ that trace. The points that matter for the bridge, in short:
   `resume`) keeps the job ID, restarts the counters, skips the idle sensor
   clear, and goes through `BUSY`, during which a nozzle clean purges
   `panic_purge_mm`, then a short `PAUSED`, then `PRINTING`. With `cold_bed`
-  it waits in `ATTENTION` for `resume` before the clean.
+  it waits in `ATTENTION` for `resume` before the clean. The page's
+  **Power-loss resume** sends `cold_bed` from its **cold bed** checkbox, and
+  **Resume** continues that wait.
 - An upload during the start blip is accepted and dropped: the firmware's
   state check passes while it reads `IDLE`, but the print start ignores it.
   The user's print goes on and the uploaded file never runs.
