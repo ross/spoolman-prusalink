@@ -7,7 +7,7 @@ from dataclasses import replace
 
 import pytest
 
-from simulator import gcode, prusalink
+from simulator import gcode, prusalink, sync
 from simulator.model import (
     Busy,
     Firmware,
@@ -167,7 +167,7 @@ def test_tag_load_sets_uuid_on_uuids_model_only():
     assert tag == {"name": "PETG", "color": "#186bb5", "instance_uuid": uuid}
 
     # The bridge's write starts the type afresh: only its own instance UUID is left.
-    p.apply(gcode.parse(f'M865 X R N"PETG" O"#186bb5" L0\nM865.1 I0 C"{uuid}"'))
+    sync.apply(p, gcode.parse(f'M865 X R N"PETG" O"#186bb5" L0\nM865.1 I0 C"{uuid}"'))
     assert shown(p) == {"name": "PETG", "color": "#186bb5", "instance_uuid": uuid}
 
     sim, mk4 = make("1.4.1", [SimTool(0)])
@@ -689,27 +689,27 @@ def test_m865_on_missing_tool_is_a_parse_error():
 
 def test_m865_reset_clears_uuid_and_preset_write_ignores_parameters():
     sim, p = make()
-    p.apply(gcode.parse('M865 X R N"ASA" O"#de3129" L0'))
+    sync.apply(p, gcode.parse('M865 X R N"ASA" O"#de3129" L0'))
     assert tool0(p).material == Material("ASA", "#de3129", **RESET)
-    p.apply(gcode.parse('M865.1 I0 C"8b6a3e3e-3f6c-4d7b-9a43-6c1f0e7d2a11"'))
+    sync.apply(p, gcode.parse('M865.1 I0 C"8b6a3e3e-3f6c-4d7b-9a43-6c1f0e7d2a11"'))
     assert tool0(p).material.instance_uuid
-    p.apply(gcode.parse('M865 X O"#000000" L0'))  # ad-hoc edit keeps the UUID
+    sync.apply(p, gcode.parse('M865 X O"#000000" L0'))  # ad-hoc edit keeps the UUID
     assert tool0(p).material.instance_uuid and tool0(p).material.color == "#000000"
-    p.apply(gcode.parse('M865 N"PETG" O"#ffffff" T250 L0'))
+    sync.apply(p, gcode.parse('M865 N"PETG" O"#ffffff" T250 L0'))
     assert tool0(p).material == Material("PETG", adhoc=False, **preset_temperatures("PETG"))
 
 
 def test_preset_ignores_edits_and_adhoc_write_edits_the_slot():
     uuid = "8b6a3e3e-3f6c-4d7b-9a43-6c1f0e7d2a11"
     sim, p = make()
-    p.apply(gcode.parse('M865 N"PETG" L0'))
+    sync.apply(p, gcode.parse('M865 N"PETG" L0'))
     assert tool0(p).previous == PLA  # a preset write leaves the ad-hoc slot alone
-    p.apply(gcode.parse(f'M865.1 I0 C"{uuid}"\nM865 O"#ffffff" L0'))
+    sync.apply(p, gcode.parse(f'M865.1 I0 C"{uuid}"\nM865 O"#ffffff" L0'))
     assert tool0(p).material == Material("PETG", adhoc=False, **preset_temperatures("PETG"))
     assert "ignored on preset" in sim.events[-1].text
-    p.apply(gcode.parse('M865 X O"#000000" L0'))  # the slot is the base, not the preset
+    sync.apply(p, gcode.parse('M865 X O"#000000" L0'))  # the slot is the base, not the preset
     assert tool0(p).material == replace(PLA, color="#000000")
-    p.apply(gcode.parse('M865 O"#111111" L0'))  # an ad-hoc type takes an edit
+    sync.apply(p, gcode.parse('M865 O"#111111" L0'))  # an ad-hoc type takes an edit
     assert tool0(p).material.color == "#101010"  # stored in 5 bits a channel (F25)
 
 
@@ -727,29 +727,29 @@ def test_m865_writes_disabled_and_unconfigured_tools():
 
 def test_m865_writes_an_unloaded_tool():
     sim, p = make(tools=[SimTool(0)])
-    p.apply(gcode.parse('M865 X R N"PLA" L0'))
+    sync.apply(p, gcode.parse('M865 X R N"PLA" L0'))
     assert tool0(p).material == Material("PLA", **RESET) and not tool0(p).loaded
 
 
 def test_m865_1_only_on_tool_0_of_uuids_model():
     uuid = "8b6a3e3e-3f6c-4d7b-9a43-6c1f0e7d2a11"
     sim, p = make("8.10.0", [loaded(0, PETG), loaded(1, PETG)])
-    p.apply(gcode.parse(f'M865.1 I0 C"{uuid}"\nM865.1 I1 C"{uuid}"'))
+    sync.apply(p, gcode.parse(f'M865.1 I0 C"{uuid}"\nM865.1 I1 C"{uuid}"'))
     assert p.tools[0].material.instance_uuid is None
     assert p.tools[1].material.instance_uuid is None
     sim, p = make(tools=[SimTool(0)])
-    p.apply(gcode.parse(f'M865.1 I0 C"{uuid}"'))
+    sync.apply(p, gcode.parse(f'M865.1 I0 C"{uuid}"'))
     assert tool0(p).material is None  # nothing stored to attach it to
 
 
 def test_m865_on_other_tool_and_copy_from_empty_tool():
     sim, p = make("8.10.0", [loaded(0, PETG), loaded(1, PETG), SimTool(2)])
-    p.apply(gcode.parse('M865 X R N"PLA" O"#73737b" L1'))
+    sync.apply(p, gcode.parse('M865 X R N"PLA" O"#73737b" L1'))
     assert p.tools[1].material == Material("PLA", "#73737b", **RESET)
     assert p.selected_tool == 0
-    p.apply(gcode.parse("M865 I2 L1"))  # copies "none": an unload of T1
+    sync.apply(p, gcode.parse("M865 I2 L1"))  # copies "none": an unload of T1
     assert p.tools[1].material is None and p.tools[1].unload_count == 1
-    p.apply(gcode.parse("M865 I0 L2"))
+    sync.apply(p, gcode.parse("M865 I0 L2"))
     assert p.tools[2].material == PETG
 
 
@@ -1000,11 +1000,11 @@ def test_preset_load_reports_the_preset_temperatures():
 def test_m865_temperatures():
     sim, p = make()
     # R resets to the firmware defaults, not the PC preset's preheat.
-    p.apply(gcode.parse('M865 X R N"PC" T260 B90 L0'))
+    sync.apply(p, gcode.parse('M865 X R N"PC" T260 B90 L0'))
     assert temperatures(p) == (260, 170, 90)
-    p.apply(gcode.parse("M865 X P200 L0"))  # an ad-hoc edit keeps the rest
+    sync.apply(p, gcode.parse("M865 X P200 L0"))  # an ad-hoc edit keeps the rest
     assert temperatures(p) == (260, 200, 90)
-    p.apply(gcode.parse('M865 N"PETG" T250 L0'))  # a preset write ignores them
+    sync.apply(p, gcode.parse('M865 N"PETG" T250 L0'))  # a preset write ignores them
     assert temperatures(p) == (230, 170, 85)
 
 
@@ -1018,7 +1018,7 @@ def test_temperatures_are_set_when_the_material_is_built():
     sim.tick(3.0)
     p.load(0, source="preset", name="PLA", color="#ff0000")
     sim.tick(100.0)
-    p.apply(gcode.parse('M865 X N"PC" L0'))  # without R, only renames
+    sync.apply(p, gcode.parse('M865 X N"PC" L0'))  # without R, only renames
     assert temperatures(p) == (215, 170, 60)
     sim, p = make(tools=[SimTool(0)])
     p.load(0, source="tag", name="petg", uuid="8b6a3e3e-3f6c-4d7b-9a43-6c1f0e7d2a11")
@@ -1029,7 +1029,7 @@ def test_temperatures_are_set_when_the_material_is_built():
 def test_a_written_color_reads_back_in_5_bits_a_channel():
     """F25: the firmware stores a color as Color555, so `#73767d` reads back `#73737b`."""
     sim, p = make()
-    p.apply(gcode.parse('M865 X R N"PLA" O"#73767d" L0\n'))
+    sync.apply(p, gcode.parse('M865 X R N"PLA" O"#73767d" L0\n'))
     assert prusalink.filament(p)["tools"][0]["material"]["color"] == "#73737b"
     assert tool0(p).previous.color == "#73737b"
     p.unload(0)

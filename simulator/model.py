@@ -16,9 +16,8 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any, ClassVar
 
-from simulator import gcode
+from simulator import gcode, sync
 from simulator.tool import (
-    DEFAULT_TEMPERATURES,
     LoadProcess,
     Material,
     SimTool,
@@ -531,7 +530,7 @@ class SimPrinter:
         if not self.can_print():
             raise Busy("Can't print right now")
         body = self.files[name]
-        wrong = self._wrong_model(body)
+        wrong = sync.wrong_model(self, body)
         if wrong and not self._auto_accept():
             job = SyncJob(name=name, gcode=body)
             job.enter(JobPhase.HOLD, Attention(Reason.MODEL_CHECK))
@@ -1261,35 +1260,11 @@ class SimPrinter:
         except gcode.GcodeError as e:
             self._hold(job, str(e))
             return
-        problem = self._tool_problem(commands)
+        problem = sync.tool_problem(self, commands)
         if problem:
             self._hold(job, problem)
             return
         self._run_commands(job, commands)
-
-    def _wrong_model(self, body: str) -> str | None:
-        """The model a file's M862.3 names when it isn't this one. A parse error is left to the
-        job, which stops on it."""
-        try:
-            commands = gcode.parse(body)
-        except gcode.GcodeError:
-            return None
-        names = (self.model.name, f"{self.model.name}MMU3")
-        for c in commands:
-            if isinstance(c, gcode.ModelCheck) and c.name not in names:
-                return c.name
-        return None
-
-    def _tool_problem(self, commands: list[gcode.Command]) -> str | None:
-        # The firmware takes any index the model can have, enabled or not.
-        last = self.model.max_tools - 1
-        for c in commands:
-            if not isinstance(c, gcode.SetFilament):
-                continue
-            for index in (c.tool, c.copy_from):
-                if index is not None and not 0 <= index <= last:
-                    return f"M865 names tool {index}; {self.model.name} has tools 0 to {last}"
-        return None
 
     def _hold(self, job: SyncJob, problem: str) -> None:
         job.enter(JobPhase.HOLD, Attention(Reason.PARSE_ERROR, detail=problem))
@@ -1297,95 +1272,10 @@ class SimPrinter:
         self._show_state()
 
     def _run_commands(self, job: SyncJob, commands: list[gcode.Command]) -> None:
-        self.apply(commands)
+        sync.apply(self, commands)
         job.enter(JobPhase.RUN)
         job.remaining = job.run_seconds = self.settings.sync_job_seconds
         self._show_state()
-
-    def apply(self, commands: list[gcode.Command]) -> None:
-        for c in commands:
-            if isinstance(c, gcode.SetFilament):
-                self._apply_filament(c)
-            elif isinstance(c, gcode.SetUuid):
-                self._apply_uuid(c)
-            elif isinstance(c, gcode.Message):
-                self.message = c.text
-                self._log("gcode", f"M117 {c.text}")
-            elif isinstance(c, gcode.Home):
-                self.homed = True
-                self._log("gcode", "G28: homed")
-            elif isinstance(c, gcode.ModelCheck):
-                self._log("gcode", f"M862.3 model check {c.name}")
-            else:
-                self._log("gcode", f"ignored: {c.line}")
-
-    def _apply_filament(self, c: gcode.SetFilament) -> None:
-        if not 0 <= c.tool < self.model.max_tools:
-            self._log("gcode", f"M865 L{c.tool} dropped: no such tool")
-            return
-        # The config store has a slot for every tool the model can have, so a write to a
-        # disabled or unconfigured tool lands; a disabled tool just isn't reported.
-        t = self.tools.get(c.tool)
-        if t is None:
-            t = self.tools[c.tool] = SimTool(c.tool, enabled=False)
-        if t.stuck_write:
-            self._log("gcode", f"M865 L{c.tool} ignored: stuck write")
-            return
-        if c.copy_from is not None:
-            self._copy_filament(t, self.tools.get(c.copy_from) or SimTool(c.copy_from))
-            return
-        if c.reset or c.adhoc:
-            # An ad-hoc write edits the ad-hoc slot; R starts it afresh.
-            old = t.previous
-            if c.reset or old is None:
-                # R starts from the firmware defaults, not a preset's values.
-                nozzle, preheat, bed = DEFAULT_TEMPERATURES
-                name = c.name or (old.name if old else "Custom")
-                material = Material(name, nozzle=nozzle, preheat=preheat, bed=bed)
-            else:
-                material = replace(old, adhoc=True)
-            material.name = c.name or material.name
-            material.color = c.color or material.color
-            _apply_temperatures(material, c.temps)
-        elif c.name:
-            # A preset write: the firmware ignores every parameter but the type.
-            material = Material(c.name, adhoc=False, **preset_temperatures(c.name))
-            if c.color or c.temps:
-                self._log("gcode", f"M865 L{c.tool}: parameters ignored on preset {c.name}")
-        elif (c.color or c.temps) and t.material is not None:
-            # An edit of the stored type, which only an ad-hoc type takes.
-            if not t.material.adhoc:
-                self._log("gcode", f"M865 L{c.tool} ignored on preset {t.material.name}")
-                return
-            material = replace(t.material, color=c.color or t.material.color)
-            _apply_temperatures(material, c.temps)
-        else:
-            self._log("gcode", f"M865 L{c.tool}: nothing to write")
-            return
-        t.store(material)
-        self._log("gcode", f"M865 T{c.tool} set to {describe(t.material)}")
-
-    def _copy_filament(self, t: SimTool, source: SimTool) -> None:
-        if source.material is None:
-            self._count_unload(t, f"M865 copied empty T{source.index}")
-            return
-        material = replace(source.material)
-        if not self.model.holds_uuid(t.index):
-            material.instance_uuid = material.material_uuid = material.package_uuid = None
-        t.store(material)
-        self._log("gcode", f"M865 T{t.index} copied from T{source.index}: {describe(material)}")
-
-    def _apply_uuid(self, c: gcode.SetUuid) -> None:
-        t = self.tools.get(c.tool)
-        usable = self.model.holds_uuid(c.tool) and t is not None and t.material is not None
-        if not usable or t.stuck_write:
-            self._log("gcode", f"M865.1 I{c.tool} dropped")
-            return
-        if not t.material.adhoc:
-            self._log("gcode", f"M865.1 I{c.tool} ignored on preset {t.material.name}")
-            return
-        t.store(replace(t.material, instance_uuid=c.uuid))
-        self._log("gcode", f"M865.1 T{c.tool} instance UUID {c.uuid}")
 
     # The page's view.
 
@@ -1467,12 +1357,6 @@ def _enum(cls: type, value: Any) -> Any:
     except ValueError:
         known = ", ".join(v.value for v in cls)
         raise Invalid(f"{value!r} isn't one of {known}") from None
-
-
-def _apply_temperatures(material: Material, temps: dict[str, int]) -> None:
-    for key in ("nozzle", "preheat", "bed"):
-        if key in temps:
-            setattr(material, key, temps[key])
 
 
 # Snapshots: asdict() out, explicit reconstruction in.
