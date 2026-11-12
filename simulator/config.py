@@ -69,6 +69,9 @@ class Location:
     location: str
     # Whether the printer's model holds an instance UUID (tool 0 only).
     uuids: bool
+    # The tool's configured material name and instance UUID, if any.
+    material: str | None = None
+    instance_uuid: str | None = None
 
 
 def _int(value: object, name: str, minimum: int | None = None) -> int:
@@ -287,7 +290,14 @@ def _location(printer: PrinterConfig, tool: ToolConfig) -> str:
 def locations(cfg: SimConfig) -> list[Location]:
     """Every tool's location, disabled tools included: the bridge can't tell them apart."""
     return [
-        Location(p.name, t.index, _location(p, t), MODELS[p.model].uuids)
+        Location(
+            p.name,
+            t.index,
+            _location(p, t),
+            MODELS[p.model].uuids,
+            t.material["name"] if t.material else None,
+            t.material["instance_uuid"] if t.material else None,
+        )
         for p in cfg.printers
         for t in p.tools
     ]

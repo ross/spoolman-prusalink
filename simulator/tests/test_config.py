@@ -208,6 +208,14 @@ def test_locations(tmp_path):
     ]
 
 
+def test_locations_carry_the_configured_material_and_uuid():
+    locs = {loc.location: loc for loc in locations(load(EXAMPLE))}
+    core = locs["core-one-l"]
+    assert (core.material, core.instance_uuid) == ("PLA", "44c406a5-c6f5-4440-bfba-e8060564b717")
+    assert (locs["indx T2"].material, locs["indx T2"].instance_uuid) == ("PETG", None)
+    assert (locs["mk4s"].material, locs["mk4s"].instance_uuid) == (None, None)
+
+
 def test_bridge_config_is_valid_toml_with_the_right_shape():
     cfg = load(EXAMPLE)
     raw = tomllib.loads(bridge_config(cfg))

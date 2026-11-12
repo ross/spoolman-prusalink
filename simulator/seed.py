@@ -130,10 +130,14 @@ async def seed(
 
         for loc in locations:
             position = loc.tool % len(CYCLE)
+            # The tool's configured material and UUID, so the bridge starts in agreement
+            # with the printer. A material seed has no filament for falls back to the cycle.
+            loaded = loc.material if loc.material in FILAMENTS else CYCLE[position]
             extra = None
             if loc.uuids and loc.tool == 0:
                 # Minted only when the spool is created, so a rerun keeps the UUID.
-                extra = {uuid_field: json.dumps(str(uuid.uuid4()))}
-            await spool(f"sim: {loc.location} loaded", CYCLE[position], loc.location, extra)
+                value = loc.instance_uuid or str(uuid.uuid4())
+                extra = {uuid_field: json.dumps(value)}
+            await spool(f"sim: {loc.location} loaded", loaded, loc.location, extra)
             spare = CYCLE[(position + 1) % len(CYCLE)]
             await spool(f"sim: {loc.location} spare", spare, SHELF, None)
