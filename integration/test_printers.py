@@ -571,7 +571,7 @@ async def test_x9_spoolman_unreachable(world: World, caplog: pytest.LogCaptureFi
     records = await w.poll()
     assert kinds(records) == [(B, "reboot")]
     assert charges(records) == []
-    queued = [(r["printer"], r["spool_id"], r["use_length"]) for r in w.bridge.state.outbox]
+    queued = [(r.printer, r.spool_id, r.use_length) for r in w.bridge.state.outbox]
     assert queued == [(IT, a, 10), (B, e, 20)]
 
     # Down again with charges queued: the tick stops at the failed flush, before any read.
@@ -589,7 +589,7 @@ async def test_x9_spoolman_unreachable(world: World, caplog: pytest.LogCaptureFi
         f"PUT /api/v1/spool/{a}/use 200",
         f"PUT /api/v1/spool/{e}/use 200",
     ]
-    assert w.bridge.state.outbox == []
+    assert len(w.bridge.state.outbox) == 0
     assert logged(caplog, logging.WARNING, "sent 2 queued charge(s)")
 
 
@@ -721,7 +721,7 @@ async def test_x14_printer_renamed(world: World, caplog: pytest.LogCaptureFixtur
     records = await w.poll()
     assert kinds(records) == [(IT, "unload"), (IT, "swap_committed")]
     assert it.state.evict == (a,)
-    assert [(r["printer"], r["spool_id"]) for r in w.bridge.state.outbox] == [(IT, c)]
+    assert [(r.printer, r.spool_id) for r in w.bridge.state.outbox] == [(IT, c)]
     await settle(w)
     await w.bridge.aclose()
 

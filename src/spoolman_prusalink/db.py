@@ -11,6 +11,7 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from .accounting import ToolState
+from .records import ChargeRecord, EventRecord, Outbox
 from .state import PrinterState, Runout, State
 
 SCHEMA_VERSION = 1
@@ -81,19 +82,10 @@ _KEYED = {
 # Outbox columns copied out of each record; the `record` column holds the rest.
 _OUTBOX_COLUMNS = ("printer", "tool", "spool_id", "use_length")
 
-# Ledger columns copied out of each record, with the types each holds. A value of any
-# other type, None included, stays in `extra`, so every record reads back as written.
-# `use_length` has no column type, so SQLite keeps an int an int and a float a float.
-_LEDGER_COLUMNS = {
-    "time": (str,),
-    "printer": (str,),
-    "tool": (int,),
-    "spool_id": (int,),
-    "use_length": (int, float),
-    "applied": (str,),
-    "failed": (str,),
-}
-# `ledger.kind` for a record that isn't an event.
+# Ledger columns besides `kind` and `extra`. A charge fills them all but `applied` or
+# `failed`, and an event only the first three. `extra` holds the record's other fields.
+_LEDGER_COLUMNS = ("time", "printer", "tool", "spool_id", "use_length", "applied", "failed")
+# `ledger.kind` for a charge. An event's is its kind.
 _CHARGE = "charge"
 
 Rows = dict[str, dict[tuple, tuple]]
@@ -121,7 +113,6 @@ class Database:
         self._conn: sqlite3.Connection | None = conn
         self._lock_fd: int | None = lock_fd
         self._rows: Rows = {name: {} for name in _KEYED}
-        self._outbox: list[tuple[int, str]] = []  # (id, canonical record), oldest first.
 
     @classmethod
     def open(cls, path: Path) -> Database:
@@ -157,26 +148,22 @@ class Database:
     def load(self) -> State:
         """Read the state, and take it as what `save` compares against."""
         try:
-            state, self._rows, self._outbox = _read(self._conn)
+            state, self._rows = _read(self._conn)
         except (sqlite3.Error, ValueError) as e:
             raise DatabaseError(f"{self.path}: {e}") from e
         return state
 
-    def save(self, state: State, ledger: Sequence[dict] = ()) -> bool:
+    def save(self, state: State, ledger: Sequence[ChargeRecord | EventRecord] = ()) -> bool:
         """Write the rows of `state` that changed since the last load or save, and append
         the `ledger` records.
+
+        `state` is the one `load` returned: its outbox says which of its charges changed.
 
         All of it goes in one transaction, so either all of it is saved or none is.
         Return whether anything was written.
         """
         rows = _rows(state)
-        texts = [_canonical(r) for r in state.outbox]
-        old = [text for _, text in self._outbox]
-        # Charges leave the front of the outbox and join at the back. Find how many left:
-        # the most that keeps the rest a prefix of the current outbox. If none fits, all
-        # of them left and every current charge is new.
-        gone = next(k for k in range(len(old) + 1) if texts[: len(old) - k] == old[k:])
-        new = texts[len(old) - gone :]
+        gone, new = state.outbox.changes()
         changes = {
             name: (
                 [k for k in self._rows[name] if k not in rows[name]],
@@ -199,26 +186,24 @@ class Database:
                     f"INSERT OR REPLACE INTO {name} ({', '.join(columns)}) VALUES ({marks})",
                     [k + v for k, v in upserted],
                 )
-            conn.executemany(
-                "DELETE FROM outbox WHERE id = ?", [(i,) for i, _ in self._outbox[:gone]]
-            )
+            conn.executemany("DELETE FROM outbox WHERE id = ?", [(i,) for i in gone])
             added = []
-            for text in new:
-                record = json.loads(text)
-                columns = tuple(record.pop(c, None) for c in _OUTBOX_COLUMNS)
+            for rec in new:
+                record = rec.to_json()
+                columns = tuple(record.pop(c) for c in _OUTBOX_COLUMNS)
                 cur = conn.execute(
                     "INSERT INTO outbox (printer, tool, spool_id, use_length, record) "
                     "VALUES (?, ?, ?, ?, ?)",
-                    (*columns, json.dumps(record, sort_keys=True)),
+                    (*columns, _canonical(record)),
                 )
-                added.append((cur.lastrowid, text))
+                added.append(cur.lastrowid)
             _insert_ledger(conn, ledger)
             conn.execute("COMMIT")
         except BaseException:
             conn.execute("ROLLBACK")
             raise
         self._rows = rows
-        self._outbox = self._outbox[gone:] + added
+        state.outbox.saved(added)
         return True
 
 
@@ -342,24 +327,21 @@ def _canonical(record: dict) -> str:
     return json.dumps(record, sort_keys=True)
 
 
-def _insert_ledger(conn: sqlite3.Connection, ledger: Sequence[dict]) -> None:
-    rows = []
-    for record in ledger:
-        extra = dict(record)
-        kind = extra.get("event")
-        if isinstance(kind, str) and kind != _CHARGE:
-            del extra["event"]
-        else:
-            kind = _CHARGE
-        columns = []
-        for name, types in _LEDGER_COLUMNS.items():
-            value = extra.get(name)
-            if type(value) in types:  # Exact, so a bool isn't taken for an int.
-                del extra[name]
-                columns.append(value)
-            else:
-                columns.append(None)
-        rows.append((kind, *columns, _canonical(extra)))
+def _ledger_row(record: ChargeRecord | EventRecord) -> tuple:
+    """The `ledger` row for a record: `kind`, the `_LEDGER_COLUMNS`, and `extra`."""
+    if isinstance(record, EventRecord):
+        ev = record.event
+        extra = {**ev.fields(), "location": record.location, "message": ev.message}
+        return (ev.kind.value, record.time, record.printer, record.tool, *[None] * 4, extra)
+    extra = record.to_json()
+    columns = tuple(extra.pop(c) for c in _LEDGER_COLUMNS)
+    if not extra["held"]:
+        del extra["held"]  # Only a held charge says so.
+    return (_CHARGE, *columns, extra)
+
+
+def _insert_ledger(conn: sqlite3.Connection, ledger: Sequence[ChargeRecord | EventRecord]) -> None:
+    rows = [(*row[:-1], _canonical(row[-1])) for row in map(_ledger_row, ledger)]
     if not rows:
         return
     names = ("kind", *_LEDGER_COLUMNS, "extra")
@@ -396,8 +378,8 @@ def _rows(state: State) -> Rows:
     return rows
 
 
-def _read(conn: sqlite3.Connection) -> tuple[State, Rows, list[tuple[int, str]]]:
-    """Read the state, its keyed rows as stored, and the outbox as (id, record) pairs."""
+def _read(conn: sqlite3.Connection) -> tuple[State, Rows]:
+    """Read the state and its keyed rows as stored."""
     rows: Rows = {}
     for name, (keys, values) in _KEYED.items():
         columns = ", ".join(keys + values)
@@ -428,10 +410,10 @@ def _read(conn: sqlite3.Connection) -> tuple[State, Rows, list[tuple[int, str]]]
     for id_, *columns, extra in conn.execute(
         "SELECT id, printer, tool, spool_id, use_length, record FROM outbox ORDER BY id"
     ):
-        record = json.loads(extra)
-        record.update(
-            (k, v) for k, v in zip(_OUTBOX_COLUMNS, columns, strict=True) if v is not None
-        )
-        state.outbox.append(record)
-        outbox.append((id_, _canonical(record)))
-    return state, rows, outbox
+        record = {**json.loads(extra), **dict(zip(_OUTBOX_COLUMNS, columns, strict=True))}
+        try:
+            outbox.append((id_, ChargeRecord.from_json(record)))
+        except TypeError as e:
+            raise ValueError(f"outbox row {id_}: {e}") from e
+    state.outbox = Outbox(outbox)
+    return state, rows

@@ -178,26 +178,6 @@ own field. Each phase saves once, at its end.
 
 Size: medium. Falls out of B2 for the most part.
 
-### B6. Charges are untyped dictionaries
-
-A charge is a dictionary with 11 keys built in `process()` (`app.py`).
-It goes to the outbox, then to `flush`, then to the ledger.
-
-- Readers are defensive about a shape the bridge itself writes:
-  `rec.get("tool", -1)` and `int(rec.get("extruded_mm", 0))`, in `flush`
-  and `_hold_deleted`.
-- `db.save` works out which charges left the outbox by comparing lists of
-  canonical JSON (`db.py`), because the outbox is a plain list that its
-  owner mutates.
-- The ledger tells a charge from an event by whether the record has an
-  `event` key (`db.py`).
-
-Shape: a `ChargeRecord` dataclass, as events are typed in `events.py`. An
-outbox object with push and pop that knows its own row IDs, so the database
-is told what changed.
-
-Size: medium.
-
 ### B7. Write-sync state sits in the accounting state
 
 `needs_sync`, `sync_attempts`, and `written` are fields of `ToolState`.
@@ -361,7 +341,6 @@ Size: medium.
 | --- | --- | --- | --- |
 | 2 | Tag-UUID owner | B1, T1 (UUID tests) | Nothing |
 | 3 | Conditions and saved facts | B2, B3, B5, B7, T1 (rest) | Workstream 2 |
-| 4 | Typed records | B6 | Nothing. Easier after 3 |
 | 5 | Narrow the bridge boundary | B4 | Workstreams 2 and 3 |
 | 8 | Simulator state | S1, S5, S6, then S2, S4 | Nothing. S4 continues the move that put the PrusaLink routing in `prusalink.serve` |
 | 10 | Accounting state | B10 | Nothing |

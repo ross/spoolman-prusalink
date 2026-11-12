@@ -4,6 +4,7 @@ import json
 import os
 import re
 import sqlite3
+from dataclasses import replace
 
 import pytest
 
@@ -15,10 +16,36 @@ from spoolman_prusalink.db import (
     read_ledger,
     read_state,
 )
-from spoolman_prusalink.events import StagedAtPrint, StagedAtReboot
+from spoolman_prusalink.events import Baseline, StagedAtPrint, StagedAtReboot
+from spoolman_prusalink.records import ChargeRecord, EventRecord, Outbox
 from spoolman_prusalink.state import PrinterState, Runout, State
 
 TAG = "91da34d9-c1c1-470f-bac7-185a2346f86a"
+
+
+def charge(spool_id: int, use_length: float = 1.0, **fields) -> ChargeRecord:
+    """A charge to `spool_id`, with any of its other fields set."""
+    rec = ChargeRecord(
+        time="2026-11-09T10:00:30+00:00",
+        printer="core",
+        tool=0,
+        location="Core One L+",
+        spool_id=spool_id,
+        extruded_mm=round(use_length),
+        use_length=use_length,
+        grams=None,
+        reason="extruded",
+        boot_id=3,
+        extruded=1500,
+    )
+    return replace(rec, **fields)
+
+
+def outbox(*charges: ChargeRecord) -> Outbox:
+    queued = Outbox()
+    for rec in charges:
+        queued.push(rec)
+    return queued
 
 
 def full_state() -> State:
@@ -55,10 +82,10 @@ def full_state() -> State:
             ),
             "mk4s": PrinterState(tools={0: ToolState(boot_id=1, charged=5)}),
         },
-        outbox=[
-            {"printer": "core", "tool": 0, "spool_id": 7, "use_length": 50.0, "grams": 0.15},
-            {"printer": "mk4s", "tool": 0, "spool_id": 9, "use_length": -2.5, "reason": "x"},
-        ],
+        outbox=outbox(
+            charge(7, 50.0, grams=0.15),
+            charge(9, -2.5, printer="mk4s", reason="x", applied="set", failed="403", held=True),
+        ),
         flagged=[7, 8],
         runouts={
             7: Runout("ran out", 1000.0, 990.5),
@@ -106,28 +133,40 @@ def test_no_write_when_unchanged(path):
 
 def test_outbox_order_is_kept(path):
     db = Database.open(path)
-    state = State()
-    charges = [{"printer": "p", "tool": 0, "spool_id": i, "use_length": 1.0} for i in range(5)]
-    state.outbox.extend(charges[:3])
+    state = db.load()
+    charges = [charge(i) for i in range(5)]
+    for rec in charges[:3]:
+        state.outbox.push(rec)
     assert db.save(state)
-    state.outbox.pop(0)
-    state.outbox.extend(charges[3:])
+    assert state.outbox.pop() == charges[0]
+    for rec in charges[3:]:
+        state.outbox.push(rec)
     assert db.save(state)
-    assert read_state(path).outbox == charges[1:]
+    assert list(read_state(path).outbox) == charges[1:]
     # The same charge twice, then one of them sent.
-    state.outbox.append(charges[4])
+    state.outbox.push(charges[4])
     assert db.save(state)
-    state.outbox.pop(0)
+    state.outbox.pop()
     assert db.save(state)
-    assert read_state(path).outbox == [*charges[2:], charges[4]]
-    # Any other change rewrites the outbox in its new order.
-    state.outbox.reverse()
+    assert list(read_state(path).outbox) == [*charges[2:], charges[4]]
+    # A charge sent before it was saved is never written.
+    state.outbox.push(charges[0])
+    while state.outbox:
+        state.outbox.pop()
     assert db.save(state)
-    assert read_state(path).outbox == [charges[4], *reversed(charges[2:])]
-    state.outbox.clear()
-    assert db.save(state)
-    assert read_state(path).outbox == []
+    assert list(read_state(path).outbox) == []
+    assert not db.save(state)
     db.close()
+
+
+def test_the_outbox_front_is_the_oldest_charge():
+    queued = Outbox([(1, charge(7))])
+    queued.push(charge(8))
+    assert queued.front() == charge(7)
+    queued.pop()
+    assert queued.front() == charge(8)
+    assert repr(queued) == f"Outbox([{charge(8)!r}])"
+    assert queued != [charge(8)]
 
 
 def test_outbox_columns(path):
@@ -136,10 +175,19 @@ def test_outbox_columns(path):
     db.close()
     conn = sqlite3.connect(path)
     rows = conn.execute("SELECT printer, tool, spool_id, use_length, record FROM outbox").fetchall()
-    assert rows == [
-        ("core", 0, 7, 50.0, '{"grams": 0.15}'),
-        ("mk4s", 0, 9, -2.5, '{"reason": "x"}'),
-    ]
+    assert [r[:4] for r in rows] == [("core", 0, 7, 50.0), ("mk4s", 0, 9, -2.5)]
+    assert json.loads(rows[0][4]) == {
+        "time": "2026-11-09T10:00:30+00:00",
+        "location": "Core One L+",
+        "extruded_mm": 50,
+        "grams": 0.15,
+        "reason": "extruded",
+        "boot_id": 3,
+        "extruded": 1500,
+        "applied": None,
+        "failed": None,
+        "held": False,
+    }
     conn.close()
 
 
@@ -198,8 +246,23 @@ def test_a_missing_database_reads_as_empty(path):
     assert not path.exists()
 
 
-# Records as the bridge writes them, and the odd ones a record could hold.
+# Records as the bridge writes them: an event, a charge Spoolman accepted, and one held for
+# a deleted spool.
 LEDGER = [
+    EventRecord("2026-11-09T10:00:00+00:00", "core", 0, "Core One L+", Baseline(1000, 7)),
+    charge(7, 500.0, grams=1.49, applied="2026-11-09T10:00:31+00:00"),
+    charge(
+        9,
+        -2.5,
+        time="2026-11-09T10:01:00+00:00",
+        tool=1,
+        reason="moved to claimed spool",
+        failed="404",
+        held=True,
+    ),
+]
+# What `read_ledger` returns for them.
+READ = [
     {
         "time": "2026-11-09T10:00:00+00:00",
         "printer": "core",
@@ -207,6 +270,8 @@ LEDGER = [
         "location": "Core One L+",
         "event": "baseline",
         "message": "baseline extruded=1000 spool=7",
+        "extruded": 1000,
+        "spool": 7,
     },
     {
         "time": "2026-11-09T10:00:30+00:00",
@@ -226,17 +291,17 @@ LEDGER = [
         "time": "2026-11-09T10:01:00+00:00",
         "printer": "core",
         "tool": 1,
+        "location": "Core One L+",
         "spool_id": 9,
+        "extruded_mm": -2,
         "use_length": -2.5,
         "grams": None,
+        "reason": "moved to claimed spool",
+        "boot_id": 3,
+        "extruded": 1500,
         "failed": "404",
         "held": True,
     },
-    {"printer": "mk4s", "tool": 0, "spool_id": 8, "use_length": 12},
-    {"time": None, "tool": 1.0, "spool_id": True, "use_length": "5"},
-    {"event": "charge", "kind": "x", "extra": {"a": [1]}, "id": 4},
-    {"event": None},
-    {},
 ]
 
 
@@ -247,10 +312,10 @@ def test_ledger_round_trip(path):
     assert not db.save(State(), [])
     db.close()
     records = read_ledger(path)
-    assert records == LEDGER
+    assert records == READ
     # Equal isn't enough: 1 == 1.0 == True.
     assert [{k: type(v) for k, v in r.items()} for r in records] == [
-        {k: type(v) for k, v in r.items()} for r in LEDGER
+        {k: type(v) for k, v in r.items()} for r in READ
     ]
     assert read_state(path) == State()
 
@@ -317,19 +382,19 @@ def test_a_failed_save_writes_nothing(path, fail):
     assert db.save(state, LEDGER[:1])
     conn = db._conn
     db._conn = FailingConnection(conn, fail)
-    state.outbox.pop(0)
-    state.outbox.append({"printer": "core", "tool": 0, "spool_id": 7, "use_length": 1.0})
+    state.outbox.pop()
+    state.outbox.push(charge(7))
     state.tools("core")[1] = ToolState(boot_id=4)
     with pytest.raises(sqlite3.OperationalError):
         db.save(state, LEDGER[1:2])
     assert read_state(path) == full_state()
-    assert read_ledger(path) == LEDGER[:1]
+    assert read_ledger(path) == READ[:1]
     # The next save writes all of it.
     db._conn = conn
     assert db.save(state, LEDGER[1:2])
     db.close()
     assert read_state(path) == state
-    assert read_ledger(path) == LEDGER[:2]
+    assert read_ledger(path) == READ[:2]
 
 
 def empty_files(path):
@@ -360,7 +425,7 @@ def test_a_database_with_no_schema_gets_it(path):
         assert db.save(full_state(), LEDGER[:1])
         db.close()
         assert read_state(f) == full_state()
-        assert read_ledger(f) == LEDGER[:1]
+        assert read_ledger(f) == READ[:1]
 
 
 def test_a_load_failure_lets_go_of_the_lock(path):
@@ -493,3 +558,15 @@ def test_a_tools_row_missing_a_key_is_a_database_error(path, edit, message):
         read_state(path)
     path.unlink()
     Database.open(path).close()  # The failed open let go of the lock.
+
+
+def test_an_outbox_row_with_an_unknown_field_is_a_database_error(path):
+    db = Database.open(path)
+    db.save(full_state())
+    db.close()
+    conn = sqlite3.connect(path)
+    with conn:
+        conn.execute("UPDATE outbox SET record = json_set(record, '$.colour', 'red')")
+    conn.close()
+    with pytest.raises(DatabaseError, match="outbox row 1: .*colour"):
+        read_state(path)

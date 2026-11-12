@@ -36,6 +36,7 @@ from spoolman_prusalink.accounting import ToolState
 from spoolman_prusalink.db import read_state
 from spoolman_prusalink.printer_sync import PRINTER_MODELS, default_preamble
 from spoolman_prusalink.prusalink import PrusaLink
+from spoolman_prusalink.records import ChargeRecord
 
 COREONEL_PREAMBLE = default_preamble(PRINTER_MODELS["8.1.0"])
 
@@ -48,7 +49,7 @@ async def test_charges_are_applied_and_recorded(tmp_path):
     assert fake.used == {19: [500.0]}
     applied = [r for r in ledger(tmp_path) if "use_length" in r]
     assert len(applied) == 1 and applied[0]["applied"]
-    assert read_state(tmp_path / "bridge.db").outbox == []
+    assert len(read_state(tmp_path / "bridge.db").outbox) == 0
     await bridge.aclose()
 
 
@@ -74,12 +75,12 @@ async def test_spoolman_outage_queues_and_retries_in_order(tmp_path, code):
     fake.fail_use = [code]
     await bridge.poll()
     assert fake.used == {}
-    assert [r["use_length"] for r in read_state(tmp_path / "bridge.db").outbox] == [500.0]
+    assert [r.use_length for r in read_state(tmp_path / "bridge.db").outbox] == [500.0]
 
     station.tool.extruded = 1600
     await bridge.poll()
     assert fake.used == {19: [500.0, 100.0]}
-    assert read_state(tmp_path / "bridge.db").outbox == []
+    assert len(read_state(tmp_path / "bridge.db").outbox) == 0
     await bridge.aclose()
 
 
@@ -181,7 +182,7 @@ async def test_a_failed_save_in_flush_keeps_the_charge_queued(tmp_path):
     await bridge.poll()
     db = tmp_path / "bridge.db"
     state, records = read_state(db), ledger(tmp_path)
-    assert [r["use_length"] for r in state.outbox] == [500.0]
+    assert [r.use_length for r in state.outbox] == [500.0]
     conn = bridge.db._conn
     bridge.db._conn = FailingCommit(conn)
     with pytest.raises(sqlite3.OperationalError):
@@ -199,7 +200,7 @@ async def test_a_failed_save_in_flush_keeps_the_charge_queued(tmp_path):
     bridge = restart(bridge)
     assert await bridge.flush()
     assert fake.used == {19: [500.0, 500.0]}
-    assert read_state(db).outbox == []
+    assert len(read_state(db).outbox) == 0
     assert [r["use_length"] for r in ledger(tmp_path) if r.get("applied")] == [500.0]
     await bridge.aclose()
 
@@ -1611,8 +1612,9 @@ async def test_runout_flag_takes_a_charge_it_cant_check_as_the_bridges_own(tmp_p
     station.tool.extruded += 500
     fake.fail_use = [503]  # The charge stays queued.
     await bridge.poll()
-    assert bridge.state.outbox
-    bridge.state.outbox[0]["grams"] = None  # Charged while the spool wasn't known.
+    assert len(bridge.state.outbox) == 1
+    # Charged while the spool wasn't known.
+    bridge.state.outbox.push(replace(bridge.state.outbox.pop(), grams=None))
     assert await bridge.flush()
     assert bridge.state.runouts[19].used == fake.spools[19]["used_weight"]
     await bridge.poll()
@@ -2578,7 +2580,7 @@ async def test_404_for_a_spool_no_longer_active_drops_the_charge(tmp_path, caplo
     fake.fail_use = [503]
     await bridge.poll()  # Swap to 20; the 500 mm for 19 stays queued.
     assert bridge.printers[0].tools[0].active == 20
-    assert [r["spool_id"] for r in bridge.state.outbox] == [19]
+    assert [r.spool_id for r in bridge.state.outbox] == [19]
     del fake.spools[19]
     station.tool.extruded = 1600
     await bridge.poll()
@@ -2766,7 +2768,7 @@ async def test_spoolman_outage_while_printing_catches_up_once(tmp_path):
     assert bridge.printers[0].tools[0].charged == 1500
     await bridge.poll()
     assert fake.used == {19: [100.0, 400.0]}
-    assert bridge.state.outbox == []
+    assert len(bridge.state.outbox) == 0
     await bridge.aclose()
 
 
@@ -2868,7 +2870,7 @@ async def test_records_name_the_printer(tmp_path):
     fake.fail_use = [503]
     await bridge.poll()
     queued = read_state(tmp_path / "bridge.db").outbox
-    assert [(r["printer"], r["tool"], r["spool_id"]) for r in queued] == [("default", 0, 19)]
+    assert [(r.printer, r.tool, r.spool_id) for r in queued] == [("default", 0, 19)]
     await bridge.poll()
     records = ledger(tmp_path)
     assert records and all(r["printer"] == "default" for r in records)
@@ -2881,11 +2883,21 @@ async def test_404_in_flush_holds_the_charge_for_the_records_printer(tmp_path, c
     a, b = (bridge.state.tools(name) for name in ("a", "b"))
     a[0] = ToolState(boot_id=1, charged=100, active=21, assigned=21)
     b[0] = ToolState(boot_id=1, charged=700, active=19, assigned=19)
-    record = {"tool": 0, "spool_id": 19, "extruded_mm": 600, "use_length": 600.0}
-    bridge.state.outbox = [
-        {**record, "printer": "b"},
-        {**record, "printer": "nowhere", "extruded_mm": 50, "use_length": 50.0},
-    ]
+    record = ChargeRecord(
+        time="2026-11-09T10:00:00+00:00",
+        printer="b",
+        tool=0,
+        location="Tool b",
+        spool_id=19,
+        extruded_mm=600,
+        use_length=600.0,
+        grams=None,
+        reason="extruded",
+        boot_id=1,
+        extruded=700,
+    )
+    bridge.state.outbox.push(record)
+    bridge.state.outbox.push(replace(record, printer="nowhere", extruded_mm=50, use_length=50.0))
     assert await bridge.flush()
     assert (b[0].active, b[0].deleted_spool, b[0].held_mm) == (None, 19, 600)
     assert (a[0].active, a[0].deleted_spool, a[0].held_mm) == (21, None, 0)

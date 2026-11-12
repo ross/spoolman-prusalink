@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from .accounting import ToolState
+from .records import Outbox
 
 
 @dataclass
@@ -39,11 +40,10 @@ class PrinterState:
 class State:
     # By printer name. Everything else here is keyed by spool and shared by every printer.
     printers: dict[str, PrinterState] = field(default_factory=dict)
-    # Charges computed but not yet accepted by Spoolman, oldest first. Each is a ledger
-    # record with `printer`, `tool`, `spool_id` and `use_length`. Saving them with the
-    # tool state in one transaction means a crash can't advance `charged` without the
-    # charge surviving.
-    outbox: list[dict] = field(default_factory=list)
+    # Charges computed but not yet accepted by Spoolman. Saving them with the tool state
+    # in one transaction means a crash can't advance `charged` without the charge
+    # surviving.
+    outbox: Outbox = field(default_factory=Outbox)
     # Spools whose flag field the bridge has set, so it clears only its own flags.
     flagged: list[int] = field(default_factory=list)
     # Flags for spools that ran out mid-print while Spoolman showed plenty left, by

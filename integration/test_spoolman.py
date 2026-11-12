@@ -79,7 +79,7 @@ async def test_m1_spoolman_unreachable(world: World, caplog: pytest.LogCaptureFi
     w.printer.extrude(0, 30)
     records = await w.poll()
     assert charges(records) == []
-    assert [r["use_length"] for r in w.bridge.state.outbox] == [30.0]
+    assert [r.use_length for r in w.bridge.state.outbox] == [30.0]
     assert logged(
         caplog, logging.WARNING, f"charge to spool {a} failed (503 Service Unavailable for PUT"
     )
@@ -89,14 +89,14 @@ async def test_m1_spoolman_unreachable(world: World, caplog: pytest.LogCaptureFi
     for _ in range(3):
         w.printer.extrude(0, 10)
         assert await w.poll() == []
-    assert [r["use_length"] for r in w.bridge.state.outbox] == [30.0]
+    assert [r.use_length for r in w.bridge.state.outbox] == [30.0]
     assert count(caplog, logging.WARNING, f"charge to spool {a} failed") == 2
 
     # Back: the queued charge goes first, then everything since, once each.
     faults.restore()
     records = await w.poll()
     assert [r["use_length"] for r in charges(records)] == [30.0, 30.0]
-    assert w.bridge.state.outbox == []
+    assert len(w.bridge.state.outbox) == 0
     assert logged_once(caplog, logging.WARNING, "sent 1 queued charge(s)")
     await w.poll()
     assert logged_once(caplog, logging.WARNING, "sent ")
@@ -121,7 +121,7 @@ async def test_m2_rejected_charge_is_dropped(world: World, caplog: pytest.LogCap
     assert charges(records) == []
     failed = [r for r in records if "failed" in r]
     assert [(r["spool_id"], r["use_length"], r["failed"]) for r in failed] == [(a, 50.0, "422")]
-    assert w.bridge.state.outbox == []
+    assert len(w.bridge.state.outbox) == 0
     msg = f"Spoolman rejected a +50 mm charge to spool {a} (422 "
     assert logged_once(caplog, logging.ERROR, msg)
     assert await w.used("A") == 0
@@ -187,7 +187,7 @@ async def test_m3_charge_to_deleted_spool_is_held(world: World, caplog: pytest.L
     w.spoolman_faults.answer("PUT", use_path(a), 503)
     w.printer.extrude(0, 40)
     await w.poll()
-    assert [r["use_length"] for r in w.bridge.state.outbox] == [40.0]
+    assert [r.use_length for r in w.bridge.state.outbox] == [40.0]
     await delete_spool(w.spoolman.client, a)
     records = await w.poll()
     held = [r for r in records if r.get("held")]
@@ -276,7 +276,7 @@ async def test_m3_deleted_during_an_unconfirmed_swap(world: World):
     w.printer.extrude(0, 20)
     await w.poll()
     await w.poll()
-    assert [r["use_length"] for r in w.bridge.state.outbox] == [20.0]
+    assert [r.use_length for r in w.bridge.state.outbox] == [20.0]
     tool = w.bridge.printers[0].tools[0]
     assert tool.swap is not None and tool.swap.mm == LOAD_MM + 20
 
@@ -587,11 +587,11 @@ async def test_m7_density_edit_applies_to_later_charges(world: World):
     w.spoolman_faults.answer("PUT", use_path(a), 503)
     w.printer.extrude(0, 1000)
     await w.poll()
-    assert [r["use_length"] for r in w.bridge.state.outbox] == [1000.0]
+    assert [r.use_length for r in w.bridge.state.outbox] == [1000.0]
     await w.spoolman.edit_filament(a, density=3.72)
     w.spoolman_faults.restore()
     await w.poll()
-    assert w.bridge.state.outbox == []
+    assert len(w.bridge.state.outbox) == 0
     assert await w.used("A") == pytest.approx(6 * before, abs=0.01)
 
 
@@ -793,7 +793,7 @@ async def test_m2_charge_accepted_with_an_unreadable_reply(
     w.printer.extrude(0, 50)
     records = await w.poll()
     assert [r["use_length"] for r in charges(records, a)] == [50.0]
-    assert w.bridge.state.outbox == []
+    assert len(w.bridge.state.outbox) == 0
     used = await w.used("A")
     assert used == pytest.approx(charges(records, a)[0]["grams"], abs=0.01)
 
