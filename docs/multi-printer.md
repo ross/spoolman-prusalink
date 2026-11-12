@@ -24,7 +24,6 @@ Not in scope:
 - Replacing `state.json` and `ledger.jsonl` with SQLite. That's a separate
   change, after this one. This plan only shapes the state and the records so
   SQLite can take them over without reshaping.
-- Per-printer dry run. Dry run stays one setting for the whole bridge.
 
 ## Why one process
 
@@ -183,8 +182,7 @@ move under that printer's name, and its outbox records and runouts are
 stamped with it.
 With several printers configured, the bridge refuses to start and says so,
 because it can't tell which printer the tools belong to. The migrated file
-reaches disk only when a live poll saves, so the message says to poll once
-with dry run off.
+reaches disk only when a poll saves, so the message says to poll once.
 
 Each printer's state also keeps the flag texts its tools last asked for, and
 a runout flag records the printer it ran out on, for notices.

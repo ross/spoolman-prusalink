@@ -204,7 +204,6 @@ LEDGER = [
         "location": "Core One L+",
         "event": "baseline",
         "message": "baseline extruded=1000 spool=7",
-        "dry_run": False,
     },
     {
         "time": "2026-11-09T10:00:30+00:00",
@@ -218,7 +217,6 @@ LEDGER = [
         "reason": "extruded",
         "boot_id": 3,
         "extruded": 1500,
-        "dry_run": False,
         "applied": "2026-11-09T10:00:31+00:00",
     },
     {
@@ -228,12 +226,11 @@ LEDGER = [
         "spool_id": 9,
         "use_length": -2.5,
         "grams": None,
-        "dry_run": False,
         "failed": "404",
         "held": True,
     },
-    {"printer": "mk4s", "tool": 0, "spool_id": 8, "use_length": 12, "dry_run": True},
-    {"time": None, "tool": 1.0, "spool_id": True, "use_length": "5", "dry_run": 1},
+    {"printer": "mk4s", "tool": 0, "spool_id": 8, "use_length": 12},
+    {"time": None, "tool": 1.0, "spool_id": True, "use_length": "5"},
     {"event": "charge", "kind": "x", "extra": {"a": [1]}, "id": 4},
     {"event": None},
     {},
@@ -243,8 +240,7 @@ LEDGER = [
 def test_ledger_round_trip(path):
     db = Database.open(path)
     assert db.save(State(), LEDGER[:2])  # Written though the state didn't change.
-    assert db.save_ledger(LEDGER[2:])
-    assert not db.save_ledger([])
+    assert db.save(State(), LEDGER[2:])
     assert not db.save(State(), [])
     db.close()
     records = read_ledger(path)
@@ -258,16 +254,16 @@ def test_ledger_round_trip(path):
 
 def test_ledger_columns(path):
     db = Database.open(path)
-    db.save_ledger(LEDGER[:3])
+    db.save(State(), LEDGER[:3])
     db.close()
     conn = sqlite3.connect(path)
     rows = conn.execute(
-        "SELECT kind, printer, tool, spool_id, use_length, applied, failed, dry_run FROM ledger"
+        "SELECT kind, printer, tool, spool_id, use_length, applied, failed FROM ledger"
     ).fetchall()
     assert rows == [
-        ("baseline", "core", 0, None, None, None, None, 0),
-        ("charge", "core", 0, 7, 500.0, "2026-11-09T10:00:31+00:00", None, 0),
-        ("charge", "core", 1, 9, -2.5, None, "404", 0),
+        ("baseline", "core", 0, None, None, None, None),
+        ("charge", "core", 0, 7, 500.0, "2026-11-09T10:00:31+00:00", None),
+        ("charge", "core", 1, 9, -2.5, None, "404"),
     ]
     extra = conn.execute("SELECT extra ->> 'grams', extra ->> 'held' FROM ledger").fetchall()
     assert extra == [(None, None), (1.49, None), (None, 1)]
@@ -277,6 +273,19 @@ def test_ledger_columns(path):
     ).fetchall()
     assert applied == [(7, 500.0)]
     conn.close()
+
+
+def test_ledger_of_an_older_database_with_a_dry_run_column(path):
+    """Databases made before dry run was removed keep the column, unused."""
+    Database.open(path).close()
+    conn = sqlite3.connect(path)
+    with conn:
+        conn.execute("ALTER TABLE ledger ADD COLUMN dry_run INTEGER")
+    conn.close()
+    db = Database.open(path)
+    assert db.save(State(), LEDGER[:2])
+    db.close()
+    assert read_ledger(path) == LEDGER[:2]
 
 
 def test_ledger_indexes(path):
@@ -323,8 +332,6 @@ def test_a_failed_save_writes_nothing(path, fail):
     state.tools("core")[1] = ToolState(boot_id=4)
     with pytest.raises(sqlite3.OperationalError):
         db.save(state, LEDGER[1:2])
-    with pytest.raises(sqlite3.OperationalError):
-        db.save_ledger(LEDGER[1:2])
     assert read_state(path) == full_state()
     assert read_ledger(path) == LEDGER[:1]
     # The next save writes all of it.
@@ -388,7 +395,7 @@ def test_a_load_failure_lets_go_of_the_lock(path):
 
 def test_a_bad_ledger_read_is_a_database_error(path):
     db = Database.open(path)
-    db.save_ledger(LEDGER[:1])
+    db.save(State(), LEDGER[:1])
     db.close()
     conn = sqlite3.connect(path)
     with conn:

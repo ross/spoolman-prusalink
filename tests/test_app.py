@@ -215,6 +215,8 @@ def make_config(tmp_path, **kw):
 
 
 def make_bridge(tmp_path, filament, spools):
+    """A bridge on fake HTTP whose only write is a charge, which Spoolman accepts."""
+
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/api/v1/filament":
             assert request.headers["X-Api-Key"] == "k"
@@ -227,11 +229,13 @@ def make_bridge(tmp_path, filament, spools):
             return httpx.Response(200, json={"id": 9, "file": {"display_name": "part.bgcode"}})
         if request.url.path == "/api/v1/status":
             return httpx.Response(200, json={"printer": {"state": "PRINTING"}, "job": {"id": 9}})
-        assert request.method == "GET", f"phase 1 must not write: {request.method} {request.url}"
+        if request.method == "PUT" and request.url.path.endswith("/use"):
+            return httpx.Response(200, json={})
+        assert request.method == "GET", f"unexpected write: {request.method} {request.url}"
         return httpx.Response(404)
 
     transport = httpx.MockTransport(handler)
-    cfg = make_config(tmp_path)
+    cfg = make_config(tmp_path, flag_field=None, claim_field=None)
     db = Database.open(cfg.db_file)
     return Bridge(
         config=cfg,
@@ -242,7 +246,7 @@ def make_bridge(tmp_path, filament, spools):
     )
 
 
-async def test_poll_logs_would_charge_and_saves_nothing(tmp_path, caplog):
+async def test_poll_charges_and_saves(tmp_path, caplog):
     extruded = {"v": 4310}
 
     def filament():
@@ -258,16 +262,16 @@ async def test_poll_logs_would_charge_and_saves_nothing(tmp_path, caplog):
     await bridge.poll()  # baseline
     extruded["v"] = 5310
     await bridge.poll()
-    assert "[Core One L+] WOULD CHARGE spool 7" in caplog.text
+    assert "[Core One L+] CHARGE spool 7" in caplog.text
     assert "≈ +2.98 g" in caplog.text
 
     ledger = read_ledger(tmp_path / "bridge.db")
     charges = [r for r in ledger if "use_length" in r]
     assert [(r["spool_id"], r["use_length"]) for r in charges] == [(7, 1000)]
+    assert charges[0]["applied"]
     assert any("event" in r for r in ledger)
-    assert all(r["dry_run"] is True for r in ledger)  # Events too, not just charges.
     assert bridge.printers[0].tools[0].charged == 5310
-    assert read_state(tmp_path / "bridge.db") == State()  # Dry run saves only the ledger.
+    assert read_state(tmp_path / "bridge.db").tools("default")[0].charged == 5310
     assert bridge.interval() == bridge.config.poll_printing
     await bridge.aclose()
 
@@ -365,8 +369,6 @@ def test_config_load(tmp_path):
     assert cfg.printers[0].tools == {0: "Core One L+"}
     assert cfg.printers[0].api_key == "secret"
     assert cfg.printers[0].name == "default"
-    assert cfg.dry_run
-
     assert cfg.length_factor == 1.0
     # P1 and C2: poll every 30 s while printing and every 60 s otherwise.
     assert cfg.poll_printing == 30
@@ -385,7 +387,7 @@ def test_config_load(tmp_path):
     p.write_text(base + '[bridge]\nclaim_field = ""\n')
     assert load(p, env={"PRUSALINK_API_KEY": "secret"}).claim_field is None
     p.write_text(base)
-    p.write_text(p.read_text() + '[bridge]\ndry_run = false\nflag_field = "Bad Key"\n')
+    p.write_text(p.read_text() + '[bridge]\nflag_field = "Bad Key"\n')
     with pytest.raises(ConfigError, match="flag_field"):
         load(p, env={"PRUSALINK_API_KEY": "secret"})
 
@@ -402,7 +404,6 @@ CONFIG_BASE = (
         ('[bridge]\nprinter_sync = "false"\n', "bridge.printer_sync must be true or false"),
         ('[bridge]\nflag_drift = "no"\n', "bridge.flag_drift must be true or false"),
         ("[bridge]\nsync_drift = 1\n", "bridge.sync_drift must be true or false"),
-        ('[bridge]\ndry_run = "false"\n', "bridge.dry_run must be true or false"),
         ('[printer]\nuuids = "false"\n', "printer.uuids must be true or false"),
         ('[printer]\ngcode_preamble = "M862.3"\n', "gcode_preamble must be a list of strings"),
         ('[printer]\ngcode_preamble = ["M862.3", 1]\n', "gcode_preamble must be a list of strings"),
@@ -516,10 +517,10 @@ def test_config_accepts_booleans_and_preamble_list(tmp_path):
             "[printer]\n",
             '[printer]\nuuids = false\ngcode_preamble = ["M862.3 P \\"COREONEL\\""]\n',
         )
-        + "[bridge]\nprinter_sync = false\ndry_run = false\npoll_idle = 0.5\n"
+        + "[bridge]\nprinter_sync = false\npoll_idle = 0.5\n"
     )
     cfg = load(p, env={"PRUSALINK_API_KEY": "k"})
-    assert cfg.printer_sync is False and cfg.dry_run is False and cfg.printers[0].uuids is False
+    assert cfg.printer_sync is False and cfg.printers[0].uuids is False
     assert cfg.printers[0].gcode_preamble == ('M862.3 P "COREONEL"',)
     assert cfg.poll_idle == 0.5
 
@@ -550,11 +551,16 @@ def test_config_from_environment_only():
             "PRUSALINK_API_KEY": "k",
             "SPOOLMAN_URL": "http://s",
             "SPOOLMAN_PRUSALINK_LOCATION": "Core One L+",
-            "SPOOLMAN_PRUSALINK_DRY_RUN": "false",
         },
     )
-    assert cfg.printers[0].tools == {0: "Core One L+"} and cfg.dry_run is False
+    assert cfg.printers[0].tools == {0: "Core One L+"}
     assert cfg.db_file.as_posix() == "/data/bridge.db"
+    with pytest.raises(ConfigError, match="SPOOLMAN_PRUSALINK_LOCATION"):
+        load(None, env={"PRUSALINK_URL": "p", "PRUSALINK_API_KEY": "k", "SPOOLMAN_URL": "s"})
+
+
+def test_config_refuses_dry_run(tmp_path):
+    """Dry run was removed: a config that still asks for it is refused, not run live."""
     env = {
         "PRUSALINK_URL": "http://p",
         "PRUSALINK_API_KEY": "k",
@@ -562,21 +568,18 @@ def test_config_from_environment_only():
         "SPOOLMAN_PRUSALINK_LOCATION": "Core One L+",
     }
     for value in ("true", " YES ", "1", "on"):
-        assert load(None, env={**env, "SPOOLMAN_PRUSALINK_DRY_RUN": value}).dry_run is True
-    assert load(None, env=env).dry_run is True  # Unset: dry run is the default.
-    with pytest.raises(ConfigError, match="SPOOLMAN_PRUSALINK_LOCATION"):
-        load(None, env={"PRUSALINK_URL": "p", "PRUSALINK_API_KEY": "k", "SPOOLMAN_URL": "s"})
+        with pytest.raises(ConfigError, match="dry run was removed"):
+            load(None, env={**env, "SPOOLMAN_PRUSALINK_DRY_RUN": value})
+    for value in ("false", "0", ""):
+        load(None, env={**env, "SPOOLMAN_PRUSALINK_DRY_RUN": value})
     with pytest.raises(ConfigError, match="true or false"):
-        load(
-            None,
-            env={
-                "PRUSALINK_URL": "p",
-                "PRUSALINK_API_KEY": "k",
-                "SPOOLMAN_URL": "s",
-                "SPOOLMAN_PRUSALINK_LOCATION": "x",
-                "SPOOLMAN_PRUSALINK_DRY_RUN": "maybe",
-            },
-        )
+        load(None, env={**env, "SPOOLMAN_PRUSALINK_DRY_RUN": "maybe"})
+    p = tmp_path / "c.toml"
+    p.write_text(CONFIG_BASE + "[bridge]\ndry_run = true\n")
+    with pytest.raises(ConfigError, match="dry run was removed"):
+        load(p, env={"PRUSALINK_API_KEY": "k"})
+    p.write_text(CONFIG_BASE + "[bridge]\ndry_run = false\n")
+    load(p, env={"PRUSALINK_API_KEY": "k"})
 
 
 PRINTERS_BASE = (
@@ -769,7 +772,7 @@ def test_main_exits_2_while_another_bridge_holds_the_database(
     p.write_text(CONFIG_BASE + f'[bridge]\ndb_file = "{db}"\n')
     monkeypatch.setenv("PRUSALINK_API_KEY", "k")
     running = Database.open(db)
-    assert main(["-c", str(p), "once"]) == 2  # Dry run too.
+    assert main(["-c", str(p), "once"]) == 2
     assert f"database: {db}.lock is locked" in caplog.text
     running.close()
 
@@ -920,7 +923,7 @@ async def test_adopt_uuid_checks_archived_spools(tmp_path, caplog):
         writes.append(request)
         return httpx.Response(200, json={})
 
-    cfg = make_config(tmp_path, dry_run=False)
+    cfg = make_config(tmp_path)
     transport = httpx.MockTransport(handler)
     bridge = Bridge(
         config=cfg,
@@ -959,7 +962,7 @@ async def test_kept_uuid_is_checked_against_archived_spools_once(tmp_path):
         reads.append(request.url.params.get("allow_archived"))
         return httpx.Response(200, json=[spool_json(7, "Core One L+")])
 
-    cfg = make_config(tmp_path, dry_run=False)
+    cfg = make_config(tmp_path)
     transport = httpx.MockTransport(handler)
     bridge = Bridge(
         config=cfg,
@@ -1150,7 +1153,7 @@ def test_main_quiets_httpx_unless_debugging(tmp_path, fake_bridge, caplog, level
 
 
 async def test_from_config_opens_the_database_and_builds_the_clients(tmp_path):
-    cfg = make_config(tmp_path, dry_run=False)
+    cfg = make_config(tmp_path)
     bridge = Bridge.from_config(cfg)
     try:
         assert [p.name for p in bridge.printers] == ["default"]
@@ -1185,7 +1188,7 @@ async def test_bridge_without_a_database_charges_and_saves_nothing(tmp_path):
             return httpx.Response(200, json={})
         raise AssertionError(f"unexpected {request.method} {request.url}")
 
-    cfg = make_config(tmp_path, dry_run=False, flag_field=None, claim_field=None)
+    cfg = make_config(tmp_path, flag_field=None, claim_field=None)
     transport = httpx.MockTransport(handler)
     bridge = Bridge(
         config=cfg,

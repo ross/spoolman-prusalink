@@ -57,7 +57,6 @@ url = "http://127.0.0.1:7912"
 db_file = "/tmp/sim-bridge.db"
 poll_printing = 2
 poll_idle = 3
-dry_run = false
 ```
 
 ```sh

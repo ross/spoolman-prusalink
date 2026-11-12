@@ -50,7 +50,6 @@ class Config:
     uuid_field: str | None = "instance_uuid"
     # Where an evicted spool goes; "" means no location. Used from phase 3.
     eviction_location: str = ""
-    dry_run: bool = True
     # Multiplier applied to the printer's extruded length before charging.
     length_factor: float = 1.0
     # Spool extra field (type text) the bridge writes flags to; None disables flags.
@@ -315,8 +314,8 @@ def load(path: str | os.PathLike | None, env: dict[str, str] | None = None) -> C
     A file configures one printer with `[printer]` and `[[tools]]`, or several with
     `[[printers]]`. The environment overrides the one-printer form for the basic settings:
     PRUSALINK_URL, PRUSALINK_API_KEY, SPOOLMAN_URL, SPOOLMAN_PRUSALINK_LOCATION (the
-    location of a single-tool printer, used when the file has no [[tools]]) and
-    SPOOLMAN_PRUSALINK_DRY_RUN. With `[[printers]]`, the printer variables are an error.
+    location of a single-tool printer, used when the file has no [[tools]]). With
+    `[[printers]]`, the printer variables are an error.
     """
     env = dict(os.environ) if env is None else env
     raw: dict = {}
@@ -348,9 +347,11 @@ def load(path: str | os.PathLike | None, env: dict[str, str] | None = None) -> C
     else:
         printers = _listed_printers(raw, env)
 
-    dry_run = _env_bool(env, "SPOOLMAN_PRUSALINK_DRY_RUN")
-    if dry_run is None:
-        dry_run = _bool(bridge, "dry_run", True, "bridge.dry_run")
+    # Dry run was removed. A config that still asks for it is refused, not run live.
+    if _env_bool(env, "SPOOLMAN_PRUSALINK_DRY_RUN") or bridge.get("dry_run") is True:
+        raise ConfigError(
+            "dry run was removed; drop bridge.dry_run and SPOOLMAN_PRUSALINK_DRY_RUN to run live"
+        )
 
     length_factor = _number(bridge, "length_factor", 1.0, "bridge.length_factor")
     if not 0 < length_factor <= 2:
@@ -374,7 +375,6 @@ def load(path: str | os.PathLike | None, env: dict[str, str] | None = None) -> C
         poll_idle=_interval(bridge, "poll_idle", 60, "bridge.poll_idle"),
         uuid_field=uuid_field,
         eviction_location=_str(bridge, "eviction_location", "", "bridge.eviction_location"),
-        dry_run=dry_run,
         length_factor=length_factor,
         flag_field=flag_field,
         claim_field=claim_field,

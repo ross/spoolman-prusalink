@@ -52,7 +52,7 @@ class State:
     # when the user edits the spool's weight in Spoolman.
     runouts: dict[int, Runout] = field(default_factory=dict)
     # Spools whose claim the bridge has handled while the box still shows ticked, so a
-    # claim is handled once even if clearing the box fails, or in dry-run mode.
+    # claim is handled once even if clearing the box fails.
     claimed: list[int] = field(default_factory=list)
 
     def tools(self, printer: str) -> dict[int, ToolState]:

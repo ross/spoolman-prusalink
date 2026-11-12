@@ -324,7 +324,7 @@ step maps to one or two actions.
 
 1. **Model and PrusaLink clone.** `model.py`, `prusalink.py`, `config.py`,
    `__main__.py`, one printer and one tool. Acceptance: the bridge's `once`
-   command against it in dry run logs a baseline; a load, unload and reboot
+   command against it logs a baseline; a load, unload and reboot
    driven with `curl` on the control API appear in the bridge's log as the
    right events.
 2. **The page.** Cards, buttons and the event log over SSE. Acceptance: S1
@@ -399,7 +399,7 @@ These aren't simulator work, but the simulator makes each one testable.
 pip install -e '.[sim]'
 python -m simulator -c simulator/sim.example.toml
 python -m simulator seed --spoolman http://127.0.0.1:7912
-python -m simulator bridge-config > /tmp/bridge.toml   # then set spoolman.url, dry_run, poll_*
+python -m simulator bridge-config > /tmp/bridge.toml   # then set spoolman.url, poll_*
 PYTHONPATH=src python -m spoolman_prusalink -c /tmp/bridge.toml run
 ```
 

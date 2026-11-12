@@ -477,9 +477,8 @@ class PrinterBridge:
     ) -> list[dict]:
         """Account one poll and persist the result.
 
-        In dry-run mode, charges go straight to the ledger and the state isn't saved.
-        Otherwise they go to the outbox for `flush()` to send, saved in one transaction
-        with the events and the new counters. Returns the charge and event records.
+        Charges go to the outbox for `flush()` to send, saved in one transaction with the
+        events and the new counters. Returns the charge and event records.
 
         `claims` is this printer's share of `Bridge._claims()`, by tool. Flags for spools
         are added to `flags`, which the bridge completes and writes after every printer.
@@ -488,7 +487,6 @@ class PrinterBridge:
         now = _now()
         events: list[dict] = []
         charges: list[dict] = []
-        dry = self.bridge.config.dry_run
         self._pending_writes = []
         self._adopts = {}
 
@@ -548,7 +546,6 @@ class PrinterBridge:
                         "location": location,
                         "event": ev.kind.value,
                         "message": ev.message,
-                        "dry_run": dry,
                     }
                 )
 
@@ -560,7 +557,7 @@ class PrinterBridge:
                 log.info(
                     "[%s] %s spool %d (%s): %+g mm%s (%s)",
                     location,
-                    "WOULD CHARGE" if dry else "CHARGE",
+                    "CHARGE",
                     c.spool_id,
                     spool.name if spool else "unknown",
                     length,
@@ -580,7 +577,6 @@ class PrinterBridge:
                         "reason": c.reason,
                         "boot_id": reading.boot_id,
                         "extruded": tool_reading.extruded,
-                        "dry_run": dry,
                     }
                 )
 
@@ -604,11 +600,6 @@ class PrinterBridge:
                 flags.setdefault(st.active, []).append(
                     f"{location}: spool is archived but still loaded"
                 )
-            if dry:
-                notes += [
-                    (("would evict", i), f"[{location}] would move spool {i} out of {location!r}")
-                    for i in st.evict
-                ]
             if st.swap is not None and st.active is None:
                 flags.setdefault(st.swap.spool_id, []).append(
                     f"{location}: filament was unloaded, then this spool was moved out. "
@@ -691,11 +682,8 @@ class PrinterBridge:
                     )
             self._notes(tool, notes, compared=not result.skipped)
 
-        if dry:
-            self.bridge._save(events + charges)
-        else:
-            self.bridge.state.outbox.extend(charges)
-            self.bridge._save(events)
+        self.bridge.state.outbox.extend(charges)
+        self.bridge._save(events)
         return events + charges
 
     def _no_write(self, tool: int, st: ToolState) -> None:
@@ -959,8 +947,6 @@ class PrinterBridge:
         # _claims() leaves spools already in `claimed` out of the candidates.
         for spool_id in [claim, *others]:
             self.bridge.state.claimed.append(spool_id)
-            if self.bridge.config.dry_run:
-                log.info("[%s] would clear the claim on spool %d", location, spool_id)
 
     def _provisional_flag(
         self, tool: int, location: str, p: Provisional, spool: Spool | None, status: PrinterStatus
@@ -1135,9 +1121,8 @@ class PrinterBridge:
             writes.append(printer_sync.ToolWrite(tool, spool, uuid_value))
 
         if not writes:
-            # A dry-run job or a wait isn't a problem, so nothing more is said when it's
-            # no longer due. A job that was failing or waiting on a busy printer is.
-            self.bridge._problems.clear((self._key, "dry-run job"))
+            # A wait isn't a problem, so nothing more is said when it's no longer due. A
+            # job that was failing or waiting on a busy printer is.
             self.bridge._problems.clear((self._key, "sync delay"))
             # Both can be open: one line, at the failure's level if it was failing.
             ended = self.bridge._problems.clear(
@@ -1165,18 +1150,6 @@ class PrinterBridge:
             return
         self.bridge._problems.clear((self._key, "sync delay"))
         gcode = printer_sync.build_job(self._preamble(), writes)
-        if self.bridge.config.dry_run:
-            # Nothing is recorded as written, so the same job is due every idle poll.
-            self.bridge._problems.fail(
-                (self._key, "dry-run job"),
-                gcode,
-                "WOULD RUN %s job %s:\n%s",
-                self.label,
-                self.config.sync_file,
-                gcode.rstrip(),
-                level=logging.INFO,
-            )
-            return
         try:
             # The state this poll acted on was read a few requests ago. Check it again
             # right before taking over the printer, in case a print started since.
@@ -1283,8 +1256,6 @@ class Bridge:
     # Claimed spools outside every tool's location, logged once until that changes.
     _unplaced: set[int] = field(default_factory=set)
     _shared: set[int] = field(default_factory=set)  # Spools active in two tools last poll.
-    # Dry run: the UUID each spool would be given, reused so the job stays the same.
-    _dry_uuids: dict[int, str] = field(default_factory=dict)
     # Tag UUIDs not adopted because an archived spool has them, so the archived spools
     # aren't read again every poll.
     _refused_uuids: set[tuple[int, str]] = field(default_factory=set)
@@ -1323,7 +1294,7 @@ class Bridge:
             spoolman=Spoolman(
                 config.spoolman_url,
                 uuid_field=config.uuid_field,
-                flag_field=None if config.dry_run else config.flag_field,
+                flag_field=config.flag_field,
                 claim_field=config.claim_field,
             ),
             state=db.load(),
@@ -1331,18 +1302,10 @@ class Bridge:
         )
 
     def _save(self, ledger: Sequence[dict] = ()) -> None:
-        """Save the state and append the `ledger` records, in one transaction.
-
-        Dry run saves only the records. It keeps its accounting in memory, as if the
-        bridge were stopped: the next live run starts from the last live state and
-        charges everything since, as after an outage.
-        """
+        """Save the state and append the `ledger` records, in one transaction."""
         if self.db is None:
             return
-        if self.config.dry_run:
-            self.db.save_ledger(ledger)
-        else:
-            self.db.save(self.state, ledger)
+        self.db.save(self.state, ledger)
 
     async def aclose(self) -> None:
         try:
@@ -1410,12 +1373,12 @@ class Bridge:
             if printer.name in reads:
                 await printer.adopt_uuids()
         await self.evict(spools)
-        if not self.config.dry_run and self.config.claim_field:
+        if self.config.claim_field:
             await self.sync_claims()
         for printer in self.printers:
             if printer.name in reads and reads[printer.name][0].state in IDLE_STATES:
                 await printer.sync_printer(spools)
-        if not self.config.dry_run and self.config.flag_field:
+        if self.config.flag_field:
             await self.sync_flags(spools)
 
     def _check_shared(self, flags: dict[int, list[str]]) -> None:
@@ -1605,19 +1568,8 @@ class Bridge:
         outage delays charges instead of dropping them. A 404 for the tool's active (or
         already deleted) spool means it was deleted: the charge is held for the tool's
         next spool. Any other 4xx drops the charge with an error so it can't block the rest.
-
-        Dry run sends nothing: charges queued by a live run stay queued until it's off.
         """
         outbox = self.state.outbox
-        if self.config.dry_run and outbox:
-            self._problems.fail(
-                "dry-run outbox",
-                len(outbox),
-                "%d queued charge(s) held until dry run is off",
-                len(outbox),
-            )
-            return True
-        self._problems.clear("dry-run outbox", "no queued charges held for dry run")
         sent = held = dropped = 0
         while outbox:
             rec = outbox[0]
@@ -1681,8 +1633,6 @@ class Bridge:
 
     async def evict(self, spools: list[Spool]) -> None:
         """Move each tool's outgoing spools out of the tool's location."""
-        if self.config.dry_run:
-            return
         # An eviction dropped elsewhere, such as when the spool was moved out by hand,
         # ends any problem moving it.
         pending = {i for p in self.printers for st in p.tools.values() for i in st.evict}
@@ -1732,13 +1682,6 @@ class Bridge:
         """Give a spool an instance UUID in Spoolman, so it can be written to the printer."""
         key = self.config.uuid_field
         assert key
-        if self.config.dry_run:
-            if spool.id not in self._dry_uuids:
-                self._dry_uuids[spool.id] = str(uuid.uuid4())
-                log.info(
-                    "would give spool %d instance UUID %s", spool.id, self._dry_uuids[spool.id]
-                )
-            return self._dry_uuids[spool.id]
         value = str(uuid.uuid4())
         if not await self._ensure_field(key, UUID_FIELD_NAME):
             return None
@@ -1763,11 +1706,6 @@ class Bridge:
         key = self.config.uuid_field
         assert key
         if not store and (spool_id, value) in self._unowned_uuids:
-            return True
-        if self.config.dry_run and store:
-            if self._dry_uuids.get(spool_id) != value:
-                self._dry_uuids[spool_id] = value
-                log.info("would give spool %d its tag's instance UUID %s", spool_id, value)
             return True
         if (spool_id, value) in self._refused_uuids:
             return False
@@ -1892,8 +1830,7 @@ class Bridge:
 
     async def run(self, stop: asyncio.Event) -> None:
         log.info(
-            "starting%s: %s spoolman=%s %s",
-            " in dry-run mode" if self.config.dry_run else "",
+            "starting: %s spoolman=%s %s",
             " ".join(f"{p.label}={p.config.url}" for p in self.printers),
             self.config.spoolman_url,
             " ".join(

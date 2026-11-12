@@ -229,20 +229,6 @@ async def test_failed_store_of_an_adopted_uuid_logs_once_and_retries(uuid_bridge
     await bridge.aclose()
 
 
-async def test_dry_run_logs_once_that_a_spool_would_take_its_tags_uuid(uuid_bridge, caplog):
-    bridge, fake, printer = uuid_bridge
-    bridge.config = replace(bridge.config, dry_run=True)
-    caplog.set_level("INFO")
-    assert await bridge._adopt_uuid(19, TAG) is True
-    assert await bridge._adopt_uuid(19, TAG) is True
-    assert count(caplog, f"would give spool 19 its tag's instance UUID {TAG}") == 1
-    other = "44c406a5-c6f5-4440-bfba-e8060564b717"
-    assert await bridge._adopt_uuid(19, other) is True  # A different tag is news.
-    assert count(caplog, "would give spool 19 its tag's instance UUID") == 2
-    assert fake.writes == [] and fake.fields == []
-    await bridge.aclose()
-
-
 async def test_printer_that_doesnt_report_a_configured_tool_is_noted_once(tmp_path, caplog):
     bridge, fake, printer = make(tmp_path, [spool(19), spool(21, location="Tool 2")])
     printer_bridge = bridge.printers[0]

@@ -207,7 +207,7 @@ def test_evicted_spool_is_ignored_then_forgotten():
 
 
 def test_second_swap_keeps_the_first_eviction_pending():
-    # Evictions never happen (dry run, or set_location keeps failing).
+    # Evictions never happen (set_location keeps failing).
     charges, kinds, state = run(
         [
             (BOOT, r(100), loc(7)),
@@ -1355,7 +1355,7 @@ def test_claim_after_unload_moves_nothing_but_switches():
 
 
 def test_claim_keeps_earlier_evictions():
-    # Spool 5 is still awaiting eviction (dry run, or Spoolman refused the move), and
+    # Spool 5 is still awaiting eviction (Spoolman refused the move), and
     # spool 9 was evicted too before it went back in and was claimed.
     state = ToolState(BOOT, 100, 0, 7, 7, evict=(5, 9))
     res = account(state, BOOT, r(150), loc(5, 7, 9), claim=9)

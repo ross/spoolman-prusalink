@@ -5,23 +5,11 @@ printers to the spools [Spoolman](https://github.com/Donkie/Spoolman) assigns
 to their tools. It reads the per-tool `extruded` counter from PrusaLink's
 `GET /api/v1/filament` endpoint and maps each tool to a Spoolman location.
 
-The bridge starts in dry-run mode, which logs what it would do and records
-what it would charge in the ledger, but changes nothing in Spoolman, on the
-printer or in its saved state. With `dry_run = false`, it charges usage to
-Spoolman, writes flags such as an unconfirmed swap to a text extra field on
-the spool, moves the old spool out of the tool's location when a swap takes
-effect, and writes the loaded spool's name, color, temperatures and UUID to
-the printer.
-
-Dry run is like a stopped bridge that shows what it would do. When it next
-runs live, the bridge starts from the state its last live run saved and
-charges everything printed since then, including during the dry run, as it
-would after an outage. Turning dry run on and off loses no usage, except
-that, as after an outage, a printer restart in between drops the usage
-before the restart. Several spool changes during a dry run also count as
-one unload when the bridge goes live (S14 in `docs/scenarios.md`): usage up
-to the last unload goes to the spool that was active at the last live run,
-and only later usage goes to the spool loaded now.
+The bridge charges usage to Spoolman, writes flags such as an unconfirmed swap
+to a text extra field on the spool, moves the old spool out of the tool's
+location when a swap takes effect, and writes the loaded spool's name, color,
+temperatures and UUID to the printer. It does all of this from the first run,
+so point it at a test Spoolman first if you want to try it safely.
 
 ## Requirements
 
@@ -55,7 +43,6 @@ docker run -d --name spoolman-prusalink --restart unless-stopped \
   -e PRUSALINK_API_KEY=API_KEY \
   -e SPOOLMAN_URL=http://SPOOLMAN_HOST:7912 \
   -e "SPOOLMAN_PRUSALINK_LOCATION=Core One L+" \
-  -e SPOOLMAN_PRUSALINK_DRY_RUN=false \
   -v spoolman-prusalink-data:/data \
   spoolman-prusalink
 ```
@@ -70,7 +57,6 @@ Spoolman's location filter, because that filter matches partial text.
 | `PRUSALINK_API_KEY` | The printer's PrusaLink API key. Single-printer form only. |
 | `SPOOLMAN_URL` | Spoolman's base URL. |
 | `SPOOLMAN_PRUSALINK_LOCATION` | The Spoolman location that stands for the printer's single tool. Single-printer form only. |
-| `SPOOLMAN_PRUSALINK_DRY_RUN` | `true` (the default) logs what the bridge would do and changes nothing. |
 | `SPOOLMAN_PRUSALINK_CONFIG` | Optional path to a TOML config file. `/config/config.toml` is read if it exists. |
 | `LOG_LEVEL` | `INFO` by default. `DEBUG` also logs every HTTP request. |
 
@@ -108,8 +94,8 @@ Do this again whenever you empty the volume.
 
 For multi-tool printers and the other settings, mount a config file based on
 `config.example.toml` at `/config/config.toml`. `PRUSALINK_URL`,
-`PRUSALINK_API_KEY`, `SPOOLMAN_URL` and `SPOOLMAN_PRUSALINK_DRY_RUN` override
-the file. `SPOOLMAN_PRUSALINK_LOCATION` applies only when the file has no
+`PRUSALINK_API_KEY` and `SPOOLMAN_URL` override the file.
+`SPOOLMAN_PRUSALINK_LOCATION` applies only when the file has no
 `[[tools]]` entries, because the file's tools take precedence. In the file,
 `[printer]` also takes `api_key`, or `api_key_env` naming the variable that
 holds the key, and an optional `name` (`default` if unset) that keys the
@@ -117,8 +103,7 @@ printer's state and appears in ledger records. `compose.example.yaml` runs
 the bridge next to Spoolman.
 
 To verify, look for a `baseline` line for each tool in the log. After the
-printer extrudes, look for lines like this one (`WOULD CHARGE` in dry-run
-mode):
+printer extrudes, look for lines like this one:
 
 ```text
 [Core One L+] CHARGE spool 7 (Prusament Galaxy Black): +1000 mm ≈ +2.98 g (extruded)
@@ -194,9 +179,8 @@ PRUSALINK_API_KEY=API_KEY script/server once
 `./config.toml`, or with `$SPOOLMAN_PRUSALINK_CONFIG` if that's set. Its
 arguments go to `spoolman-prusalink`: with none it polls until stopped, and
 `once` polls once and exits. Only one bridge may run against a printer,
-because two would charge the same usage twice, so stop any other bridge first
-or leave `dry_run = true`. See [Development](#development) for the other
-scripts.
+because two would charge the same usage twice, so stop any other bridge
+first. See [Development](#development) for the other scripts.
 
 ## How usage is attributed
 
@@ -209,10 +193,8 @@ into the tool's location while the old filament is still loaded. The bridge
 stages the new spool and keeps charging the old one. When the printer reports
 an unload, usage up to the unload goes to the old spool, and everything after
 it, including the load and purge, goes to the new one. The old spool can stay
-in the location until then. After the unload, the bridge ignores it. With
-`dry_run = false`, it also moves the old spool to `eviction_location`, which
-is no location by default. In dry-run mode, it only logs that it would move
-the spool. Set `eviction_location` in the config file.
+in the location until then. After the unload, the bridge ignores it and
+moves it to `eviction_location`, which is no location by default. Set `eviction_location` in the config file.
 
 If you swap the filament first, the bridge flags an unconfirmed swap and keeps
 charging the assigned spool. Move the new spool into the location before the
@@ -285,8 +267,8 @@ Claiming the spool that's already active confirms it, and nothing moves.
 
 ## Charging and flags
 
-With `dry_run = false`, each charge is saved to the database before it's sent
-to Spoolman, in the same transaction as the counters it came from, and removed once
+Each charge is saved to the database before it's sent to Spoolman, in the
+same transaction as the counters it came from, and removed once
 Spoolman accepts it, in the same transaction as its ledger record. If Spoolman is unreachable or returns a server error,
 charges stay queued and are retried in order on the next poll, including
 after a restart. If Spoolman rejects a charge with a client error (4xx), the
@@ -340,8 +322,7 @@ rewrite a flag that hasn't changed.
 Claims use the `claim_field` extra field (`bridge_claim` by default), a
 boolean field the bridge creates on first use and shows as **Claim held
 usage**. The bridge clears the box after it handles a claim. Set
-`claim_field = ""` to turn claims off. In dry-run mode the bridge handles each
-claim once but doesn't clear the box, so the next live run handles it again.
+`claim_field = ""` to turn claims off.
 
 ## Writing to the printer
 
@@ -459,7 +440,6 @@ changed or removed. Each row has these columns:
   8601 string in UTC.
 - `printer`: the printer's name; `default` when `[printer]` sets none.
 - `tool`: the tool index.
-- `dry_run`: 1 for a record from a dry run, otherwise 0.
 - `spool_id` and `use_length`: for a charge, the spool and the millimeters
   charged to it.
 - `applied`: for a charge Spoolman accepted, when it accepted it.
@@ -470,11 +450,8 @@ changed or removed. Each row has these columns:
   `reason`, `grams` and `extruded_mm`. Read them with `->>`, as in
   `extra ->> 'reason'`.
 
-A live run writes a charge's row when Spoolman answers it, and an event's
-row in the same transaction as the state it changed. Dry run writes its rows
-and no state, creating the database if it's missing, so the run after it
-charges the same usage again from the last live state, with its own events
-and charges, which can differ from the dry run's.
+The bridge writes a charge's row when Spoolman answers it, and an event's
+row in the same transaction as the state it changed.
 
 To total what Spoolman received for each spool, add up `use_length` over
 the charges it accepted:

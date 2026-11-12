@@ -305,8 +305,8 @@ class World:
     async def restart(self, **config) -> None:
         """Stop the bridge and start a new one on the same database, with `config` changed.
 
-        The bridge's restart (B2), a lost database (B4) and a dry run (B6) are tested
-        this way; the new bridge runs on the simulator's clock like the first.
+        The bridge's restart (B2) and a lost database (B4) are tested this way; the new
+        bridge runs on the simulator's clock like the first.
         """
         await self.bridge.aclose()
         self.cfg = replace(self.cfg, **config)
@@ -553,7 +553,6 @@ async def world(
             *(other[-1] for other in others),
         ),
         db_file=tmp_path / "bridge.db",
-        dry_run=False,
         **world_config,
     )
     bridge = Bridge.from_config(cfg)
