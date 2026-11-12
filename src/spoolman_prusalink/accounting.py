@@ -418,12 +418,23 @@ def account(
         out.events.append(Event(kind, message))
 
     def charge(target: int, mm: int, reason: str) -> None:
-        # Every charge counts toward the usage since load, so a refund that moves usage
-        # to another spool moves it there too.
-        if mm:
-            out.charges.append(Charge(target, mm, reason))
-            window = current.since_load
-            current.since_load = {**window, target: window.get(target, 0) + mm}
+        """Charge `mm` to a spool, and add it to each tally kept on that spool.
+
+        Every charge goes through here, so no charge site updates a tally itself. A
+        refund counts too: it moves usage to another spool, which the usage since load
+        has to follow. `take()` and a confirmed swap close the open swap and the
+        provisional charge before they refund, so those two never see one.
+        """
+        if not mm:
+            return
+        out.charges.append(Charge(target, mm, reason))
+        window = current.since_load
+        current.since_load = {**window, target: window.get(target, 0) + mm}
+        swap, provisional = current.swap, current.provisional
+        if swap is not None and swap.spool_id == target:
+            current.swap = replace(swap, mm=swap.mm + mm)
+        if provisional is not None and provisional.spool_id == target:
+            current.provisional = replace(provisional, mm=provisional.mm + mm)
 
     assigned = resolve_assignment(last, location_ids)
     ambiguous = isinstance(assigned, list)
@@ -509,18 +520,16 @@ def account(
             EventKind.HELD_CHARGED,
             f"spool {target} is active; charged it {held} mm held before the printer restarted",
         )
-        # It's usage from before this poll, like usage held by not advancing `charged`.
-        if current.swap is not None and current.swap.spool_id == target:
-            current.swap = replace(current.swap, mm=current.swap.mm + held)
-        if current.provisional is not None and current.provisional.spool_id == target:
-            current.provisional = replace(current.provisional, mm=current.provisional.mm + held)
         current.held_mm = 0
 
     def take(target: int, how: str) -> str:
         """Move the usage since load to `target` and make it active, as a claim does.
 
-        Returns what moved, for the event.
+        That settles which spool went in, so an open swap or a provisional charge is
+        closed. Returns what moved, for the event.
         """
+        current.swap = None
+        current.provisional = None
         # Charge before refunding: Spoolman clamps used_weight at 0, so a refund applied
         # first could be truncated if the charge then fails.
         moved = {i: mm for i, mm in sorted(current.since_load.items()) if i != target and mm > 0}
@@ -578,9 +587,6 @@ def account(
         if before > 0 or carried:
             if current.active is not None:
                 charge(current.active, before, "before unload")
-                provisional = current.provisional
-                if provisional is not None and provisional.spool_id == current.active:
-                    current.provisional = replace(provisional, mm=provisional.mm + before)
             elif current.deleted_spool is not None:
                 current.held_mm += before
             else:
@@ -690,6 +696,7 @@ def account(
                 current.swap = None
         elif swap is not None:
             moved = swap.mm
+            current.swap = None
             if moved > 0:
                 # Charge before refunding: Spoolman clamps used_weight at 0, so a refund
                 # applied first could be truncated if the charge then fails.
@@ -700,7 +707,6 @@ def account(
                 f"swap confirmed: {moved} mm moved from spool {swap.spool_id} to "
                 f"{current.assigned}",
             )
-            current.swap = None
             retire(current.active)
             current.active = current.assigned
         elif (
@@ -750,7 +756,6 @@ def account(
                 f"printer already has spool {current.active}'s filament; switching from "
                 f"spool {old} now and moving {moved}",
             )
-            current.provisional = None
         elif matches(current.assigned):
             event(
                 EventKind.CORRECTION,
@@ -863,11 +868,6 @@ def account(
         else:
             charge(current.active, delta, "extruded")
             current.charged = reading.extruded
-            swap, provisional = current.swap, current.provisional
-            if swap is not None and swap.spool_id == current.active:
-                current.swap = replace(swap, mm=swap.mm + delta)
-            if provisional is not None and provisional.spool_id == current.active:
-                current.provisional = replace(provisional, mm=provisional.mm + delta)
     elif current.held_mm and current.active is None and current.deleted_spool is None:
         # Usage kept over a reboot is still held, though there's no new usage this poll.
         if reading.material is None:

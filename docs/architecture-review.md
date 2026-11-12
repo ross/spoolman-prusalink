@@ -239,10 +239,6 @@ It's pure, well documented, and has 94 tests through its public signature.
 The order of the steps is real: unload, claim, assignment, print start,
 usage. The length isn't the problem. These are:
 
-- **The usage tallies are kept by hand.** `swap.mm` and `provisional.mm`
-  track what's been charged to their spool. Three charge sites each update
-  them: `charge_held`, the unload in step 1, and the usage in step 5. A new
-  charge site has to remember to.
 - **The legal states aren't written down.** Which combinations of `active`,
   `assigned`, `swap`, `provisional`, and `deleted_spool` can occur is known
   only by reasoning. Three commits have removed branches that turned out to
@@ -260,11 +256,6 @@ tests are the check.
 
 Part 1, a small stack of its own:
 
-- **One charge helper owns the tallies.** A charge to a spool updates
-  `swap.mm` and `provisional.mm` when they're on that spool, in the helper,
-  not at each call. Before changing it, trace the refund paths: a claim and
-  a confirmed swap refund a spool and then clear the swap, which looks
-  compatible but isn't confirmed.
 - **Write the invariants down.** One function checks that a `ToolState` is
   a legal combination. The test wrapper calls it on every poll.
 - **One event table** gives each kind its severity and whether it repeats.
