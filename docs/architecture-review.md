@@ -21,9 +21,9 @@ Counts are as of `9402330`.
   last one goes, delete the document.
 
 What was checked: every file in `src/spoolman_prusalink` was read in full,
-and the bridge findings (B1 to B11) come from that reading. The test (T1 to
-T8) and simulator (S1 to S6) findings come from two separate reviews. A
-second pass then checked every finding against the code.
+and the bridge findings (B1 to B11, of which B4 is left) come from that
+reading. The test (T1 to T8) and simulator (S1 to S6) findings come from two
+separate reviews. A second pass then checked every finding against the code.
 
 ## The common pattern
 
@@ -42,63 +42,6 @@ literal level. Don't add a central object that owns levels.
 
 ## Bridge
 
-### B2. `process()` does five jobs
-
-`PrinterBridge.process()` (`app.py`) is about 180 lines. For each tool it
-runs the accounting, builds ledger records, collects flag texts, decides
-UUID trust, and classifies a mismatch as a pending write or drift.
-
-Most conditions are reported on two channels with separately worded text:
-`notes` for the log and `flags` for Spoolman. Symptoms of the two channels
-having no shared model:
-
-- `_notes` (`app.py`) reports an ended note by splitting its text on
-  `"] "` to recover the location.
-- `_COMPARED` (`app.py`) finds the notes about a comparison by testing
-  whether the key is a tuple whose first item is `"printer"` or `"uuid"`.
-  It keeps those notes standing while a tool is skipped.
-- `_compared_flags` and `_keep_compared` do the same job for flags, with
-  their own dictionary. The two mechanisms don't share a key.
-- `_provisional_shown` (`app.py`) is state that exists only so a flag's
-  text doesn't change on every poll, because the text has a growing number
-  in it.
-
-Shape: pure functions that turn a tool's state into a list of conditions.
-Each condition has a key, a spool, a log text, an optional flag text, and
-whether it depends on comparing the printer with the spool. The code that
-creates a condition gives it the literal level it logs at. One differ finds
-the starts and ends, logs each at its condition's level, and collects the
-flags. `process()` becomes the loop that calls them.
-
-Stack #105 left `_notes` as it was, because it already logs on change. This
-finding is about how notes are keyed and paired with flags, not about when
-they log.
-
-Size: large.
-
-### B3. Saved state stores presentation, not facts
-
-- `ToolState.written` (`accounting.py`) holds the `M865` lines of the
-  last write. Three places parse it back with regular expressions:
-  `_written_uuid` (`app.py`), `printer_matches_write`
-  (`printer_sync.py`), and `_written_temperatures`
-  (`printer_sync.py`).
-- `_edited` (`app.py`) decides that a spool was edited in Spoolman by
-  comparing freshly rendered G-code with the saved text. A change to how
-  `filament_lines` renders a line would make every tool that still shows
-  the bridge's last write look edited after an upgrade, and the bridge
-  would write each one once more. Tagged tools are never written, so they
-  aren't affected.
-- `Runout.text` and `PrinterState.flags` are saved as prose. A wording fix
-  doesn't reach state that already exists.
-
-Shape: save what was written as fields (name, color, temperatures, UUID) and
-save runouts as a kind with parameters, as notices are saved as typed events
-(`events.py`). Render G-code and prose
-at the point of use. `PrinterState.flags` can then hold conditions from B2.
-
-Size: medium.
-
 ### B4. The `Bridge` and `PrinterBridge` boundary leaks both ways
 
 The split is "keyed by tool" against "keyed by spool", but each side works
@@ -111,8 +54,8 @@ on the other's private fields:
   writes `bridge.state.runouts`, `bridge.state.claimed`, and
   `bridge.state.outbox`.
 - `Bridge` sets `p._idle_since` in `poll`, calls `p._hold_deleted` from
-  `flush`, reads `p._printer_reach.down` and `p._last_state` in `interval`,
-  and assigns `printer.tools[tool]` in `evict`.
+  `flush`, reads `p._printer_reach.down` in `interval`, and assigns
+  `printer.tools[tool]` in `evict`.
 
 Shape: small owners for the spool-keyed concerns, each with public methods:
 the archived-spool cache, the UUID registry (mint, adopt, refused, unowned),
@@ -120,54 +63,7 @@ and the flags. `PrinterBridge` gets the few it needs instead of a
 back-reference to the whole `Bridge`. `Bridge` asks a printer for what it
 needs through public methods.
 
-Size: medium. Easier after B2, which removes most of the reach-ins.
-
-### B5. The poll order is an implicit protocol
-
-`Bridge.poll()` (`app.py`) calls its phases in a fixed order, and the
-phases talk through fields:
-
-- `process()` fills `_pending_writes` and `_adopts`. `adopt_uuids()` removes
-  tools from `_pending_writes`. `sync_printer()` consumes both.
-- `flags` is a dictionary passed down as an out-parameter and filled by
-  `_claims`, `process`, `_check_shared`, and `_finish_flags`. The result is
-  left in `_flags` for `sync_flags`.
-- `sync_printer` sets `_last_state = "BUSY"`, a state the printer didn't
-  report, so that `interval()` polls again soon.
-- There are seven `_save()` call sites. Several mutations of saved state
-  rely on a later save by other code. `_hold_deleted` has a comment that
-  says so.
-
-Why it hurts: reordering two phases, or adding one, can break another phase
-with no failing type or signature.
-
-Shape: each phase returns a value and the next takes it as an argument.
-`process()` returns the writes it wants, the adoptions, the flags, and the
-ledger records. `poll()` passes them on. A "poll again soon" request is its
-own field. Each phase saves once, at its end.
-
-Size: medium. Falls out of B2 for the most part.
-
-### B7. Write-sync state sits in the accounting state
-
-`needs_sync`, `sync_attempts`, and `written` are fields of `ToolState`.
-`account()` sets `needs_sync` and resets `sync_attempts`
-(`accounting.py`), although the accounting knows nothing else about
-printer writes. `app.py` rewrites all three in `_no_write` and
-`sync_printer`.
-
-Shape: `account()` reports "the active spool changed or the tool unloaded"
-in its result. The write logic owns its own per-tool state, saved beside the
-tool state.
-
-Size: small to medium. Do it with B3, which reshapes `written`.
-
-### B10. Smaller items
-
-- The `tools` table holds a JSON blob per tool, `printer_flags` holds JSON,
-  and `seen_tags` has columns. `SCHEMA_VERSION` doesn't cover the blob's
-  shape. The blob is `ToolState.to_json` in `accounting.py`, so it belongs
-  to workstream 10.
+Size: medium.
 
 ## Tests and tooling
 
@@ -187,31 +83,25 @@ coverage out of the unit suite to remove it.
 
 ### T1. Tests pin the bridge's private state
 
-Tests read, set, or call private attributes of the bridge in about 100
-places. The most used are `db._conn` (16), `_adopt_uuid` (13), `_notes`
-(11), `_flags` (11), and `_mint_uuid` (8).
+Tests read, set, or call private attributes of the bridge in about 45
+places. They fall into two groups:
 
-- `tests/test_failures.py` calls `_adopt_uuid` and `_mint_uuid` to reach
-  each failure. Those belong to the UUID registry in B4, so their tests
-  move when it gets public methods.
-- `tests/test_failures.py` sets `_sync_busy`, `_sync_failed`, and
-  `_sync_delaying` to reach each log line.
-- `tests/test_writes.py` replaces `bridge.db._conn` with a failing
-  connection.
+- **The spool-keyed concerns in B4:** `_adopt_uuid` (13), `_mint_uuid` (8),
+  `_check_shared` (7), `_archived` (7), `_refused_uuids`, `_unowned_uuids`,
+  and `_flag_failing`. Their tests move when B4 gives the UUID registry, the
+  archived-spool cache, and the flags public methods.
+- **Problem records that B4's owners don't hold**, about ten uses:
+  `PrinterBridge._printer_reach` and `Bridge._spoolman_reach`, which track
+  whether the printer and Spoolman can be reached, `_negative`,
+  `_evict_failing`, and `_unusable_fields`. Each test reads one to check that
+  a problem started or ended.
 
-Why it hurts: B2 and B5 can't land without rewriting these tests. The
-unit suite has to reach every branch, and while the logic sits inside
-`process()`, calling a private method or setting a private field is the
-cheapest way to do that.
+Shape: for the first group, test through B4's public methods. For the
+second, check what the bridge logs or does, as the tests around them do, or
+give each side a public read, such as whether it's reachable.
 
-Shape: make the branches cheap to reach in public. Once B2 turns the
-decisions into pure public functions, test those functions directly, as
-`tests/test_tags.py` tests `tags.decide()`. Drive problem states through
-the fake Spoolman's settings and the simulated printer's faults and
-`before_request` hook, as `tests/harness.py` does. Give `Database` a way to
-inject a failing connection.
-
-Size: large. Do it with B2.
+Size: medium. Do it with B4, and don't count T1 as done until the second
+group is gone too.
 
 ### T3. A behavior change is made in two suites
 
@@ -227,9 +117,6 @@ own behavior decides the outcome. Don't narrow the unit suite.
 
 | # | Workstream | Findings | Depends on |
 | --- | --- | --- | --- |
-| 3 | Conditions and saved facts | B2, B3, B5, B7, T1 (rest) | Nothing |
-| 5 | Narrow the bridge boundary | B4, T1 (UUID registry tests) | Workstream 3 |
-| 10 | Accounting state | B10 | Nothing |
+| 5 | Narrow the bridge boundary | B4, T1 | Nothing |
 
-Workstream 10 is independent and can run at any time. T3
-has no work, so it isn't in a workstream.
+T3 has no work, so it isn't in a workstream.
