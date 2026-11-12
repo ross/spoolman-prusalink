@@ -25,6 +25,7 @@ from harness import (
 
 from spoolman_prusalink.db import read_state
 from spoolman_prusalink.errors import BadAnswer, Unreachable
+from spoolman_prusalink.uuids import Minted
 
 TAG = "91da34d9-c1c1-470f-bac7-185a2346f86a"
 
@@ -208,13 +209,13 @@ async def test_failed_uuid_field_setup_mints_nothing(uuid_bridge, caplog):
     caplog.set_level("INFO")
     fake.fail_field = 500
     target = (await bridge.spoolman.spools())[0]
-    assert await bridge._mint_uuid(target) is None
-    assert await bridge._mint_uuid(target) is None
+    assert await bridge.uuids.mint(target) == Minted(None, wait=True)
+    assert await bridge.uuids.mint(target) == Minted(None, wait=True)
     assert count(caplog, "can't set up the 'instance_uuid' spool field") == 1
     assert fake.writes == [] and "instance_uuid" not in fake.spools[19]["extra"]
 
     fake.fail_field = None
-    minted = await bridge._mint_uuid(target)
+    minted = (await bridge.uuids.mint(target)).uuid
     assert minted and stored_uuid(fake, 19) == minted
     assert count(caplog, "'instance_uuid' spool field is set up") == 1
     await bridge.aclose()
@@ -225,12 +226,12 @@ async def test_uuid_field_of_another_type_is_known_until_set_up(uuid_bridge, cap
     caplog.set_level("INFO")
     fake.fields.append({"key": "instance_uuid", "name": "UUID", "field_type": "integer"})
     target = (await bridge.spoolman.spools())[0]
-    assert await bridge._mint_uuid(target) is None
-    assert bridge._unusable_fields == {"instance_uuid"}
+    assert await bridge.uuids.mint(target) == Minted(None, wait=False)
+    assert bridge.fields.unusable("instance_uuid")
 
     fake.fields = []  # Someone deletes the field, so the bridge can set it up.
-    assert await bridge._mint_uuid(target)
-    assert bridge._unusable_fields == set()
+    assert (await bridge.uuids.mint(target)).uuid
+    assert not bridge.fields.unusable("instance_uuid")
     assert count(caplog, "'instance_uuid' spool field is set up") == 1
     await bridge.aclose()
 
@@ -239,13 +240,13 @@ async def test_failed_uuid_field_setup_adopts_nothing(uuid_bridge, caplog):
     bridge, fake, station = uuid_bridge
     caplog.set_level("INFO")
     fake.fail_field = 500
-    assert await bridge._adopt_uuid(19, TAG) is False
-    assert await bridge._adopt_uuid(19, TAG) is False
+    assert await bridge.uuids.adopt(19, TAG) is False
+    assert await bridge.uuids.adopt(19, TAG) is False
     assert count(caplog, "can't set up the 'instance_uuid' spool field") == 1
     assert fake.writes == []
 
     fake.fail_field = None
-    assert await bridge._adopt_uuid(19, TAG) is True
+    assert await bridge.uuids.adopt(19, TAG) is True
     assert stored_uuid(fake, 19) == TAG
     await bridge.aclose()
 
@@ -254,16 +255,16 @@ async def test_failed_archived_check_adopts_nothing_and_logs_once(uuid_bridge, c
     bridge, fake, station = uuid_bridge
     caplog.set_level("INFO")
     fake.fail_read = 500
-    assert await bridge._adopt_uuid(19, TAG) is False
-    assert await bridge._adopt_uuid(19, TAG) is False
+    assert await bridge.uuids.adopt(19, TAG) is False
+    assert await bridge.uuids.adopt(19, TAG) is False
     assert count(caplog, "can't check spool 19's tag UUID") == 1
     assert fake.writes == []
-    assert (19, TAG) not in bridge._refused_uuids  # Not a refusal: it's tried again.
+    assert (19, TAG) not in bridge.uuids.refused  # Not a refusal: it's tried again.
 
     assert levels(caplog, "can't check spool 19's tag UUID") == ["WARNING"]
     fake.fail_read = None
     caplog.clear()
-    assert await bridge._adopt_uuid(19, TAG) is True
+    assert await bridge.uuids.adopt(19, TAG) is True
     assert stored_uuid(fake, 19) == TAG
     assert records(caplog) == [("INFO", f"gave spool 19 its tag's instance UUID {TAG}")]
     await bridge.aclose()
@@ -273,10 +274,10 @@ async def test_failed_check_of_a_kept_uuid_logs_its_recovery(uuid_bridge, caplog
     bridge, fake, station = uuid_bridge
     caplog.set_level("INFO")
     fake.fail_read = 500
-    assert await bridge._adopt_uuid(19, TAG, store=False) is False
+    assert await bridge.uuids.adopt(19, TAG, store=False) is False
     fake.fail_read = None
     caplog.clear()
-    assert await bridge._adopt_uuid(19, TAG, store=False) is True
+    assert await bridge.uuids.adopt(19, TAG, store=False) is True
     assert records(caplog) == [
         ("INFO", f"checked spool 19's tag UUID {TAG}: no other spool has it")
     ]
@@ -288,15 +289,15 @@ async def test_failed_store_of_an_adopted_uuid_logs_once_and_retries(uuid_bridge
     bridge, fake, station = uuid_bridge
     caplog.set_level("INFO")
     fake.fail_patch = 500
-    assert await bridge._adopt_uuid(19, TAG) is False
-    assert await bridge._adopt_uuid(19, TAG) is False
+    assert await bridge.uuids.adopt(19, TAG) is False
+    assert await bridge.uuids.adopt(19, TAG) is False
     assert count(caplog, "can't store an instance UUID on spool 19") == 1
     assert "instance_uuid" not in fake.spools[19]["extra"]
 
     assert levels(caplog, "can't store an instance UUID on spool 19") == ["WARNING"]
     fake.fail_patch = None
     caplog.clear()
-    assert await bridge._adopt_uuid(19, TAG) is True
+    assert await bridge.uuids.adopt(19, TAG) is True
     assert stored_uuid(fake, 19) == TAG
     assert records(caplog) == [("INFO", f"gave spool 19 its tag's instance UUID {TAG}")]
     await bridge.aclose()
@@ -307,12 +308,12 @@ async def test_failed_store_of_a_minted_uuid_logs_once_and_retries(uuid_bridge, 
     caplog.set_level("INFO")
     target = (await bridge.spoolman.spools())[0]
     fake.fail_patch = 500
-    assert await bridge._mint_uuid(target) is None
-    assert await bridge._mint_uuid(target) is None
+    assert await bridge.uuids.mint(target) == Minted(None, wait=True)
+    assert await bridge.uuids.mint(target) == Minted(None, wait=True)
     assert levels(caplog, "can't store an instance UUID on spool 19") == ["WARNING"]
     fake.fail_patch = None
     caplog.clear()
-    minted = await bridge._mint_uuid(target)
+    minted = (await bridge.uuids.mint(target)).uuid
     assert minted and stored_uuid(fake, 19) == minted
     assert records(caplog) == [("INFO", f"gave spool 19 instance UUID {minted}")]
     await bridge.aclose()

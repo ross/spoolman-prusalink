@@ -7,7 +7,7 @@ the bridge's own code isn't mistaken for a bad answer.
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Hashable, Iterator, MutableMapping
 from contextlib import contextmanager
 from typing import Any
 
@@ -28,6 +28,14 @@ class ServiceError(Exception):
     def __init__(self, message: str, summary: str | None = None) -> None:
         super().__init__(message)
         self.summary = message if summary is None else summary
+
+
+def record_failure(failing: MutableMapping, key: Hashable, error: ServiceError) -> bool:
+    """Note `error` as what's failing at `key`. Returns whether it's new or changed."""
+    text = error.summary
+    new = failing.get(key) != text
+    failing[key] = text
+    return new
 
 
 class Unreachable(ServiceError):

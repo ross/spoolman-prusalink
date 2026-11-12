@@ -9,6 +9,7 @@ from spoolman_prusalink.errors import (
     Unreachable,
     check,
     parsing,
+    record_failure,
     send,
 )
 from spoolman_prusalink.prusalink import NoFilamentEndpoint, PrusaLink
@@ -122,3 +123,22 @@ async def test_upload_to_a_printing_printer_is_busy():
     with pytest.raises(Busy, match="409 Conflict for PUT /api/v1/files/usb/a.gcode: printing"):
         await printer.upload_and_print("usb", "a.gcode", "G28\n")
     await printer.aclose()
+
+
+# record_failure: a failing dict keeps the last error logged for each key
+
+
+def test_record_failure_says_whether_an_error_is_new_or_changed():
+    failing: dict[int, str] = {}
+    assert record_failure(failing, 7, BadAnswer("boom")) is True
+    assert record_failure(failing, 7, BadAnswer("boom")) is False
+    assert record_failure(failing, 7, BadAnswer("bang")) is True
+    assert record_failure(failing, 8, BadAnswer("bang")) is True
+    assert failing == {7: "bang", 8: "bang"}
+
+
+def test_record_failure_compares_the_summary_not_the_body():
+    failing: dict[int, str] = {}
+    assert record_failure(failing, 7, BadAnswer("502: request 1", 502, "502")) is True
+    assert record_failure(failing, 7, BadAnswer("502: request 2", 502, "502")) is False
+    assert record_failure(failing, 7, BadAnswer("503: request 3", 503, "503")) is True

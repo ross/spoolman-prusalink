@@ -13,7 +13,7 @@ import pytest
 from spoolman_prusalink import __main__ as main_module
 from spoolman_prusalink.__main__ import main
 from spoolman_prusalink.accounting import ToolState
-from spoolman_prusalink.app import Bridge, Reachability, _log_failed, _log_ok, _record
+from spoolman_prusalink.app import Bridge, Reachability, _log_failed, _log_ok
 from spoolman_prusalink.config import Config, ConfigError, PrinterConfig, load
 from spoolman_prusalink.db import Database, DatabaseError, read_ledger, read_state
 from spoolman_prusalink.errors import BadAnswer, Unreachable
@@ -933,7 +933,7 @@ async def test_adopt_uuid_checks_archived_spools(tmp_path, caplog):
         db=Database.open(cfg.db_file),
     )
     caplog.set_level("INFO")
-    assert await bridge._adopt_uuid(7, TAG) is False
+    assert await bridge.uuids.adopt(7, TAG) is False
     assert reads == ["true"] and writes == []
     assert caplog.text.count("archived spool 6 has it") == 1
     await bridge.aclose()
@@ -955,7 +955,7 @@ async def test_kept_uuid_is_checked_against_archived_spools_once(tmp_path):
         db=Database.open(cfg.db_file),
     )
     for _ in range(2):
-        assert await bridge._adopt_uuid(7, TAG, store=False) is True
+        assert await bridge.uuids.adopt(7, TAG, store=False) is True
     assert reads == ["true"]  # Read once, and nothing written.
     await bridge.aclose()
 
@@ -1071,25 +1071,6 @@ async def test_from_config_passes_the_clock_and_transports(tmp_path):
         assert seen == ["printer", "spoolman"]
     finally:
         await bridge.aclose()
-
-
-# _record: a failing dict keeps the last error logged for each key
-
-
-def test_record_says_whether_an_error_is_new_or_changed():
-    failing: dict[int, str] = {}
-    assert _record(failing, 7, BadAnswer("boom")) is True
-    assert _record(failing, 7, BadAnswer("boom")) is False
-    assert _record(failing, 7, BadAnswer("bang")) is True
-    assert _record(failing, 8, BadAnswer("bang")) is True
-    assert failing == {7: "bang", 8: "bang"}
-
-
-def test_record_compares_the_summary_not_the_body():
-    failing: dict[int, str] = {}
-    assert _record(failing, 7, BadAnswer("502: request 1", 502, "502")) is True
-    assert _record(failing, 7, BadAnswer("502: request 2", 502, "502")) is False
-    assert _record(failing, 7, BadAnswer("503: request 3", 503, "503")) is True
 
 
 def reach_lines(caplog):

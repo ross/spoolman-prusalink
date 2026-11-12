@@ -6,8 +6,7 @@ import asyncio
 import contextlib
 import logging
 import time
-import uuid
-from collections.abc import Callable, Hashable, Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from enum import Enum
@@ -20,7 +19,6 @@ from .accounting import ToolState, account, hold_deleted
 from .archive import ArchivedSpools
 from .conditions import (
     CLAIM_FIELD_NAME,
-    UUID_FIELD_NAME,
     ArchivedLoaded,
     Condition,
     Drift,
@@ -41,14 +39,16 @@ from .conditions import (
 )
 from .config import Config, PrinterConfig
 from .db import Database
-from .errors import Busy, NotFound, Rejected, ServiceError, Unreachable
+from .errors import Busy, NotFound, Rejected, ServiceError, Unreachable, record_failure
 from .events import Report, Unload
+from .fields import SpoolFields
 from .models import FilamentReading, Spool
 from .prusalink import BUSY_STATES, IDLE_STATES, NoFilamentEndpoint, PrinterStatus, PrusaLink
 from .records import ChargeRecord, EventRecord
 from .spoolman import Spoolman
 from .state import PrinterState, Runout, State
 from .tags import Decision, SeenTag
+from .uuids import UuidRegistry
 
 log = logging.getLogger("spoolman_prusalink")
 
@@ -162,14 +162,6 @@ def _log_ok(reach: Reachability) -> None:
         log.warning("%s reachable again after %s", reach.name, _duration(recovery.lasted))
     else:
         log.warning("%s reads working again after %s", reach.name, _duration(recovery.lasted))
-
-
-def _record(failing: dict, key: Hashable, error: ServiceError) -> bool:
-    """Note `error` as what's failing at `key`. Returns whether it's new or changed."""
-    text = error.summary
-    new = failing.get(key) != text
-    failing[key] = text
-    return new
 
 
 # A mid-print unload with more than this fraction of the net weight left in Spoolman
@@ -375,7 +367,7 @@ class PrinterBridge:
             try:
                 found = await self.bridge.spoolman.spool(spool_id)
             except ServiceError as e:
-                if _record(self._lookup_failing, spool_id, e):
+                if record_failure(self._lookup_failing, spool_id, e):
                     log.warning(
                         "[%s] can't look up spool %d, which is missing from Spoolman's list: %s",
                         location,
@@ -639,7 +631,7 @@ class PrinterBridge:
                     certain=st.assigned == st.active and st.swap is None and st.provisional is None,
                     spools=spools,
                     uuids=self._uuids,
-                    refused=self.bridge._refused_uuids,
+                    refused=self.bridge.uuids.refused,
                     written_uuid=written.uuid if (written := self._write(tool).written) else None,
                 )
             if seen != SeenTag():
@@ -797,9 +789,9 @@ class PrinterBridge:
         """
         left = Plan(list(plan.writes))
         for tool, adopt in plan.adoptions.items():
-            if await self.bridge._adopt_uuid(adopt.spool_id, adopt.uuid, store=adopt.store):
+            if await self.bridge.uuids.adopt(adopt.spool_id, adopt.uuid, store=adopt.store):
                 left.adoptions[tool] = adopt
-            elif (adopt.spool_id, adopt.uuid) not in self.bridge._refused_uuids:
+            elif (adopt.spool_id, adopt.uuid) not in self.bridge.uuids.refused:
                 left.writes = [t for t in left.writes if t != tool]
         return left
 
@@ -936,10 +928,8 @@ class PrinterBridge:
                 elif adopted is not None and adopted.spool_id == spool.id:
                     uuid_value = adopted.uuid
                 else:
-                    uuid_value = await self.bridge._mint_uuid(spool)
-                    if uuid_value is None and self.bridge.config.uuid_field not in (
-                        self.bridge._unusable_fields
-                    ):
+                    uuid_value, wait = await self.bridge.uuids.mint(spool)
+                    if wait:
                         # The spool gets its UUID first (W1): written without one, the
                         # printer would match the write and no later poll would mint
                         # again. The write stays due, and the next poll retries the mint.
@@ -1023,16 +1013,13 @@ class Bridge:
     db: Database
     state: State = field(default_factory=State)
     printers: list[PrinterBridge] = field(init=False, default_factory=list)
-    _ready_fields: set[str] = field(default_factory=set)
-    # Field keys whose last setup failure was `Rejected`: it needs someone to fix it.
-    _unusable_fields: set[str] = field(default_factory=set)
+    fields: SpoolFields = field(init=False)
+    uuids: UuidRegistry = field(init=False)
     _spoolman_reach: Reachability = field(init=False)
     # What's failing now, by spool, with the last error logged for each.
     _unclaim_failing: dict[int, str] = field(default_factory=dict)
     _evict_failing: dict[int, str] = field(default_factory=dict)
-    _uuid_failing: dict[int, str] = field(default_factory=dict)
     _flag_failing: dict[int, str] = field(default_factory=dict)
-    _field_failing: dict[str, str] = field(default_factory=dict)
     # The status or error code of a charge that's stuck in the outbox, if one is.
     _charge_failing: str | None = None
     # Active or flagged spools missing from Spoolman's list that turned out to be archived.
@@ -1044,16 +1031,13 @@ class Bridge:
     _shared: dict[int, list[str]] = field(default_factory=dict)
     # Loaded spools that showed a negative remaining weight last poll.
     _negative: set[int] = field(default_factory=set)
-    # Tag UUIDs not adopted because an archived spool has them, so the archived spools
-    # aren't read again every poll.
-    _refused_uuids: set[tuple[int, str]] = field(default_factory=set)
-    # UUIDs kept on the printer for a spool that no archived spool has, checked once.
-    _unowned_uuids: set[tuple[int, str]] = field(default_factory=set)
     clock: Callable[[], float] = time.monotonic
 
     def __post_init__(self) -> None:
         # Read through `self`, so a clock set later reaches it too.
         self._spoolman_reach = Reachability("Spoolman", lambda: self.clock())
+        self.fields = SpoolFields(self.spoolman)
+        self.uuids = UuidRegistry(self.spoolman, self.fields, self.config.uuid_field)
         several = len(self.config.printers) > 1
         self.printers = [
             PrinterBridge(
@@ -1361,14 +1345,14 @@ class Bridge:
         """
         key = self.config.claim_field
         assert key
-        if not await self._ensure_field(key, CLAIM_FIELD_NAME, "boolean"):
+        if not await self.fields.ensure(key, CLAIM_FIELD_NAME, "boolean"):
             return
         changed = False
         for spool_id in list(self.state.claimed):
             try:
                 await self.spoolman.set_extra(spool_id, key, False)
             except ServiceError as e:
-                if _record(self._unclaim_failing, spool_id, e):
+                if record_failure(self._unclaim_failing, spool_id, e):
                     log.warning("can't clear the claim on spool %d: %s", spool_id, e)
                 else:
                     log.debug("still can't clear the claim on spool %d: %s", spool_id, e)
@@ -1476,7 +1460,7 @@ class Bridge:
                             continue
                         await self.spoolman.set_location(spool_id, target)
                     except ServiceError as e:
-                        if _record(self._evict_failing, spool_id, e):
+                        if record_failure(self._evict_failing, spool_id, e):
                             log.warning("[%s] can't move spool %d out: %s", location, spool_id, e)
                         else:
                             log.debug(
@@ -1493,104 +1477,6 @@ class Bridge:
                     st = replace(st, evict=tuple(i for i in st.evict if i != spool_id))
                     printer.tools[tool] = st
                     self._save()
-
-    async def _mint_uuid(self, spool: Spool) -> str | None:
-        """Give a spool an instance UUID in Spoolman, so it can be written to the printer."""
-        key = self.config.uuid_field
-        assert key
-        value = str(uuid.uuid4())
-        if not await self._ensure_field(key, UUID_FIELD_NAME):
-            return None
-        try:
-            await self.spoolman.set_extra(spool.id, key, value)
-        except ServiceError as e:
-            self._uuid_trouble(spool.id, e, "can't store an instance UUID on spool %d: %s")
-            return None
-        self._uuid_failing.pop(spool.id, None)
-        log.info("gave spool %d instance UUID %s", spool.id, value)
-        return value
-
-    async def _adopt_uuid(self, spool_id: int, value: str, store: bool = True) -> bool:
-        """Store a tag's instance UUID on a spool that has none. Returns whether it did.
-
-        Spoolman's list leaves out archived spools, so they're checked here: a runout
-        reload can show an archived spool's tag. A spool that has the UUID already keeps
-        it, and this one doesn't take it. With `store` False, only that check is made,
-        once, for a UUID kept on the printer without storing it.
-        """
-        key = self.config.uuid_field
-        assert key
-        if not store and (spool_id, value) in self._unowned_uuids:
-            return True
-        try:
-            every = await self.spoolman.spools(archived=True)
-        except ServiceError as e:
-            self._uuid_trouble(spool_id, e, "can't check spool %d's tag UUID: %s")
-            return False
-        owner = next(
-            (
-                s.id
-                for s in every
-                if s.id != spool_id and (s.instance_uuid or "").lower() == value.lower()
-            ),
-            None,
-        )
-        if owner is not None:
-            self._refused_uuids.add((spool_id, value))
-            # Logged once: `tags.decide` doesn't propose a refused pair again.
-            self._uuid_failing.pop(spool_id, None)
-            log.info(
-                "spool %d can't take instance UUID %s from the printer: archived spool %d has it",
-                spool_id,
-                value,
-                owner,
-            )
-            return False
-        if not store:
-            self._unowned_uuids.add((spool_id, value))
-            if self._uuid_failing.pop(spool_id, None) is not None:
-                log.info("checked spool %d's tag UUID %s: no other spool has it", spool_id, value)
-            return True
-        if not await self._ensure_field(key, UUID_FIELD_NAME):
-            return False
-        try:
-            await self.spoolman.set_extra(spool_id, key, value)
-        except ServiceError as e:
-            self._uuid_trouble(spool_id, e, "can't store an instance UUID on spool %d: %s")
-            return False
-        self._uuid_failing.pop(spool_id, None)
-        log.info("gave spool %d its tag's instance UUID %s", spool_id, value)
-        return True
-
-    def _uuid_trouble(self, spool_id: int, error: Exception, message: str) -> None:
-        """Log a failed UUID store or check at WARNING, or at DEBUG if it repeats."""
-        if _record(self._uuid_failing, spool_id, error):
-            log.warning(message, spool_id, error)
-        else:
-            log.debug(message, spool_id, error)
-
-    async def _ensure_field(self, key: str, name: str, field_type: str = "text") -> bool:
-        if key in self._ready_fields:
-            return True
-        try:
-            await self.spoolman.ensure_field(key, name, field_type)
-        except ServiceError as e:
-            # A refusal, such as a key of another type, a proxy refusing the fields API or
-            # a Spoolman without it, lasts until someone fixes it. Anything else may pass.
-            if isinstance(e, Rejected):
-                self._unusable_fields.add(key)
-            else:
-                self._unusable_fields.discard(key)  # Passing, whatever failed before.
-            if _record(self._field_failing, key, e):
-                log.warning("can't set up the %r spool field: %s", key, e)
-            else:
-                log.debug("can't set up the %r spool field: %s", key, e)
-            return False
-        if self._field_failing.pop(key, None) is not None:
-            log.info("%r spool field is set up", key)
-        self._unusable_fields.discard(key)
-        self._ready_fields.add(key)
-        return True
 
     def _flag_spool_deleted(self, spool_id: int) -> bool:
         """Forget a deleted spool's flag, and end a failing update on it.
@@ -1613,7 +1499,7 @@ class Bridge:
         """
         key = self.config.flag_field
         assert key
-        if not await self._ensure_field(key, FLAG_FIELD_NAME):
+        if not await self.fields.ensure(key, FLAG_FIELD_NAME):
             return
         current = {s.id: s.flag for s in [*spools, *self.archived]}
         changed = False
@@ -1626,7 +1512,7 @@ class Bridge:
                 try:
                     found = await self.spoolman.spool(spool_id)
                 except ServiceError as e:
-                    if _record(self._flag_failing, spool_id, e):
+                    if record_failure(self._flag_failing, spool_id, e):
                         log.warning("can't look up flagged spool %d: %s", spool_id, e)
                     else:
                         log.debug("can't look up flagged spool %d: %s", spool_id, e)
@@ -1650,7 +1536,7 @@ class Bridge:
                     changed |= self._flag_spool_deleted(spool_id)
                     continue
                 except ServiceError as e:
-                    if _record(self._flag_failing, spool_id, e):
+                    if record_failure(self._flag_failing, spool_id, e):
                         log.warning("can't update the flag on spool %d: %s", spool_id, e)
                     else:
                         log.debug("can't update the flag on spool %d: %s", spool_id, e)
