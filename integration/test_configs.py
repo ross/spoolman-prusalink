@@ -33,7 +33,9 @@ from integration.faults import set_extra_text
 from integration.temperatures import TEMPERATURES, WRITTEN
 from integration.test_writes import SYNC_FILE, gcode, write_due, wrote_b
 from simulator.model import Material
-from spoolman_prusalink.printer_sync import COREONEL_PREAMBLE
+from spoolman_prusalink.printer_sync import PRINTER_MODELS, default_preamble
+
+COREONEL_PREAMBLE = default_preamble(PRINTER_MODELS["8.1.0"])
 
 # Setups that leave the bridge with no instance UUIDs to write or compare: models with no
 # tag reader, and a Core One L with the Spoolman field off.
@@ -146,8 +148,8 @@ async def test_s1_tag_uuid_is_not_adopted_without_uuids(world: World):
 
 # --- Features turned off ---
 @pytest.mark.parametrize(
-    "world_config",
-    [dict(flag_drift=False), dict(flag_field="")],
+    "world_config, world_printer",
+    [({}, dict(flag_drift=False)), (dict(flag_field=""), {})],
     ids=["flag_drift", "flag_field"],
     indirect=True,
 )

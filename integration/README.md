@@ -81,7 +81,7 @@ script/integration --cov=spoolman_prusalink --cov-fail-under=0
   as `"1.4.0"` for an MK4, gets that single-tool model instead, with no UUID on
   spool A or the printer. `world_config` overrides the bridge's `Config`, such
   as `flag_field=""`, and `world_printer` overrides the printer's
-  `PrinterConfig`, such as `sync_file="other.gcode"`. All three are set with
+  `PrinterConfig`, such as `sync_drift=True`. All three are set with
   `@pytest.mark.parametrize(..., indirect=True)`.
 - **A second printer, when asked for.** A test that takes `world_printers`
   at 2 (`@pytest.mark.parametrize("world_printers", [2], indirect=True)`)
@@ -104,7 +104,8 @@ Each test is named after its row in `docs/scenarios.md`. The table below is
 generated from the tests: the row comes from the name and the description from
 the first line of the docstring. Update it with
 `python -m integration.table --write`. A unit test checks that the table is
-current and that the scenario rows name their tests.
+current and that every test's row is in `docs/scenarios.md` with an end to
+end Status.
 
 <!-- table:begin -->
 | Row | Test | What it checks |
@@ -287,9 +288,9 @@ current and that the scenario rows name their tests.
    `events()` and `charges()`), spools in Spoolman (`w.used()`, `w.flag()`,
    `w.spoolman.extra()`), and the printer (`w.material()`, `w.requests()`,
    `w.sim.events`).
-5. Set the row's Status in `docs/scenarios.md` to end to end, naming the test,
-   and run `python -m integration.table --write`.
-   `pytest tests/test_integration_table.py` checks all three.
+5. Set the row's Status in `docs/scenarios.md` to end to end, saying what the
+   test covers, and run `python -m integration.table --write`.
+   `pytest tests/test_integration_table.py` checks the table and the row.
 
 To make Spoolman fail, use `w.spoolman_faults`, a transport in front of the
 bridge's Spoolman client (`integration/faults.py`). It passes requests through
