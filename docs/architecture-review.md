@@ -357,8 +357,15 @@ alone. That drops a documented feature, so the work includes:
   tests that only it reaches. The `uuid_field = ""` case covers the rest.
 - The `uuids = false` tests in `tests/test_writes.py` and
   `tests/test_app.py`.
+- `uuids` in `PRINTER_KEYS` in `tests/test_writes.py`, and the two
+  wrong-type cases in `tests/test_app.py`.
+- The simulator's generated bridge config, which writes `uuids = false` for
+  a model without UUIDs (`simulator/config.py` and its test).
+- The `uuids` arguments in the integration harness, in `world` and
+  `add_printers`. Both raise `TypeError` once the field is gone, so every
+  integration world depends on removing them.
 - The mentions in `README.md`, `config.example.toml`, `docs/scenarios.md`,
-  and `docs/multi-printer.md`.
+  `docs/multi-printer.md`, and the examples and comments in `integration/`.
 
 `uuid_field` stays: it names the Spoolman field, and `uuid_field = ""`
 still turns UUIDs off for the whole bridge, as `flag_field` and
