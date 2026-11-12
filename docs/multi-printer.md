@@ -113,8 +113,7 @@ Move the per-printer group into a `PrinterBridge` class with `process()`,
 Spoolman client, the spool-keyed state, `flush()`, `evict()`,
 `sync_claims()`, `sync_flags()`, and a list of printer bridges. The claims
 resolver maps a location to a printer and tool pair instead of a bare tool
-index. `Once`, the per-problem logger, stays on `Bridge`, with the printer
-name added to keys that were per tool.
+index.
 
 The accounting module, the PrusaLink and Spoolman clients, printer sync,
 drift, and color don't change.
