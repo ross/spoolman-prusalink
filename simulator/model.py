@@ -858,8 +858,9 @@ class SimPrinter:
     def _hand_load(self, t: SimTool, material: Material | None) -> None:
         if t.process is not None:
             raise Busy("a load or unload is already running")
-        t.fill(t.kept() if material is None else material)
-        t.gap = 0.0
+        # Filament goes in even when there's no type to restore.
+        t.store(t.kept() if material is None else material)
+        t.loaded, t.gap = True, 0.0
         self._log("load", f"T{t.index} loaded by hand while off: {_describe(t.material)}")
 
     def unload(self, tool: int) -> None:

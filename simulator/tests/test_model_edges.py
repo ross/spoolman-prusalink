@@ -570,3 +570,15 @@ def test_a_tool_can_be_disabled_during_a_sync_job():
     assert not p.tools[2].enabled
     with pytest.raises(Invalid, match="T0 is in use"):
         p.set_tool_enabled(0, False)
+
+
+def test_a_reload_by_hand_with_no_type_to_restore_still_loads_the_tool():
+    """A runout on a tool that never had a type: the hand reload has nothing to restore."""
+    sim, p = printing()
+    tool = p.tools[0]
+    tool.material = tool.previous = None  # no type was ever stored
+    p.runout(0)
+    assert tool.kept() is None
+    p.set_power("off")
+    p.load(0)
+    assert tool.loaded and tool.material is None
