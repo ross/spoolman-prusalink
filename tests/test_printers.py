@@ -237,11 +237,11 @@ async def test_x6_shared_spool_logs_again_when_it_recurs(tmp_path, caplog):
     for _ in range(2):
         a_tools[0] = ToolState(boot_id=1, active=19, assigned=19)
         b_tools[0] = ToolState(boot_id=1, active=19, assigned=20)
-        bridge._check_shared({})
-        bridge._check_shared({})
+        bridge._check_shared()
+        bridge._check_shared()
         a_tools[0] = ToolState(boot_id=1, active=None, assigned=19)
         b_tools[0] = ToolState(boot_id=1, active=None, assigned=20)
-        bridge._check_shared({})
+        bridge._check_shared()
     assert caplog.text.count(warning) == 2
     assert caplog.text.count("spool 19 is no longer active in more than one tool") == 2
     await bridge.aclose()
@@ -252,12 +252,12 @@ async def test_shared_spool_logs_again_when_its_locations_change(tmp_path, caplo
     a_tools, b_tools = bridge.state.tools("a"), bridge.state.tools("b")
     a_tools[0] = ToolState(boot_id=1, active=19, assigned=19)
     b_tools[0] = ToolState(boot_id=1, active=19, assigned=20)
-    bridge._check_shared({})
-    bridge._check_shared({})
+    bridge._check_shared()
+    bridge._check_shared()
     assert caplog.text.count("spool 19 is active in Tool a and Tool b at once") == 1
     bridge.printers[0].config.tools[0] = "Tool c"
-    bridge._check_shared({})
-    bridge._check_shared({})
+    bridge._check_shared()
+    bridge._check_shared()
     assert caplog.text.count("spool 19 is active in Tool c and Tool b at once") == 1
     assert "no longer active" not in caplog.text
     await bridge.aclose()
@@ -412,7 +412,7 @@ async def test_read_failures_name_the_printer(tmp_path, caplog):
 async def test_x16_runout_flag_clears_when_the_spool_becomes_active_elsewhere(tmp_path):
     bridge, fake, printers = await baseline(tmp_path, [spool(19, A), spool(20, B)])
     a, b = printers["a"], printers["b"]
-    bridge.state.runouts[19] = Runout("Tool a: unloaded mid-print with 900 g left", 1000.0, 100.0)
+    bridge.state.runouts[19] = Runout("Tool a", 900.0, 1000.0, 100.0)
     unload(a)
     await bridge.poll()
     assert "unloaded mid-print" in fake.flag(19)

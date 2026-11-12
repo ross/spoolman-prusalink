@@ -9,11 +9,13 @@ import pytest
 from harness import (
     LOC,
     PLA,
+    answer,
     drop,
     fill,
     jobs,
     levels,
     make,
+    menu,
     restart,
     spool,
     spool_x,
@@ -23,7 +25,6 @@ from harness import (
 
 from spoolman_prusalink.db import read_state
 from spoolman_prusalink.errors import BadAnswer, Unreachable
-from spoolman_prusalink.events import EventKind
 
 TAG = "91da34d9-c1c1-470f-bac7-185a2346f86a"
 
@@ -123,23 +124,47 @@ async def test_sync_job_busy_and_failing_ends_with_one_line(tmp_path, caplog):
     bridge, fake, station = make(tmp_path, [spool(19)])
     caplog.set_level("INFO")
     await bridge.poll()
-    printer_bridge = bridge.printers[0]
-    # A 409 left the job waiting, then a later attempt failed outright.
-    printer_bridge._sync_busy, printer_bridge._sync_failed = "409", "500"
+    # A swap to spool 20, loaded from the menu: a write is due.
+    station.tool.unload_count, station.tool.extruded_at_unload = 1, 1000
+    fill(station.tool, menu("PLA"))
+    fake.spools[20] = spool_x(20)
+    # A 409 leaves the job waiting, then a later attempt fails outright.
+    station.before_request = answer(409, "PUT")
+    await bridge.poll()
+    station.before_request = answer(500, "PUT")
+    await bridge.poll()
+    assert levels(caplog, "busy; sync job waits") == ["INFO"]
+    assert levels(caplog, "sync job failed") == ["WARNING"]
+    fake.spools[20]["location"] = None  # The spool is leaving: nothing to write any more.
     caplog.clear()
-    await bridge.poll()  # Nothing to write any more.
+    await bridge.poll()
     assert levels(caplog, "sync job no longer needed") == ["WARNING"]
 
-    printer_bridge._sync_busy = "409"
+    # A job that only waited on a busy printer ends at INFO.
+    fake.spools[20]["location"] = LOC
+    station.before_request = answer(409, "PUT")
+    await bridge.poll()
+    fake.spools[20]["location"] = None
     caplog.clear()
     await bridge.poll()
     assert levels(caplog, "sync job no longer needed") == ["INFO"]
+    await bridge.aclose()
 
-    printer_bridge._sync_delaying = True  # A delay wait ends without a line.
-    caplog.clear()
+
+async def test_sync_job_waiting_out_the_delay_ends_without_a_line(tmp_path, caplog):
+    bridge, fake, station = make(tmp_path, [spool(19)], sync_delay=3600)
+    caplog.set_level("INFO")
+    await bridge.poll()
+    station.tool.unload_count, station.tool.extruded_at_unload = 1, 1000
+    fill(station.tool, menu("PLA"))
+    fake.spools[20] = spool_x(20)
+    await bridge.poll()
+    assert count(caplog, "sync job waits until the printer has been idle") == 1
+    fake.spools[20]["location"] = None
     await bridge.poll()
     await bridge.poll()
     assert count(caplog, "sync job no longer needed") == 0
+    assert jobs(station) == []
     await bridge.aclose()
 
 
@@ -308,55 +333,6 @@ async def test_printer_that_doesnt_report_a_configured_tool_is_noted_once(tmp_pa
     await bridge.aclose()
 
 
-async def test_a_tool_note_that_goes_away_is_logged_once_at_its_level(tmp_path, caplog):
-    bridge, fake, station = make(tmp_path, [spool(19)])
-    caplog.set_level("INFO")
-    printer_bridge = bridge.printers[0]
-    gone = ("index", "[Tool 2] printer doesn't report tool index 1")
-    kept = ("other", "[Tool 2] another note")
-    printer_bridge._notes(1, [gone, kept])
-    printer_bridge._notes(1, [kept])  # Only the note that went away ends.
-    printer_bridge._notes(1, [kept])
-    printer_bridge._notes(1, [])
-    printer_bridge._notes(1, [])
-    ends = [(r.levelname, r.getMessage()) for r in caplog.records if "no longer" in r.getMessage()]
-    assert ends == [
-        ("WARNING", "[Tool 2] no longer: printer doesn't report tool index 1"),
-        ("WARNING", "[Tool 2] no longer: another note"),
-    ]
-    caplog.clear()
-    printer_bridge._notes(1, [gone])  # Back again: logged afresh.
-    assert [r.getMessage() for r in caplog.records] == [gone[1]]
-    await bridge.aclose()
-
-
-async def test_a_tool_note_with_new_detail_is_logged_without_an_end_line(tmp_path, caplog):
-    bridge, fake, station = make(tmp_path, [spool(19)])
-    caplog.set_level("INFO")
-    printer_bridge = bridge.printers[0]
-    what = ("printer", 19)
-    printer_bridge._notes(0, [(what, f"[{LOC}] printer differs from spool 19: color")])
-    printer_bridge._notes(0, [(what, f"[{LOC}] printer differs from spool 19: color; name")])
-    assert [r.getMessage() for r in caplog.records] == [
-        f"[{LOC}] printer differs from spool 19: color",
-        f"[{LOC}] printer differs from spool 19: color; name",
-    ]
-    # A poll that doesn't compare the printer with the spool leaves the note standing.
-    caplog.clear()
-    printer_bridge._notes(0, [(EventKind.AMBIGUOUS, f"[{LOC}] location holds spools")], False)
-    printer_bridge._notes(0, [], compared=False)
-    assert [r.getMessage() for r in caplog.records] == [
-        f"[{LOC}] location holds spools",
-        f"[{LOC}] no longer: location holds spools",
-    ]
-    caplog.clear()
-    printer_bridge._notes(0, [])
-    assert [r.getMessage() for r in caplog.records] == [
-        f"[{LOC}] no longer: printer differs from spool 19: color; name"
-    ]
-    await bridge.aclose()
-
-
 async def test_eviction_no_longer_needed_logs_only_after_a_failure(tmp_path, caplog):
     bridge, fake, station = make(tmp_path, [spool(19)])
     caplog.set_level("INFO")
@@ -394,22 +370,24 @@ async def test_flagged_spools_missing_from_the_list_are_looked_up(tmp_path):
     bridge, fake, station = make(tmp_path, [spool(19, flag="still wanted")])
     fake.spools[19]["archived"] = True
     bridge.state.flagged[:] = [19, 20]
-    bridge._save()
-    bridge._flags = {19: "still wanted"}  # 20 has no flag wanted and was deleted.
-    await bridge.sync_flags([])
+    bridge.db.save(bridge.state)
+    # 20 has no flag wanted and was deleted.
+    await bridge.sync_flags([], {19: "still wanted"})
     assert bridge.state.flagged == [19]  # 19 is archived and keeps its flag; 20 is forgotten.
     assert read_state(tmp_path / "bridge.db").flagged == [19]
     assert [w for w in fake.writes if w[0] == "patch"] == []
     assert sorted(fake.lookups) == [19, 20]
-    await bridge.sync_flags([])  # The archived spool is kept, so it isn't looked up again.
+    await bridge.sync_flags(
+        [], {19: "still wanted"}
+    )  # The archived spool is kept, so it isn't looked up again.
     assert sorted(fake.lookups) == [19, 20]
     await bridge.aclose()
 
 
 async def test_flag_wanted_on_an_unlisted_spool_the_bridge_never_flagged_is_left(tmp_path):
     bridge, fake, station = make(tmp_path, [spool(19)])
-    bridge._flags = {19: "wanted"}  # Not in the list given, and never flagged.
-    await bridge.sync_flags([])
+    # Not in the list given, and never flagged.
+    await bridge.sync_flags([], {19: "wanted"})
     assert bridge.state.flagged == []
     assert fake.lookups == []
     assert [w for w in fake.writes if w[0] == "patch"] == []
@@ -420,8 +398,7 @@ async def test_flagged_spool_unarchived_since_the_list_was_read_is_kept_current(
     bridge, fake, station = make(tmp_path, [spool(19, flag="x")])
     fake.unlisted.add(19)
     bridge.state.flagged[:] = [19]
-    bridge._flags = {}
-    await bridge.sync_flags(await bridge.spoolman.spools())
+    await bridge.sync_flags(await bridge.spoolman.spools(), {})
     assert fake.flag(19) is None
     assert bridge.state.flagged == []
     assert bridge._archived == {}  # Not archived, so the next list has it.
@@ -460,9 +437,9 @@ async def test_run_polls_until_stopped(tmp_path, caplog, queued):
 async def test_cleared_flag_leaves_the_flagged_list_and_is_saved(tmp_path):
     bridge, fake, station = make(tmp_path, [spool(19, flag="was flagged"), spool(20)])
     bridge.state.flagged[:] = [19]
-    bridge._save()  # As an earlier poll left it.
-    bridge._flags = {}  # Nothing wanted any more.
-    await bridge.sync_flags(await bridge.spoolman.spools())
+    bridge.db.save(bridge.state)  # As an earlier poll left it.
+    # Nothing wanted any more.
+    await bridge.sync_flags(await bridge.spoolman.spools(), {})
     assert fake.flag(19) is None
     assert bridge.state.flagged == []
     assert read_state(tmp_path / "bridge.db").flagged == []
@@ -473,13 +450,12 @@ async def test_cleared_flag_leaves_the_flagged_list_and_is_saved(tmp_path):
 async def test_flagged_spool_that_leaves_the_list_is_forgotten_and_saved(tmp_path, how):
     bridge, fake, station = make(tmp_path, [spool(19, flag="x"), spool(20)])
     bridge.state.flagged[:] = [19]
-    bridge._save()  # As an earlier poll left it.
-    bridge._flags = {}
+    bridge.db.save(bridge.state)  # As an earlier poll left it.
     if how == "deleted":
         del fake.spools[19]
     else:
         fake.spools[19]["archived"] = True
-    await bridge.sync_flags(await bridge.spoolman.spools())
+    await bridge.sync_flags(await bridge.spoolman.spools(), {})
     assert bridge.state.flagged == []
     assert read_state(tmp_path / "bridge.db").flagged == []
     # An archived spool's stale flag is cleared (#120); a deleted one has none.
@@ -501,10 +477,9 @@ async def test_flagged_spool_that_leaves_the_list_while_its_flag_fails_ends_once
     bridge, fake, station = make(tmp_path, [spool(19, flag="x"), spool(20)])
     caplog.set_level("DEBUG", "spoolman_prusalink")
     bridge.state.flagged[:] = [19]
-    bridge._flags = {}
     fake.fail_patch = 500
     for _ in range(2):
-        await bridge.sync_flags(await bridge.spoolman.spools())
+        await bridge.sync_flags(await bridge.spoolman.spools(), {})
     assert levels(caplog, "can't update the flag on spool 19") == ["WARNING", "DEBUG"]
 
     before = len(caplog.records)
@@ -513,14 +488,14 @@ async def test_flagged_spool_that_leaves_the_list_while_its_flag_fails_ends_once
     else:
         fake.spools[19]["archived"] = True
     # Writes still fail: the archived spool keeps its flag and is retried, quietly.
-    await bridge.sync_flags(await bridge.spoolman.spools())
+    await bridge.sync_flags(await bridge.spoolman.spools(), {})
     if how == "archived":
         assert fake.flag(19) == "x"
         assert bridge.state.flagged == [19]
         assert levels(caplog, "can't update the flag on spool 19")[-1] == "DEBUG"
     fake.fail_patch = None
     for _ in range(3):
-        await bridge.sync_flags(await bridge.spoolman.spools())
+        await bridge.sync_flags(await bridge.spoolman.spools(), {})
     ended = records_after(caplog, before)
     if how == "deleted":
         assert ended == [("INFO", "spool 19 was deleted; its flag no longer needs updating")]
@@ -538,15 +513,14 @@ async def test_flagged_spool_that_cant_be_looked_up_is_retried_and_logged_once(t
     caplog.set_level("DEBUG", "spoolman_prusalink")
     fake.spools[19]["archived"] = True
     bridge.state.flagged[:] = [19]
-    bridge._flags = {}
     fake.fail_lookup = 500
     for _ in range(2):
-        await bridge.sync_flags([])
+        await bridge.sync_flags([], {})
     assert levels(caplog, "can't look up flagged spool 19") == ["WARNING", "DEBUG"]
     assert bridge.state.flagged == [19]
     fake.fail_lookup = None
     before = len(caplog.records)
-    await bridge.sync_flags([])
+    await bridge.sync_flags([], {})
     assert records_after(caplog, before) == [("INFO", "cleared flag on spool 19")]
     assert fake.flag(19) is None
     await bridge.aclose()
@@ -558,11 +532,10 @@ async def test_archived_flagged_spool_deleted_while_its_flag_fails_ends_once(tmp
     bridge, fake, station = make(tmp_path, [spool(19, flag="x"), spool(20)])
     caplog.set_level("DEBUG", "spoolman_prusalink")
     bridge.state.flagged[:] = [19]
-    bridge._flags = {}
     fake.spools[19]["archived"] = True
     fake.fail_patch = 500
     for _ in range(2):
-        await bridge.sync_flags(await bridge.spoolman.spools())
+        await bridge.sync_flags(await bridge.spoolman.spools(), {})
     assert 19 in bridge._archived
     assert levels(caplog, "can't update the flag on spool 19") == ["WARNING", "DEBUG"]
 
@@ -570,7 +543,7 @@ async def test_archived_flagged_spool_deleted_while_its_flag_fails_ends_once(tmp
     fake.fail_patch = None
     before = len(caplog.records)
     for _ in range(3):
-        await bridge.sync_flags(await bridge.spoolman.spools())
+        await bridge.sync_flags(await bridge.spoolman.spools(), {})
     assert records_after(caplog, before) == [
         ("INFO", "spool 19 was deleted; its flag no longer needs updating")
     ]
