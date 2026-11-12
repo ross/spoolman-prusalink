@@ -176,10 +176,3 @@ def test_printer_matches_write_notices_each_difference():
     assert not printer_matches_write(other, written, True)
     # With UUIDs off, the printer's UUID isn't compared.
     assert printer_matches_write(other, written, False)
-
-
-def test_printer_matches_write_with_a_write_that_has_no_temperatures():
-    # No T or B in the first line: nothing the printer reports can match it.
-    material = reported("PLA", "#8c9099", 215, 170, 60)
-    assert not printer_matches_write(material, 'M865 X R N"PLA" O"#8c9099" L0', False)
-    assert not printer_matches_write(material, "", False)

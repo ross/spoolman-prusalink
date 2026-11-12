@@ -38,8 +38,6 @@ differ while a swap is in progress:
 - A *claim* is the user saying which spool is in the tool. Everything charged since the
   later of the tool's last unload and the printer's last reboot (`since_load`) moves to
   the claimed spool, which becomes active. Claiming the active spool confirms it.
-- Firmware without `unload_count` can't stage: an assignment change switches immediately,
-  after charging usage so far to the outgoing spool.
 
 While the tool reports no material, or no spool is active, uncharged usage is held (by
 not advancing `charged`) and goes to the active spool once both are present. A reboot
@@ -149,11 +147,6 @@ class Notice:
     message: str
 
 
-# `ToolState.written` for state saved before the bridge recorded its writes. Those writes
-# used `J` to supply temperatures, which the firmware ignores, so they're rewritten once.
-UNKNOWN_WRITE = ""
-
-
 @dataclass(frozen=True)
 class ToolState:
     boot_id: int | None = None
@@ -180,7 +173,7 @@ class ToolState:
     sync_attempts: int = 0
     # The `M865` lines last written to the printer for this tool, so an edit in Spoolman
     # can be told apart from a change on the printer. None when the bridge hasn't
-    # written this tool. UNKNOWN_WRITE for state saved before this was recorded.
+    # written this tool.
     written: str | None = None
     # Usage held in raw extruded mm, charged to the next spool that becomes active in this
     # tool: after the active spool was deleted in Spoolman (`deleted_spool` is that
@@ -265,7 +258,7 @@ class ToolState:
             notice=_notice_from_json(data.get("notice")),
             needs_sync=bool(data.get("needs_sync", False)),
             sync_attempts=int(data.get("sync_attempts", 0)),
-            written=data.get("written", UNKNOWN_WRITE),
+            written=data.get("written"),
             held_mm=int(data.get("held_mm", 0)),
             deleted_spool=data.get("deleted_spool"),
             staged_notice=_notice_from_json(data.get("staged_notice")),
@@ -285,12 +278,7 @@ class ToolState:
         )
 
 
-def _evict_from_json(data: list[int] | int | None) -> tuple[int, ...]:
-    # State from before several evictions were kept stores one spool or None.
-    if data is None:
-        return ()
-    if isinstance(data, int):
-        return (data,)
+def _evict_from_json(data: list[int]) -> tuple[int, ...]:
     return tuple(int(i) for i in data)
 
 
@@ -325,8 +313,8 @@ def hold_deleted(state: ToolState, spool_id: int, mm: int = 0, queued: int = 0) 
 
     If it's the active spool, the tool is left with no active spool, and later usage is
     held for the next spool that becomes active. `mm` is a charge Spoolman rejected,
-    added to the held total. Returns the state unchanged if the spool is neither active
-    nor already held for.
+    added to the held total. The caller checks that the spool is the active or the
+    already deleted one.
 
     An unconfirmed swap on the deleted spool is dropped, and its usage since the unload
     is held too: that filament came from whatever was loaded, which the next spool
@@ -353,8 +341,6 @@ def hold_deleted(state: ToolState, spool_id: int, mm: int = 0, queued: int = 0) 
             # the staged spool from here on.
             staged_notice=None,
         )
-    elif spool_id != state.deleted_spool:
-        return state
     if spool_id in state.since_load:
         # A claim takes the held usage instead: a rejected charge is both in the window
         # and in `held_mm`, and there's nothing left to refund.
@@ -424,7 +410,7 @@ def account(
         out.state = ToolState(
             boot_id=boot_id,
             charged=reading.extruded,
-            unload_count=reading.unload_count or 0,
+            unload_count=reading.unload_count,
             active=active,
             assigned=assigned,
             job_id=job_id,
@@ -482,7 +468,6 @@ def account(
         )
         s = replace(s, charged=reading.extruded)
 
-    legacy = reading.unload_count is None
     active = s.active
     swap = s.swap
     notice = s.notice
@@ -514,7 +499,7 @@ def account(
         held = 0
 
     # 1. Unload since the last poll: usage before it goes to the active spool.
-    if not legacy and reading.unload_count != s.unload_count:
+    if reading.unload_count != s.unload_count:
         at = reading.extruded_at_unload or 0
         if reading.unload_count < s.unload_count or at < s.charged or at > reading.extruded:
             event(
@@ -684,15 +669,8 @@ def account(
                     f"printer already has spool {assigned}'s filament; making it active",
                 )
                 active = assigned
-        elif legacy or active is None:
-            # No unload signal to wait for, or nothing was active: switch now, charging
-            # usage so far to the outgoing spool.
-            delta = reading.extruded - s.charged
-            if legacy and active is not None and delta > 0 and reading.material is not None:
-                charge(active, delta, "extruded")
-                s = replace(s, charged=reading.extruded)
-            if legacy:
-                window.clear()  # The switch is the best guess at when the spool went in.
+        elif active is None:
+            # Nothing was active: switch now.
             event(
                 EventKind.ASSIGNMENT_CHANGED,
                 f"spool {active} -> {assigned}"
@@ -735,9 +713,9 @@ def account(
                 f"{active} until the printer reports an unload",
             )
 
-    elif not legacy and active is not None and s.assigned is None and assigned == active:
+    elif active is not None and s.assigned is None and assigned == active:
         event(EventKind.ACTIVE_UNASSIGNED, f"spool {active} is back in the location")
-    elif not legacy and active is not None and s.assigned != active and assigned == active:
+    elif active is not None and s.assigned != active and assigned == active:
         event(
             EventKind.STAGING_CANCELLED,
             f"spool {s.assigned} is no longer staged; still charging spool {active}",
@@ -775,7 +753,7 @@ def account(
             )
             provisional = Provisional(swap.spool_id, swap.mm, job_id)
             swap = None
-        if not legacy and assigned is not None and assigned != active:
+        if assigned is not None and assigned != active:
             msg = (
                 f"print started while spool {assigned} is staged but not loaded; "
                 f"charging spool {active}"
@@ -829,7 +807,6 @@ def account(
     # After a deletion, the deleted-spool flag already covers the staged spool.
     if (
         (rebooted or s.reboot_pending)
-        and not legacy
         and assigned is not None
         and assigned != active
         and deleted is None

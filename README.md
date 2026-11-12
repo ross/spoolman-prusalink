@@ -231,9 +231,6 @@ Other rules:
   product look the same.
 - If a print starts while a swap is staged, the bridge warns and keeps
   charging the old spool.
-- Firmware without `unload_count` can't stage swaps. A Spoolman change then
-  switches at the next poll, after charging usage so far to the outgoing
-  spool.
 
 The bridge also logs when the printer's filament name, color, nozzle, preheat
 or bed temperature, or instance UUID differs from the loaded spool. A menu load

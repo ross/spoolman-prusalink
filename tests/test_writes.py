@@ -10,7 +10,7 @@ from dataclasses import replace
 import httpx
 import pytest
 
-from spoolman_prusalink.accounting import UNKNOWN_WRITE, ToolState
+from spoolman_prusalink.accounting import ToolState
 from spoolman_prusalink.app import Bridge
 from spoolman_prusalink.color import quantize
 from spoolman_prusalink.config import Config, PrinterConfig
@@ -18,7 +18,6 @@ from spoolman_prusalink.db import Database, read_ledger, read_state
 from spoolman_prusalink.printer_sync import COREONEL_PREAMBLE, PRESETS
 from spoolman_prusalink.prusalink import PrusaLink
 from spoolman_prusalink.spoolman import Spoolman
-from spoolman_prusalink.state import Runout
 
 LOC = "Core One L+"
 
@@ -1214,7 +1213,7 @@ async def written_state(tmp_path, **cfg):
 
 
 @pytest.mark.parametrize("sync_drift", [False, True])
-@pytest.mark.parametrize("reason", ["drift", "edited", "unknown_write", "needs_sync"])
+@pytest.mark.parametrize("reason", ["drift", "edited", "needs_sync"])
 async def test_emptied_location_reports_only_real_drift(tmp_path, caplog, reason, sync_drift):
     bridge, fake, printer = await written_state(tmp_path, sync_drift=sync_drift)
     caplog.set_level("INFO")
@@ -1223,8 +1222,6 @@ async def test_emptied_location_reports_only_real_drift(tmp_path, caplog, reason
         printer.material = {"name": "PETG"}
     elif reason == "edited":
         fake.spools[20]["filament"]["color_hex"] = "00ff00"
-    elif reason == "unknown_write":
-        bridge.printers[0].tools[0] = replace(bridge.printers[0].tools[0], written=UNKNOWN_WRITE)
     else:
         bridge.printers[0].tools[0] = replace(bridge.printers[0].tools[0], needs_sync=True)
     for _ in range(3):
@@ -1519,27 +1516,6 @@ async def test_spool_deleted_before_its_write_runs_holds_usage_and_writes_nothin
     await bridge.aclose()
 
 
-async def test_state_from_before_write_tracking_is_rewritten_once(tmp_path):
-    uuid19 = "91da34d9-c1c1-470f-bac7-185a2346f86a"
-    bridge, fake, printer = make(tmp_path, [spool(20)], uuid_field="instance_uuid")
-    printer.material = {**printer.material, "instance_uuid": uuid19}  # left by a runout
-    await bridge.poll()  # baseline
-    # Simulate state saved by an older bridge: no "written" key.
-    conn = sqlite3.connect(tmp_path / "bridge.db")
-    with conn:
-        conn.execute("UPDATE tools SET data = json_remove(data, '$.written')")
-    conn.close()
-    bridge.state = bridge.db.load()
-
-    await bridge.poll()
-    (gcode,) = jobs(printer)
-    minted = json.loads(fake.spools[20]["extra"]["instance_uuid"])
-    assert " T215 B60 " in gcode and f'C"{minted}"' in gcode
-    await bridge.poll()
-    assert len(jobs(printer)) == 1
-    await bridge.aclose()
-
-
 async def test_fresh_install_does_not_rewrite(tmp_path):
     bridge, fake, printer = make(tmp_path, [spool(19)], uuid_field="instance_uuid")
     for _ in range(2):
@@ -1630,31 +1606,15 @@ async def test_runout_flag_clears_when_initial_weight_is_edited(tmp_path):
     await bridge.aclose()
 
 
-async def test_runout_flag_from_older_state_learns_the_weights(tmp_path):
-    bridge, fake, printer = await runout_mid_print(tmp_path, remaining=400.0)
-    bridge.state.runouts[19] = Runout(bridge.state.runouts[19].text)  # As loaded from v1.
-    await bridge.poll()
-    assert 19 in bridge.state.runouts  # Learns the weights, doesn't read it as an edit.
-    fake.spools[19]["used_weight"] = 990.0
-    await bridge.poll()
-    assert 19 not in bridge.state.runouts
-    await bridge.aclose()
-
-
-@pytest.mark.parametrize("unknown", ["grams", "used"])
-async def test_runout_flag_takes_a_charge_it_cant_check_as_the_bridges_own(tmp_path, unknown):
-    # Without the charge's weight or the stored weight, the response can't be checked,
-    # so it's taken as the bridge's own charge. Without "grams", the old stored weight
-    # would read as an edit next time; without "used", the next read learns the weights.
+async def test_runout_flag_takes_a_charge_it_cant_check_as_the_bridges_own(tmp_path):
+    # Without the charge's weight, the response can't be checked, so it's taken as the
+    # bridge's own charge. Otherwise the old stored weight would read as an edit next time.
     bridge, fake, printer = await runout_mid_print(tmp_path, remaining=400.0)
     printer.extruded += 500
     fake.fail_use = [503]  # The charge stays queued.
     await bridge.poll()
     assert bridge.state.outbox
-    if unknown == "grams":
-        bridge.state.outbox[0]["grams"] = None  # Charged while the spool wasn't known.
-    else:
-        bridge.state.runouts[19].used = None
+    bridge.state.outbox[0]["grams"] = None  # Charged while the spool wasn't known.
     assert await bridge.flush()
     assert bridge.state.runouts[19].used == fake.spools[19]["used_weight"]
     await bridge.poll()

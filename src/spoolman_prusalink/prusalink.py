@@ -41,7 +41,7 @@ def parse_filament(data: dict) -> FilamentReading:
             index=index,
             extruded=int(raw["extruded"]),
             material=material,
-            unload_count=raw.get("unload_count"),
+            unload_count=int(raw["unload_count"]),
             extruded_at_unload=raw.get("extruded_at_unload"),
         )
     return FilamentReading(boot_id=int(data["boot_id"]), tools=tools)

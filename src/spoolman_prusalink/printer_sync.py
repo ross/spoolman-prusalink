@@ -295,13 +295,12 @@ def printer_matches_write(material: Material, written: str, uuids: bool) -> bool
     return True
 
 
-def _written_temperatures(written: str) -> Temperatures | None:
-    line = written.splitlines()[0] if written else ""
+def _written_temperatures(written: str) -> Temperatures:
+    line = written.splitlines()[0]
     nozzle = re.search(r"\sT(\d+)\b", line)
     bed = re.search(r"\sB(\d+)\b", line)
     preheat = re.search(r"\sP(\d+)\b", line)
-    if nozzle is None or bed is None:
-        return None
+    assert nozzle and bed  # The first line always has both.
     return Temperatures(
         int(nozzle.group(1)),
         int(preheat.group(1)) if preheat else DEFAULT_PREHEAT,

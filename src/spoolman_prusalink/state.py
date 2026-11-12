@@ -13,12 +13,12 @@ class Runout:
 
     `net` and `used` start as the weights when the flag was set, and `used` follows the
     bridge's own charges. Any other change to either is the user editing the weight,
-    which answers the flag. None means not known yet.
+    which answers the flag.
     """
 
     text: str
-    net: float | None = None
-    used: float | None = None
+    net: float
+    used: float
     printer: str | None = None  # Whose tool it ran out in.
 
 
