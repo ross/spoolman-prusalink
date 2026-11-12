@@ -60,6 +60,7 @@ async def test_check_raises_by_status(code, error):
     assert type(raised.value) is error
     assert raised.value.status == code
     assert str(raised.value) == f"{code} {resp.reason_phrase} for GET /api/thing: oops"
+    assert raised.value.summary == f"{code} {resp.reason_phrase} for GET /api/thing"
 
 
 async def test_check_passes_a_success_and_words_an_empty_body_without_it():

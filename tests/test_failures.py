@@ -608,3 +608,38 @@ async def test_archived_active_spool_deleted_while_its_flag_fails_ends_once(tmp_
     assert bridge._flag_failing == {}
     assert levels(caplog, "can't update the flag on spool 19") == ["WARNING", "DEBUG"]
     await bridge.aclose()
+
+
+async def test_error_page_that_changes_each_time_is_logged_once(tmp_path, caplog, monkeypatch):
+    """A proxy's error page with a request ID in it isn't a new failure on every poll."""
+    bridge, fake, printer = make(tmp_path, [spool(19)])
+    await bridge.poll()
+    caplog.set_level("INFO")
+    calls = {"n": 0}
+
+    def gateway(path):
+        calls["n"] += 1
+        summary = f"502 Bad Gateway for {path}"
+        return BadAnswer(f"{summary}: request {calls['n']}", 502, summary)
+
+    async def use_length(spool_id, mm):
+        raise gateway("PUT /api/v1/spool/19/use")
+
+    async def spools(archived=False):
+        raise gateway("GET /api/v1/spool")
+
+    real = bridge.spoolman.use_length
+    monkeypatch.setattr(bridge.spoolman, "use_length", use_length)
+    printer.extruded = 1500
+    for _ in range(3):  # The charge is queued, and the next polls can't send it.
+        await bridge.poll()
+    assert count(caplog, "charge to spool 19 failed (502 Bad Gateway") == 1
+    assert "failed (502 Bad Gateway for PUT /api/v1/spool/19/use: request 1)" in caplog.text
+
+    monkeypatch.setattr(bridge.spoolman, "use_length", real)
+    monkeypatch.setattr(bridge.spoolman, "spools", spools)
+    for _ in range(3):
+        await bridge.poll()
+    assert count(caplog, "Spoolman read failed") == 1
+    assert "skipping poll: 502 Bad Gateway for GET /api/v1/spool: request 4" in caplog.text
+    await bridge.aclose()
