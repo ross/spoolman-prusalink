@@ -1264,7 +1264,8 @@ def test_claim_on_staged_spool_moves_usage_since_unload():
         Charge(7, -550, "moved to claimed spool"),
         Charge(9, 50, "extruded"),
     ]
-    assert EventKind.CLAIMED in [e.kind for e in res.events]
+    claimed = next(e.message for e in res.events if e.kind is EventKind.CLAIMED)
+    assert claimed.startswith("spool 9 claimed in place of spool 7: ")
     s = res.state
     assert (s.active, s.assigned, s.evict) == (9, 9, (7,))
     assert (s.provisional, s.swap, s.staged_notice) == (None, None, None)
@@ -1494,9 +1495,21 @@ def test_claim_takes_usage_held_for_a_deleted_spool():
     ]
     kinds = [e.kind for e in res.events]
     assert EventKind.CLAIMED in kinds and EventKind.HELD_CHARGED in kinds
+    claimed = next(e.message for e in res.events if e.kind is EventKind.CLAIMED)
+    assert claimed.startswith("spool 20 claimed in place of deleted spool 19: ")
     s = res.state
     assert (s.active, s.held_mm, s.deleted_spool, s.needs_sync) == (20, 0, None, True)
     assert s.since_load == {20: 150}
+
+
+def test_claim_with_no_spool_active_names_none():
+    _, _, state = run([(BOOT, r(100), loc())])
+    assert state.active is None
+    res = account(state, BOOT, r(150), loc(5), claim=5)
+    assert res.claimed
+    claimed = next(e.message for e in res.events if e.kind is EventKind.CLAIMED)
+    assert claimed.startswith("spool 5 claimed with no spool active: ")
+    assert res.state.active == 5
 
 
 def test_hold_deleted_drops_the_provisional_charge():
