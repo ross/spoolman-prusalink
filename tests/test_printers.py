@@ -1,7 +1,7 @@
 """Two printers against one Spoolman: the X scenarios in docs/multi-printer.md."""
 
 import httpx
-from test_writes import CLAIMED, jobs, ledger, restart, spool, two_printers
+from harness import CLAIMED, jobs, ledger, restart, spool, two_printers
 
 from spoolman_prusalink.accounting import ToolState
 from spoolman_prusalink.db import read_state
