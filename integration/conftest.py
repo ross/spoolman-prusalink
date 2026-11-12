@@ -3,7 +3,7 @@
 Nothing here waits on the wall clock. The simulator's time moves only when a test ticks
 it, and the bridge polls only when a test calls `poll()`, so every scenario reads the
 same way each run. Spoolman is the one external piece: its URL comes from
-`SPOOLMAN_URL`, and every test without it is skipped.
+`INTEGRATION_SPOOLMAN_URL`, and every test without it is skipped.
 """
 
 from __future__ import annotations
@@ -73,10 +73,11 @@ WORLD_MODELS = {1: "8.1.0", 2: "8.10.0"}
 @pytest.fixture(scope="session")
 def spoolman_url() -> str:
     """The Spoolman under test, or a skip that says how to provide one."""
-    url = os.environ.get("SPOOLMAN_URL")
+    url = os.environ.get("INTEGRATION_SPOOLMAN_URL")
     if not url:
         pytest.skip(
-            "integration tests need a Spoolman: set SPOOLMAN_URL (see integration/README.md)"
+            "integration tests need a Spoolman: set INTEGRATION_SPOOLMAN_URL "
+            "(see integration/README.md)"
         )
     return url.rstrip("/")
 

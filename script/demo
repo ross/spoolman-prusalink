@@ -3,7 +3,7 @@
 # simulator, and the bridge pointed at both. Ctrl-C stops the simulator and the
 # bridge.
 #
-# Spoolman: with SPOOLMAN_URL set, the demo uses that Spoolman. Otherwise it
+# Spoolman: with DEMO_SPOOLMAN_URL set, the demo uses that Spoolman. Otherwise it
 # runs the container spoolman-demo (Podman or Docker) on 127.0.0.1:7912, or on
 # DEMO_SPOOLMAN_PORT, with its data on the volume spoolman-demo-data, so spools
 # and usage carry over between runs. The container keeps running afterwards;
@@ -43,7 +43,7 @@ while True:
 PY
 }
 
-if [ -z "${SPOOLMAN_URL:-}" ]; then
+if [ -z "${DEMO_SPOOLMAN_URL:-}" ]; then
     image=${SPOOLMAN_IMAGE:-ghcr.io/donkie/spoolman:0.27.1}
     engine=${CONTAINER_ENGINE:-$(command -v podman >/dev/null && echo podman || echo docker)}
     port=${DEMO_SPOOLMAN_PORT:-7912}
@@ -56,14 +56,14 @@ if [ -z "${SPOOLMAN_URL:-}" ]; then
         "$engine" run -d --name spoolman-demo -p "127.0.0.1:$port:8000" \
             -v spoolman-demo-data:/home/app/.local/share/spoolman "$image" >/dev/null
     fi
-    SPOOLMAN_URL=http://127.0.0.1:$port
+    DEMO_SPOOLMAN_URL=http://127.0.0.1:$port
 fi
 
-echo "==> Waiting for Spoolman at $SPOOLMAN_URL"
-wait_for "$SPOOLMAN_URL/api/v1/health" Spoolman
+echo "==> Waiting for Spoolman at $DEMO_SPOOLMAN_URL"
+wait_for "$DEMO_SPOOLMAN_URL/api/v1/health" Spoolman
 
 echo "==> Seeding Spoolman with the simulator's spools"
-.venv/bin/python -m simulator -c "$sim_config" seed --spoolman "$SPOOLMAN_URL"
+.venv/bin/python -m simulator -c "$sim_config" seed --spoolman "$DEMO_SPOOLMAN_URL"
 
 bridge_config=$data/bridge.toml
 {
@@ -71,7 +71,7 @@ bridge_config=$data/bridge.toml
     cat <<TOML
 
 [spoolman]
-url = "$SPOOLMAN_URL"
+url = "$DEMO_SPOOLMAN_URL"
 
 [bridge]
 db_file = "$data/bridge.db"
@@ -88,7 +88,7 @@ control_port=$(.venv/bin/python -c 'import sys; from simulator import config; pr
 wait_for "http://127.0.0.1:$control_port/" simulator
 
 cat <<MSG
-==> The simulator's page is http://127.0.0.1:$control_port and Spoolman is $SPOOLMAN_URL
+==> The simulator's page is http://127.0.0.1:$control_port and Spoolman is $DEMO_SPOOLMAN_URL
 ==> Starting the bridge with $bridge_config
 MSG
 .venv/bin/spoolman-prusalink -c "$bridge_config" "$@"

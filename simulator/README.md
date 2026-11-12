@@ -18,7 +18,7 @@ script/demo
 ```
 
 It starts the container `spoolman-demo` on `127.0.0.1:7912` with Podman or
-Docker, unless `SPOOLMAN_URL` names a Spoolman to use. Then it seeds Spoolman,
+Docker, unless `DEMO_SPOOLMAN_URL` names a Spoolman to use. Then it seeds Spoolman,
 writes the bridge's config to `simulator/data/bridge.toml`, and runs the
 simulator and the bridge until you press Ctrl-C. Spoolman's data lives on the
 volume `spoolman-demo-data`, so it carries over between runs; the container

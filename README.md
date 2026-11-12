@@ -523,6 +523,6 @@ script/integration
 
 It starts a throwaway Spoolman container with Podman or Docker and removes it
 afterwards. To use a Spoolman you already have, one no bridge uses, set
-`SPOOLMAN_URL`.
+`INTEGRATION_SPOOLMAN_URL`.
 
 CI runs both, as separate jobs. See [integration/README.md](integration/README.md).

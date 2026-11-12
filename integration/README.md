@@ -24,10 +24,10 @@ To use a Spoolman you already have, one that no bridge uses and no other run
 shares (see [What they assume](#what-they-assume)), point the tests at it:
 
 ```sh
-SPOOLMAN_URL=http://127.0.0.1:7912 script/integration
+INTEGRATION_SPOOLMAN_URL=http://127.0.0.1:7912 script/integration
 ```
 
-Without `SPOOLMAN_URL`, a plain `pytest integration` skips every test.
+Without `INTEGRATION_SPOOLMAN_URL`, a plain `pytest integration` skips every test.
 
 ### Coverage
 
@@ -51,7 +51,7 @@ script/integration --cov=spoolman_prusalink --cov-fail-under=0
   second test run on the same Spoolman can flag this run's spools, and this
   run's bridges can flag theirs. Don't run the tests against a Spoolman a
   bridge uses, and don't let two runs overlap. `script/integration` without
-  `SPOOLMAN_URL`, as in CI, starts a fresh Spoolman each run.
+  `INTEGRATION_SPOOLMAN_URL`, as in CI, starts a fresh Spoolman each run.
 - **Unique location names.** Location names are what map a spool to a tool, so
   they're the isolation. Each test picks a prefix such as `it-3fa2c1` and uses
   `<prefix> T` for the tool and `<prefix> shelf` for spare spools. Spool
