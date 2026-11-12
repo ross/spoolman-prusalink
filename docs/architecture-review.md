@@ -165,7 +165,7 @@ Size: small to medium. Do it with B3, which reshapes `written`.
 ### B10. Smaller items
 
 - The `tools` table holds a JSON blob per tool, `printer_flags` holds JSON,
-  and `seen_uuids` has columns. `SCHEMA_VERSION` doesn't cover the blob's
+  and `seen_tags` has columns. `SCHEMA_VERSION` doesn't cover the blob's
   shape. The blob is `ToolState.to_json` in `accounting.py`, so it belongs
   to workstream 10.
 
