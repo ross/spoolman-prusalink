@@ -117,18 +117,6 @@ own behavior decides the outcome. Don't narrow the unit suite.
 
 The simulator review read every file in `simulator/`.
 
-### S2. The page reimplements the model's rules
-
-- The page's `SETTINGS` list (`app.js`) lacks `recover_seconds`,
-  `unpark_seconds`, and `panic_purge_mm`.
-- `canStart`, `dLoad`, `dUnload`, and `IDLEISH` copy model rules, and the
-  option lists copy the enums.
-
-Shape: `to_json` publishes the actions available for each printer and tool,
-the setting fields, and the enum values. The page renders them.
-
-Size: medium.
-
 ### S4. `SimPrinter` holds too much
 
 `SimPrinter` (`model.py`) holds the physical and job state machine,
@@ -146,6 +134,6 @@ Size: large.
 | # | Workstream | Findings | Depends on |
 | --- | --- | --- | --- |
 | 5 | Narrow the bridge boundary | B4, T1 | Nothing |
-| 8 | Simulator state | S2, then S4 | Nothing. S4 continues the move that put the PrusaLink routing in `prusalink.serve` |
+| 8 | Simulator state | S4 | Nothing. S4 continues the move that put the PrusaLink routing in `prusalink.serve` |
 
 T3 has no work, so it isn't in a workstream.

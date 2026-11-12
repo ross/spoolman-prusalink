@@ -4,18 +4,7 @@
 // every render works from it; the only local state is UI state (open forms,
 // typed values, log filters), kept per printer so re-renders don't lose it.
 
-const SETTINGS = [
-  ['time_scale', 'time scale', 'n'], ['feed_ratio', 'feed ratio', 'n'],
-  ['print_rate_mm_s', 'print mm/s', 'n'], ['load_rate_mm_s', 'load mm/s', 'n'],
-  ['unload_seconds', 'unload s', 'n'], ['load_feed_mm', 'load feed mm', 'n'],
-  ['purge_mm', 'purge mm', 'n'], ['toolchange_purge_mm', 'toolchange purge mm', 'n'],
-  ['jam_purge_mm', 'jam purge mm', 'n'], ['preheat_seconds', 'preheat s', 'n'],
-  ['scan_seconds', 'scan s', 'n'], ['blip_seconds', 'blip s', 'n'],
-  ['park_seconds', 'park s', 'n'], ['sync_job_seconds', 'sync job s', 'n'],
-  ['auto_accept_model_check', 'auto-accept model check', 'b'], ['start_blip', 'start blip', 'b'],
-];
 const KINDS = ['action', 'state', 'request', 'load', 'unload', 'job', 'gcode', 'other'];
-const IDLEISH = ['IDLE', 'FINISHED', 'STOPPED'];
 const MAX_LOG = 500;
 
 let S = null; // last full state
@@ -87,12 +76,20 @@ async function doAction(pname, action, body, onOk) {
 
 // ---- settings strip ----
 
+// The fields come from the model (`setting_fields`), so the page lists every setting.
 function buildSettings() {
   const box = $('settings');
-  box.innerHTML = SETTINGS.map(([k, label, type]) =>
-    '<label>' + esc(label) + ' <input data-s="' + k + '" ' +
-    (type === 'b' ? 'type="checkbox"' : 'type="number" step="any"') + '></label>').join('');
-  box.addEventListener('change', async (e) => {
+  const fields = S.setting_fields || [];
+  const sig = fields.map((f) => f.name + ':' + f.kind).join(',');
+  if (box.dataset.sig === sig) return;
+  box.dataset.sig = sig;
+  box.innerHTML = fields.map((f) =>
+    '<label>' + esc(f.name.replace(/_/g, ' ')) + ' <input data-s="' + esc(f.name) + '" ' +
+    (f.kind === 'bool' ? 'type="checkbox"' : 'type="number" step="any"') + '></label>').join('');
+}
+
+function wireSettings() {
+  $('settings').addEventListener('change', async (e) => {
     const k = e.target.dataset.s;
     if (!k) return;
     const isBool = e.target.type === 'checkbox';
@@ -109,10 +106,12 @@ function buildSettings() {
 
 function renderSettings() {
   if (!S) return;
-  for (const [k, , type] of SETTINGS) {
+  buildSettings();
+  for (const f of S.setting_fields || []) {
+    const k = f.name;
     const el = document.querySelector('[data-s="' + k + '"]');
     if (!el || el === document.activeElement || !(k in S.settings)) continue;
-    if (type === 'b') el.checked = !!S.settings[k];
+    if (f.kind === 'bool') el.checked = !!S.settings[k];
     else el.value = S.settings[k];
   }
   $('now').textContent = fmtTime(S.now);
@@ -157,6 +156,12 @@ function btn(label, act, o) {
     (o.title ? ' title="' + esc(o.title) + '"' : '') + '>' + esc(label) + '</button>';
 }
 function isOpen(p, f) { return !!pst(p.name).open[f]; }
+// A button for an action the model publishes: disabled, with the model's reason as its
+// tooltip, when `actions[name]` says why it can't run now.
+function gate(actions, name, o) {
+  const why = actions ? actions[name] : null;
+  return Object.assign({}, o, why == null ? {} : { dis: true, title: why });
+}
 
 function matHtml(m, prev) {
   if (!m) return '<span class="muted">-</span>';
@@ -169,25 +174,12 @@ function matHtml(m, prev) {
 }
 
 function renderTool(p, t) {
-  const st = up(p.state);
-  const job = p.job;
-  const ph = job ? up(job.phase) : '';
-  const at = job && job.attention;
   const proc = t.process;
   const i = t.index;
-  const mentions = !!at && at.tool === i;
-  const running = st === 'PRINTING' || st === 'PAUSED';
-  const multi = p.tools.length > 1;
-  const midPrint = job && (ph === 'PRINTING' || ph === 'PREHEAT');
-  const off = low(p.power) === 'off';
-  const tdis = !t.enabled; // a disabled tool takes only Enable/Disable
-  const hasJob = !!job;
-  const canKeep = ph === 'WAIT_LOAD' && mentions;
-  const canTag = !!(p.model && p.model.uuids);
-  const dLoad = tdis || !!proc || (running && !(st === 'ATTENTION' && mentions));
-  const dUnload = tdis || !t.loaded || !!proc || running || hasJob;
-  const dMove = !IDLEISH.includes(st);
-  const dRun = tdis || !(midPrint && t.loaded);
+  const a = t.actions || {};
+  const canKeep = a.keep == null;
+  // Load opens the form when either a fresh load or the runout's reload can run.
+  const loadGate = canKeep ? {} : gate(a, 'load');
 
   let procTxt = '';
   if (proc) {
@@ -210,22 +202,22 @@ function renderTool(p, t) {
     '<td class="num">' + Number(t.gap || 0).toFixed(1) + '</td></tr>';
 
   h += '<tr class="sub"><td colspan="9"><div class="toolbtns">' + procTxt + flags + (flags ? ' ' : '') +
-    btn('Load', 'load_form', { tool: i, dis: dLoad, cls: isOpen(p, 'load' + i) ? 'on' : '' }) +
-    btn('Unload', 'unload', { tool: i, dis: dUnload }) +
-    btn('Extrude', 'extrude', { tool: i, dis: tdis || off || dMove || !t.loaded }) +
-    btn('Retract', 'retract', { tool: i, dis: tdis || off || dMove }) +
-    btn('Runout', 'runout', { tool: i, dis: dRun }) +
-    btn('Jam', 'jam', { tool: i, dis: dRun }) +
+    btn('Load', 'load_form', Object.assign({ tool: i, cls: isOpen(p, 'load' + i) ? 'on' : '' }, loadGate)) +
+    btn('Unload', 'unload', gate(a, 'unload', { tool: i })) +
+    btn('Extrude', 'extrude', gate(a, 'extrude', { tool: i })) +
+    btn('Retract', 'retract', gate(a, 'retract', { tool: i })) +
+    btn('Runout', 'runout', gate(a, 'runout', { tool: i })) +
+    btn('Jam', 'jam', gate(a, 'jam', { tool: i })) +
     '<label title="unload on jam"><input type="checkbox" data-k="jam' + i + '"' +
     (getv(p.name, 'jam' + i, true) ? ' checked' : '') + '>unload</label>' +
-    btn('Select', 'select_tool', { tool: i, dis: tdis || !multi || hasJob }) +
-    btn('Sensor fault', 'sensor_fault', { tool: i, dis: tdis, cls: t.sensor_fault ? 'on' : '' }) +
-    btn('Stuck write', 'stuck_write', { tool: i, dis: tdis, cls: t.stuck_write ? 'on' : '' }) +
-    btn(t.enabled ? 'Disable' : 'Enable', 'tool_enabled', { tool: i }) +
+    btn('Select', 'select_tool', gate(a, 'select_tool', { tool: i })) +
+    btn('Sensor fault', 'sensor_fault', gate(a, 'set_sensor_fault', { tool: i, cls: t.sensor_fault ? 'on' : '' })) +
+    btn('Stuck write', 'stuck_write', gate(a, 'set_stuck_write', { tool: i, cls: t.stuck_write ? 'on' : '' })) +
+    btn(t.enabled ? 'Disable' : 'Enable', 'tool_enabled', gate(a, 'set_tool_enabled', { tool: i })) +
     '</div>';
 
   if (isOpen(p, 'load' + i)) {
-    const sources = (canTag ? ['tag'] : []).concat(['preset'], canKeep ? ['keep'] : []);
+    const sources = (p.load_sources || ['preset']).concat(canKeep ? ['keep'] : []);
     let src = getv(p.name, 'load' + i + '.source', 'preset');
     if (!sources.includes(src)) src = 'preset';
     const nm = String(getv(p.name, 'load' + i + '.name', 'PLA')).trim();
@@ -237,7 +229,7 @@ function renderTool(p, t) {
       '<label>uuid' + inp(p, 'load' + i + '.uuid', '', 'type="text" size="36"') + '</label>' +
       '<label>feed mm' + inp(p, 'load' + i + '.feed', '', 'type="number" step="any"') + '</label>' +
       '<label>purge mm' + inp(p, 'load' + i + '.purge', '', 'type="number" step="any"') + '</label>' +
-      btn('Start load', 'load_submit', { tool: i, dis: tdis || (needName && !nm) }) + '</div>';
+      btn('Start load', 'load_submit', { tool: i, dis: needName && !nm }) + '</div>';
   }
   return h + '</td></tr>';
 }
@@ -246,7 +238,6 @@ function renderPrinter(p) {
   const st = up(p.state);
   const job = p.job;
   const ph = job ? up(job.phase) : '';
-  const off = low(p.power) === 'off';
   const m = p.model || {};
   const at = job && job.attention;
   const attn = at ? at.text : '';
@@ -263,9 +254,9 @@ function renderPrinter(p) {
     '<span class="badge st-' + esc(st) + '">' + esc(st) + '</span>' +
     '<small class="muted mono" title="api key">:' + esc(p.port) + ' ' + esc(p.api_key) + '</small></div>' +
     '<div class="row">' +
-    '<label>power <select data-sel="set_power" data-field="power">' + opts(['on', 'off', 'hung'], low(p.power)) + '</select></label>' +
-    '<label>fault <select data-sel="set_fault" data-field="fault">' + opts(['none', 'bad_key', 'error'], low(p.fault)) + '</select></label>' +
-    '<label>fw <select data-sel="set_firmware" data-field="firmware">' + opts(['full', 'no_counters', 'no_endpoint'], low(p.firmware)) + '</select></label>' +
+    '<label>power <select data-sel="set_power" data-field="power">' + opts(S.options.power, low(p.power)) + '</select></label>' +
+    '<label>fault <select data-sel="set_fault" data-field="fault">' + opts(S.options.fault, low(p.fault)) + '</select></label>' +
+    '<label>fw <select data-sel="set_firmware" data-field="firmware">' + opts(S.options.firmware, low(p.firmware)) + '</select></label>' +
     '<small class="muted">boot ' + esc(p.boot_id) + '</small>' +
     '<small>' + (p.homed ? 'homed' : '<span class="muted">not homed</span>') + '</small>' +
     '<small>tool <b>' + esc(p.selected_tool) + '</b></small></div>';
@@ -289,23 +280,21 @@ function renderPrinter(p) {
   h += '</div>';
   if (p.message) h += '<div style="margin-top:3px"><span class="pill" title="last M117">' + esc(p.message) + '</span></div>';
 
-  const canStart = IDLEISH.includes(st) && !off && !(st === 'IDLE' && job) && !p.tools.some((t) => t.process);
-  const canClearJam = !off && ph === 'HOLD' && at.reason === 'jam';
+  const a = p.actions || {};
   const aa = p.auto_accept_model_check;
-  const tap = ph === 'HOLD' && job.kind === 'sync';
   h += '<div class="btns">' +
-    btn('Start print', 'toggle', { form: 'start', dis: !canStart, cls: isOpen(p, 'start') ? 'on' : '' }) +
-    btn('Pause', 'pause', { dis: off || !(ph === 'PRINTING' || ph === 'PREHEAT') }) +
-    btn('Resume', 'resume', { dis: off || !((st === 'PAUSED' && ph === 'PAUSED') || ph === 'AWAIT_RESUME') }) +
-    btn('Cancel', 'cancel', { dis: off || !job || ph === 'PARKING', cls: 'danger' }) +
-    btn('Dismiss', 'dismiss', { dis: off || !(st === 'FINISHED' || st === 'STOPPED') }) +
-    btn('Home', 'home', { dis: off || !!job || !(st === 'IDLE' || st === 'FINISHED' || st === 'STOPPED') }) +
-    btn('Reboot', 'reboot', { dis: off }) +
-    btn('Power-loss resume', 'power_loss', { dis: off, title: 'reboot, keeping the job' }) +
+    btn('Start print', 'toggle', gate(a, 'start_print', { form: 'start', cls: isOpen(p, 'start') ? 'on' : '' })) +
+    btn('Pause', 'pause', gate(a, 'pause')) +
+    btn('Resume', 'resume', gate(a, 'resume')) +
+    btn('Cancel', 'cancel', gate(a, 'cancel', { cls: 'danger' })) +
+    btn('Dismiss', 'dismiss', gate(a, 'dismiss')) +
+    btn('Home', 'home', gate(a, 'home')) +
+    btn('Reboot', 'reboot', gate(a, 'reboot')) +
+    btn('Power-loss resume', 'power_loss', gate(a, 'reboot', { title: 'reboot, keeping the job' })) +
     '<label title="the bed cools during the outage, so the print waits for Resume"><input type="checkbox" data-k="cold"' +
     (getv(p.name, 'cold', false) ? ' checked' : '') + '>cold bed</label>' +
-    btn('Tap through', 'tap_through', { dis: off || !tap }) +
-    (canClearJam ? btn('Clear jam', 'clear_jam', {}) : '') +
+    btn('Tap through', 'tap_through', gate(a, 'tap_through')) +
+    (a.clear_jam == null ? btn('Clear jam', 'clear_jam', {}) : '') +
     btn('Auto-accept: ' + (aa == null ? 'default' : aa ? 'on' : 'off'), 'auto_accept', { title: 'model check; cycles default, on, off' }) +
     btn('Counter step back', 'toggle', { form: 'counter', cls: isOpen(p, 'counter') ? 'on' : '' }) +
     btn('Set extruded_at_unload', 'toggle', { form: 'eau', cls: isOpen(p, 'eau') ? 'on' : '' }) +
@@ -632,7 +621,7 @@ function connect() {
   });
 }
 
-buildSettings();
+wireSettings();
 wireSnapshots();
 wireCards();
 wireLog();

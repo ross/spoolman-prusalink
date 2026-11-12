@@ -345,7 +345,7 @@ class SimTool:
 
     def fill(self, material: Material | None) -> None:
         """Leave the tool as a finished load of `material` leaves it, or a finished unload for
-        None. Nothing is counted: this is setup, and a load by hand while the printer is off.
+        None. Nothing is counted: this is setup, such as a config or a test's starting state.
         """
         self.loaded = material is not None
         self.store(material)
@@ -800,18 +800,13 @@ class SimPrinter:
         """
         t = self._tool(tool)
         material = self._new_material(t, source, name, color, uuid, temperatures)
-        job = self.job
-        waiting = job is not None and job.wait_tool == tool
-        if source is None and not waiting:
-            raise Invalid("a load needs a source, tag or preset, outside a runout reload")
+        self._check_load(t, keep=source is None)
         what = f"{source} {_describe(material)}" if source else f"keep {_describe(t.kept())}"
         if self.power is Power.OFF:
             self._hand_load(t, material)
             return
-        if t.process is not None or self.state is State.BUSY:
-            raise Busy("a load or unload is already running")
-        if job is not None and not waiting:
-            raise Busy("can't load during a print; run the tool out first")
+        job = self.job
+        waiting = job is not None and job.wait_tool == tool
         self._log("action", f"load T{tool} {what}")
         feed = self.settings.load_feed_mm if feed_mm is None else _positive(feed_mm, "feed_mm")
         purge = self.settings.purge_mm if purge_mm is None else _positive(purge_mm, "purge_mm")
@@ -856,8 +851,6 @@ class SimPrinter:
         )
 
     def _hand_load(self, t: SimTool, material: Material | None) -> None:
-        if t.process is not None:
-            raise Busy("a load or unload is already running")
         # Filament goes in even when there's no type to restore.
         t.store(t.kept() if material is None else material)
         t.loaded, t.gap = True, 0.0
@@ -866,18 +859,11 @@ class SimPrinter:
     def unload(self, tool: int) -> None:
         """Unload a tool. While the printer is off the type stays stored until the next boot."""
         t = self._tool(tool)
-        if not t.loaded:
-            raise Invalid(f"T{tool} has no filament")
+        self._check_unload(t)
         if self.power is Power.OFF:
-            if t.process is not None:
-                raise Busy("a load or unload is already running")
             self._log("action", f"unload T{tool} by hand while off")
             t.loaded, t.gap = False, self.model.gap_mm
             return
-        if self.job is not None:
-            raise Busy("can't unload during a print; use runout")
-        if t.process is not None or self.state not in IDLE_STATES:
-            raise Busy(f"can't unload while {self.state}")
         self._log("action", f"unload T{tool}")
         t.process = UnloadProcess(self.settings.unload_seconds)
         self.screen = State.IDLE  # using the menu dismisses a finished or stopped screen
@@ -886,10 +872,7 @@ class SimPrinter:
     def _manual_move(self, tool: int, mm: Any) -> tuple[SimTool, float]:
         t = self._tool(tool)
         mm = _positive(mm, "mm")
-        if self.power is Power.OFF or self.job is not None or self.state not in IDLE_STATES:
-            raise Busy(f"manual moves need an idle printer, not {self.state}")
-        if not t.loaded:
-            raise Invalid(f"T{tool} has no filament")
+        self._check_move(t)
         return t, mm
 
     def extrude(self, tool: int, mm: float) -> None:
@@ -903,11 +886,8 @@ class SimPrinter:
         self._log("action", f"retract T{tool} {mm:g} mm: gap {t.gap:g}")
 
     def select_tool(self, tool: int) -> None:
-        if self.model.max_tools == 1:
-            raise Invalid(f"{self.model.name} has one tool")
         t = self._tool(tool)
-        if self.job is not None or self.state is State.BUSY:
-            raise Busy(f"can't pick a tool while {self.state}")
+        self._check_select(t)
         self.selected_tool = tool
         self._log("action", f"select T{tool}")
         if self.power is not Power.OFF:
@@ -916,9 +896,7 @@ class SimPrinter:
     # Actions on prints.
 
     def start_print(self, spec: PrintSpec) -> None:
-        self._need_power()
-        if not self.can_print():
-            raise Busy(f"can't print while {self.state}")
+        self._check_start_print()
         if not spec.segments:
             raise Invalid("a print needs at least one segment")
         for s in spec.segments:
@@ -948,23 +926,21 @@ class SimPrinter:
         self._show_state()
 
     def pause(self) -> None:
+        self._check_pause()
         job = self.job
-        if job is None or job.phase not in (JobPhase.PRINTING, JobPhase.PREHEAT):
-            raise Busy("nothing to pause")
         self._log("action", "pause")
         job.paused_from = job.phase
         job.enter(JobPhase.PAUSED)
         self._show_state()
 
     def resume(self) -> None:
+        self._check_resume()
         job = self.job
-        if job is not None and job.phase is JobPhase.AWAIT_RESUME:
+        if job.phase is JobPhase.AWAIT_RESUME:
             self._log("action", "resume after the power panic")
             job.cold_bed = False
             self._recover(job, clean=True)
             return
-        if job is None or job.phase is not JobPhase.PAUSED or self.state is not State.PAUSED:
-            raise Busy("nothing to resume")
         self._log("action", "resume")
         if job.paused_from is JobPhase.PREHEAT:
             job.enter(JobPhase.PREHEAT)
@@ -974,9 +950,8 @@ class SimPrinter:
         job.paused_from = None
 
     def cancel(self) -> None:
+        self._check_cancel()
         job = self.job
-        if job is None or job.phase is JobPhase.PARKING:
-            raise Busy("nothing to cancel")
         if job.id is None:
             # Declining the preview: no job was counted, so there's nothing to park.
             self._log("action", f"cancel {job.name} at the preview")
@@ -1005,41 +980,27 @@ class SimPrinter:
         self._log("load", f"T{t.index} {p.kind} stopped by the cancel")
 
     def dismiss(self) -> None:
-        if self.job is not None or self.state not in (State.FINISHED, State.STOPPED):
-            raise Busy(f"nothing to dismiss in {self.state}")
+        self._check_dismiss()
         self._log("action", "dismiss")
         self.screen = State.IDLE
         self._show_state()
 
     def home(self) -> None:
         """Home from the menu. Only the flag changes: homing moves no filament."""
-        self._need_power()
-        if self.job is not None or self.state not in (State.IDLE, State.FINISHED, State.STOPPED):
-            raise Busy(f"can't home in {self.state}")
+        self._check_home()
         self.homed = True
         self._log("action", "home")
 
-    def _check_runout(self, tool: int) -> SimTool:
-        t = self._tool(tool)
-        job = self.job
-        printing = isinstance(job, UserJob) and job.phase in (JobPhase.PRINTING, JobPhase.PREHEAT)
-        if self.power is Power.OFF or not printing:
-            raise Busy("a runout or jam needs a print in progress")
-        # Only the picked tool feeds, so only its sensor can see a runout or a jam.
-        if t.index != self.selected_tool:
-            raise Invalid(f"T{tool} isn't the selected tool")
-        if not t.loaded:
-            raise Busy(f"T{tool} has no filament")
-        return t
-
     def runout(self, tool: int) -> None:
-        t = self._check_runout(tool)
+        t = self._tool(tool)
+        self._check_runout(t)
         self._log("action", f"runout T{tool}")
         self._runout(t, Reason.RUNOUT)
 
     def jam(self, tool: int, unload: bool = True) -> None:
         """A jam either unloads like a runout (and purges more on reload) or is cleared in place."""
-        t = self._check_runout(tool)
+        t = self._tool(tool)
+        self._check_runout(t)
         self._log("action", f"jam T{tool}" + ("" if unload else " without unloading"))
         if unload:
             self._runout(t, Reason.JAM)
@@ -1058,18 +1019,16 @@ class SimPrinter:
         self._show_state()
 
     def clear_jam(self) -> None:
+        self._check_clear_jam()
         job = self.job
-        if job is None or job.phase is not JobPhase.HOLD or not job.waits_for(Reason.JAM):
-            raise Busy("no jam to clear")
         self._log("action", "clear jam")
         job.enter(JobPhase.PAUSED)
         self._show_state()
 
     def tap_through(self) -> None:
         """Answer the screen's question: accept the model check, or abort on a parse error."""
+        self._check_tap_through()
         job = self.job
-        if job is None or job.phase is not JobPhase.HOLD or not isinstance(job, SyncJob):
-            raise Busy("nothing to tap through")
         self._log("action", f"tap through: {job.attention}")
         if job.waits_for(Reason.MODEL_CHECK):
             self._start_job(job)
@@ -1171,10 +1130,7 @@ class SimPrinter:
     def set_tool_enabled(self, tool: int, value: bool) -> None:
         t = self._tool(tool, enabled=False)
         if not value:
-            job = self.job
-            in_print = isinstance(job, UserJob) and tool in {s.tool for s in job.spec.segments}
-            if tool == self.selected_tool or in_print or t.process is not None:
-                raise Invalid(f"T{tool} is in use")
+            self._check_disable(t)
         t.enabled = bool(value)
         self._log("action", f"T{tool} {'enabled' if value else 'disabled'}")
 
@@ -1192,6 +1148,144 @@ class SimPrinter:
             raise Invalid("value must be an integer")
         self._tool(tool).extruded_at_unload = value
         self._log("action", f"T{tool} extruded_at_unload set to {value}")
+
+    # Guards. Each raises Busy or Invalid when its action can't run now. The actions call
+    # them, and `actions_json` calls them to tell the page what it can do, so the rules
+    # are written once. A printer that's off takes no input except by hand: filament pushed
+    # in or pulled out, and a tool picked, enabled or disabled.
+
+    def _check_load(self, t: SimTool, *, keep: bool) -> None:
+        waiting = self.job is not None and self.job.wait_tool == t.index
+        if keep and not waiting:
+            raise Invalid("a load needs a source, tag or preset, outside a runout reload")
+        if t.process is not None:
+            raise Busy("a load or unload is already running")
+        if self.power is Power.OFF:
+            return  # pushed in by hand
+        if self.state is State.BUSY:
+            raise Busy("a load or unload is already running")
+        if self.job is not None and not waiting:
+            raise Busy("can't load during a print; run the tool out first")
+
+    def _check_unload(self, t: SimTool) -> None:
+        if not t.loaded:
+            raise Invalid(f"T{t.index} has no filament")
+        if t.process is not None:
+            raise Busy("a load or unload is already running")
+        if self.power is Power.OFF:
+            return  # pulled out by hand
+        if self.job is not None:
+            raise Busy("can't unload during a print; use runout")
+        if self.state not in IDLE_STATES:
+            raise Busy(f"can't unload while {self.state}")
+
+    def _check_move(self, t: SimTool) -> None:
+        self._need_power()
+        if self.job is not None or self.state not in IDLE_STATES:
+            raise Busy(f"manual moves need an idle printer, not {self.state}")
+        if not t.loaded:
+            raise Invalid(f"T{t.index} has no filament")
+
+    def _check_select(self, t: SimTool) -> None:
+        if self.model.max_tools == 1:
+            raise Invalid(f"{self.model.name} has one tool")
+        if self.job is not None or self.state is State.BUSY:
+            raise Busy(f"can't pick a tool while {self.state}")
+
+    def _check_runout(self, t: SimTool) -> None:
+        self._need_power()
+        job = self.job
+        if not (isinstance(job, UserJob) and job.phase in (JobPhase.PRINTING, JobPhase.PREHEAT)):
+            raise Busy("a runout or jam needs a print in progress")
+        # Only the picked tool feeds, so only its sensor can see a runout or a jam.
+        if t.index != self.selected_tool:
+            raise Invalid(f"T{t.index} isn't the selected tool")
+        if not t.loaded:
+            raise Busy(f"T{t.index} has no filament")
+
+    def _check_disable(self, t: SimTool) -> None:
+        job = self.job
+        in_print = isinstance(job, UserJob) and t.index in {s.tool for s in job.spec.segments}
+        if t.index == self.selected_tool or in_print or t.process is not None:
+            raise Invalid(f"T{t.index} is in use")
+
+    def _check_start_print(self) -> None:
+        self._need_power()
+        if not self.can_print():
+            raise Busy(f"can't print while {self.state}")
+
+    def _check_pause(self) -> None:
+        self._need_power()
+        if self.job is None or self.job.phase not in (JobPhase.PRINTING, JobPhase.PREHEAT):
+            raise Busy("nothing to pause")
+
+    def _check_resume(self) -> None:
+        self._need_power()
+        if self.job is None or self.job.phase not in (JobPhase.PAUSED, JobPhase.AWAIT_RESUME):
+            raise Busy("nothing to resume")
+
+    def _check_cancel(self) -> None:
+        self._need_power()
+        if self.job is None or self.job.phase is JobPhase.PARKING:
+            raise Busy("nothing to cancel")
+
+    def _check_dismiss(self) -> None:
+        self._need_power()
+        if self.job is not None or self.state not in (State.FINISHED, State.STOPPED):
+            raise Busy(f"nothing to dismiss in {self.state}")
+
+    def _check_home(self) -> None:
+        self._need_power()
+        if self.job is not None or self.state not in IDLE_STATES:
+            raise Busy(f"can't home in {self.state}")
+
+    def _check_clear_jam(self) -> None:
+        self._need_power()
+        job = self.job
+        if job is None or job.phase is not JobPhase.HOLD or not job.waits_for(Reason.JAM):
+            raise Busy("no jam to clear")
+
+    def _check_tap_through(self) -> None:
+        self._need_power()
+        job = self.job
+        if job is None or job.phase is not JobPhase.HOLD or not isinstance(job, SyncJob):
+            raise Busy("nothing to tap through")
+
+    def actions_json(self) -> dict[str, str | None]:
+        """Each printer action, with why it can't run now, or None when it can."""
+        checks: dict[str, Callable[[], None]] = {
+            "start_print": self._check_start_print,
+            "pause": self._check_pause,
+            "resume": self._check_resume,
+            "cancel": self._check_cancel,
+            "dismiss": self._check_dismiss,
+            "home": self._check_home,
+            "reboot": self._need_power,
+            "clear_jam": self._check_clear_jam,
+            "tap_through": self._check_tap_through,
+        }
+        return {name: _refusal(check) for name, check in checks.items()}
+
+    def _tool_actions_json(self, t: SimTool) -> dict[str, str | None]:
+        """Each tool action, with why it can't run now, or None when it can."""
+        checks: dict[str, Callable[[], None]] = {
+            "load": lambda: self._check_load(t, keep=False),
+            "keep": lambda: self._check_load(t, keep=True),
+            "unload": lambda: self._check_unload(t),
+            "extrude": lambda: self._check_move(t),
+            "retract": lambda: self._check_move(t),
+            "runout": lambda: self._check_runout(t),
+            "jam": lambda: self._check_runout(t),
+            "select_tool": lambda: self._check_select(t),
+            # The fault switches take any enabled tool, in any state.
+            "set_sensor_fault": lambda: None,
+            "set_stuck_write": lambda: None,
+        }
+        if not t.enabled:
+            refused = {name: f"tool {t.index} is disabled" for name in checks}
+            return {**refused, "set_tool_enabled": None}  # enabling is always allowed
+        out = {name: _refusal(check) for name, check in checks.items()}
+        return {**out, "set_tool_enabled": _refusal(lambda: self._check_disable(t))}
 
     # Time.
 
@@ -1572,8 +1666,21 @@ class SimPrinter:
             "job": job,
             "job_counter": self.job_counter,
             "auto_accept_model_check": self.auto_accept_model_check,
-            "tools": [_tool_json(t) for t in sorted(self.tools.values(), key=lambda t: t.index)],
+            "actions": self.actions_json(),
+            "load_sources": ["tag", "preset"] if m.uuids else ["preset"],
+            "tools": [
+                {**_tool_json(t), "actions": self._tool_actions_json(t)}
+                for t in sorted(self.tools.values(), key=lambda t: t.index)
+            ],
         }
+
+
+def _refusal(check: Callable[[], None]) -> str | None:
+    try:
+        check()
+    except (Busy, Invalid) as e:
+        return str(e)
+    return None
 
 
 def _tool_json(t: SimTool) -> dict:
@@ -1762,6 +1869,16 @@ class Simulation:
             "settings": asdict(self.settings),
             "printers": [p.to_json() for p in self.printers.values()],
             "snapshots": self.snapshot_names(),
+            # What the page's forms offer, so it copies none of the model's lists.
+            "setting_fields": [
+                {"name": f.name, "kind": "bool" if isinstance(f.default, bool) else "number"}
+                for f in fields(Settings)
+            ],
+            "options": {
+                "power": [str(v) for v in Power],
+                "fault": [str(v) for v in Fault],
+                "firmware": [str(v) for v in Firmware],
+            },
         }
         if events:
             out["events"] = [asdict(e) for e in self.events[-200:]]
