@@ -116,26 +116,8 @@ own behavior decides the outcome. Don't narrow the unit suite.
 
 The simulator review read every file in `simulator/`.
 
-### S1. Printer state is stored beside the job phase
-
-`simulator/model.py` has 26 `_set_state()` calls, nearly all paired with a
-`job.phase = ...` write. While a job exists, the state follows from the
-phase. The `HOLD` phase covers three situations, told apart by `job.jam`,
-`job.id is None`, and comparing `attention` with the text `"model check"`.
-`static/app.js` reads the attention text too: with regular expressions to
-find a tool index, and with `===` and `startsWith` to enable a button.
-
-Shape: derive the state from the phase with one table and store only the
-idle screen. Make the attention reason an enum with a tool index. Split
-`SimJob` into a user job and a sync job.
-
-Size: medium.
-
 ### S2. The page reimplements the model's rules
 
-- The Resume button is disabled unless the state is `PAUSED`, but
-  `resume()` also handles the wait on a cold bed after a power panic, which
-  is `ATTENTION`. The page can't continue that print (#134).
 - The page's `SETTINGS` list (`app.js`) lacks `recover_seconds`,
   `unpark_seconds`, and `panic_purge_mm`.
 - `canStart`, `dLoad`, `dUnload`, and `IDLEISH` copy model rules, and the
@@ -156,44 +138,7 @@ process, so the format must stay callable without HTTP.
 Shape: a pure `prusalink.render(printer)` for the wire views, the G-code
 interpreter in its own module, and input checks in the control layer.
 
-Size: large. Do S1 and S5 first.
-
-### S5. Tool material rules are kept by convention
-
-`_set_material` (`model.py`) keeps a tool's material, its ad-hoc slot
-(`previous`), and `kept_type` in step. `_apply_uuid` (`model.py`),
-`_tool_from_config`, and test setup in `simulator/tests/util.py`,
-`tests/harness.py` (`fill`), and `integration/printers.py` (`start`) write
-the fields directly. `SimTool.temps` copies temperatures that `Material`
-already has.
-
-Shape: methods on `SimTool` own material writes, with a "loaded with"
-constructor for test setup. Fold `temps` into the slot's `Material`.
-
-Size: medium.
-
-### S6. Smaller items
-
-- Config-to-model conversion lives in `model.py` (`from_config`,
-  `_tool_from_config`), with an import cycle hidden
-  behind `TYPE_CHECKING`. Material name, color, and UUID checks exist in
-  both `config.py` and `model.py`.
-- The control API dispatches with `getattr(printer, action)(**body)`
-  (`control.py`) and catches `TypeError` around the whole call, so a
-  bug inside an action returns 400 "bad parameters". The action list is
-  kept in `control.py`, the README, and `app.js`.
-- `Simulation` mixes the clock with web streaming, and `log()` always calls
-  `changed()` (`model.py`). `Station.requests` (`integration/station.py`)
-  and `jobs` (`tests/harness.py`) find requests by parsing log text.
-- "UUIDs only on tool 0 of a model that holds them" is written in about
-  seven places in `model.py`, `config.py`, and `seed.py`.
-- Snapshots are a dump of the internal dataclasses, with shims for older
-  snapshots in `_process_from`, `_tool_from` (`kept_type`), and `Material`'s
-  optional temperatures.
-- `seed` picks spool materials from `CYCLE[tool % 3]` (`seed.py`) and
-  mints a random UUID, so the demo printer's preloaded tag UUID never
-  matches its seeded spool, and the demo starts with UUID drift (#135).
-  This may be intended. Nothing says so.
+Size: large.
 
 ## Order and dependencies
 
@@ -201,6 +146,6 @@ Size: medium.
 | --- | --- | --- | --- |
 | 3 | Conditions and saved facts | B10 | Nothing |
 | 5 | Narrow the bridge boundary | B4, T1 | Workstream 3 |
-| 8 | Simulator state | S1, S5, S6, then S2, S4 | Nothing. S4 continues the move that put the PrusaLink routing in `prusalink.serve` |
+| 8 | Simulator state | S2, then S4 | Nothing. S4 continues the move that put the PrusaLink routing in `prusalink.serve` |
 
 T3 has no work, so it isn't in a workstream.

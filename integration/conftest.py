@@ -45,10 +45,10 @@ CLAIM_FIELD = "bridge_claim"
 LOAD_MM = 36 + 40
 
 PLA = ("PLA", "#73737b")
-PETG = ("PETG", "#1f6fb2")
-ASA = ("ASA", "#d9342b")
+PETG = ("PETG", "#186bb5")
+ASA = ("ASA", "#de3129")
 # Spool D's, in tool 1 of a multi-tool world: PETG in a color B doesn't share.
-PETG_GREEN = ("PETG", "#2a9d4a")
+PETG_GREEN = ("PETG", "#299c4a")
 
 # The printer `world` simulates, by how many tools it has: a Core One L, or a Core One L
 # INDX (no tag reader, no UUIDs, a 27 mm gap) with tools 0 and 1 docked.

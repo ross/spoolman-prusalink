@@ -7,14 +7,24 @@ import os
 import re
 import sys
 import tomllib
-import uuid
 from dataclasses import dataclass, field, fields
 
-from simulator.model import MODELS, Firmware, Invalid, Settings
+from simulator.model import (
+    MODELS,
+    Firmware,
+    Invalid,
+    Material,
+    Settings,
+    SimPrinter,
+    SimTool,
+    Simulation,
+    check_color,
+    check_name,
+    check_uuid,
+    preset_temperatures,
+)
 
 _NAME_PATTERN = r"[A-Za-z0-9_.-]{1,64}"
-_MATERIAL_PATTERN = r"[A-Za-z0-9_-]{1,7}"
-_COLOR_PATTERN = r"#[0-9a-fA-F]{6}"
 
 _TOP_KEYS = {"host", "control_port", "data_dir", "printers"}
 _PRINTER_KEYS = {"name", "model", "api_key", "port", "firmware", "auto_accept_model_check", "tools"}
@@ -67,8 +77,9 @@ class Location:
     printer: str
     tool: int
     location: str
-    # Whether the printer's model holds an instance UUID (tool 0 only).
+    # Whether the printer's model has a tag reader, and whether this tool keeps tag UUIDs.
     uuids: bool
+    holds_uuid: bool
     # The tool's configured material name and instance UUID, if any.
     material: str | None = None
     instance_uuid: str | None = None
@@ -119,32 +130,23 @@ def _unknown(table: dict, allowed: set[str], prefix: str) -> None:
             raise ConfigError(f"{where} isn't a known key")
 
 
-def _material(value: object, prefix: str, uuids: bool, tool: int) -> dict:
+def _material(value: object, prefix: str, holds_uuid: bool) -> dict:
     name = f"{prefix}.material"
     if not isinstance(value, dict):
         raise ConfigError(f"{name} must be a table with a name, got {value!r}")
     _unknown(value, _MATERIAL_KEYS, name)
     if "name" not in value:
         raise ConfigError(f"{name} needs a name")
-    material_name = _str(value["name"], f"{name}.name")
-    if not re.fullmatch(_MATERIAL_PATTERN, material_name):
-        raise ConfigError(f"{name}.name must match {_MATERIAL_PATTERN}, got {material_name!r}")
-    color = None
-    if "color" in value:
-        color = _str(value["color"], f"{name}.color")
-        if not re.fullmatch(_COLOR_PATTERN, color):
-            raise ConfigError(f"{name}.color must look like #rrggbb, got {color!r}")
-        color = color.lower()
-    instance_uuid = None
-    if "instance_uuid" in value:
-        raw = _str(value["instance_uuid"], f"{name}.instance_uuid")
+    # The same checks as a load from the page, so a configured tool holds what a load could.
+    out = {}
+    for key, check in (("name", check_name), ("color", check_color), ("instance_uuid", check_uuid)):
         try:
-            instance_uuid = str(uuid.UUID(raw))
-        except ValueError as e:
-            raise ConfigError(f"{name}.instance_uuid isn't a UUID, got {raw!r}") from e
-        if not uuids or tool != 0:
-            raise ConfigError(f"{name}.instance_uuid needs a model that holds UUIDs, on tool 0")
-    return {"name": material_name, "color": color, "instance_uuid": instance_uuid}
+            out[key] = check(value.get(key))
+        except Invalid as e:
+            raise ConfigError(f"{name}.{key}: {e}") from None
+    if out["instance_uuid"] and not holds_uuid:
+        raise ConfigError(f"{name}.instance_uuid needs a model that holds UUIDs, on tool 0")
+    return out
 
 
 def _tool(entry: object, prefix: str, model_code: str) -> ToolConfig:
@@ -163,7 +165,7 @@ def _tool(entry: object, prefix: str, model_code: str) -> ToolConfig:
     enabled = _bool(entry.get("enabled", True), f"{prefix}.enabled")
     material = None
     if "material" in entry:
-        material = _material(entry["material"], prefix, info.uuids, index)
+        material = _material(entry["material"], prefix, info.holds_uuid(index))
     extruded = _number(entry.get("extruded", 0), f"{prefix}.extruded", 0)
     unload_count = _int(entry.get("unload_count", 0), f"{prefix}.unload_count", 0)
     at_unload = _int(entry.get("extruded_at_unload", 0), f"{prefix}.extruded_at_unload", 0)
@@ -298,6 +300,7 @@ def locations(cfg: SimConfig) -> list[Location]:
             t.index,
             _location(p, t),
             MODELS[p.model].uuids,
+            MODELS[p.model].holds_uuid(t.index),
             t.material["name"] if t.material else None,
             t.material["instance_uuid"] if t.material else None,
         )
@@ -334,3 +337,44 @@ def bridge_config(cfg: SimConfig) -> str:
                 "",
             ]
     return "\n".join(lines)
+
+
+def build(cfg: SimConfig) -> Simulation:
+    """The simulation `cfg` describes, with every printer booted and idle."""
+    sim = Simulation(Settings(**cfg.settings), data_dir=cfg.data_dir)
+    for pc in cfg.printers:
+        model = MODELS[pc.model]
+        default = Firmware.FULL if model.counters else Firmware.NO_COUNTERS
+        tools = {tc.index: _sim_tool(tc) for tc in pc.tools}
+        enabled = sorted(i for i, t in tools.items() if t.enabled)
+        sim.add(
+            SimPrinter(
+                name=pc.name,
+                port=pc.port,
+                api_key=pc.api_key,
+                model=model,
+                firmware=Firmware(pc.firmware) if pc.firmware else default,
+                auto_accept_model_check=pc.auto_accept_model_check,
+                tools=tools,
+                selected_tool=enabled[0] if enabled else min(tools),
+            )
+        )
+    return sim
+
+
+def _sim_tool(tc: ToolConfig) -> SimTool:
+    m = tc.material
+    material = None
+    if m:
+        color, uuid_ = m["color"], m["instance_uuid"]
+        # A configured color or UUID can only come from an ad-hoc type; a bare name is a preset.
+        adhoc = bool(color or uuid_)
+        material = Material(m["name"], color, uuid_, adhoc, **preset_temperatures(m["name"]))
+    return SimTool.loaded_with(
+        tc.index,
+        material,
+        enabled=tc.enabled,
+        extruded=float(tc.extruded),
+        unload_count=tc.unload_count,
+        extruded_at_unload=tc.extruded_at_unload,
+    )

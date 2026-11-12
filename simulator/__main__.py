@@ -84,7 +84,7 @@ class Server:
 
 
 async def _run(cfg: config.SimConfig) -> None:
-    sim = Simulation.from_config(cfg)
+    sim = config.build(cfg)
     sim.listeners.append(_print_event)
     server = Server(sim, cfg.host, cfg.control_port)
     await server.start()
