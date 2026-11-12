@@ -78,24 +78,12 @@ Size: large.
 
 ### B3. Saved state stores presentation, not facts
 
-- `ToolState.written` (`accounting.py`) holds the `M865` lines of the
-  last write. Three places parse it back with regular expressions:
-  `_written_uuid` (`app.py`), `printer_matches_write`
-  (`printer_sync.py`), and `_written_temperatures`
-  (`printer_sync.py`).
-- `_edited` (`app.py`) decides that a spool was edited in Spoolman by
-  comparing freshly rendered G-code with the saved text. A change to how
-  `filament_lines` renders a line would make every tool that still shows
-  the bridge's last write look edited after an upgrade, and the bridge
-  would write each one once more. Tagged tools are never written, so they
-  aren't affected.
-- `Runout.text` and `PrinterState.flags` are saved as prose. A wording fix
-  doesn't reach state that already exists.
+`Runout.text` and `PrinterState.flags` are saved as prose. A wording fix
+doesn't reach state that already exists.
 
-Shape: save what was written as fields (name, color, temperatures, UUID) and
-save runouts as a kind with parameters, as notices are saved as typed events
-(`events.py`). Render G-code and prose
-at the point of use. `PrinterState.flags` can then hold conditions from B2.
+Shape: save runouts as a kind with parameters, as notices are saved as typed
+events (`events.py`). Render prose at the point of use. `PrinterState.flags`
+can then hold conditions from B2.
 
 Size: medium.
 
@@ -180,7 +168,7 @@ Shape: `account()` reports "the active spool changed or the tool unloaded"
 in its result. The write logic owns its own per-tool state, saved beside the
 tool state.
 
-Size: small to medium. Do it with B3, which reshapes `written`.
+Size: small to medium.
 
 ### B9. `account()` is one function of six steps
 
@@ -206,8 +194,9 @@ Size: medium.
 
 - The `tools` table holds a JSON blob per tool, `printer_flags` holds JSON,
   and `seen_uuids` has columns. `SCHEMA_VERSION` doesn't cover the blob's
-  shape. The blob is `ToolState.to_json` in `accounting.py`, so it belongs
-  to workstream 10.
+  shape. The blob is `ToolState.to_json` in `accounting.py`. Do it last in
+  workstream 3, after workstreams 3 and 4 have changed what's saved per
+  tool.
 
 ## Tests and tooling
 
@@ -357,11 +346,9 @@ Size: medium.
 
 | # | Workstream | Findings | Depends on |
 | --- | --- | --- | --- |
-| 3 | Conditions and saved facts | B2, B3, B5, B7, T1 (rest) | Nothing |
+| 3 | Conditions and saved facts | B2, B3, B5, B7, B10, T1 (rest) | Nothing |
 | 4 | Typed records | B6, B9, T7 | Nothing. Easier after 3 |
 | 5 | Narrow the bridge boundary | B4, T1 (UUID registry tests) | Workstream 3 |
 | 8 | Simulator state | S1, S5, S6, then S2, S4 | Nothing. S4 continues the move that put the PrusaLink routing in `prusalink.serve` |
-| 10 | Accounting state | B10 | Nothing |
 
-Workstream 10 is independent and can run at any time. T3
-has no work, so it isn't in a workstream.
+T3 has no work, so it isn't in a workstream.

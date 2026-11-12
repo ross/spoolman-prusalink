@@ -16,6 +16,7 @@ from spoolman_prusalink.db import (
     read_state,
 )
 from spoolman_prusalink.events import StagedAtPrint, StagedAtReboot
+from spoolman_prusalink.printer_sync import WrittenFilament
 from spoolman_prusalink.state import PrinterState, Runout, State
 from spoolman_prusalink.tags import SeenTag
 
@@ -38,7 +39,7 @@ def full_state() -> State:
         notice=StagedAtPrint(8, 7),
         needs_sync=True,
         sync_attempts=1,
-        written="M865 T0",
+        written=WrittenFilament("PLA", 215, 60, color="#8c9099"),
         held_mm=30,
         deleted_spool=4,
         staged_notice=StagedAtReboot(8, 7),
@@ -468,6 +469,9 @@ def test_a_lock_that_fails_for_another_reason_lets_go_of_the_file(path, monkeypa
         (lambda d: d["swap"].pop("mm"), "missing key 'mm'"),
         (lambda d: d.update(evict=None), "a value of the wrong type"),
         (lambda d: d.update(since_load=None), "a value of the wrong type"),
+        # The G-code text an older bridge saved.
+        (lambda d: d.update(written='M865 X R N"PLA" T215 B60 L0'), "a value of the wrong type"),
+        (lambda d: d["written"].pop("nozzle"), "missing key 'nozzle'"),
     ],
 )
 def test_a_tools_row_missing_a_key_is_a_database_error(path, edit, message):
