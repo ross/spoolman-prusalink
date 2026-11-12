@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 from dataclasses import asdict
 from pathlib import Path
@@ -71,10 +72,14 @@ def _call(sim: Simulation, name: str, action: str, body: dict) -> None:
     if action == "start_print":
         printer.start_print(PrintSpec.from_dict(body))
         return
+    method = getattr(printer, action)
+    # Check the parameters against the signature before the call, so a TypeError raised
+    # inside the action is a bug that answers 500, not a bad request.
     try:
-        getattr(printer, action)(**body)
+        inspect.signature(method).bind(**body)
     except TypeError as e:
         raise Invalid(f"bad parameters for {action}: {e}") from None
+    method(**body)
 
 
 def make_app(sim: Simulation) -> web.Application:

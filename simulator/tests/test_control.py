@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import re
+from pathlib import Path
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
@@ -166,3 +168,20 @@ async def test_an_action_without_a_body_takes_no_parameters(setup):
     assert resp.status == 200 and p.homed
     resp = await client.post("/api/printers/p/dismiss")
     assert resp.status == 409 and "nothing to dismiss" in (await resp.json())["error"]
+
+
+async def test_a_type_error_inside_an_action_is_a_bug_not_a_bad_request(setup, monkeypatch):
+    sim, p, client = setup
+
+    def broken() -> None:
+        raise TypeError("a bug")
+
+    monkeypatch.setattr(p, "home", broken)
+    resp = await client.post("/api/printers/p/home")
+    assert resp.status == 500
+
+
+def test_the_readme_lists_every_action():
+    readme = (Path(control.__file__).parent / "README.md").read_text()
+    listed = re.search(r"^Actions: (.*?)\. Parameter names", readme, re.S | re.M).group(1)
+    assert set(re.findall(r"`(\w+)`", listed)) == control.ACTIONS

@@ -378,10 +378,6 @@ Size: large.
 
 ### S6. Smaller items
 
-- The control API dispatches with `getattr(printer, action)(**body)`
-  (`control.py`) and catches `TypeError` around the whole call, so a
-  bug inside an action returns 400 "bad parameters". The action list is
-  kept in `control.py`, the README, and `app.js`.
 - `Simulation` mixes the clock with web streaming, and `log()` always calls
   `changed()` (`model.py`). `Station.requests` (`integration/station.py`)
   and `jobs` (`tests/harness.py`) find requests by parsing log text.
