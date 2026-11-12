@@ -245,6 +245,12 @@ async def spoolman(spoolman_url: str, prefix: str):
             await helper.cleanup()
 
 
+def sim_clock(sim: Simulation) -> Callable[[], float]:
+    """The bridge's clock: simulated time, offset so that it starts large, as a monotonic
+    clock does. An outage reminder measured from zero would show up in the tests."""
+    return lambda: sim.now + 1e6
+
+
 def advance(sim: Simulation, seconds: float) -> None:
     """Move simulated time on by `seconds`, in the clock task's 0.1 s steps."""
     t = 0.0
@@ -337,8 +343,7 @@ class World:
         """
         await self.bridge.aclose()
         self.cfg = replace(self.cfg, **config)
-        self.bridge = Bridge.from_config(self.cfg)
-        self.bridge.clock = lambda: self.sim.now
+        self.bridge = Bridge.from_config(self.cfg, clock=sim_clock(self.sim))
         self.bridges.append(self.bridge)
 
     @property
@@ -645,8 +650,7 @@ async def world(
         ),
         **world_config,
     )
-    bridge = Bridge.from_config(cfg)
-    bridge.clock = lambda: sim.now
+    bridge = Bridge.from_config(cfg, clock=sim_clock(sim))
     w = World(
         sim,
         printer,

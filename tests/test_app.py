@@ -340,8 +340,8 @@ async def test_printer_outage_logged_on_change(tmp_path, caplog):
         Spoolman("http://s", transport=t),
         {"default": PrusaLink("http://p", "k", transport=t)},
         Database.open(cfg.db_file),
+        clock=lambda: now["v"],
     )
-    bridge.printers[0]._printer_reach.clock = lambda: now["v"]
     caplog.set_level("INFO")
 
     for _ in range(5):
@@ -388,9 +388,9 @@ async def test_printer_kind_change_and_bad_answer_reporting(tmp_path, caplog):
         Spoolman("http://s", transport=t),
         {"default": PrusaLink("http://p", "k", transport=t)},
         Database.open(cfg.db_file),
+        clock=lambda: now["v"],
     )
     reach = bridge.printers[0]._printer_reach
-    reach.clock = lambda: now["v"]
     caplog.set_level("DEBUG")
 
     def lines(text):
