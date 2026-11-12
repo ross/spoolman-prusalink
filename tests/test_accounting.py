@@ -1591,3 +1591,8 @@ def test_claim_while_a_job_waits_for_its_first_extrusion():
     _, kinds, state = run([(BOOT, r(260, unloads=1, at_unload=100), loc(9), 42)], res.state)
     assert EventKind.SWAP_ASSUMED not in kinds
     assert (state.active, state.job_id, state.provisional) == (9, 42, None)
+
+
+def test_baseline_with_an_empty_location_names_no_spool():
+    res = account(ToolState(), BOOT, r(100), loc())
+    assert [e.message for e in res.events] == ["baseline extruded=100 spool=none"]
