@@ -132,6 +132,8 @@ archived active spool (M3, M3a) is logged once when the bridge finds it.
 | B3 | Killed between a charge being accepted and the outbox being saved. | That charge is sent again: up to one poll's worth, double-charged. | Implemented; known limit |
 | B4 | The database lost. | Starts again from a baseline (B1). Usage since the last poll is lost, and swap state is forgotten. | Implemented; a lost database is a deployment problem (see Out of scope); end to end (`test_b4_database_lost`) |
 | B5 | First start on a Spoolman without the bridge's extra fields. | Registers each field when it first needs it: the flag (text) and claim (boolean) fields at the first poll, the instance UUID field (text) when it first stores a UUID. A key that already exists with another type is logged once and left alone: nothing is written to that field, and charging carries on. | Tested; end to end (`test_b5_fields_registered_on_a_fresh_spoolman`); a key with the wrong type, end to end (`test_b5_field_with_the_wrong_type`) |
+| B6 | A second bridge started on a running bridge's database. | Refuses to start, naming the lock file beside the database (Q9). The running bridge carries on. | Tested; end to end (`test_b6_second_bridge_on_one_database_is_refused`) |
+| B7 | The database file isn't a bridge database: another program's, corrupt, or a schema version this bridge doesn't know. | Refuses to start, naming the file, and leaves it as it was. | Tested; end to end (`test_b7_database_that_is_not_the_bridges_is_refused`) |
 
 ## Claims
 

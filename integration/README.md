@@ -214,6 +214,8 @@ current and that the scenario rows name their tests.
 | B4 | `test_bridge.py::test_b4_database_lost` | The database lost: a new baseline, use since the last poll lost, the swap forgotten. |
 | B5 | `test_bridge.py::test_b5_field_with_the_wrong_type` | A field key taken by another type: logged once, no flag written, charging unaffected. |
 | B5 | `test_bridge.py::test_b5_fields_registered_on_a_fresh_spoolman` | Fresh Spoolman: the bridge registers its flag, claim and UUID fields as it needs them. |
+| B6 | `test_bridge.py::test_b6_second_bridge_on_one_database_is_refused` | A second bridge on a running bridge's database refuses to start; the first carries on. |
+| B7 | `test_bridge.py::test_b7_database_that_is_not_the_bridges_is_refused` | A database that's another program's, corrupt or a newer schema: refused, left as it was. |
 <!-- table:end -->
 
 ## Add a scenario

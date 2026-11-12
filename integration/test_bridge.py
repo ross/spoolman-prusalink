@@ -1,4 +1,4 @@
-"""The bridge itself: docs/scenarios.md rows B1, B2, B4 and B5.
+"""The bridge itself: docs/scenarios.md rows B1 to B7.
 
 B3, a kill between a charge being accepted and the outbox being saved, is a known limit
 with no way in from outside the bridge, so it has no test here.
@@ -7,13 +7,17 @@ with no way in from outside the bridge, so it has no test here.
 from __future__ import annotations
 
 import logging
+import sqlite3
 import uuid
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
 from integration.conftest import LOAD_MM, PETG, PLA, World, charges, count, events, print_spec
 from simulator.model import State
+from spoolman_prusalink.app import Bridge
+from spoolman_prusalink.db import DatabaseError
 
 
 async def test_b1_first_start(world: World):
@@ -196,3 +200,76 @@ async def test_b5_field_with_the_wrong_type(world: World, caplog: pytest.LogCapt
     assert not any(r.levelno > logging.WARNING for r in caplog.records)
     assert writes == []
     assert not any("can't update the flag" in r.getMessage() for r in caplog.records)
+
+
+async def test_b6_second_bridge_on_one_database_is_refused(world: World):
+    """A second bridge on a running bridge's database refuses to start; the first carries on."""
+    w = world
+    await w.poll()
+    with pytest.raises(DatabaseError, match="another bridge is running on the same database"):
+        Bridge.from_config(w.cfg)
+
+    w.printer.extrude(0, 20)
+    records = await w.poll()
+    assert w.charged(records, "A") == 20
+
+    # Once the first bridge stops, a bridge starts on its database and carries on.
+    await w.restart()
+    w.printer.extrude(0, 10)
+    records = await w.poll()
+    assert events(records) == []
+    assert w.charged(records, "A") == 10
+
+
+def foreign(path: Path) -> None:
+    conn = sqlite3.connect(path)
+    conn.execute("CREATE TABLE notes (id INTEGER PRIMARY KEY, text TEXT)")
+    conn.execute("INSERT INTO notes (text) VALUES ('keep me')")
+    conn.commit()
+    conn.close()
+
+
+def corrupt(path: Path) -> None:
+    path.write_bytes(b"not a database\n" * 512)
+
+
+def newer(path: Path) -> None:
+    """Renumber a bridge database's schema to one this bridge doesn't know."""
+    conn = sqlite3.connect(path)
+    conn.execute("UPDATE meta SET value = '99' WHERE key = 'schema_version'")
+    conn.commit()
+    conn.close()
+
+
+@pytest.mark.parametrize(
+    "make, error",
+    [
+        (foreign, "isn't a bridge database"),
+        (corrupt, "file is not a database"),
+        (newer, "unsupported schema version '99'"),
+    ],
+    ids=["foreign", "corrupt", "newer"],
+)
+async def test_b7_database_that_is_not_the_bridges_is_refused(
+    world: World, tmp_path: Path, make, error: str
+):
+    """A database that's another program's, corrupt or a newer schema: refused, left as it was."""
+    w = world
+    path = tmp_path / "other" / "bridge.db"
+    path.parent.mkdir()
+    if make is newer:
+        # A real bridge database, made by a bridge that has polled once.
+        await w.restart(db_file=path)
+        await w.poll()
+        await w.bridge.aclose()
+    make(path)
+    files = contents(path.parent)
+
+    with pytest.raises(DatabaseError, match=error):
+        Bridge.from_config(replace(w.cfg, db_file=path))
+    assert contents(path.parent) == files
+
+
+def contents(folder: Path) -> dict[str, bytes]:
+    """Every file in `folder` but the lock file, which a refused bridge may create."""
+    return {p.name: p.read_bytes() for p in folder.iterdir() if not p.name.endswith(".lock")}
