@@ -305,10 +305,29 @@ def test_settings_update_validates_before_changing_anything():
         ({"bogus": 1}, "unknown setting 'bogus'"),
         ({"time_scale": 0}, "time_scale must be greater than 0"),
         ({"load_rate_mm_s": 0}, "load_rate_mm_s must be greater than 0"),
+        ({"feed_ratio": float("nan")}, "feed_ratio must be a number of at least 0"),
+        ({"purge_mm": float("inf")}, "purge_mm must be a number of at least 0"),
     ):
         with pytest.raises(Invalid, match=message):
             s.update({"unload_seconds": 99, **values})
         assert s.unload_seconds == 2
+
+
+def test_settings_construction_checks_every_field():
+    Settings()
+    for values, message in (
+        ({"time_scale": 0}, "time_scale must be greater than 0"),
+        ({"load_rate_mm_s": 0}, "load_rate_mm_s must be greater than 0"),
+        ({"print_rate_mm_s": -1}, "print_rate_mm_s must be a number of at least 0"),
+        ({"purge_mm": -1}, "purge_mm must be a number of at least 0"),
+        ({"feed_ratio": float("nan")}, "feed_ratio must be a number of at least 0"),
+        ({"time_scale": float("inf")}, "time_scale must be a number of at least 0"),
+        ({"scan_seconds": float("-inf")}, "scan_seconds must be a number of at least 0"),
+        ({"purge_mm": True}, "purge_mm must be a number of at least 0"),
+        ({"start_blip": 1}, "start_blip must be true or false"),
+    ):
+        with pytest.raises(Invalid, match=message):
+            Settings(**values)
 
 
 # Print progress.
@@ -417,6 +436,17 @@ def test_restore_rejects_a_malformed_snapshot():
     sim, _ = make()
     with pytest.raises(Invalid, match="bad snapshot"):
         sim.restore({"printers": []})
+
+
+def test_restore_rejects_bad_settings_and_changes_nothing():
+    sim, _ = make()
+    snap = json.loads(json.dumps(sim.snapshot()))
+    snap["settings"]["load_rate_mm_s"] = 0
+    sim.settings.time_scale = 7
+    before = json.dumps(sim.snapshot(), sort_keys=True)
+    with pytest.raises(Invalid, match="bad snapshot: load_rate_mm_s must be greater than 0"):
+        sim.restore(snap)
+    assert json.dumps(sim.snapshot(), sort_keys=True) == before
 
 
 def test_select_tool_while_off_changes_the_pick_without_touching_the_sensor():

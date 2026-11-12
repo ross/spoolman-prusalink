@@ -81,6 +81,12 @@ BAD = {
     "setting type bool": ('start_blip = "no"\n' + printer(), "start_blip must be true or false"),
     "setting type float": ('time_scale = "fast"\n' + printer(), "time_scale must be a number"),
     "setting bool as number": ("feed_ratio = true\n" + printer(), "feed_ratio must be a number"),
+    "load rate zero": ("load_rate_mm_s = 0\n" + printer(), "load_rate_mm_s must be greater than 0"),
+    "print rate zero": (
+        "print_rate_mm_s = 0\n" + printer(),
+        "print_rate_mm_s must be greater than 0",
+    ),
+    "negative number": ("purge_mm = -1\n" + printer(), "purge_mm must be a number of at least 0"),
     "time scale zero": ("time_scale = 0\n" + printer(), "time_scale must be greater than 0"),
     "port as string": (printer('port = "80"'), "printers[0].port must be an integer"),
     "port is control port": (printer("port = 8000"), "printers[0].port 8000 is already used"),
