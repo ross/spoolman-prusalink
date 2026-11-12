@@ -471,7 +471,7 @@ def world_model(request: pytest.FixtureRequest, world_tools: int) -> str:
 
 @pytest.fixture
 def world_printer(request: pytest.FixtureRequest) -> dict:
-    """Settings `world` overrides in printer "it"'s `PrinterConfig`, such as `uuids=False`.
+    """Settings `world` overrides in printer "it"'s `PrinterConfig`, such as `sync_file`.
 
     None by default. A test sets them with
     `@pytest.mark.parametrize("world_printer", [dict(...)], indirect=True)`.
@@ -538,8 +538,8 @@ async def world(
 
     With `world_tools` at 2 the printer is a Core One L INDX instead, which shows no
     UUIDs, and tool 1 is loaded with spool D's green PETG, with D in `<prefix> T1`. The
-    bridge's config is the same apart from the second tool, `uuids` included: the
-    bridge decides from the model.
+    bridge's config is the same apart from the second tool: the bridge decides from the
+    model whether to use UUIDs.
 
     With `world_printers` at 2 a second Core One L, printer "b", shares the simulation:
     tool 0 loaded with spool E's white PLA and UUID, E in `<prefix> LB`. See
@@ -597,7 +597,7 @@ async def world(
                 url=f"http://{server.host}:{server.port}",
                 api_key=KEY,
                 tools=dict(locations),
-                **{"uuids": True, **world_printer},
+                **world_printer,
             ),
             *(other[-1] for other in others),
         ),

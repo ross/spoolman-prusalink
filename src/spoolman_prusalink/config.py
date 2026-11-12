@@ -34,9 +34,6 @@ class PrinterConfig:
     # Where the sync job is uploaded, and its file name (overwritten each time).
     sync_storage: str = "usb"
     sync_file: str = "spoolman-sync.gcode"
-    # Write the instance UUID on tool 0, minting one in Spoolman if the spool has none.
-    # False on printers without NFC support, such as INDX.
-    uuids: bool = True
 
 
 @dataclass(frozen=True)
@@ -175,7 +172,7 @@ def _url_key(url: str, prefix: str) -> str:
 
 
 def _printer_settings(table: dict, prefix: str) -> dict:
-    """Parse the settings every printer form shares: the sync job and UUIDs."""
+    """Parse the settings every printer form shares: the sync job."""
     sync_file = _str(table, "sync_file", "spoolman-sync.gcode", f"{prefix}.sync_file")
     if not re.fullmatch(r"[A-Za-z0-9_.-]+\.gcode", sync_file):
         raise ConfigError(f"{prefix}.sync_file must be a plain .gcode file name, got {sync_file!r}")
@@ -188,7 +185,6 @@ def _printer_settings(table: dict, prefix: str) -> dict:
         "gcode_preamble": None if preamble is None else tuple(preamble),
         "sync_storage": _str(table, "sync_storage", "usb", f"{prefix}.sync_storage"),
         "sync_file": sync_file,
-        "uuids": _bool(table, "uuids", True, f"{prefix}.uuids"),
     }
 
 
