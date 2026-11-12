@@ -471,7 +471,6 @@ CONFIG_BASE = (
         ('[bridge]\nprinter_sync = "false"\n', "bridge.printer_sync must be true or false"),
         ('[bridge]\nflag_drift = "no"\n', "bridge.flag_drift must be true or false"),
         ("[bridge]\nsync_drift = 1\n", "bridge.sync_drift must be true or false"),
-        ('[printer]\nuuids = "false"\n', "printer.uuids must be true or false"),
         ('[printer]\ngcode_preamble = "M862.3"\n', "gcode_preamble must be a list of strings"),
         ('[printer]\ngcode_preamble = ["M862.3", 1]\n', "gcode_preamble must be a list of strings"),
         ("[bridge]\npoll_idle = 0\n", "bridge.poll_idle must be a number greater than 0"),
@@ -595,12 +594,12 @@ def test_config_accepts_booleans_and_preamble_list(tmp_path):
     p.write_text(
         CONFIG_BASE.replace(
             "[printer]\n",
-            '[printer]\nuuids = false\ngcode_preamble = ["M862.3 P \\"COREONEL\\""]\n',
+            '[printer]\ngcode_preamble = ["M862.3 P \\"COREONEL\\""]\n',
         )
         + "[bridge]\nprinter_sync = false\npoll_idle = 0.5\n"
     )
     cfg = load(p, env={"PRUSALINK_API_KEY": "k"})
-    assert cfg.printer_sync is False and cfg.printers[0].uuids is False
+    assert cfg.printer_sync is False
     assert cfg.printers[0].gcode_preamble == ('M862.3 P "COREONEL"',)
     assert cfg.poll_idle == 0.5
 
@@ -643,7 +642,7 @@ PRINTERS_BASE = (
     '[spoolman]\nurl = "http://s"\n'
     '[[printers]]\nname = "core"\nurl = "http://a"\napi_key_env = "CORE_KEY"\n'
     '[[printers.tools]]\nindex = 0\nlocation = "Core One L+"\n'
-    '[[printers]]\nname = "mk4s"\nurl = "http://b/"\napi_key = "kb"\nuuids = false\n'
+    '[[printers]]\nname = "mk4s"\nurl = "http://b/"\napi_key = "kb"\n'
     '[[printers.tools]]\nindex = 0\nlocation = "MK4S"\n'
 )
 MK4S_TOOL = '[[printers.tools]]\nindex = 0\nlocation = "MK4S"\n'
@@ -653,19 +652,17 @@ def test_config_lists_several_printers(tmp_path):
     p = tmp_path / "c.toml"
     p.write_text(PRINTERS_BASE)
     core, mk4s = load(p, env={"CORE_KEY": "ka"}).printers
-    assert (core.name, core.url, core.api_key, core.tools, core.uuids) == (
+    assert (core.name, core.url, core.api_key, core.tools) == (
         "core",
         "http://a",
         "ka",
         {0: "Core One L+"},
-        True,
     )
-    assert (mk4s.name, mk4s.url, mk4s.api_key, mk4s.tools, mk4s.uuids) == (
+    assert (mk4s.name, mk4s.url, mk4s.api_key, mk4s.tools) == (
         "mk4s",
         "http://b/",
         "kb",
         {0: "MK4S"},
-        False,
     )
 
 
@@ -717,7 +714,6 @@ def test_config_lists_several_printers(tmp_path):
         ),
         (("[spoolman]\n", '[printer]\nurl = "http://p"\n[spoolman]\n'), "not both"),
         (("[spoolman]\n", '[[tools]]\nindex = 0\nlocation = "X"\n[spoolman]\n'), "not both"),
-        (("uuids = false\n", 'uuids = "no"\n'), "printers[mk4s].uuids must be true or false"),
     ],
 )
 def test_config_rejects_bad_printer_lists(tmp_path, edit, error):
