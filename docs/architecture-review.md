@@ -1,0 +1,621 @@
+# Architecture review
+
+This is a list of design problems found in a review on 2026-11-12, at main
+`51cb3ad`, with the rough shape of a rework for each. Nothing here is fixed
+yet. Each workstream is meant to be picked up by a later session as its own
+stack of PRs.
+
+Line numbers are as of `51cb3ad`. Check them before relying on them.
+
+## How to use this document
+
+- Pick a workstream from [Order and dependencies](#order-and-dependencies),
+  not a single finding. Several findings share tests and state, so they land
+  together or block each other.
+- Don't keep backwards compatibility. The project is pre-release with one
+  test deployment, so a rework can change the saved state, the ledger
+  records, or the config without a migration. Say in the PR what the
+  deployment has to do, such as starting from an empty database.
+- When a workstream merges, delete its findings from this document. When the
+  last one goes, delete the document.
+
+What was checked: every file in `src/spoolman_prusalink` was read in full,
+and the bridge findings (B1 to B11) come from that reading. The test (T1 to
+T8) and simulator (S1 to S10) findings come from two separate reviews. Of
+those, T1, T4, and T5 were checked against `src/`. The rest are reported, not
+confirmed, and each says so where it matters.
+
+## The common pattern
+
+Stack #105 removed `Once`, which coupled problem state to log levels and
+held both away from the code that owned them. Most findings below are
+relatives of that problem:
+
+- State that has no single owner, kept consistent by convention.
+- A value stored in its rendered form (G-code, prose) and parsed back.
+- One module reaching into another's private fields.
+- The same rule or list written out in several places.
+
+The rule from #105 still applies to every rework here: state lives at the
+code that owns it, and the call site that detects a change logs it with a
+literal level. Don't add a central object that owns levels.
+
+## Bridge
+
+### B1. Tag-UUID trust has no owner
+
+The rules for trusting an instance UUID read from a tag are a state machine
+spread over `PrinterBridge` and `Bridge`:
+
+- `_seen_uuid` (`app.py:256`) is a positional 4-tuple of UUID, spool,
+  appeared, and runout. Code reads it as `seen[1]`, `seen[2]`, and `seen[3]`.
+  A 25-line comment explains the field.
+- `PrinterState.seen_uuids` (`state.py:36`) is a 3-tuple copy of the same
+  data. `_see_uuid` and `_seen_unload` write both by hand.
+- `_uuid_gap`, `_adopts` (a 3-tuple per tool), `Bridge._refused_uuids`, and
+  `Bridge._unowned_uuids` hold the rest.
+- `_tag_uuid` (`app.py:802`) is named like a query, but it records what it
+  saw and changes saved state. It returns `("adopt", uuid)`,
+  `("keep", uuid)`, or `("conflict", uuid)` as strings.
+- Nothing saves the change. It relies on the `_save()` at the end of
+  `process()`.
+
+Why it hurts: a change to any one rule means tracing six fields through five
+methods. The tests pin the tuple layout (see T1), so the shape can't change
+without rewriting them.
+
+Shape: a typed per-tool record, such as a `SeenTag` dataclass, that the
+database stores as is. A pure function takes the record, the reported
+material, the active spool, whether that spool is certain, and the spool
+list. It returns the new record and a decision from an enum. That's the form
+`accounting.account()` already has. The caller saves and acts.
+
+Size: large. Do it with T1.
+
+### B2. `process()` does five jobs
+
+`PrinterBridge.process()` (`app.py:499`) is 210 lines. For each tool it runs
+the accounting, builds ledger records, derives flag texts from the tool
+state, decides UUID trust, and classifies a mismatch as a pending write or
+drift.
+
+Most conditions are reported on two channels with separately worded text:
+`notes` for the log and `flags` for Spoolman. Symptoms of the two channels
+having no shared model:
+
+- `_notes` (`app.py:1204`) reports an ended note by splitting its text on
+  `"] "` to recover the location.
+- `_COMPARED` (`app.py:50`) finds the notes about a comparison by testing
+  whether the key is a tuple whose first item is `"printer"` or `"uuid"`.
+- `_provisional_shown` (`app.py:236`) is state that exists only so a flag's
+  text doesn't change on every poll, because the text has a growing number
+  in it.
+
+Shape: pure functions that turn a tool's state into a list of conditions.
+Each condition has a key, a spool, a log text, an optional flag text, and
+whether it depends on comparing the printer with the spool. One differ logs
+the starts and ends and collects the flags. `process()` becomes the loop that
+calls them.
+
+Stack #105 left `_notes` as it was, because it already logs on change. This
+finding is about how notes are keyed and paired with flags, not about when
+they log.
+
+Size: large.
+
+### B3. Saved state stores presentation, not facts
+
+- `ToolState.written` (`accounting.py:178`) holds the `M865` lines of the
+  last write. Three places parse it back with regular expressions:
+  `_written_uuid` (`app.py:198`), `printer_matches_write`
+  (`printer_sync.py:277`), and `_written_temperatures`
+  (`printer_sync.py:298`).
+- `_edited` (`app.py:977`) decides that a spool was edited in Spoolman by
+  comparing freshly rendered G-code with the saved text. A change to how
+  `filament_lines` renders a line would make every written tool look edited
+  after an upgrade, and the bridge would rewrite each one.
+- `Notice.message`, `Runout.text`, and `PrinterState.flags` are saved as
+  prose. A wording fix doesn't reach state that already exists.
+
+Shape: save what was written as fields (name, color, temperatures, UUID) and
+save notices and runouts as a kind with parameters. Render G-code and prose
+at the point of use. `PrinterState.flags` can then hold conditions from B2.
+
+Size: medium.
+
+### B4. The `Bridge` and `PrinterBridge` boundary leaks both ways
+
+The split is "keyed by tool" against "keyed by spool", but each side works
+on the other's private fields:
+
+- `PrinterBridge` rebuilds `bridge._archived` in `check_missing`
+  (`app.py:344`), once per printer per poll. It reads
+  `bridge._refused_uuids`, and it calls `bridge._save`, `bridge._mint_uuid`,
+  and `bridge._adopt_uuid`. It writes `bridge.state.runouts`,
+  `bridge.state.claimed`, and `bridge.state.outbox`.
+- `Bridge` sets `p._idle_since` (`app.py:1325`), calls `p._hold_deleted`
+  from `flush` (`app.py:1603`), reads `p._printer_reach.down` and
+  `p._last_state` in `interval`, and assigns `printer.tools[tool]` in
+  `evict`.
+
+Shape: small owners for the spool-keyed concerns, each with public methods:
+the archived-spool cache, the UUID registry (mint, adopt, refused, unowned),
+and the flags. `PrinterBridge` gets the few it needs instead of a
+back-reference to the whole `Bridge`. `Bridge` asks a printer for what it
+needs through public methods.
+
+Size: medium. Easier after B1 and B2, which remove most of the reach-ins.
+
+### B5. The poll order is an implicit protocol
+
+`Bridge.poll()` (`app.py:1316`) calls its phases in a fixed order, and the
+phases talk through fields:
+
+- `process()` fills `_pending_writes` and `_adopts`. `adopt_uuids()` removes
+  tools from `_pending_writes`. `sync_printer()` consumes both.
+- `flags` is a dictionary passed down as an out-parameter and filled by
+  `_claims`, `process`, `_check_shared`, and `_finish_flags`. The result is
+  left in `_flags` for `sync_flags`.
+- `sync_printer` sets `_last_state = "BUSY"` (`app.py:1201`), a state the
+  printer didn't report, so that `interval()` polls again soon.
+- There are nine `_save()` call sites. Several mutations of saved state rely
+  on a later save by other code. `_hold_deleted` has a comment that says so
+  (`app.py:412`).
+
+Why it hurts: reordering two phases, or adding one, can break another phase
+with no failing type or signature.
+
+Shape: each phase returns a value and the next takes it as an argument.
+`process()` returns the writes it wants, the adoptions, the flags, and the
+ledger records. `poll()` passes them on. A "poll again soon" request is its
+own field. Each phase saves once, at its end.
+
+Size: medium. Falls out of B2 for the most part.
+
+### B6. Charges and events are untyped dictionaries
+
+A charge is a dictionary with 11 keys built in `process()` (`app.py:596`).
+It goes to the outbox, then to `flush`, then to the ledger.
+
+- Readers are defensive about a shape the bridge itself writes:
+  `rec.get("tool", -1)`, `int(rec.get("extruded_mm", 0))`
+  (`app.py:402`, `app.py:1597`).
+- `db.save` works out which charges left the outbox by comparing lists of
+  canonical JSON (`db.py:179`), because the outbox is a plain list that its
+  owner mutates.
+- The ledger tells a charge from an event by whether the record has an
+  `event` key (`db.py:350`).
+- `Event` is a kind and a message (`accounting.py:108`). Amounts and spool
+  IDs exist only in the prose, so about 70 integration test lines compare
+  messages exactly (reported in the test review).
+
+Shape: `ChargeRecord` and `EventRecord` dataclasses. An outbox object with
+push and pop that knows its own row IDs, so the database is told what
+changed. Events carry fields (millimeters, from spool, to spool) and the
+message is rendered from them.
+
+Size: medium.
+
+### B7. Write-sync state sits in the accounting state
+
+`needs_sync`, `sync_attempts`, and `written` are fields of `ToolState`.
+`account()` sets `needs_sync` and resets `sync_attempts`
+(`accounting.py:840`), although the accounting knows nothing else about
+printer writes. `app.py` rewrites all three in `_no_write` and
+`sync_printer`.
+
+Shape: `account()` reports "the active spool changed or the tool unloaded"
+in its result. The write logic owns its own per-tool state, saved beside the
+tool state.
+
+Size: small to medium. Do it with B3, which reshapes `written`.
+
+### B8. Raw `httpx` errors reach every layer
+
+`app.py` has 17 `except` sites that name `httpx` errors. Most also catch
+`ValueError` and `KeyError`, because the caller has to know what the
+client's parsing can raise. Status codes are interpreted far from the
+client: 404 in `flush` and `check_missing`, 409 in `sync_printer`, 5xx in
+`flush`.
+
+Why it hurts: a `KeyError` from a bug in bridge code inside one of those
+`try` blocks is logged as a bad answer from the service.
+
+Shape: the clients raise their own errors: unreachable, bad answer, not
+found, busy. The clients catch parse errors where they parse. `app.py`
+catches the client errors only.
+
+Size: small to medium. Independent of the rest.
+
+### B9. `account()` mixes last poll's state with this poll's
+
+`account()` (`accounting.py:370`) is 490 lines: six numbered steps, about
+ten mutable locals, and four closures that use `nonlocal`. It's pure, well
+documented, and has 98 tests through its public signature. The order of the
+steps is real: unload, claim, assignment, print start, usage. The length
+isn't the problem. These are:
+
+- **`s` is half last poll and half this poll.** `s.active`, `s.assigned`,
+  and `s.job_id` are the previous poll's values, compared with the new
+  locals. `s.charged`, `s.unload_count`, `s.boot_id`, and `s.evict` have
+  already been advanced with `replace`. The reader has to know which, field
+  by field.
+- **The usage tallies are kept by hand.** `swap.mm` and `provisional.mm`
+  track what's been charged to their spool. Three charge sites each update
+  them (`accounting.py:496`, `:557`, `:809`), so a new charge site has to
+  remember to.
+- **The legal states aren't written down.** Which combinations of `active`,
+  `assigned`, `swap`, `provisional`, and `deleted_spool` can occur is known
+  only by reasoning. Three commits have removed branches that turned out to
+  be unreachable. The one invariant that's checked, that a provisional
+  charge is on the active spool, lives in a wrapper in
+  `tests/test_accounting.py:27`.
+- **Step 3 is a 13-branch `elif` chain** where order is priority.
+- **Event classification is split.** `WARNINGS` is in `accounting.py`,
+  `_REPEATING` is in `app.py`, and `process()` has a special case for
+  `HOLD_DELETED`. `ACTIVE_UNASSIGNED` is used for five different messages,
+  including "is back in the location", and `ASSIGNMENT_CHANGED` for two.
+
+The rework is in two parts. Neither changes behavior, and the existing
+tests are the check.
+
+Part 1, a small stack of its own:
+
+- **Two states.** `last` is the state passed in. It's frozen and never
+  reassigned, so `last.x` always means the previous poll. `current` holds
+  this poll's values: every step writes to it, and at the end it's the
+  result. Nothing else carries tool state, so the loose locals go away.
+
+  Start `current` as a copy of `last`, not empty. Most fields carry over
+  unchanged on most polls, and with an empty start a field that a step
+  forgets to copy is silently reset. The early returns for a first poll and
+  an ambiguous location build their own state today and have the same
+  risk.
+- **One charge helper owns the tallies.** A charge to a spool updates
+  `swap.mm` and `provisional.mm` when they're on that spool, in the helper,
+  not at each call. Before changing it, trace the refund paths: a claim and
+  a confirmed swap refund a spool and then clear the swap, which looks
+  compatible but isn't confirmed.
+- **Write the invariants down.** One function checks that a `ToolState` is
+  a legal combination. The test wrapper calls it on every poll.
+- **One event table** gives each kind its severity and whether it repeats.
+  Split the overloaded kinds.
+
+Part 2, with B6: each numbered step becomes a function over `last` and
+`current`. B6 gives events fields, which already rewrites every `event()`
+call, so do the split in the same stack.
+
+Not planned: a formal state machine, with a named mode per tool and defined
+transitions. The conditions overlap (a provisional charge with a staged
+spool, a deleted spool with a staged spool), so the modes multiply. The
+invariants function from part 1 is what such a machine would be derived
+from. Reconsider it once that function exists and shows how many legal
+combinations there are.
+
+Size: small for part 1, medium for part 2.
+
+### B10. Smaller items
+
+- `ToolState.from_json` (`accounting.py:239`) keeps defaults for state saved
+  by older versions, such as `data.get("extruded", data.get("charged", 0))`.
+  The project is pre-release and keeps no backwards compatibility.
+- The `tools` table holds a JSON blob per tool, `printer_flags` holds JSON,
+  and `seen_uuids` has columns. `SCHEMA_VERSION` doesn't cover the blob's
+  shape.
+- "Only tool 0 holds a UUID" is written as `tool == 0` in seven places in
+  `app.py`, `drift.py`, and `printer_sync.py`.
+- `Runout.printer` is saved and never read.
+- `Spoolman.set_extra_text` and `drift.printer_name` only call another
+  function.
+- `COREONEL_PREAMBLE` is used only by tests.
+- Stale comments: "Used from phase 3" (`config.py:51`), "used by phase 3
+  writes" (`prusalink.py:11`), "Pending firmware fields" (`models.py:37`).
+- `config.py` has three near-identical number parsers (`_number`,
+  `_interval`, `_delay`), and `load()` keeps the single-printer checks "in
+  the order they always have".
+- Log lines name a printer three ways: `label`, `_prefix`, and
+  `[location]`.
+- `docs/sqlite.md` and `docs/multi-printer.md` describe plans that have
+  merged, in the future tense.
+
+### B11. Printer settings are configured globally
+
+A setup can mix printers, so a setting that describes a printer belongs to
+that printer's config entry. Five settings under `[bridge]` describe a
+printer and are read by `PrinterBridge` through `bridge.config`:
+
+| Setting | What it describes |
+| --- | --- |
+| `length_factor` | How far the printer's extruded length is from real usage. Two printers can need different factors, and today they share one. |
+| `printer_sync`, `sync_delay`, `sync_drift` | Whether and when the bridge writes to the printer |
+| `flag_drift` | Whether drift on the printer becomes a flag |
+
+`uuid_field`, `flag_field`, and `claim_field` name Spoolman fields and stay
+global.
+
+In the other direction, the per-printer `uuids` setting says whether the
+printer can hold an instance UUID. `PrinterModel.uuids` already knows that
+from the type the printer reports, so the setting asks the user for
+something the bridge can find out.
+
+Shape: move the five settings to `PrinterConfig`, set in the `[printer]`
+table or in each `[[printers]]` entry, with no global default. One place
+per setting is less error prone than a default with overrides.
+`PrinterBridge` then reads them from its own config, which removes those
+reads of `bridge.config` (see B4). Remove `uuids`. Before removing it,
+check that nothing turns it off for a model that does hold UUIDs:
+`_uuids` (`app.py:470`) requires the setting, `uuid_field`, and the model's
+capability together.
+
+Size: small.
+
+## Tests and tooling
+
+### The test layers
+
+Each layer keeps the one below it honest. The findings in this section are
+judged against these roles.
+
+| Layer | Role | Runs |
+| --- | --- | --- |
+| Unit suite (`tests/`, `simulator/tests/`) | Covers everything. The 99.4% floor counts this suite only, as a cheap check that nothing lacks a test. | Constantly during development, so it stays fast and needs no container. |
+| Integration suite (`integration/`) | Checks that the unit suite's fakes and state setup haven't diverged from a real Spoolman. | In CI and before a merge. Development doesn't depend on it. |
+| Live checks and firmware reading | Keep the simulator behaving like a real printer, which can't be put in a test loop. | By hand, at the printer. |
+
+Some scenarios are tested in both suites. That's accepted. Don't move
+coverage out of the unit suite to remove it.
+
+### T1. Tests pin the bridge's private state
+
+Tests read, set, or call private attributes of the bridge in about 150
+places. The most used are `_tag_uuid` (17), `db._conn` (16), `_adopt_uuid`
+(13), `_seen_uuid` (12), `_notes` (11), and `_loaded_tag` (10).
+
+- Tests write `_seen_uuid` as a positional 4-tuple, for example
+  `tests/test_app.py:908`.
+- `tests/test_failures.py:115-127` sets `_sync_busy`, `_sync_failed`, and
+  `_sync_delaying` to reach each log line.
+- `tests/test_writes.py:383-432` replaces `bridge.db._conn` with a failing
+  connection.
+
+Why it hurts: B1, B2, and B5 can't land without rewriting these tests. The
+unit suite has to reach every branch, and while the logic sits inside
+`process()`, calling a private method or setting a private field is the
+cheapest way to do that.
+
+Shape: make the branches cheap to reach in public. Once B1 and B2 turn the
+decisions into pure public functions, test those functions directly, as
+`tests/test_accounting.py` tests `account()`. Drive problem states through
+the fakes' behavior, which already have `upload_error` and `busy`. Give
+`Database` a way to inject a failing connection.
+
+Size: large. Do it with B1.
+
+### T2. Nothing checks the unit suite's fake printer
+
+Reported, not confirmed. `tests/test_writes.py` is 3,224 lines with 148
+tests and 444 `bridge.poll()` calls. It runs on a hand-written
+`FakeSpoolman` and a fake `Printer` that has its own `M865` parser and its
+own default temperatures, which copy `simulator/gcode.py` and
+`simulator/model.py:137`. `tests/test_failures.py` and
+`tests/test_printers.py` import from it.
+
+Why it hurts: the fake Spoolman is checked by the integration suite, and
+the simulator is checked by the live checks. The fake `Printer` is a third
+model of the firmware that neither checks. A firmware behavior fixed in the
+simulator doesn't reach it, so these tests can pass against a stale
+printer.
+
+Shape: replace the fake `Printer` with `SimPrinter`, in process. Keep
+`FakeSpoolman`. Move the shared harness to `tests/conftest.py`.
+
+`SimPrinter` can run in process: its PrusaLink views are plain methods
+(`status_json`, `filament_json`, `job_json`, `version_json`, `upload`), and
+time passes only when a test calls `tick`. What's missing is the routing.
+It lives in aiohttp handlers in `simulator/prusalink.py`, and the
+integration suite reaches it over a real socket.
+
+1. Move the routing and the power, key, and fault gate out of the aiohttp
+   handlers into one function that takes a method, path, headers, and body,
+   and returns a status and JSON. The aiohttp app and a new
+   `httpx.MockTransport` handler both call it, so the routes exist once.
+   This is also the first step of S4.
+2. Cover what the fake can do and the simulator can't. The fake returns any
+   status code for every request (`error`) or for uploads only
+   (`upload_error`), and scripts the next status states (`states`). Check
+   each against the simulator's `Fault`, `Power`, and `Firmware` settings.
+   Put what's left in the transport handler, as `integration/faults.py`
+   does for Spoolman, not in the simulator.
+3. Port the tests. The fake finishes a sync job at once, and the simulator
+   takes ticks, so tests need the tick helpers that `World` has in
+   `integration/conftest.py`. Share them (see T6).
+
+Size: large.
+
+### T3. A behavior change is made in two suites
+
+Reported, not confirmed. Most W rows of `docs/scenarios.md` are tested in
+both `tests/test_writes.py` and `integration/test_writes.py`.
+
+The duplication is accepted (see [the test layers](#the-test-layers)).
+Nothing to do now. If changing both suites for each behavior change becomes
+a burden, narrow the integration suite to the scenarios where Spoolman's
+own behavior decides the outcome. Don't narrow the unit suite.
+
+### T4. The test clock doesn't reach `Reachability`
+
+`Reachability` takes its own `clock`, which defaults to `time.monotonic`
+(`app.py:98`). `PrinterBridge` and `Bridge` build theirs without passing the
+bridge's clock (`app.py:265`, `app.py:1240`). The integration tests set
+`bridge.clock`, so reachability runs on wall time, and
+`integration/test_counters.py:133` patches `_printer_reach.clock` to work
+around it.
+
+Shape: pass one clock from `Bridge` to every `Reachability`, and accept it
+in `Bridge.from_config`.
+
+Size: small.
+
+### T5. Tests swap the Spoolman transport through private attributes
+
+`integration/faults.py:136-139` and `tests/test_printers.py:173` assign
+`bridge.spoolman._client._transport`. `Spoolman` and `PrusaLink` accept
+`transport=`, but `Bridge.from_config` can't pass one.
+
+Shape: add transport parameters to `from_config`.
+
+Size: small.
+
+### T6. Harness duplication
+
+Reported, not confirmed.
+
+- The `world` fixture (`integration/conftest.py:528-642`) branches on four
+  indirect parameters. `Station` (`integration/printers.py:31-82`)
+  reimplements `World`'s `start_print`, `swap_cycle`, `unload`, `counter`,
+  and `material`, and has drifted: `Station.swap_cycle` lacks a temperature
+  default that `conftest.py:412` adds.
+- `baseline()` is defined in six integration test files.
+- Helpers that assert "logged once" differ by file. Some check the level
+  and some don't. Logging a problem once is product behavior, so one helper
+  should define it.
+
+Shape: build `World` from a list of station specs and have it delegate to
+`Station`. One `baseline` and one log-assertion helper in `conftest.py`.
+
+Size: medium.
+
+### T7. Tests match prose
+
+Reported, not confirmed. About 70 integration lines compare an event's
+message exactly, and about 210 lines across both suites match log text. B6
+removes the cause for events. Keep one prose check per event kind.
+
+### T8. Scripts and scenario table
+
+Reported, not confirmed.
+
+- `script/demo` and `script/integration` each detect the container engine,
+  pin `ghcr.io/donkie/spoolman:0.27.1`, and wait for health.
+  `compose.example.yaml` uses `:latest`, a version CI doesn't test.
+- The Status column of `docs/scenarios.md` lists 85 test names by hand.
+  `tests/test_integration_table.py` checks them, so the cost is the editing,
+  not drift.
+
+Size: small.
+
+## Simulator
+
+All reported, not confirmed. The simulator review read every file in
+`simulator/`.
+
+### S1. Printer state is stored beside the job phase
+
+`simulator/model.py` has 27 `_set_state()` calls, nearly all paired with a
+`job.phase = ...` write. While a job exists, the state follows from the
+phase. The `HOLD` phase covers three situations, told apart by `job.jam`,
+`job.id is None`, and comparing `attention` with the text `"model check"`
+(`model.py:622`, `model.py:922`). `static/app.js:185` and `:295` parse the
+attention text with a regular expression.
+
+Shape: derive the state from the phase with one table and store only the
+idle screen. Make the attention reason an enum with a tool index. Split
+`SimJob` into a user job and a sync job.
+
+Size: medium.
+
+### S2. The page reimplements the model's rules
+
+- The Resume button is disabled unless the state is `PAUSED`
+  (`app.js:299`), but `resume()` also handles the power-panic wait, which is
+  `ATTENTION` (`model.py:808`). The page can't trigger it.
+- The page's `SETTINGS` list (`app.js:7-16`) lacks `recover_seconds`,
+  `unpark_seconds`, and `panic_purge_mm`.
+- `canStart`, `dLoad`, `dUnload`, and `IDLEISH` copy model rules, and the
+  option lists copy the enums.
+
+Shape: `to_json` publishes the actions available for each printer and tool,
+the setting fields, and the enum values. The page renders them.
+
+Size: medium.
+
+### S3. Settings are validated three ways
+
+`Settings.update` (`model.py:197-214`) accepts NaN and infinity. The config
+loader (`config.py:231-242`) rejects NaN but sets no minimum except for
+`time_scale`. `from_config` and `restore` build `Settings` with no checks.
+The review reports that `load_rate_mm_s = 0` in the config divides by zero
+on every tick, which stops the simulated printer. Confirm that before
+fixing it.
+
+Shape: one checked constructor on `Settings`, used by all three.
+
+Size: small.
+
+### S4. `SimPrinter` holds too much
+
+`SimPrinter` (`model.py:394-1430`) holds the physical and job state machine,
+the PrusaLink wire format, the page's JSON view, a G-code interpreter, and
+checks on raw JSON input. The trace recorder samples the wire format in
+process, so the format must stay callable without HTTP.
+
+Shape: a pure `prusalink.render(printer)` for the wire views, the G-code
+interpreter in its own module, and input checks in the control layer.
+
+Size: large. Do S1 and S5 first.
+
+### S5. Tool material rules are kept by convention
+
+`_set_material` (`model.py:445`) keeps a tool's material, its ad-hoc slot
+(`previous`), and `kept_type` in step. `_apply_uuid` (`model.py:1381`),
+`_tool_from_config`, and test setup in `simulator/tests/util.py:14`,
+`integration/conftest.py:580-583`, and `integration/printers.py:113` write
+the fields directly. `SimTool.temps` copies temperatures that `Material`
+already has.
+
+Shape: methods on `SimTool` own material writes, with a "loaded with"
+constructor for test setup. Fold `temps` into the slot's `Material`.
+
+Size: medium.
+
+### S6. Smaller items
+
+- Config-to-model conversion lives in `model.py` (`from_config`,
+  `_tool_from_config` at `model.py:1667`), with an import cycle hidden
+  behind `TYPE_CHECKING`. Material name, color, and UUID checks exist in
+  both `config.py` and `model.py`.
+- The control API dispatches with `getattr(printer, action)(**body)`
+  (`control.py:66-76`) and catches `TypeError` around the whole call, so a
+  bug inside an action returns 400 "bad parameters". The action list is
+  kept in `control.py`, the README, and `app.js`.
+- `Simulation` mixes the clock with web streaming, and `log()` always calls
+  `changed()` (`model.py:1575`). `integration/conftest.py:451` counts
+  requests by parsing log text.
+- "UUIDs only on tool 0 of a model that holds them" is written in about
+  seven places in `model.py`, `config.py`, and `seed.py`.
+- Snapshots are a dump of the internal dataclasses, with shims for older
+  snapshots (`model.py:1471`, `model.py:1482`, `model.py:149`).
+- `seed` picks spool materials from `CYCLE[tool % 3]` (`seed.py:132`) and
+  mints a random UUID, so the demo printer's preloaded tag UUID never
+  matches its seeded spool. This may be intended. Nothing says so.
+
+## Order and dependencies
+
+| # | Workstream | Findings | Depends on |
+| --- | --- | --- | --- |
+| 1 | Injection seams | T4, T5 | Nothing |
+| 2 | Tag-UUID owner | B1, T1 (UUID tests) | Nothing |
+| 3 | Conditions and saved facts | B2, B3, B5, B7, T1 (rest) | Workstream 2 |
+| 4 | Typed records | B6, B9 (part 2), T7 | Workstream 10. Easier after 3 |
+| 5 | Narrow the bridge boundary | B4 | Workstreams 2 and 3 |
+| 6 | Client errors | B8 | Nothing |
+| 7 | Unit suite on the simulator | T2, T6 | Nothing. Before workstreams 2 and 3 if possible, so their tests are ported once |
+| 8 | Simulator state | S1, S5, then S2, S4 | Nothing |
+| 9 | Small items | B10, B11, T8, S3, S6 | Nothing |
+| 10 | Accounting state | B9 (part 1) | Nothing |
+
+Workstreams 1, 6, 8, 9, and 10 are independent and can run at any time.
+Of the large ones, workstream 7 is best first, because workstreams 2 and 3
+rewrite many of the same tests and would otherwise port them twice. Then
+workstream 2: it has the least clear state and the most pinned tests, and
+workstreams 3 and 5 get simpler once it's done.
