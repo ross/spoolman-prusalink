@@ -40,6 +40,7 @@ class FakeSpoolman:
         self.down = False  # Refuse connections.
         self.fail_read = None  # Status code for spool reads.
         self.fail_patch = None  # Status code for spool PATCHes.
+        self.fail_uuid = None  # Status code for PATCHes that store an instance UUID.
         self.fail_field = None  # Status code for field reads.
         self.fail_lookup = None  # Status code for one-at-a-time spool reads.
         self.garble_lookup = False  # Answer one-at-a-time spool reads with a body that isn't JSON.
@@ -103,6 +104,8 @@ class FakeSpoolman:
                 return httpx.Response(self.fail_patch, text="oops")
             spool_id = int(path.rsplit("/", 1)[1])
             body = json.loads(request.content)
+            if self.fail_uuid and "instance_uuid" in body.get("extra", {}):
+                return httpx.Response(self.fail_uuid, text="oops")
             if "location" in body:
                 self.spools[spool_id]["location"] = body["location"]
                 self.writes.append(("location", spool_id, body["location"]))
@@ -630,6 +633,75 @@ async def test_spoolman_first_swap_evicts_and_writes_printer(tmp_path):
     assert len(jobs(printer)) == 1
     assert bridge.printers[0].tools[0].needs_sync is False
     assert fake.flag(20) is None
+    await bridge.aclose()
+
+
+async def swap_to_menu_loaded_20(bridge, fake, printer):
+    """Spoolman first: spool 20 in, an unload, then a menu load. A write of 20 is due."""
+    await bridge.poll()
+    fake.spools[20] = spool_x(20)
+    await bridge.poll()
+    printer.unloads, printer.at_unload, printer.material = 1, 1000, None
+    await bridge.poll()
+    printer.extruded, printer.material = 1116, {"name": "PLA"}
+
+
+async def test_failed_uuid_mint_holds_the_write_until_stored(tmp_path, caplog):
+    """The spool gets its UUID before the printer gets the spool (W1, #119)."""
+    bridge, fake, printer = make(tmp_path, [spool(19)], uuid_field="instance_uuid")
+    caplog.set_level("DEBUG")
+    await swap_to_menu_loaded_20(bridge, fake, printer)
+    fake.fail_uuid = 500
+    for _ in range(3):
+        await bridge.poll()
+    assert jobs(printer) == []
+    assert stored_uuid(fake, 20) is None
+    assert bridge.printers[0].tools[0].needs_sync is True
+    assert levels(caplog, "can't store an instance UUID on spool 20") == [
+        "WARNING",
+        "DEBUG",
+        "DEBUG",
+    ]
+    assert caplog.text.count("printer will be set to spool 20 when idle") == 1
+
+    fake.fail_uuid = None
+    caplog.clear()
+    await bridge.poll()
+    minted = stored_uuid(fake, 20)
+    (gcode,) = jobs(printer)
+    assert f'M865.1 I0 C"{minted}"' in gcode
+    assert printer.material["instance_uuid"] == minted
+    assert lines(caplog, 20) == [("INFO", f"gave spool 20 instance UUID {minted}")]
+
+    caplog.clear()
+    await bridge.poll()  # The printer matches: nothing more to write or mint.
+    assert len(jobs(printer)) == 1
+    assert "instance UUID" not in caplog.text
+    assert fake.flag(20) is None
+    await bridge.aclose()
+
+
+async def test_failed_uuid_mint_leaves_a_failing_sync_job_failing(tmp_path, caplog):
+    """A write waiting on the mint is still needed: the job's failure isn't over."""
+    bridge, fake, printer = make(tmp_path, [spool(19)], uuid_field="instance_uuid")
+    caplog.set_level("INFO")
+    await swap_to_menu_loaded_20(bridge, fake, printer)
+    printer.upload_error = 500
+    await bridge.poll()
+    assert caplog.text.count("sync job failed (500)") == 1
+
+    # Someone clears the UUID minted for the failed job, and Spoolman won't take another.
+    fake.spools[20]["extra"].pop("instance_uuid")
+    fake.fail_uuid = 500
+    await bridge.poll()
+    assert "sync job no longer needed" not in caplog.text
+
+    fake.fail_uuid = printer.upload_error = None
+    await bridge.poll()
+    (gcode,) = jobs(printer)
+    assert f'M865.1 I0 C"{stored_uuid(fake, 20)}"' in gcode
+    assert caplog.text.count("sync job working again") == 1
+    assert "sync job no longer needed" not in caplog.text
     await bridge.aclose()
 
 
@@ -2413,7 +2485,11 @@ async def test_claim_failing_to_clear_is_handled_once(tmp_path, caplog):
     caplog.clear()
     await bridge.poll()
     assert claim_box(fake, 20) is False
-    assert lines(caplog, 20) == [("INFO", "cleared the claim on spool 20")]
+    # The UUID mint failed with the claim, and its write waited for it (W1).
+    assert lines(caplog, 20) == [
+        ("INFO", "cleared the claim on spool 20"),
+        ("INFO", f"gave spool 20 instance UUID {stored_uuid(fake, 20)}"),
+    ]
     await bridge.poll()
     assert read_state(tmp_path / "bridge.db").claimed == []
     await bridge.aclose()

@@ -1105,6 +1105,7 @@ class PrinterBridge:
             return
         by_id = {s.id: s for s in spools}
         writes: list[printer_sync.ToolWrite] = []
+        minting = False  # A tool's write waits for its spool's UUID to be stored.
         for tool in self._pending_writes:
             st = self.tools[tool]
             spool = by_id.get(st.active)
@@ -1119,8 +1120,16 @@ class PrinterBridge:
                     uuid_value = adopted[1]
                 else:
                     uuid_value = await self.bridge._mint_uuid(spool)
+                    if uuid_value is None:
+                        # The spool gets its UUID first (W1). Written without one, the
+                        # printer would match the write and no later poll would mint
+                        # again. The write stays due, and the next poll retries the mint.
+                        minting = True
+                        continue
             writes.append(printer_sync.ToolWrite(tool, spool, uuid_value))
 
+        if not writes and minting:
+            return  # The job is still needed: leave its waits and failures as they are.
         if not writes:
             # A wait for the delay ends silently. A job that was failing or waiting on a
             # busy printer says it's no longer needed.
