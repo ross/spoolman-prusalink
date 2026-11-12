@@ -559,3 +559,14 @@ def test_load_logs_name_the_type_the_tool_holds():
     p.load(0, source="preset", name="PETG", color="#73767d")
     run(sim, 20)
     assert "T0 type set to PETG #73737b" in messages(sim, "load")
+
+
+def test_a_tool_can_be_disabled_during_a_sync_job():
+    """A sync job has no segments, so only the selected tool is in use."""
+    sim, p = make("3.1.0", [loaded(0), loaded(1), loaded(2)])
+    p.upload("x.gcode", 'M862.3 P"MK4"\nM117 x\n', print_after=True, overwrite=False)
+    assert p.job.waits_for(Reason.MODEL_CHECK)
+    p.set_tool_enabled(2, False)
+    assert not p.tools[2].enabled
+    with pytest.raises(Invalid, match="T0 is in use"):
+        p.set_tool_enabled(0, False)

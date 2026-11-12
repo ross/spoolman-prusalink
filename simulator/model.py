@@ -1170,9 +1170,8 @@ class SimPrinter:
     def set_tool_enabled(self, tool: int, value: bool) -> None:
         t = self._tool(tool, enabled=False)
         if not value:
-            in_print = (
-                self.job and self.job.spec and tool in {s.tool for s in self.job.spec.segments}
-            )
+            job = self.job
+            in_print = isinstance(job, UserJob) and tool in {s.tool for s in job.spec.segments}
             if tool == self.selected_tool or in_print or t.process is not None:
                 raise Invalid(f"T{tool} is in use")
         t.enabled = bool(value)
