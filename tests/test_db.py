@@ -643,3 +643,18 @@ def test_a_conditions_row_that_cant_be_read_is_a_database_error(path, data, mess
     row = f"conditions row ('core', 0): {message}"
     with pytest.raises(DatabaseError, match=re.escape(f"{path}: {row}")):
         Database.open(path)
+
+
+def test_a_runout_flag_is_rendered_from_the_saved_facts(path):
+    runout = Runout("Tool a", 900.4, 1000.0, 100.0)
+    text = (
+        "Tool a: unloaded mid-print with 900 g left in Spoolman. If it ran out, its usage "
+        "is probably on another spool: check recent swaps, then correct this spool's "
+        "weight, which clears this. The filament may also have jammed or tangled. Ignore "
+        "this after a planned color change."
+    )
+    assert runout.flag == text
+    db = Database.open(path)
+    db.save(State(runouts={7: runout}))
+    db.close()
+    assert read_state(path).runouts[7].flag == text
