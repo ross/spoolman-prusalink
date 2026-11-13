@@ -68,24 +68,30 @@ The decisions are in pure code, and `app.py` does the I/O around them:
   printer's reading, the spools in the tool's location, the job, and any claim. It
   returns the charges, the events, and the new state. Most behavior changes start here.
 - `accounting.violations()` lists what's illegal in a tool state. A fixture in the root
-  `conftest.py` checks every state that goes into or comes out of `account()`, in every
-  suite.
+  `conftest.py` checks every state the bridge passes to `account()` and `hold_deleted()`,
+  and every state it gets back, in every suite. The fixture doesn't see a test that calls
+  `account()` directly. `tests/test_accounting.py` calls it through its own checking
+  wrapper, so use that wrapper there.
 - `events.py` and `conditions.py` hold typed, frozen records. An event is something that
-  happened, and it goes to the log and the ledger. A condition is something that's wrong
-  now, and it lasts from the poll that finds it to the poll that doesn't. Each record
-  renders its log line and its Spoolman flag text from its fields, so add a field
+  happened. It renders its message from its fields, and `Report` in `events.py` says
+  whether the bridge logs it and writes it to the ledger. A condition is something that's
+  wrong now, and it lasts from the poll that finds it to the poll that doesn't. It
+  renders its log line and its Spoolman flag text from its fields. For both, add a field
   instead of formatting a string where the record is created.
-- `tags.py` decides when the bridge can trust a tag's instance UUID as the spool's
-  identity.
+- `tags.py` decides when the bridge can trust a tag's instance UUID. A tag's instance
+  UUID is the spool's identity (Q10), and the bridge never writes a tool loaded from a
+  tag (Q11).
 - `drift.py` compares the printer's loaded filament with the assigned spool.
 - `printer_sync.py` builds the G-code job that sets the printer's filament. PrusaLink has
   no write endpoint for filament, so the bridge uploads a small `M865` job and runs it as
   a print.
 
-The clients, `prusalink.py` and `spoolman.py`, raise only the `ServiceError` hierarchy
-in `errors.py`. The rest of the bridge never sees `httpx` or parsing errors. It catches
-only `ServiceError`, so an error from the bridge's own code isn't mistaken for a bad
-answer.
+The clients, `prusalink.py` and `spoolman.py`, raise the `ServiceError` hierarchy in
+`errors.py`. The PrusaLink client also raises `NoFilamentEndpoint` when the firmware has
+no filament endpoint or no usage counters, and `PrinterBridge.read()` catches it
+separately. The rest of the bridge never sees `httpx` or parsing errors, and it doesn't
+catch broader exceptions, so an error from the bridge's own code isn't mistaken for a
+bad answer.
 
 The bridge keeps its state in SQLite through `db.py`: per-tool state, flags, runouts,
 claims, the charge outbox, and the ledger. `state.py` is the same state in memory. The
@@ -106,13 +112,14 @@ The tests have three layers, and each keeps the one below it honest.
 - **Unit suite.** It covers everything, needs no container, and stays fast. The coverage
   floor, `fail_under` in `pyproject.toml`, counts this suite only. When coverage rises,
   raise the floor. Don't lower it. Remove dead code instead of excluding it from
-  coverage: the code has no `pragma: no cover`.
+  coverage.
 - **Integration suite.** It checks that the unit suite's fakes haven't diverged from a
   real Spoolman. Both suites test some scenarios, and that's accepted. Don't move
   coverage out of the unit suite to remove the overlap.
 - **Live checks.** Traces recorded from the real printer are in
   `simulator/tests/traces/`, and `simulator/tests/test_traces.py` replays them against
-  the simulator. `docs/printer-behaviors.md` is the record.
+  the simulator. Most behaviors have no trace yet, and a replay with no trace is skipped.
+  `docs/printer-behaviors.md` is the record of which behaviors are traced.
 
 These points aren't obvious from any one file:
 
@@ -123,15 +130,19 @@ These points aren't obvious from any one file:
   and the bridge polls only when a test calls `poll()`.
 - Run the integration tests only through `script/integration`. It starts a throwaway
   Spoolman container for each run, with Podman or Docker, because two runs that share a
-  Spoolman flag each other's spools. A plain `pytest integration` skips every test.
+  Spoolman flag each other's spools. For the same reason, it refuses to run when
+  `INTEGRATION_SPOOLMAN_URL` is already set. A plain `pytest integration` skips every
+  test.
 - Tests and scripts never read the bridge's own settings, such as `SPOOLMAN_URL`, so a
   shell set up for a real bridge can't point them at a real Spoolman. Give a new setting
   its own name, as with `INTEGRATION_SPOOLMAN_URL` and `DEMO_SPOOLMAN_URL`.
 - Name an integration test `test_<row>_<short name>`, where the row is a scenario ID from
-  `docs/scenarios.md`, such as `S7` or `W13`. Give it a docstring that says what it
-  checks. The table in `integration/README.md` is generated from the names and
-  docstrings, and `tests/test_integration_table.py` fails when the table or the scenario
-  rows are out of step with the tests.
+  `docs/scenarios.md` in lowercase, such as `test_s7_...` for row S7. An uppercase ID
+  isn't recognized. Give the test a docstring that says what it checks, and make the
+  row's status in `docs/scenarios.md` say "end to end". The table in
+  `integration/README.md` is generated from the names and docstrings, and
+  `tests/test_integration_table.py` fails when the table or the scenario rows are out of
+  step with the tests.
 
 ## Scenarios and printer behaviors
 
@@ -150,11 +161,13 @@ to rows by ID. The letter is the row's group:
 | K | Claims |
 | X | Several printers |
 | T | Multi-tool |
+| Q | Questions: decisions, each naming the rows it settles |
 
 When you change a behavior, update its row. When you add a behavior, add a row.
 
 `docs/printer-behaviors.md` lists what the printer reports through PrusaLink. Each
-behavior has its firmware source and the trace that checks the simulator against it.
+behavior names its firmware source and its trace, or the trace still to record. Its
+status says how far the evidence goes, from read in the source to traced on the printer.
 Change the simulator's printer behavior only on that evidence: the firmware source or a
 trace.
 
@@ -172,9 +185,10 @@ longer occurs.
 ## Conventions
 
 - **Logging.** Log a problem once, when it starts, and stay quiet until it changes or
-  ends. Log its end once, at the same level. Never log the same problem on every poll.
-  Conditions and `Reachability` in `app.py` do this, so use them instead of adding a log
-  call to the poll path.
+  ends. Log its end once, at the same level. Never log the same problem on every poll
+  above DEBUG. A long outage gets at most one reminder an hour. An action that failed
+  logs its later success at INFO. Conditions and `Reachability` in `app.py` do this, so
+  use them instead of adding a log call to the poll path.
 - **Ruff.** The line length is 100, and the rule sets are `E`, `F`, `I`, `B`, `UP`, and
   `SIM`.
 - **Python.** The oldest supported version is 3.11, and the image ships 3.13. CI tests
