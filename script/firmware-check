@@ -35,6 +35,7 @@ repo=$(awk '$1 == "repo" { print $2 }' "$pin")
 [ -n "$repo" ] || { echo "no repo line in $pin" >&2; exit 2; }
 # Lines of "<blob> <path>", without comments.
 entries=$(sed -e 's/#.*//' "$pin" | awk 'NF == 2 && $1 != "repo" && $1 != "commit"')
+[ -n "$entries" ] || { echo "no files in $pin" >&2; exit 2; }
 
 if [ -n "$checkout" ]; then
     treeish=$ref
