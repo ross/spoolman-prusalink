@@ -32,7 +32,8 @@ _MULTI_TOOL = "multi-tool printers aren't supported yet"
 # Printer type codes, as `/api/version` reports them in `printer`. From
 # `include/common/printer_model_data.hpp` and `ProjectOptions.cmake` in the firmware: the
 # filament tracker is in the MK4 build (MK4, MK4S, MK3.9, MK3.9S), the Core One and the
-# Core One L; ANFC, which keeps UUIDs, only in the last two.
+# Core One L; ANFC, which keeps UUIDs, only in the last two. `script/firmware-check`
+# compares this table with the firmware source.
 PRINTER_MODELS = {
     "1.3.5": PrinterModel("MK3.5", _NO_COUNTERS),
     "1.3.6": PrinterModel("MK3.5S", _NO_COUNTERS),
@@ -116,8 +117,8 @@ class Preset:
 # parameter to the defaults in the firmware's `filament.hpp` (nozzle 215, preheat 170,
 # bed 60, everything else unset or off), and `J` (inherit a preset) is ignored on these
 # models, so the job writes each value. PPS and PPA are left out: they need the HT
-# idler-door setting, which `M865` can't set. `docs/firmware-pin.txt` records the firmware
-# version these were read from.
+# idler-door setting, which `M865` can't set. `script/firmware-check` compares these
+# and the defaults with the firmware source.
 PRESETS = {
     "PLA": Preset(215, 60, chamber=(20, 15, 38)),
     "PETG": Preset(230, 85, chamber=(30, 15, 45)),
@@ -132,6 +133,8 @@ PRESETS = {
     "PVA": Preset(210, 60, preheat=160, chamber=(25, 15, 38)),
     "BVOH": Preset(210, 60, preheat=160, chamber=(25, 15, 38)),
 }
+# Material names written as another preset. `script/firmware-check` compares them with the
+# tag names the firmware loads as another preset.
 PRESET_ALIASES = {"TPU": "FLEX", "TPE": "FLEX"}
 # In the firmware only the PPS and PPA presets set `requires_ht_idler_door`, and `M865`
 # has no parameter for it, so an ad-hoc filament with these names would load without it.

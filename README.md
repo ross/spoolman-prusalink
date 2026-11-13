@@ -503,7 +503,7 @@ pattern, so the same commands work in every checkout and in CI:
 | `script/test` | Runs the unit suite. |
 | `script/integration` | Runs the end-to-end tests in `integration/` against a Spoolman. See [Tests](#tests). |
 | `script/lint` | Checks lint rules and formatting with ruff. Changes nothing. |
-| `script/firmware-check` | Checks the firmware files the preset tables were copied from for changes. See `docs/firmware-pin.txt`. |
+| `script/firmware-check` | Compares the model and preset tables the bridge and the simulator copy from the firmware with the firmware source. A weekly workflow runs it. |
 | `script/format` | Formats the code and applies ruff's safe fixes. |
 | `script/cibuild` | Runs what CI runs: bootstrap, lint, and the unit suite with coverage. |
 
@@ -518,11 +518,12 @@ step. Set `PYTHON` to pick the interpreter that creates `.venv`, for example
 script/test
 ```
 
-That's the unit suite: the bridge's tests in `tests/` and the simulator's in
-`simulator/tests`, self-contained and quick. Run it before every change.
+That's the unit suite: the bridge's tests in `tests/`, the simulator's in
+`simulator/tests`, and the firmware check's in `firmware/tests`, self-contained
+and quick. Run it before every change.
 
-With no arguments, `script/test` measures branch coverage of the bridge and
-the simulator, as CI does, and fails below the `fail_under` floor in
+With no arguments, `script/test` measures branch coverage of the bridge, the
+simulator and the firmware check, as CI does, and fails below the `fail_under` floor in
 `pyproject.toml`. When coverage rises, raise the floor to match. Arguments go
 to pytest without coverage, so a single file or test isn't held to the floor:
 

@@ -170,6 +170,7 @@ def _models(*infos: ModelInfo) -> dict[str, ModelInfo]:
     return {m.code: m for m in infos}
 
 
+# The printer models, from the firmware: `script/firmware-check` compares them with its source.
 MODELS = _models(
     ModelInfo("1.3.5", "MK3.5", counters=False),
     ModelInfo("1.3.6", "MK3.5S", counters=False),
