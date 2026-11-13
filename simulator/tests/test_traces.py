@@ -16,7 +16,7 @@ from pathlib import Path
 
 import pytest
 
-from simulator import trace
+from simulator import prusalink, trace
 from simulator.model import Material, Power, PrintSpec, Segment, SimPrinter, Simulation, State
 from simulator.tests.util import make
 from spoolman_prusalink import printer_sync
@@ -74,7 +74,7 @@ class Recorder:
             self.samples.append(trace.Sample(self.t, error="connection refused"))
         else:
             self.samples.append(
-                trace.Sample(self.t, p.status_json(), p.filament_json(), p.job_json())
+                trace.Sample(self.t, prusalink.status(p), prusalink.filament(p), prusalink.job(p))
             )
 
     def advance(self, seconds: float) -> None:

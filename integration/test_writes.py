@@ -24,6 +24,7 @@ from integration.conftest import (
 )
 from integration.faults import set_extra_text
 from integration.temperatures import TEMPERATURES, WRITTEN
+from simulator import prusalink
 from simulator.model import MODELS, JobPhase, Material, ModelInfo, State
 from simulator.prusalink import DROP, Answer, Reply
 from spoolman_prusalink.printer_sync import PRINTER_MODELS, default_preamble
@@ -909,7 +910,7 @@ async def test_w9_malformed_color_is_drift(world: World, caplog: pytest.LogCaptu
     def bad_color(method: str, path: str) -> Reply:
         if path != "/api/v1/filament":
             return None
-        data = w.printer.filament_json()
+        data = prusalink.filament(w.printer)
         assert data is not None
         data["tools"][0]["material"]["color"] = "#7g737b"
         return Answer(200, data)
