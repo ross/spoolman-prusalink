@@ -10,12 +10,21 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from typing import Literal
+from typing import Any, Literal
 
 import httpx
 from aiohttp import web
 
-from simulator.model import Busy, Fault, Power, SimPrinter, Simulation
+from simulator.model import (
+    Busy,
+    Fault,
+    Firmware,
+    Power,
+    SimPrinter,
+    SimTool,
+    Simulation,
+    State,
+)
 
 TRUE_HEADERS = ("?1", "1", "true")
 FILES = "/api/v1/files/"
@@ -96,21 +105,129 @@ def _route(p: SimPrinter, method: str, path: str, headers: dict[str, str], body:
     return view(p)
 
 
-def _job(p: SimPrinter) -> Answer:
-    data = p.job_json()
+# The wire views: the bodies of the GET endpoints, as pure functions of the printer. The
+# trace recorder samples them in process, so they work without HTTP.
+
+
+def status(p: SimPrinter) -> dict:
+    printer: dict[str, Any] = {
+        "state": str(p.state),
+        "temp_bed": 0.0,
+        "target_bed": 0.0,
+        "temp_nozzle": 0.0,
+        "target_nozzle": 0.0,
+        "axis_z": 0.0,
+        "flow": 100,
+        "speed": 100,
+        "fan_hotend": 0,
+        "fan_print": 0,
+    }
+    if p.state is not State.PRINTING:
+        printer.update(axis_x=0.0, axis_y=0.0)
+    out: dict[str, Any] = {
+        "printer": printer,
+        "storage": {"path": "/usb/", "name": "usb", "read_only": False},
+    }
+    if p.job_visible():
+        job = p.job
+        out["job"] = {
+            "id": job.id,
+            "progress": job.progress(),
+            "time_printing": int(job.time_printing),
+        }
+    return out
+
+
+def job(p: SimPrinter) -> dict | None:
+    if not p.job_visible():
+        return None
+    job = p.job
+    paused = p.state in (State.PAUSED, State.ATTENTION)
+    path = f"/usb/{job.name}"
+    return {
+        "id": job.id,
+        "state": "PAUSED" if paused else "PRINTING",
+        "progress": job.progress(),
+        "time_printing": int(job.time_printing),
+        "file": {
+            "name": job.name,
+            "display_name": job.name,
+            "path": path,
+            "refs": {"download": path},
+        },
+    }
+
+
+def _material(p: SimPrinter, tool: SimTool) -> dict | None:
+    m = tool.material
+    if m is None or tool.sensor_fault:
+        return None
+    nozzle, preheat, bed = m.temperatures()
+    out: dict[str, Any] = {
+        "name": m.name,
+        "nozzle_temperature": nozzle,
+        "preheat_temperature": preheat,
+        "bed_temperature": bed,
+    }
+    if m.color:
+        out["color"] = m.color
+    if p.model.holds_uuid(tool.index):
+        for key in ("material_uuid", "package_uuid", "instance_uuid"):
+            if value := getattr(m, key):
+                out[key] = value
+    return out
+
+
+def filament(p: SimPrinter) -> dict | None:
+    if p.firmware is Firmware.NO_ENDPOINT:
+        return None
+    counters = p.firmware is Firmware.FULL
+    tools = []
+    for tool in sorted(p.tools.values(), key=lambda t: t.index):
+        if not tool.enabled:
+            continue
+        entry: dict[str, Any] = {"index": tool.index}
+        if counters:
+            entry.update(
+                extruded=int(tool.extruded),
+                unload_count=tool.unload_count,
+                extruded_at_unload=tool.extruded_at_unload,
+            )
+        material = _material(p, tool)
+        if material:
+            entry["material"] = material
+        tools.append(entry)
+    return {"boot_id": p.boot_id, "tools": tools} if counters else {"tools": tools}
+
+
+def version(p: SimPrinter) -> dict:
+    return {
+        "api": "2.0.0",
+        "server": "2.1.2",
+        "text": "PrusaLink",
+        "firmware": "6.4.0-sim",
+        "hostname": p.name,
+        "printer": p.model.code,
+        "nozzle_diameter": 0.4,
+        "capabilities": {"upload-by-put": True},
+    }
+
+
+def _job_answer(p: SimPrinter) -> Answer:
+    data = job(p)
     return Answer(204) if data is None else Answer(200, data)
 
 
-def _filament(p: SimPrinter) -> Answer:
-    data = p.filament_json()
+def _filament_answer(p: SimPrinter) -> Answer:
+    data = filament(p)
     return NOT_FOUND if data is None else Answer(200, data)
 
 
 VIEWS: dict[str, Callable[[SimPrinter], Answer]] = {
-    "/api/version": lambda p: Answer(200, p.version_json()),
-    "/api/v1/status": lambda p: Answer(200, p.status_json()),
-    "/api/v1/job": _job,
-    "/api/v1/filament": _filament,
+    "/api/version": lambda p: Answer(200, version(p)),
+    "/api/v1/status": lambda p: Answer(200, status(p)),
+    "/api/v1/job": _job_answer,
+    "/api/v1/filament": _filament_answer,
 }
 
 

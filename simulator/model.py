@@ -16,7 +16,15 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any, ClassVar
 
-from simulator import gcode
+from simulator import gcode, sync
+from simulator.tool import (
+    LoadProcess,
+    Material,
+    SimTool,
+    UnloadProcess,
+    describe,
+    preset_temperatures,
+)
 
 EVENT_LIMIT = 2000
 SNAPSHOT_NAME = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
@@ -181,74 +189,6 @@ MODELS = _models(
 )
 
 
-# Nozzle, preheat and bed temperatures of the firmware's preset filaments
-# (`src/common/filament_presets.cpp`), with the preheat for printers with a load cell.
-PRESET_TEMPERATURES = {
-    "PLA": (215, 170, 60),
-    "PETG": (230, 170, 85),
-    "ASA": (260, 170, 100),
-    "PC": (275, 250, 100),
-    "PVB": (215, 170, 75),
-    "ABS": (255, 170, 100),
-    "HIPS": (220, 170, 100),
-    "PP": (240, 170, 100),
-    "FLEX": (240, 210, 50),
-    "PA": (285, 260, 100),
-    "PPS": (320, 170, 105),
-    "PPA": (320, 170, 105),
-    "PVA": (210, 160, 60),
-    "BVOH": (210, 160, 60),
-}
-# What `M865 R` resets them to (`FilamentTypeParameters` in `filament.hpp`).
-DEFAULT_TEMPERATURES = (215, 170, 60)
-
-
-@dataclass
-class Material:
-    name: str
-    color: str | None = None
-    instance_uuid: str | None = None
-    # A preset has no color or UUID and ignores edits; tag loads, loads with a picked color,
-    # and M865 X writes are ad-hoc. The page shows the flag; PrusaLink doesn't.
-    adhoc: bool = True
-    # Set when the material is built, as the firmware does: from the preset, the tag or
-    # M865. Without them, the firmware's defaults.
-    nozzle: int = DEFAULT_TEMPERATURES[0]
-    preheat: int = DEFAULT_TEMPERATURES[1]
-    bed: int = DEFAULT_TEMPERATURES[2]
-    # Set by a tag load only. M865 X R starts afresh without them; edits and runout
-    # reloads keep them.
-    material_uuid: str | None = None
-    package_uuid: str | None = None
-
-    def temperatures(self) -> tuple[int, int, int]:
-        """Return the nozzle, preheat and bed temperatures the printer reports."""
-        return self.nozzle, self.preheat, self.bed
-
-
-def color555(color: str | None) -> str | None:
-    """Round `#rrggbb` to what the firmware stores: 5 bits a channel, widened back to 8.
-
-    `Color555::from_rgb` keeps each channel's top 5 bits, and `to_color` widens them as
-    `(v << 3) | (v >> 2)` (`src/common/utils/color555.hpp:23-54` at 2db93db5).
-    """
-    if color is None:
-        return None
-    channels = (int(color[i : i + 2], 16) >> 3 for i in (1, 3, 5))
-    return "#" + "".join(f"{(v << 3) | (v >> 2):02x}" for v in channels)
-
-
-def preset_temperatures(name: str) -> dict[str, int]:
-    """Return the temperatures a material named `name` starts from, as `Material` keywords.
-
-    A preset's name matches exactly, as `FilamentType::from_name` does. A tag named TPU
-    starts from FLEX (`openprinttag/data_utils.cpp:217-219`). Anything else gets the defaults.
-    """
-    key = "FLEX" if name == "TPU" else name
-    values = PRESET_TEMPERATURES.get(key, DEFAULT_TEMPERATURES)
-    return dict(zip(("nozzle", "preheat", "bed"), values, strict=True))
-
-
 POSITIVE_SETTINGS = frozenset({"time_scale", "load_rate_mm_s", "print_rate_mm_s"})
 
 
@@ -303,75 +243,6 @@ class Settings:
 
 
 @dataclass
-class LoadProcess:
-    phase: str  # FEED_GAP (not counted), FEED (counted, old material), PURGE (new material)
-    remaining: float  # mm left in this phase
-    feed_mm: float
-    purge_mm: float
-    material: Material | None  # set at the purge; None restores the type the unload left
-    kind: str = "load"
-
-
-@dataclass
-class UnloadProcess:
-    remaining: float  # seconds
-    kind: str = "unload"
-
-
-@dataclass
-class SimTool:
-    index: int
-    enabled: bool = True
-    loaded: bool = False
-    material: Material | None = None
-    previous: Material | None = None  # the ad-hoc slot: the last ad-hoc material written
-    kept_type: Material | None = None  # the type the last unload left, for a runout reload
-    extruded: float = 0.0
-    unload_count: int = 0
-    extruded_at_unload: int = 0
-    gap: float = 0.0
-    sensor_fault: bool = False
-    stuck_write: bool = False
-    process: LoadProcess | UnloadProcess | None = None
-
-    # The stored type, the ad-hoc slot and the kept type change only through these methods.
-
-    @classmethod
-    def loaded_with(cls, index: int, material: Material | None, **kw: Any) -> SimTool:
-        """A tool as a finished load of `material` leaves it, or empty for None."""
-        tool = cls(index, **kw)
-        tool.fill(material)
-        return tool
-
-    def fill(self, material: Material | None) -> None:
-        """Leave the tool as a finished load of `material` leaves it, or a finished unload for
-        None. Nothing is counted: this is setup, such as a config or a test's starting state.
-        """
-        self.loaded = material is not None
-        self.store(material)
-
-    def store(self, material: Material | None) -> None:
-        """Write the stored type. An ad-hoc type also fills the ad-hoc slot (`previous`).
-
-        The slot keeps a color in 5 bits per channel, so the color reads back rounded (F25).
-        """
-        if material is not None:
-            material = replace(material, color=color555(material.color))
-        self.material = material
-        if material is not None and material.adhoc:
-            self.previous = replace(material)
-
-    def clear_type(self) -> None:
-        """The firmware writes "none": the type goes, and a runout reload can restore it."""
-        self.kept_type, self.material = self.material, None
-
-    def kept(self) -> Material | None:
-        """The type a load without a source restores: the one the unload left, else the slot."""
-        kept = self.kept_type or self.previous
-        return None if kept is None else replace(kept)
-
-
-@dataclass
 class Segment:
     tool: int
     slicer_mm: float
@@ -388,24 +259,6 @@ class PrintSpec:
     @property
     def total_mm(self) -> float:
         return sum(s.slicer_mm for s in self.segments)
-
-    @classmethod
-    def from_dict(cls, data: dict) -> PrintSpec:
-        try:
-            segments = [Segment(int(s["tool"]), float(s["slicer_mm"])) for s in data["segments"]]
-            return cls(
-                segments=segments,
-                duration_s=_opt_float(data.get("duration_s")),
-                preheat_s=_opt_float(data.get("preheat_s")),
-                color_changes_mm=[float(x) for x in data.get("color_changes_mm") or []],
-                name=str(data.get("name") or "part.bgcode"),
-            )
-        except (KeyError, TypeError, ValueError) as e:
-            raise Invalid(f"bad print: {e}") from None
-
-
-def _opt_float(value: Any) -> float | None:
-    return None if value is None else float(value)
 
 
 @dataclass(kw_only=True)
@@ -530,13 +383,6 @@ def check_uuid(value: Any) -> str | None:
         raise Invalid(f"{value!r} isn't a UUID") from None
 
 
-def _describe(m: Material | None) -> str:
-    if m is None:
-        return "nothing"
-    extra = "".join(f" {x}" for x in (m.color, m.instance_uuid) if x)
-    return m.name + extra
-
-
 def _feed(tool: SimTool, mm: float) -> None:
     """Feed filament: refill the retraction gap first, count only what goes past it."""
     fill = min(tool.gap, mm)
@@ -596,8 +442,8 @@ class SimPrinter:
             self._log("state", f"{self._shown} -> {state}")
             self._shown = state
 
-    def _tool(self, index: Any, *, enabled: bool = True) -> SimTool:
-        tool = self.tools.get(index) if isinstance(index, int) else None
+    def _tool(self, index: int, *, enabled: bool = True) -> SimTool:
+        tool = self.tools.get(index)
         if tool is None:
             raise Invalid(f"{self.name} has no tool {index!r}")
         if enabled and not tool.enabled:
@@ -631,7 +477,7 @@ class SimPrinter:
         if tool.material is not None and empty:
             self._count_unload(tool, "idle sensor clear")
 
-    # PrusaLink views.
+    # Job state rules.
 
     def job_visible(self) -> bool:
         job = self.job
@@ -643,105 +489,6 @@ class SimPrinter:
         # dropped; `print_file` handles it. A running load or unload reads BUSY, so it
         # refuses too.
         return self.state in IDLE_STATES and self.job is None and self.power is not Power.OFF
-
-    def status_json(self) -> dict:
-        printer: dict[str, Any] = {
-            "state": str(self.state),
-            "temp_bed": 0.0,
-            "target_bed": 0.0,
-            "temp_nozzle": 0.0,
-            "target_nozzle": 0.0,
-            "axis_z": 0.0,
-            "flow": 100,
-            "speed": 100,
-            "fan_hotend": 0,
-            "fan_print": 0,
-        }
-        if self.state is not State.PRINTING:
-            printer.update(axis_x=0.0, axis_y=0.0)
-        out: dict[str, Any] = {
-            "printer": printer,
-            "storage": {"path": "/usb/", "name": "usb", "read_only": False},
-        }
-        if self.job_visible():
-            job = self.job
-            out["job"] = {
-                "id": job.id,
-                "progress": job.progress(),
-                "time_printing": int(job.time_printing),
-            }
-        return out
-
-    def job_json(self) -> dict | None:
-        if not self.job_visible():
-            return None
-        job = self.job
-        paused = self.state in (State.PAUSED, State.ATTENTION)
-        path = f"/usb/{job.name}"
-        return {
-            "id": job.id,
-            "state": "PAUSED" if paused else "PRINTING",
-            "progress": job.progress(),
-            "time_printing": int(job.time_printing),
-            "file": {
-                "name": job.name,
-                "display_name": job.name,
-                "path": path,
-                "refs": {"download": path},
-            },
-        }
-
-    def _material_json(self, tool: SimTool) -> dict | None:
-        m = tool.material
-        if m is None or tool.sensor_fault:
-            return None
-        nozzle, preheat, bed = m.temperatures()
-        out: dict[str, Any] = {
-            "name": m.name,
-            "nozzle_temperature": nozzle,
-            "preheat_temperature": preheat,
-            "bed_temperature": bed,
-        }
-        if m.color:
-            out["color"] = m.color
-        if self.model.holds_uuid(tool.index):
-            for key in ("material_uuid", "package_uuid", "instance_uuid"):
-                if value := getattr(m, key):
-                    out[key] = value
-        return out
-
-    def filament_json(self) -> dict | None:
-        if self.firmware is Firmware.NO_ENDPOINT:
-            return None
-        counters = self.firmware is Firmware.FULL
-        tools = []
-        for tool in sorted(self.tools.values(), key=lambda t: t.index):
-            if not tool.enabled:
-                continue
-            entry: dict[str, Any] = {"index": tool.index}
-            if counters:
-                entry.update(
-                    extruded=int(tool.extruded),
-                    unload_count=tool.unload_count,
-                    extruded_at_unload=tool.extruded_at_unload,
-                )
-            material = self._material_json(tool)
-            if material:
-                entry["material"] = material
-            tools.append(entry)
-        return {"boot_id": self.boot_id, "tools": tools} if counters else {"tools": tools}
-
-    def version_json(self) -> dict:
-        return {
-            "api": "2.0.0",
-            "server": "2.1.2",
-            "text": "PrusaLink",
-            "firmware": "6.4.0-sim",
-            "hostname": self.name,
-            "printer": self.model.code,
-            "nozzle_diameter": 0.4,
-            "capabilities": {"upload-by-put": True},
-        }
 
     def upload(self, name: str, body: str, *, print_after: bool, overwrite: bool) -> None:
         """Store a file and maybe print it. The file stays even when the print is refused."""
@@ -765,7 +512,7 @@ class SimPrinter:
         if not self.can_print():
             raise Busy("Can't print right now")
         body = self.files[name]
-        wrong = self._wrong_model(body)
+        wrong = sync.wrong_model(self, body)
         if wrong and not self._auto_accept():
             job = SyncJob(name=name, gcode=body)
             job.enter(JobPhase.HOLD, Attention(Reason.MODEL_CHECK))
@@ -789,7 +536,7 @@ class SimPrinter:
         uuid: str | None = None,
         feed_mm: float | None = None,
         purge_mm: float | None = None,
-        temperatures: Any = None,
+        temperatures: list[int] | None = None,
     ) -> None:
         """Load filament into a tool: feed over the gap, counted feed, set the type, purge.
 
@@ -801,7 +548,7 @@ class SimPrinter:
         t = self._tool(tool)
         material = self._new_material(t, source, name, color, uuid, temperatures)
         self._check_load(t, keep=source is None)
-        what = f"{source} {_describe(material)}" if source else f"keep {_describe(t.kept())}"
+        what = f"{source} {describe(material)}" if source else f"keep {describe(t.kept())}"
         if self.power is Power.OFF:
             self._hand_load(t, material)
             return
@@ -854,7 +601,7 @@ class SimPrinter:
         # Filament goes in even when there's no type to restore.
         t.store(t.kept() if material is None else material)
         t.loaded, t.gap = True, 0.0
-        self._log("load", f"T{t.index} loaded by hand while off: {_describe(t.material)}")
+        self._log("load", f"T{t.index} loaded by hand while off: {describe(t.material)}")
 
     def unload(self, tool: int) -> None:
         """Unload a tool. While the printer is off the type stays stored until the next boot."""
@@ -869,7 +616,7 @@ class SimPrinter:
         self.screen = State.IDLE  # using the menu dismisses a finished or stopped screen
         self._show_state()
 
-    def _manual_move(self, tool: int, mm: Any) -> tuple[SimTool, float]:
+    def _manual_move(self, tool: int, mm: float) -> tuple[SimTool, float]:
         t = self._tool(tool)
         mm = _positive(mm, "mm")
         self._check_move(t)
@@ -1103,39 +850,39 @@ class SimPrinter:
             _feed(tool, self.settings.panic_purge_mm)
             self._log("job", f"nozzle clean purged {self.settings.panic_purge_mm:g} mm")
 
-    def set_power(self, power: str, *, resume: bool = False, cold_bed: bool = False) -> None:
+    def set_power(self, power: Power, *, resume: bool = False, cold_bed: bool = False) -> None:
         """Off freezes the printer; leaving off boots it, which drops any job unless `resume`."""
-        power = _enum(Power, power)
+        power = Power(power)
         old, self.power = self.power, power
         self._log("action", f"power {power}")
         if old is Power.OFF and power is not Power.OFF:
             self._reboot(resume, cold_bed)
 
-    def set_fault(self, fault: str) -> None:
-        self.fault = _enum(Fault, fault)
+    def set_fault(self, fault: Fault) -> None:
+        self.fault = Fault(fault)
         self._log("action", f"fault {self.fault}")
 
-    def set_firmware(self, firmware: str) -> None:
-        self.firmware = _enum(Firmware, firmware)
+    def set_firmware(self, firmware: Firmware) -> None:
+        self.firmware = Firmware(firmware)
         self._log("action", f"firmware {self.firmware}")
 
     def set_sensor_fault(self, tool: int, value: bool) -> None:
-        self._tool(tool).sensor_fault = bool(value)
+        self._tool(tool).sensor_fault = value
         self._log("action", f"T{tool} sensor fault {'on' if value else 'off'}")
 
     def set_stuck_write(self, tool: int, value: bool) -> None:
-        self._tool(tool).stuck_write = bool(value)
+        self._tool(tool).stuck_write = value
         self._log("action", f"T{tool} stuck write {'on' if value else 'off'}")
 
     def set_tool_enabled(self, tool: int, value: bool) -> None:
         t = self._tool(tool, enabled=False)
         if not value:
             self._check_disable(t)
-        t.enabled = bool(value)
+        t.enabled = value
         self._log("action", f"T{tool} {'enabled' if value else 'disabled'}")
 
     def set_auto_accept(self, value: bool | None) -> None:
-        self.auto_accept_model_check = None if value is None else bool(value)
+        self.auto_accept_model_check = value
         self._log("action", f"auto-accept model check {value}")
 
     def counter_step_back(self, tool: int, mm: float) -> None:
@@ -1144,8 +891,6 @@ class SimPrinter:
         self._log("action", f"T{tool} extruded stepped back to {int(t.extruded)}")
 
     def set_extruded_at_unload(self, tool: int, value: int) -> None:
-        if isinstance(value, bool) or not isinstance(value, int):
-            raise Invalid("value must be an integer")
         self._tool(tool).extruded_at_unload = value
         self._log("action", f"T{tool} extruded_at_unload set to {value}")
 
@@ -1339,7 +1084,7 @@ class SimPrinter:
         elif p.phase == "FEED":
             material = p.material if p.material is not None else t.kept()
             t.store(material)
-            self._log("load", f"T{t.index} type set to {_describe(t.material)}")
+            self._log("load", f"T{t.index} type set to {describe(t.material)}")
             p.phase, p.remaining = "PURGE", p.purge_mm
         else:
             t.loaded, t.process = True, None
@@ -1495,35 +1240,11 @@ class SimPrinter:
         except gcode.GcodeError as e:
             self._hold(job, str(e))
             return
-        problem = self._tool_problem(commands)
+        problem = sync.tool_problem(self, commands)
         if problem:
             self._hold(job, problem)
             return
         self._run_commands(job, commands)
-
-    def _wrong_model(self, body: str) -> str | None:
-        """The model a file's M862.3 names when it isn't this one. A parse error is left to the
-        job, which stops on it."""
-        try:
-            commands = gcode.parse(body)
-        except gcode.GcodeError:
-            return None
-        names = (self.model.name, f"{self.model.name}MMU3")
-        for c in commands:
-            if isinstance(c, gcode.ModelCheck) and c.name not in names:
-                return c.name
-        return None
-
-    def _tool_problem(self, commands: list[gcode.Command]) -> str | None:
-        # The firmware takes any index the model can have, enabled or not.
-        last = self.model.max_tools - 1
-        for c in commands:
-            if not isinstance(c, gcode.SetFilament):
-                continue
-            for index in (c.tool, c.copy_from):
-                if index is not None and not 0 <= index <= last:
-                    return f"M865 names tool {index}; {self.model.name} has tools 0 to {last}"
-        return None
 
     def _hold(self, job: SyncJob, problem: str) -> None:
         job.enter(JobPhase.HOLD, Attention(Reason.PARSE_ERROR, detail=problem))
@@ -1531,95 +1252,10 @@ class SimPrinter:
         self._show_state()
 
     def _run_commands(self, job: SyncJob, commands: list[gcode.Command]) -> None:
-        self.apply(commands)
+        sync.apply(self, commands)
         job.enter(JobPhase.RUN)
         job.remaining = job.run_seconds = self.settings.sync_job_seconds
         self._show_state()
-
-    def apply(self, commands: list[gcode.Command]) -> None:
-        for c in commands:
-            if isinstance(c, gcode.SetFilament):
-                self._apply_filament(c)
-            elif isinstance(c, gcode.SetUuid):
-                self._apply_uuid(c)
-            elif isinstance(c, gcode.Message):
-                self.message = c.text
-                self._log("gcode", f"M117 {c.text}")
-            elif isinstance(c, gcode.Home):
-                self.homed = True
-                self._log("gcode", "G28: homed")
-            elif isinstance(c, gcode.ModelCheck):
-                self._log("gcode", f"M862.3 model check {c.name}")
-            else:
-                self._log("gcode", f"ignored: {c.line}")
-
-    def _apply_filament(self, c: gcode.SetFilament) -> None:
-        if not 0 <= c.tool < self.model.max_tools:
-            self._log("gcode", f"M865 L{c.tool} dropped: no such tool")
-            return
-        # The config store has a slot for every tool the model can have, so a write to a
-        # disabled or unconfigured tool lands; a disabled tool just isn't reported.
-        t = self.tools.get(c.tool)
-        if t is None:
-            t = self.tools[c.tool] = SimTool(c.tool, enabled=False)
-        if t.stuck_write:
-            self._log("gcode", f"M865 L{c.tool} ignored: stuck write")
-            return
-        if c.copy_from is not None:
-            self._copy_filament(t, self.tools.get(c.copy_from) or SimTool(c.copy_from))
-            return
-        if c.reset or c.adhoc:
-            # An ad-hoc write edits the ad-hoc slot; R starts it afresh.
-            old = t.previous
-            if c.reset or old is None:
-                # R starts from the firmware defaults, not a preset's values.
-                nozzle, preheat, bed = DEFAULT_TEMPERATURES
-                name = c.name or (old.name if old else "Custom")
-                material = Material(name, nozzle=nozzle, preheat=preheat, bed=bed)
-            else:
-                material = replace(old, adhoc=True)
-            material.name = c.name or material.name
-            material.color = c.color or material.color
-            _apply_temperatures(material, c.temps)
-        elif c.name:
-            # A preset write: the firmware ignores every parameter but the type.
-            material = Material(c.name, adhoc=False, **preset_temperatures(c.name))
-            if c.color or c.temps:
-                self._log("gcode", f"M865 L{c.tool}: parameters ignored on preset {c.name}")
-        elif (c.color or c.temps) and t.material is not None:
-            # An edit of the stored type, which only an ad-hoc type takes.
-            if not t.material.adhoc:
-                self._log("gcode", f"M865 L{c.tool} ignored on preset {t.material.name}")
-                return
-            material = replace(t.material, color=c.color or t.material.color)
-            _apply_temperatures(material, c.temps)
-        else:
-            self._log("gcode", f"M865 L{c.tool}: nothing to write")
-            return
-        t.store(material)
-        self._log("gcode", f"M865 T{c.tool} set to {_describe(t.material)}")
-
-    def _copy_filament(self, t: SimTool, source: SimTool) -> None:
-        if source.material is None:
-            self._count_unload(t, f"M865 copied empty T{source.index}")
-            return
-        material = replace(source.material)
-        if not self.model.holds_uuid(t.index):
-            material.instance_uuid = material.material_uuid = material.package_uuid = None
-        t.store(material)
-        self._log("gcode", f"M865 T{t.index} copied from T{source.index}: {_describe(material)}")
-
-    def _apply_uuid(self, c: gcode.SetUuid) -> None:
-        t = self.tools.get(c.tool)
-        usable = self.model.holds_uuid(c.tool) and t is not None and t.material is not None
-        if not usable or t.stuck_write:
-            self._log("gcode", f"M865.1 I{c.tool} dropped")
-            return
-        if not t.material.adhoc:
-            self._log("gcode", f"M865.1 I{c.tool} ignored on preset {t.material.name}")
-            return
-        t.store(replace(t.material, instance_uuid=c.uuid))
-        self._log("gcode", f"M865.1 T{c.tool} instance UUID {c.uuid}")
 
     # The page's view.
 
@@ -1693,20 +1329,6 @@ def _tool_json(t: SimTool) -> dict:
     else:
         out["process"] = {"kind": "unload", "phase": "UNLOAD", "remaining_s": p.remaining}
     return out
-
-
-def _enum(cls: type, value: Any) -> Any:
-    try:
-        return cls(value)
-    except ValueError:
-        known = ", ".join(v.value for v in cls)
-        raise Invalid(f"{value!r} isn't one of {known}") from None
-
-
-def _apply_temperatures(material: Material, temps: dict[str, int]) -> None:
-    for key in ("nozzle", "preheat", "bed"):
-        if key in temps:
-            setattr(material, key, temps[key])
 
 
 # Snapshots: asdict() out, explicit reconstruction in.
