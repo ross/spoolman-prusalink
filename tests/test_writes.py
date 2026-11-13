@@ -1725,6 +1725,16 @@ async def test_negative_remaining_ends_when_the_spool_is_unloaded(tmp_path, capl
     assert bridge.printers[0].tools[0].active == 20
     assert "negative weight" not in caplog.text
     assert levels(caplog, "shows -12 g remaining") == ["INFO"]
+    # The unload ended it, so loading 19 again while it's still negative starts it again.
+    fake.spools[20]["location"] = None
+    fake.spools[19]["location"] = LOC
+    await bridge.poll()
+    station.tool.unload_count, station.tool.extruded_at_unload = 2, 1100
+    for _ in range(2):
+        await bridge.poll()
+        station.finish_job()
+    assert bridge.printers[0].tools[0].active == 19
+    assert levels(caplog, "shows -12 g remaining") == ["INFO", "INFO"]
     await bridge.aclose()
 
 
