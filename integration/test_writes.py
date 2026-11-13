@@ -662,7 +662,7 @@ async def test_w14_edit_after_the_uuid_is_cleared_keeps_the_printers(
     await w.spoolman.edit_filament(b, color_hex="00ad52")
     await w.poll()
     assert len(w.requests("PUT")) == 2
-    assert (b, written) in w.bridge._unowned_uuids  # Checked against archived spools.
+    assert w.bridge.uuids.checked(b, written)  # Checked against archived spools.
     await w.run_until(lambda: w.printer.job is None)
     assert w.material() == (PETG[0], "#00ad52", written)
     m865 = [t for t in gcode(w) if t.startswith("M865.1 T0")]

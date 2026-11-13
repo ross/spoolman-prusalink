@@ -17,6 +17,7 @@ from harness import (
 
 from spoolman_prusalink.accounting import ToolState
 from spoolman_prusalink.db import read_state
+from spoolman_prusalink.flags import SharedSpools
 from spoolman_prusalink.state import Runout
 
 A, B = "Tool a", "Tool b"
@@ -228,43 +229,33 @@ async def test_x5_x6_claim_on_b_while_a_still_has_the_spool(tmp_path, caplog):
     await bridge.aclose()
 
 
-async def test_x6_shared_spool_logs_again_when_it_recurs(tmp_path, caplog):
+def test_x6_shared_spool_logs_again_when_it_recurs(caplog):
     # When both tools drop the spool in one poll, it never passes through being active in
     # exactly one tool, and the "shared" problem must still clear so a recurrence logs.
-    bridge, fake, printers = two_printers(tmp_path, [spool(19, A), spool(20, B)])
-    a_tools, b_tools = bridge.state.tools("a"), bridge.state.tools("b")
+    shared = SharedSpools()
     warning = "spool 19 is active in Tool a and Tool b at once"
     for _ in range(2):
-        a_tools[0] = ToolState(boot_id=1, active=19, assigned=19)
-        b_tools[0] = ToolState(boot_id=1, active=19, assigned=20)
-        bridge._check_shared()
-        bridge._check_shared()
-        a_tools[0] = ToolState(boot_id=1, active=None, assigned=19)
-        b_tools[0] = ToolState(boot_id=1, active=None, assigned=20)
-        bridge._check_shared()
+        shared.check({19: ["Tool a", "Tool b"]})
+        shared.check({19: ["Tool a", "Tool b"]})
+        assert shared.check({}) == {}
     assert caplog.text.count(warning) == 2
     assert caplog.text.count("spool 19 is no longer active in more than one tool") == 2
-    await bridge.aclose()
 
 
-async def test_shared_spool_logs_again_when_its_locations_change(tmp_path, caplog):
-    bridge, fake, printers = two_printers(tmp_path, [spool(19, A), spool(20, B)])
-    a_tools, b_tools = bridge.state.tools("a"), bridge.state.tools("b")
-    a_tools[0] = ToolState(boot_id=1, active=19, assigned=19)
-    b_tools[0] = ToolState(boot_id=1, active=19, assigned=20)
-    bridge._check_shared()
-    bridge._check_shared()
+def test_shared_spool_logs_again_when_its_locations_change(caplog):
+    shared = SharedSpools()
+    shared.check({19: ["Tool a", "Tool b"]})
+    shared.check({19: ["Tool a", "Tool b"]})
     assert caplog.text.count("spool 19 is active in Tool a and Tool b at once") == 1
-    bridge.printers[0].config.tools[0] = "Tool c"
-    bridge._check_shared()
-    bridge._check_shared()
+    flags = shared.check({19: ["Tool c", "Tool b"]})
+    shared.check({19: ["Tool c", "Tool b"]})
     assert caplog.text.count("spool 19 is active in Tool c and Tool b at once") == 1
     assert "no longer active" not in caplog.text
-    await bridge.aclose()
+    assert list(flags) == [19] and flags[19][0].startswith("active in Tool c and Tool b")
 
 
 async def test_archived_spool_on_the_first_printer_is_looked_up_once(tmp_path, caplog):
-    # The archived-spool cache is shared: b's check must not drop what a found.
+    # The printers share the archived-spool cache, pruned once per poll.
     bridge, fake, printers = await baseline(tmp_path, [spool(19, A), spool(20, B)])
     a = printers["a"]
     fake.spools[19]["archived"] = True
@@ -274,6 +265,20 @@ async def test_archived_spool_on_the_first_printer_is_looked_up_once(tmp_path, c
     assert fake.lookups == [19]
     assert fake.flag(19) == "Tool a: spool is archived but still loaded"
     assert caplog.text.count("spool 19 is archived but still loaded") == 1
+    await bridge.aclose()
+
+
+async def test_archived_spool_unloaded_with_a_runout_flag_is_flagged_whatever_the_order(tmp_path):
+    # a finds 19 archived and unloads it in the same poll. The cache is pruned before the
+    # printers run, so 19 stays cached for this poll's flags even though b runs after a.
+    bridge, fake, printers = await baseline(tmp_path, [spool(19, A), spool(20, B)])
+    bridge.state.runouts[19] = Runout("Tool a", 900.0, 1000.0, 100.0)
+    fake.spools[19]["archived"] = True
+    unload(printers["a"])
+    await bridge.poll()
+    assert fake.lookups == [19]
+    assert "unloaded mid-print" in fake.flag(19)
+    assert 19 in bridge.state.flagged
     await bridge.aclose()
 
 

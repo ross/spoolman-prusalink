@@ -13,7 +13,7 @@ import pytest
 from spoolman_prusalink import __main__ as main_module
 from spoolman_prusalink.__main__ import main
 from spoolman_prusalink.accounting import ToolState
-from spoolman_prusalink.app import Bridge, Reachability, _log_failed, _log_ok, _record
+from spoolman_prusalink.app import Bridge, Reachability, _log_failed, _log_ok
 from spoolman_prusalink.config import Config, ConfigError, PrinterConfig, load
 from spoolman_prusalink.db import Database, DatabaseError, read_ledger, read_state
 from spoolman_prusalink.errors import BadAnswer, Unreachable
@@ -375,7 +375,7 @@ async def test_printer_outage_logged_on_change(tmp_path, caplog):
         ("INFO", "printer still unreachable after 3h 00m"),
         ("WARNING", "printer read failed, skipping poll"),
     ]
-    assert not bridge.printers[0]._printer_reach.down
+    assert bridge.printers[0].reachable
     await bridge.aclose()
 
 
@@ -397,7 +397,7 @@ async def test_printer_kind_change_and_bad_answer_reporting(tmp_path, caplog):
         Database.open(cfg.db_file),
         clock=lambda: now["v"],
     )
-    reach = bridge.printers[0]._printer_reach
+    printer = bridge.printers[0]
     caplog.set_level("DEBUG")
 
     def lines(text):
@@ -408,10 +408,10 @@ async def test_printer_kind_change_and_bad_answer_reporting(tmp_path, caplog):
         ]
 
     await bridge.poll()
-    assert reach.down
+    assert not printer.reachable
     mode["v"] = "bad"  # Answering badly is a new kind of trouble, and counts as up.
     await bridge.poll()
-    assert not reach.down
+    assert printer.reachable
     assert bridge.interval() == cfg.poll_printing  # Up, and not yet read.
     now["v"] += 60
     await bridge.poll()  # Same kind again: DEBUG.
@@ -933,7 +933,7 @@ async def test_adopt_uuid_checks_archived_spools(tmp_path, caplog):
         db=Database.open(cfg.db_file),
     )
     caplog.set_level("INFO")
-    assert await bridge._adopt_uuid(7, TAG) is False
+    assert await bridge.uuids.adopt(7, TAG) is False
     assert reads == ["true"] and writes == []
     assert caplog.text.count("archived spool 6 has it") == 1
     await bridge.aclose()
@@ -955,7 +955,7 @@ async def test_kept_uuid_is_checked_against_archived_spools_once(tmp_path):
         db=Database.open(cfg.db_file),
     )
     for _ in range(2):
-        assert await bridge._adopt_uuid(7, TAG, store=False) is True
+        assert await bridge.uuids.adopt(7, TAG, store=False) is True
     assert reads == ["true"]  # Read once, and nothing written.
     await bridge.aclose()
 
@@ -1045,9 +1045,10 @@ async def test_from_config_opens_the_database_and_builds_the_clients(tmp_path):
     Database.open(cfg.db_file).close()
 
 
-async def test_from_config_passes_the_clock_and_transports(tmp_path):
+async def test_from_config_passes_the_clock_and_transports(tmp_path, caplog):
     cfg = make_config(tmp_path)
     seen: list[str] = []
+    now = [3600.0]
 
     def refuse(name):
         def handler(request):
@@ -1058,38 +1059,22 @@ async def test_from_config_passes_the_clock_and_transports(tmp_path):
 
     bridge = Bridge.from_config(
         cfg,
-        clock=lambda: 3600.0,
+        clock=lambda: now[0],
         spoolman_transport=refuse("spoolman"),
         printer_transports={"default": refuse("printer")},
     )
     try:
         await bridge.poll()  # The printer read fails, so Spoolman isn't read.
         assert seen == ["printer"]
-        assert bridge.printers[0]._printer_reach.since == 3600.0
+        now[0] += 3600  # An hour on, by the clock passed in: the reminder.
+        caplog.set_level("INFO")
+        await bridge.poll()
+        assert "printer still unreachable after 1h 00m" in caplog.text
         with pytest.raises(Unreachable):
             await bridge.spoolman.spools()
-        assert seen == ["printer", "spoolman"]
+        assert seen == ["printer", "printer", "spoolman"]
     finally:
         await bridge.aclose()
-
-
-# _record: a failing dict keeps the last error logged for each key
-
-
-def test_record_says_whether_an_error_is_new_or_changed():
-    failing: dict[int, str] = {}
-    assert _record(failing, 7, BadAnswer("boom")) is True
-    assert _record(failing, 7, BadAnswer("boom")) is False
-    assert _record(failing, 7, BadAnswer("bang")) is True
-    assert _record(failing, 8, BadAnswer("bang")) is True
-    assert failing == {7: "bang", 8: "bang"}
-
-
-def test_record_compares_the_summary_not_the_body():
-    failing: dict[int, str] = {}
-    assert _record(failing, 7, BadAnswer("502: request 1", 502, "502")) is True
-    assert _record(failing, 7, BadAnswer("502: request 2", 502, "502")) is False
-    assert _record(failing, 7, BadAnswer("503: request 3", 503, "503")) is True
 
 
 def reach_lines(caplog):

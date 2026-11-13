@@ -14,6 +14,7 @@ from integration.conftest import (
     FLAG_FIELD,
     LOAD_MM,
     PETG,
+    PLA,
     UUID_FIELD,
     World,
     baseline,
@@ -618,7 +619,7 @@ async def test_m1_spool_list_fails(
         w.printer.extrude(0, 20)
         assert await w.poll() == []
     assert w.bridge.printers[0].tools[0].charged == charged_at
-    assert not w.bridge._spoolman_reach.down
+    assert not logged(caplog, logging.WARNING, "Spoolman unreachable")  # A bad answer.
     assert faults.requests.count(f"GET /api/v1/spool {status}") == 3
     failed = "Spoolman read failed, skipping poll"
     assert logged_once(caplog, logging.WARNING, failed)
@@ -1088,10 +1089,20 @@ async def test_m5_negative_weight_ends(world: World, caplog: pytest.LogCaptureFi
         assert len(events(records, "swap_committed")) == 1
         await w.swap_cycle(source="tag", name=PETG[0], color=PETG[1])
         assert not logged(caplog, logging.INFO, recovered)
-    assert w.bridge._negative == set()
 
     for _ in range(2):
         w.printer.extrude(0, 10)
         await w.poll()
     assert logged_once(caplog, logging.INFO, negative)
     assert count(caplog, logging.INFO, recovered) == (1 if end == "edit" else 0)
+
+    if end == "unload":
+        # The unload ended it, so loading A again while it's still negative starts it again.
+        await w.move("B", None)
+        await w.move("A", w.tool_location)
+        await w.poll()
+        await w.unload()
+        await w.poll()
+        await w.swap_cycle(source="tag", name=PLA[0], color=PLA[1])
+        await w.poll()
+        assert count(caplog, logging.INFO, negative) == 2

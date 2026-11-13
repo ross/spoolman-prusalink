@@ -5,7 +5,6 @@ import logging
 import sqlite3
 from dataclasses import replace
 
-import httpx
 import pytest
 from harness import (
     CLAIMED,
@@ -35,7 +34,6 @@ from simulator.prusalink import Answer
 from spoolman_prusalink.accounting import ToolState
 from spoolman_prusalink.db import read_state
 from spoolman_prusalink.printer_sync import PRINTER_MODELS, WriteState, default_preamble
-from spoolman_prusalink.prusalink import PrusaLink
 from spoolman_prusalink.records import ChargeRecord
 
 COREONEL_PREAMBLE = default_preamble(PRINTER_MODELS["8.1.0"])
@@ -90,14 +88,9 @@ async def test_queued_charge_survives_restart(tmp_path):
     station.tool.extruded = 1500
     fake.fail_use = [503]
     await bridge.poll()
-    await bridge.aclose()
 
     # A new bridge process: it loads the outbox and sends it even if the printer is down.
-    restarted, _, _ = make(tmp_path, [])
-    restarted.spoolman = bridge.spoolman.__class__(
-        "http://spoolman", flag_field="bridge_flag", transport=httpx.MockTransport(fake.handle)
-    )
-    restarted.printers[0].client = PrusaLink("http://printer", "k", transport=station.transport())
+    restarted = restart(bridge)
     station.before_request = drop
     await restarted.poll()
     assert fake.used == {19: [500.0]}
@@ -1699,7 +1692,9 @@ async def test_negative_remaining_that_recovers_while_loaded_logs_both_at_info(t
     for _ in range(2):
         await bridge.poll()
     assert levels(caplog, "spool 19 no longer shows a negative weight") == ["INFO"]
-    assert bridge._negative == set()
+    weighted(fake.spools[19], -3.0)  # It ended, so going negative again is logged again.
+    await bridge.poll()
+    assert levels(caplog, "spool 19 shows -3 g remaining") == ["INFO", "INFO"]
     await bridge.aclose()
 
 
@@ -1728,9 +1723,18 @@ async def test_negative_remaining_ends_when_the_spool_is_unloaded(tmp_path, capl
         await bridge.poll()
         station.finish_job()
     assert bridge.printers[0].tools[0].active == 20
-    assert bridge._negative == set()
     assert "negative weight" not in caplog.text
     assert levels(caplog, "shows -12 g remaining") == ["INFO"]
+    # The unload ended it, so loading 19 again while it's still negative starts it again.
+    fake.spools[20]["location"] = None
+    fake.spools[19]["location"] = LOC
+    await bridge.poll()
+    station.tool.unload_count, station.tool.extruded_at_unload = 2, 1100
+    for _ in range(2):
+        await bridge.poll()
+        station.finish_job()
+    assert bridge.printers[0].tools[0].active == 19
+    assert levels(caplog, "shows -12 g remaining") == ["INFO", "INFO"]
     await bridge.aclose()
 
 
@@ -2186,7 +2190,7 @@ async def test_failed_lookup_of_a_spool_missing_from_the_list_is_logged_once(
     # Looked up again each poll, but the problem is logged once.
     assert fake.lookups == [19, 19, 19]
     assert caplog.text.count("can't look up spool 19, which is missing") == 1
-    assert bridge._archived == {}
+    assert not bridge.archived
     assert "archived" not in caplog.text and "deleted" not in caplog.text
     # Each poll is still charged, without filament data, as for a spool that's merely unlisted.
     assert fake.used == {19: [100.0, 100.0, 100.0]}
@@ -2251,7 +2255,7 @@ async def test_spool_missing_from_a_stale_list_is_looked_up_again_only_if_still_
         await bridge.poll()
     assert fake.lookups == [19, 19]
     assert "archived" not in caplog.text and "deleted" not in caplog.text
-    assert bridge._archived == {}
+    assert not bridge.archived
     # Charged without its filament data while it's missing.
     assert "spool 19 (unknown): +100 mm" in caplog.text
     charged = [r for r in ledger(tmp_path) if r.get("spool_id") == 19 and "use_length" in r]
