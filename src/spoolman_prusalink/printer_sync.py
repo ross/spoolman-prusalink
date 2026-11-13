@@ -28,11 +28,13 @@ UUID_TOOL = 0
 
 _NO_COUNTERS = "its firmware doesn't report usage counters in /api/v1/filament"
 _MULTI_TOOL = "multi-tool printers aren't supported yet"
+_IX = "the iX isn't supported yet"
 
 # Printer type codes, as `/api/version` reports them in `printer`. From
 # `include/common/printer_model_data.hpp` and `ProjectOptions.cmake` in the firmware: the
-# filament tracker is in the MK4 build (MK4, MK4S, MK3.9, MK3.9S), the Core One and the
-# Core One L; ANFC, which keeps UUIDs, only in the last two.
+# builds without the filament tracker (MK3.5, MINI, XL dev kit) report no usage counters;
+# ANFC, which keeps UUIDs, is only in the Core One (and its Oak edition) and Core One L
+# builds. `script/firmware-check` compares this table with the firmware source.
 PRINTER_MODELS = {
     "1.3.5": PrinterModel("MK3.5", _NO_COUNTERS),
     "1.3.6": PrinterModel("MK3.5S", _NO_COUNTERS),
@@ -42,9 +44,11 @@ PRINTER_MODELS = {
     "1.4.1": PrinterModel("MK4S"),
     "2.1.0": PrinterModel("MINI", _NO_COUNTERS),
     "3.1.0": PrinterModel("XL", _MULTI_TOOL),
+    "3.1.1": PrinterModel("XLP", _MULTI_TOOL),
     "5.1.0": PrinterModel("XL", _MULTI_TOOL),
-    "4.1.0": PrinterModel("iX", _MULTI_TOOL),
+    "4.1.0": PrinterModel("iX", _IX),
     "7.1.0": PrinterModel("COREONE", uuids=True),
+    "7.2.0": PrinterModel("COREONEOAK", uuids=True),
     "8.1.0": PrinterModel("COREONEL", uuids=True),
     "7.10.0": PrinterModel("COREONEINDX", _MULTI_TOOL),
     "8.10.0": PrinterModel("COREONEL-INDX", _MULTI_TOOL),
@@ -116,7 +120,8 @@ class Preset:
 # parameter to the defaults in the firmware's `filament.hpp` (nozzle 215, preheat 170,
 # bed 60, everything else unset or off), and `J` (inherit a preset) is ignored on these
 # models, so the job writes each value. PPS and PPA are left out: they need the HT
-# idler-door setting, which `M865` can't set.
+# idler-door setting, which `M865` can't set. `script/firmware-check` compares these
+# and the defaults with the firmware source.
 PRESETS = {
     "PLA": Preset(215, 60, chamber=(20, 15, 38)),
     "PETG": Preset(230, 85, chamber=(30, 15, 45)),
@@ -131,7 +136,9 @@ PRESETS = {
     "PVA": Preset(210, 60, preheat=160, chamber=(25, 15, 38)),
     "BVOH": Preset(210, 60, preheat=160, chamber=(25, 15, 38)),
 }
-PRESET_ALIASES = {"TPU": "FLEX", "TPE": "FLEX"}
+# Material names written as another preset. `script/firmware-check` compares them with the
+# tag names the firmware loads as another preset.
+PRESET_ALIASES = {"TPU": "FLEX"}
 # In the firmware only the PPS and PPA presets set `requires_ht_idler_door`, and `M865`
 # has no parameter for it, so an ad-hoc filament with these names would load without it.
 HT_IDLER_DOOR = frozenset({"PPS", "PPA"})

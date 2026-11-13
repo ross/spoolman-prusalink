@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+# Compare the bridge's and the simulator's copies of firmware tables with the firmware
+# source: printer models, preset filaments, reset defaults and tag aliases.
+#
+# It rebuilds each table from Prusa-Firmware-Buddy for every firmware build and lists each
+# difference; firmware/compare.py has the details and the list of expected differences.
+# Exits 0 when every difference is expected, 1 on any other difference or an expected one
+# that no longer occurs, 2 on a usage error, 3 when the firmware can't be fetched or a
+# file doesn't have the structure the reader expects.
+#
+#   script/firmware-check                    # upstream master
+#   script/firmware-check REF                # an upstream branch, tag or full commit hash
+#   script/firmware-check --checkout DIR [REF]   # a local checkout, at REF (default HEAD)
+#
+# Upstream mode fetches from GitHub without the API or a token, and can't fetch a
+# commit by a short hash. Needs git.
+set -euo pipefail
+
+args=("$@")
+# Resolve a relative DIR from the caller's directory, before the cd below.
+if [ "${1:-}" = "--checkout" ] && [ $# -ge 2 ]; then
+    case $2 in
+        /*) ;;
+        *) args[1]=$PWD/$2 ;;
+    esac
+fi
+
+cd "$(dirname "$0")/.."
+
+[ -n "${SKIP_BOOTSTRAP:-}" ] || script/bootstrap
+
+exec .venv/bin/python -m firmware "${args[@]}"

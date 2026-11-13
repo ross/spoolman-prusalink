@@ -21,10 +21,11 @@ so point it at a test Spoolman first if you want to try it safely.
 
   | Model | Charging | Printer writes | Instance UUIDs |
   | --- | --- | --- | --- |
-  | Core One, Core One L | Yes | Yes | Yes |
+  | Core One, Core One Oak, Core One L | Yes | Yes | Yes |
   | MK4, MK4S, MK3.9, MK3.9S | Yes | Yes | No: the firmware drops them |
   | MINI, MK3.5, MK3.5S | No: the endpoint has no usage counters | No | No |
-  | XL, iX, Core One (L) INDX | Untested | No: multi-tool isn't supported yet | No |
+  | XL, XLP, Core One (L) INDX | Untested | No: multi-tool isn't supported yet | No |
+  | iX | Untested | No: not supported yet | No |
 
   On firmware without the endpoint or its counters, the bridge logs an error
   once and charges nothing, then resumes on its own if they appear.
@@ -395,7 +396,7 @@ Requirements for a write:
   the bridge doesn't write. A job for the wrong model would stop on the
   printer's compatibility warning until someone tapped through it.
 - The spool's material must be a printer preset (PLA, PETG, ASA, PC, PVB,
-  ABS, HIPS, PP, FLEX, PA, PVA, BVOH; TPU and TPE map to FLEX), or its
+  ABS, HIPS, PP, FLEX, PA, PVA, BVOH; TPU maps to FLEX), or its
   filament must have extruder and bed temperatures in Spoolman. `M865 X R`
   resets every filament parameter, so the job writes them all: the preset's
   nozzle, preheat, bed and chamber temperatures and its filtration and
@@ -405,9 +406,9 @@ Requirements for a write:
   spool and doesn't write.
 - The printer's name is the material, cut to the 7 characters from
   `a-zA-Z0-9_-` the firmware accepts, so `PLA+` is written as `PLA`.
-- With `uuid_field` set, on a model that keeps instance UUIDs (Core One and
-  Core One L), a spool with no instance UUID gets a new one in Spoolman before
-  it's written.
+- With `uuid_field` set, on a model that keeps instance UUIDs (Core One, Core
+  One Oak and Core One L), a spool with no instance UUID gets a new one in
+  Spoolman before it's written.
 
 The bridge's own job doesn't count as a print start: it's recognized by
 `sync_file`.
@@ -503,6 +504,7 @@ pattern, so the same commands work in every checkout and in CI:
 | `script/test` | Runs the unit suite. |
 | `script/integration` | Runs the end-to-end tests in `integration/` against a Spoolman. See [Tests](#tests). |
 | `script/lint` | Checks lint rules and formatting with ruff. Changes nothing. |
+| `script/firmware-check` | Compares the model and preset tables the bridge and the simulator copy from the firmware with the firmware source. A weekly workflow runs it. |
 | `script/format` | Formats the code and applies ruff's safe fixes. |
 | `script/cibuild` | Runs what CI runs: bootstrap, lint, and the unit suite with coverage. |
 
@@ -517,11 +519,12 @@ step. Set `PYTHON` to pick the interpreter that creates `.venv`, for example
 script/test
 ```
 
-That's the unit suite: the bridge's tests in `tests/` and the simulator's in
-`simulator/tests`, self-contained and quick. Run it before every change.
+That's the unit suite: the bridge's tests in `tests/`, the simulator's in
+`simulator/tests`, and the firmware check's in `firmware/tests`, self-contained
+and quick. Run it before every change.
 
-With no arguments, `script/test` measures branch coverage of the bridge and
-the simulator, as CI does, and fails below the `fail_under` floor in
+With no arguments, `script/test` measures branch coverage of the bridge, the
+simulator and the firmware check, as CI does, and fails below the `fail_under` floor in
 `pyproject.toml`. When coverage rises, raise the floor to match. Arguments go
 to pytest without coverage, so a single file or test isn't held to the floor:
 

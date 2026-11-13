@@ -11,6 +11,7 @@ from typing import Any
 
 # Nozzle, preheat and bed temperatures of the firmware's preset filaments
 # (`src/common/filament_presets.cpp`), with the preheat for printers with a load cell.
+# `script/firmware-check` compares them with the firmware source.
 PRESET_TEMPERATURES = {
     "PLA": (215, 170, 60),
     "PETG": (230, 170, 85),
@@ -29,6 +30,10 @@ PRESET_TEMPERATURES = {
 }
 # What `M865 R` resets them to (`FilamentTypeParameters` in `filament.hpp`).
 DEFAULT_TEMPERATURES = (215, 170, 60)
+# Tag names the firmware loads as another preset: the TPU workaround in
+# the `FilamentParametersInfo` constructor in `src/feature/openprinttag/data_utils.cpp`.
+# `script/firmware-check` compares them with the firmware source.
+PRESET_ALIASES = {"TPU": "FLEX"}
 
 
 @dataclass
@@ -69,11 +74,10 @@ def color555(color: str | None) -> str | None:
 def preset_temperatures(name: str) -> dict[str, int]:
     """Return the temperatures a material named `name` starts from, as `Material` keywords.
 
-    A preset's name matches exactly, as `FilamentType::from_name` does. A tag named TPU
-    starts from FLEX (`openprinttag/data_utils.cpp:217-219`). Anything else gets the defaults.
+    A preset's name matches exactly, as `FilamentType::from_name` does. A name in
+    `PRESET_ALIASES`, such as TPU, starts from its preset. Anything else gets the defaults.
     """
-    key = "FLEX" if name == "TPU" else name
-    values = PRESET_TEMPERATURES.get(key, DEFAULT_TEMPERATURES)
+    values = PRESET_TEMPERATURES.get(PRESET_ALIASES.get(name, name), DEFAULT_TEMPERATURES)
     return dict(zip(("nozzle", "preheat", "bed"), values, strict=True))
 
 

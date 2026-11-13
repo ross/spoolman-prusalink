@@ -29,7 +29,7 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 # The unit tests. The end-to-end tests in integration/ need a Spoolman; see integration/README.md.
-testpaths = ["tests", "simulator/tests"]
+testpaths = ["tests", "simulator/tests", "firmware/tests"]
 pythonpath = ["."]  # the unit tests import integration.table
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
@@ -37,9 +37,10 @@ asyncio_default_fixture_loop_scope = "function"
 [tool.coverage.run]
 # Measured on the unit suite, `pytest --cov`. The integration tests don't count toward it;
 # CI reports their coverage of the bridge on its own, with no floor.
-source = ["spoolman_prusalink", "simulator"]
+source = ["spoolman_prusalink", "simulator", "firmware"]
 omit = [
     "simulator/tests/*",
+    "firmware/tests/*",
     # Command-line wiring and the live-printer recorder; the simulator itself is measured.
     "simulator/__main__.py",
     "simulator/probe.py",

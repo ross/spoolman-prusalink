@@ -160,8 +160,8 @@ class ModelInfo:
     def holds_uuid(self, tool: int) -> bool:
         """Whether `tool` keeps tag UUIDs: tool 0 of a model with a tag reader (F21).
 
-        `M865.1 I0` writes the instance UUID there, and only the Core One and Core One L
-        build `M865.1` and the tag reader.
+        `M865.1 I0` writes the instance UUID there, and only the Core One (and Oak) and
+        Core One L build `M865.1` and the tag reader.
         """
         return self.uuids and tool == UUID_TOOL
 
@@ -170,6 +170,7 @@ def _models(*infos: ModelInfo) -> dict[str, ModelInfo]:
     return {m.code: m for m in infos}
 
 
+# The printer models, from the firmware: `script/firmware-check` compares them with its source.
 MODELS = _models(
     ModelInfo("1.3.5", "MK3.5", counters=False),
     ModelInfo("1.3.6", "MK3.5S", counters=False),
@@ -180,9 +181,10 @@ MODELS = _models(
     ModelInfo("2.1.0", "MINI", counters=False),
     ModelInfo("3.1.0", "XL", max_tools=5),
     ModelInfo("3.1.1", "XLP", max_tools=5),
-    ModelInfo("5.1.0", "XL", max_tools=5),
+    ModelInfo("5.1.0", "XL", max_tools=5, counters=False),
     ModelInfo("4.1.0", "iX"),
     ModelInfo("7.1.0", "COREONE", uuids=True),
+    ModelInfo("7.2.0", "COREONEOAK", uuids=True),
     ModelInfo("8.1.0", "COREONEL", uuids=True),
     ModelInfo("7.10.0", "COREONEINDX", gap_mm=27.0, max_tools=8),
     ModelInfo("8.10.0", "COREONEL-INDX", gap_mm=27.0, max_tools=8),

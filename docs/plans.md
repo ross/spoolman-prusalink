@@ -99,9 +99,9 @@ One `Simulation` holds a list of printers. Each printer has:
 
 - `name`, `port`, `api_key`, `model`: a type code from `PRINTER_MODELS` in
   `printer_sync.py`. The model decides the `M862.3` name, whether UUIDs are
-  stored (Core One and Core One L only), the retraction gap (27 mm on INDX,
-  40 mm on the Nextruder and XL), and the tool limit (8 on INDX, 5 on XL, 1
-  elsewhere).
+  stored (Core One, Core One Oak and Core One L only), the retraction gap
+  (27 mm on INDX, 40 mm on the Nextruder and XL), and the tool limit (8 on
+  INDX, 5 on XL, 1 elsewhere).
 - `firmware`: `full` (counters and unload fields), `no_counters` (MINI and
   MK3.5: material only), `no_endpoint` (404). Switchable at run time, so a
   "firmware update" can turn counters on.
@@ -150,7 +150,7 @@ the middle sees a partial value, as on a real printer.
 | Unload | `unload_count += 1`, `extruded_at_unload = extruded`, `material` moves to `previous`, `loaded = false`. Covers the menu, `M702`, `M600`, runout, stuck-filament recovery, pulling filament out during a load, and the idle sensor clear below. | `store_definition.cpp:258`, `pause.cpp:1278`; seen live (S1, S2) |
 | Load | Three phases. Feed: the first `gap` mm fill the gap and don't count, the rest counts with no `material` reported. Then the material is set. Then the purge counts under the new material. A menu load on a Core One L measured 116 mm in total. | `pause.cpp:797`; seen live (S2, the held load usage) |
 | Load from the menu, with a preset | `material` becomes the preset's name with no color and no UUID; `previous` is replaced. "Ask for color" gives the preset's name plus the chosen color and clears the UUID. A plain load, `M701`, and autoload all go through this menu. Any preset, including PPS and PPA (W8). | Follow-up A; README (W8) |
-| Load from a tag (ANFC) | Sets name, color and UUID. Core One and Core One L only. | Follow-up A; seen live (S1) |
+| Load from a tag (ANFC) | Sets name, color and UUID. Core One, Core One Oak and Core One L only. | Follow-up A; seen live (S1) |
 | Runout, `M600`, jam | During a print: state `ATTENTION` while the dialog waits, `PAUSED` once handled until resumed, then `PRINTING`. The unload counts as above. The reload restores `previous` as `material`, so the printer keeps showing the old spool. A jam adds an extra purge after the reload. A jam cleared without unloading counts nothing. | `printer_state.cpp:238`, `M600.cpp:282`; seen live (P2, P6) |
 | Print start | Job ID incremented at once. `PRINTING` during the file scan, a brief `IDLE` with no `job` object, then `PRINTING`. A configurable preheat delay before the first extrusion, so P8 is possible. | `marlin_server.cpp:2301`, `printer_state.cpp:379` |
 | Pause and resume | `PAUSED` then `PRINTING`; the counter holds, then continues. | P11 |
@@ -184,7 +184,7 @@ when its dock is calibrated. The XL has up to five heads, enabled per dwarf.
   `I<n>` selects which tool's filament to read or modify. `M865 I<empty tool>
   L<n>` copies "none" and counts as an unload of `n`.
 - Type codes and model names, already in `PRINTER_MODELS`: XL `3.1.0` and
-  `5.1.0` as `XL`, XL+ `3.1.1` as `XLP` (not in the bridge's table yet),
+  `5.1.0` as `XL`, XL+ `3.1.1` as `XLP`,
   Core One INDX `7.10.0` as `COREONEINDX`, Core One L INDX `8.10.0` as
   `COREONEL-INDX`.
 - Nothing else in PrusaLink says how many tools there are or which is
@@ -371,7 +371,6 @@ step maps to one or two actions.
 
 These aren't simulator work, but the simulator makes each one testable.
 
-- `XLP` (`3.1.1`) is missing from `PRINTER_MODELS`.
 - The start blip: a poll that lands on the brief `IDLE` with no `job` during
   a print start sees an idle printer with no job and could run a sync job
   into the start of a user print. The upload would fail with 409 once the
