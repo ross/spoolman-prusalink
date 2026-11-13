@@ -440,44 +440,6 @@ class Expected:
 # match a difference: one that no longer occurs fails the check, so the list stays honest.
 EXPECTED = (
     Expected(
-        "bridge PRINTER_MODELS", "3.1.1", None, "model", "the bridge doesn't list the XLP yet"
-    ),
-    Expected(
-        "bridge PRINTER_MODELS",
-        "7.2.0",
-        None,
-        "model",
-        "the bridge doesn't list the Core One Oak yet",
-    ),
-    Expected(
-        "bridge PRINTER_MODELS",
-        "4.1.0",
-        None,
-        "unsupported",
-        "the bridge refuses the iX as multi-tool, but its build has one tool",
-    ),
-    Expected(
-        "bridge PRESET_ALIASES",
-        None,
-        "TPE",
-        "alias",
-        "the bridge maps TPE to FLEX; the firmware doesn't",
-    ),
-    Expected(
-        "simulator MODELS",
-        "5.1.0",
-        None,
-        "counters",
-        "the simulator gives the XL dev kit counters; its build has no filament tracker",
-    ),
-    Expected(
-        "simulator MODELS",
-        "7.2.0",
-        None,
-        "model",
-        "the simulator doesn't list the Core One Oak yet",
-    ),
-    Expected(
         "bridge PRESETS",
         None,
         "PPS",

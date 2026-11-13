@@ -184,7 +184,7 @@ when its dock is calibrated. The XL has up to five heads, enabled per dwarf.
   `I<n>` selects which tool's filament to read or modify. `M865 I<empty tool>
   L<n>` copies "none" and counts as an unload of `n`.
 - Type codes and model names, already in `PRINTER_MODELS`: XL `3.1.0` and
-  `5.1.0` as `XL`, XL+ `3.1.1` as `XLP` (not in the bridge's table yet),
+  `5.1.0` as `XL`, XL+ `3.1.1` as `XLP`,
   Core One INDX `7.10.0` as `COREONEINDX`, Core One L INDX `8.10.0` as
   `COREONEL-INDX`.
 - Nothing else in PrusaLink says how many tools there are or which is

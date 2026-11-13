@@ -7,7 +7,9 @@ cross the line, and this one keeps the two in step.
 from dataclasses import fields
 
 from simulator.tool import DEFAULT_TEMPERATURES, PRESET_TEMPERATURES
+from simulator.tool import PRESET_ALIASES as SIM_ALIASES
 from spoolman_prusalink.printer_sync import DEFAULT_PREHEAT, HT_IDLER_DOOR, PRESETS, Preset
+from spoolman_prusalink.printer_sync import PRESET_ALIASES as BRIDGE_ALIASES
 
 
 def test_temperatures_agree():
@@ -28,3 +30,7 @@ def test_reset_defaults_agree():
     default_preheat = next(f.default for f in fields(Preset) if f.name == "preheat")
     assert DEFAULT_TEMPERATURES[1] == DEFAULT_PREHEAT
     assert default_preheat == DEFAULT_PREHEAT
+
+
+def test_aliases_agree():
+    assert BRIDGE_ALIASES == SIM_ALIASES
