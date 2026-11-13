@@ -406,9 +406,9 @@ Requirements for a write:
   spool and doesn't write.
 - The printer's name is the material, cut to the 7 characters from
   `a-zA-Z0-9_-` the firmware accepts, so `PLA+` is written as `PLA`.
-- With `uuid_field` set, on a model that keeps instance UUIDs (Core One and
-  Core One L), a spool with no instance UUID gets a new one in Spoolman before
-  it's written.
+- With `uuid_field` set, on a model that keeps instance UUIDs (Core One, Core
+  One Oak and Core One L), a spool with no instance UUID gets a new one in
+  Spoolman before it's written.
 
 The bridge's own job doesn't count as a print start: it's recognized by
 `sync_file`.
