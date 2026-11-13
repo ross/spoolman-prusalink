@@ -5,7 +5,17 @@ from dataclasses import replace
 import pytest
 
 from firmware import compare, read
-from firmware.compare import MISSING, PRESENT, Build, Copies, Difference, Expected, Firmware
+from firmware.compare import (
+    MISSING,
+    PRESENT,
+    Build,
+    CleanerPurge,
+    Copies,
+    Difference,
+    Expected,
+    Firmware,
+    Pause,
+)
 from firmware.source import Unreadable
 from firmware.tests import fixtures
 from simulator.model import ModelInfo
@@ -13,6 +23,82 @@ from spoolman_prusalink.printer_sync import Preset, PrinterModel
 
 NO_COUNTERS = "no counters"
 MULTI_TOOL = "multi-tool"
+
+NEXTRUDER_AUTO_RETRACT = (
+    (8, 995),
+    (-43, 6000),
+    (-8, 3000),
+    (-4, 1800),
+    (20, 600),
+    (-20, 470),
+    (55, 1740),
+    (-55, 6000),
+    (20, 340),
+    (-20, 210),
+)
+NEXTRUDER_UNLOAD = (*NEXTRUDER_AUTO_RETRACT, (-50, 2000))
+NEXTRUDER_RUNOUT = ((7, 1500), (-50, 2700), (-5, 50), (-50, 1500))
+NEXTRUDER = {
+    "auto_retract": NEXTRUDER_AUTO_RETRACT,
+    "runout": NEXTRUDER_RUNOUT,
+    "unload": NEXTRUDER_UNLOAD,
+}
+INDX_RAMMING = (
+    (8, 1500),
+    (8, 1200),
+    (-20, 2100),
+    (-3, 60),
+    (3, 120),
+    (19, 1800),
+    (2, 600),
+    (-20, 2100),
+    (-3, 120),
+    (3, 120),
+    (-6, 120),
+    (-8, 360),
+)
+INDX = {
+    "auto_retract": ((8, 480), (-8, 4800), (1, 1440), (-1, 1440)),
+    "runout": INDX_RAMMING,
+    "runout_flexible": ((-50, 600),),
+    "unload": INDX_RAMMING,
+    "unload_flexible": ((-50, 600),),
+}
+MINI_RAMMING = ((20, 1500), (-50, 2700), (-5, 50), (-50, 1500))
+
+NEXTRUDER_PAUSE = Pause(4, 8, 105, 30, 50, 27)
+CORE_ONE_PAUSE = Pause(4, 8, 105, 40, 20, 40)
+INDX_PAUSE = Pause(4, 8, 55, 15, 25, 40)
+INDX_PURGE = CleanerPurge(25.0, True)
+
+# Per build: E steps (default, calibrated), pause lengths, ramming and the cleaner's purge.
+EXTRUDERS = {
+    "MK4": ((380, 400), NEXTRUDER_PAUSE, NEXTRUDER, None),
+    "XL": ((380, 400), NEXTRUDER_PAUSE, NEXTRUDER, None),
+    "XL_DEV_KIT": (
+        (380, 400),
+        NEXTRUDER_PAUSE,
+        {"runout": NEXTRUDER_RUNOUT, "unload": NEXTRUDER_UNLOAD},
+        None,
+    ),
+    "iX": ((380, 400), Pause(4, 8, 110, 40, 45, 40), NEXTRUDER, CleanerPurge(0.0, False)),
+    "COREONE": ((380, 400), CORE_ONE_PAUSE, NEXTRUDER, None),
+    "COREONEL": ((380, 400), CORE_ONE_PAUSE, NEXTRUDER, None),
+    "COREONE_INDX": ((550, 576), INDX_PAUSE, INDX, INDX_PURGE),
+    "COREONEL_INDX": ((550, 576), INDX_PAUSE, INDX, INDX_PURGE),
+    "MK3.5": (
+        (266, 280),
+        Pause(4, 8, 105, 30, 50, 21),
+        {"runout": NEXTRUDER_RUNOUT, "unload": MINI_RAMMING},
+        None,
+    ),
+    "MINI": (
+        (325, 325),
+        Pause(4, 8, 400, 40, 320, 50),
+        {"runout": MINI_RAMMING, "unload": MINI_RAMMING},
+        None,
+    ),
+}
 
 
 def test_load_reads_every_build():
@@ -38,6 +124,41 @@ def test_load_reads_every_build():
     assert firmware.builds["XL_DEV_KIT"].presets["PA"]["nozzle_temperature"] == 285
 
 
+@pytest.mark.parametrize("name", sorted(EXTRUDERS))
+def test_load_reads_every_builds_extruder(name):
+    build = compare.load(fixtures.FakeSource()).builds[name]
+    e_steps, pause, ramming, cleaner_purge = EXTRUDERS[name]
+    assert build.e_steps == e_steps
+    assert build.pause == pause
+    assert build.ramming == ramming
+    assert build.cleaner_purge == cleaner_purge
+
+
+def test_feed_ratio():
+    builds = compare.load(fixtures.FakeSource()).builds
+    assert builds["MK4"].feed_ratio == 0.95
+    assert builds["COREONE_INDX"].feed_ratio == 550 / 576
+    assert builds["MINI"].feed_ratio == 1.0
+
+
+def test_extruder_table_covers_every_build():
+    assert EXTRUDERS.keys() == {b for b in compare.MODEL_BUILDS.values() if b}
+
+
+@pytest.mark.parametrize(
+    ("sequence", "distance"),
+    [
+        (NEXTRUDER_AUTO_RETRACT, 55),
+        (NEXTRUDER_UNLOAD, 105),
+        (INDX["auto_retract"], 8),
+        ((), 0),
+        (((-5, 100), (20, 100), (-3, 100)), 3),
+    ],
+)
+def test_retracted_distance(sequence, distance):
+    assert compare.retracted_distance(sequence) == distance
+
+
 def test_load_fails_on_a_model_without_a_build():
     models = fixtures.MODELS_HPP.replace("{ 2, 1, 0 }", "{ 9, 9, 9 }")
     files = {**fixtures.FILES, read.MODELS_FILE: models}
@@ -52,10 +173,20 @@ def test_load_fails_on_a_build_printer_cant_name():
         compare.load(fixtures.FakeSource(files))
 
 
-def test_load_fails_on_a_missing_file():
+@pytest.mark.parametrize(
+    "path",
+    [
+        read.TRACKER_FILE,
+        read.advanced_file("MINI"),
+        read.configuration_file("XL_DEV_KIT"),
+        read.ramming_file("mk3_5"),
+        read.CLEANER_FILE,
+    ],
+)
+def test_load_fails_on_a_missing_file(path):
     files = dict(fixtures.FILES)
-    del files[read.TRACKER_FILE]
-    with pytest.raises(Unreadable, match=f"can't read {read.TRACKER_FILE}"):
+    del files[path]
+    with pytest.raises(Unreadable, match=f"can't read {path}"):
         compare.load(fixtures.FakeSource(files))
 
 
@@ -63,6 +194,28 @@ def test_every_build_has_its_printer_is_macro():
     builds = {b for b in compare.MODEL_BUILDS.values() if b}
     covered = set().union(*compare.PRINTER_IS.values())
     assert builds == covered
+
+
+def test_every_build_has_its_configuration():
+    assert compare.CONFIGURATIONS.keys() == {b for b in compare.MODEL_BUILDS.values() if b}
+
+
+@pytest.mark.parametrize(
+    ("build", "features", "variant"),
+    [
+        ("MK4", {"HAS_NEXTRUDER"}, "nextruder"),
+        ("COREONE_INDX", {"HAS_INDX"}, "indx"),
+        ("MINI", set(), "mini"),
+        ("MK3.5", set(), "mk3_5"),
+    ],
+)
+def test_ramming_file(build, features, variant):
+    assert compare.ramming_file(build, frozenset(features)) == read.ramming_file(variant)
+
+
+def test_ramming_file_fails_on_a_build_without_one():
+    with pytest.raises(Unreadable, match=f"can't read {read.RAMMING_CMAKE_FILE}: .* for NEW"):
+        compare.ramming_file("NEW", frozenset())
 
 
 @pytest.mark.parametrize(
@@ -120,6 +273,21 @@ def fw_preset(nozzle, preheat, bed, chamber=None, filtration=None, flexible=Fals
     return values
 
 
+def build(name, features, tools, gap_mm, presets):
+    """A `Build` with the fields the comparison reads, and fixed extruder numbers."""
+    return Build(
+        name,
+        features,
+        tools,
+        gap_mm,
+        presets,
+        e_steps=(380, 400),
+        pause=NEXTRUDER_PAUSE,
+        ramming=NEXTRUDER,
+        cleaner_purge=None,
+    )
+
+
 def synthetic():
     """A firmware with three models, and copies that match it."""
     core = frozenset(
@@ -132,16 +300,16 @@ def synthetic():
         }
     )
     builds = {
-        "MK4": Build(
+        "MK4": build(
             "MK4",
             frozenset({"HAS_FILAMENT_TRACKER"}),
             1,
             40.0,
             {"PLA": fw_preset(215, 170, 60), "FLEX": fw_preset(240, 210, 50, flexible=True)},
         ),
-        "MINI": Build("MINI", frozenset(), 1, None, {"PLA": fw_preset(215, 170, 60)}),
-        "XL": Build("XL", frozenset({"HAS_FILAMENT_TRACKER"}), 5, 40.0, {}),
-        "COREONE": Build(
+        "MINI": build("MINI", frozenset(), 1, None, {"PLA": fw_preset(215, 170, 60)}),
+        "XL": build("XL", frozenset({"HAS_FILAMENT_TRACKER"}), 5, 40.0, {}),
+        "COREONE": build(
             "COREONE",
             core,
             1,

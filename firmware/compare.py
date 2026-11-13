@@ -5,11 +5,15 @@ The bridge (`spoolman_prusalink.printer_sync`) and the simulator (`simulator.mod
 models, the preset filaments, the reset defaults and the tag aliases. This module reads
 the same tables from the firmware source for each firmware build and lists every place
 a copy differs. A difference on `EXPECTED` is reported but doesn't fail the check.
+
+Each build also carries its extruder numbers (steps per mm, filament change lengths,
+ramming sequences and the nozzle cleaner's purge), which nothing compares yet.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+import functools
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, fields
 from typing import Any
 
@@ -57,8 +61,26 @@ PRINTER_IS = {
     "COREONEL": {"COREONEL", "COREONEL_INDX"},
 }
 
-# The `ProjectOptions.cmake` features the comparison and the preset table use. A macro
-# outside this list fails the read.
+# Each build's `include/marlin/Configuration_<X>.h` and `Configuration_<X>_adv.h`, as the
+# `#elif` chains in `Configuration.h` and `Configuration_adv.h` pick them by
+# `PRINTER_IS_PRUSA_<X>()`: the INDX builds share their base model's files, which branch
+# on `HAS_INDX()` inside. The XL build is the main board's; `Configuration_XL_Dwarf.h` is
+# the tool head's.
+CONFIGURATIONS = {
+    "MINI": "MINI",
+    "MK3.5": "MK3.5",
+    "MK4": "MK4",
+    "XL": "XL",
+    "XL_DEV_KIT": "XL_DEV_KIT",
+    "iX": "iX",
+    "COREONE": "COREONE",
+    "COREONE_INDX": "COREONE",
+    "COREONEL": "COREONEL",
+    "COREONEL_INDX": "COREONEL",
+}
+
+# The `ProjectOptions.cmake` features the comparison, the readers and the simulator's
+# printer profiles use. A macro outside this list fails the read.
 FEATURES = (
     "HAS_LOADCELL",
     "HAS_INDX",
@@ -71,7 +93,49 @@ FEATURES = (
     "HAS_CHAMBER_FILTRATION_API",
     "HAS_HT_HOTEND",
     "HAS_FILAMENT_HEATBREAK_PARAM",
+    "HAS_PAUSE",
+    "HAS_AUTO_RETRACT",
+    "HAS_SWITCHABLE_AUTO_RETRACT",
+    "HAS_NOZZLE_CLEANER",
+    "HAS_MMU2",
 )
+
+Ramming = tuple[read.Step, ...]
+
+
+def retracted_distance(sequence: Iterable[read.Step]) -> int:
+    """Return how far a ramming sequence leaves the filament retracted, in mm.
+
+    As `RammingSequence::init` in `ramming_sequence.hpp` works it out: a negative E
+    retracts, a positive one pushes back, and pushing past the nozzle resets it to 0.
+    """
+    distance = 0
+    for e, _feedrate in sequence:
+        distance = max(0, distance - e)
+    return distance
+
+
+@dataclass(frozen=True)
+class Pause:
+    """A build's filament change lengths in `Configuration_<X>_adv.h`, in mm.
+
+    The fields follow `read.PAUSE_LENGTHS`.
+    """
+
+    prime_mm: int
+    retract_mm: int
+    unload_mm: int
+    slow_load_mm: int
+    fast_load_mm: int
+    purge_mm: int
+
+
+@dataclass(frozen=True)
+class CleanerPurge:
+    """What the nozzle cleaner's `purge_clean` G-code does to the filament."""
+
+    e_mm: float
+    auto_retract: bool  # whether it runs M1705 after extruding
 
 
 @dataclass(frozen=True)
@@ -81,6 +145,12 @@ class Build:
     tools: int
     gap_mm: float | None  # None where the filament tracker can't build
     presets: Mapping[str, Mapping[str, read.Value]]
+    e_steps: tuple[int, int]  # the extruder's default and calibrated steps per mm
+    pause: Pause
+    # By `StandardRammingSequence` case, with `<case>_flexible` where flexible filament
+    # gets another sequence.
+    ramming: Mapping[str, Ramming]
+    cleaner_purge: CleanerPurge | None  # None without HAS_NOZZLE_CLEANER
 
     @property
     def counters(self) -> bool:
@@ -89,6 +159,12 @@ class Build:
     @property
     def uuids(self) -> bool:
         return "HAS_ANFC" in self.features
+
+    @property
+    def feed_ratio(self) -> float:
+        """How much filament an E move feeds per mm commanded (`planner.cpp`)."""
+        default, calibrated = self.e_steps
+        return default / calibrated
 
 
 @dataclass(frozen=True)
@@ -122,6 +198,21 @@ def tools(features: frozenset[str]) -> int:
     return 1
 
 
+def ramming_file(build: str, features: frozenset[str]) -> str:
+    """Return the standard ramming sequence file a build compiles.
+
+    Mirrors the `if()` chain in `src/feature/ramming/CMakeLists.txt`.
+    """
+    if "HAS_NEXTRUDER" in features:
+        return read.ramming_file("nextruder")
+    if "HAS_INDX" in features:
+        return read.ramming_file("indx")
+    variants = {"MINI": "mini", "MK3.5": "mk3_5"}
+    if build not in variants:
+        raise Unreadable(read.RAMMING_CMAKE_FILE, f"no ramming sequence for {build}")
+    return read.ramming_file(variants[build])
+
+
 def macros(build: str, features: Mapping[str, frozenset[str]]) -> read.Macros:
     """Return the macro values for `build`; an unknown macro raises KeyError."""
 
@@ -148,16 +239,28 @@ def load(source: Source) -> Firmware:
         raise Unreadable(read.OPTIONS_FILE, f"PRINTER_VALID_OPTS doesn't list {', '.join(unknown)}")
     presets_text = source.read(read.PRESETS_FILE)
     tracker_text = source.read(read.TRACKER_FILE)
+    # Several builds share each of the files below.
+    text = functools.cache(source.read)
     builds = {}
     for name in sorted({b for b in MODEL_BUILDS.values() if b is not None}):
         has = frozenset(f for f, printers in features.items() if name in printers)
         values = macros(name, features)
+        configuration = read.configuration_file(CONFIGURATIONS[name])
+        advanced = read.advanced_file(CONFIGURATIONS[name])
+        ramming = ramming_file(name, has)
+        cleaner = None
+        if "HAS_NOZZLE_CLEANER" in has:
+            cleaner = CleanerPurge(*read.cleaner_purge(text(read.CLEANER_FILE), values))
         builds[name] = Build(
             name=name,
             features=has,
             tools=tools(has),
             gap_mm=read.tracker_gap(tracker_text, values),
             presets=read.presets(presets_text, values),
+            e_steps=read.e_steps(text(configuration), values, configuration),
+            pause=Pause(*read.pause_lengths(text(advanced), values, advanced)),
+            ramming=read.ramming(text(ramming), values, ramming),
+            cleaner_purge=cleaner,
         )
     return Firmware(
         commit=source.commit,

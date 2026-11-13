@@ -536,3 +536,199 @@ def test_tracker_gap_skips_unit_test_only_lines():
 def test_tracker_gap_fail_closed(text, problem):
     with pytest.raises(Unreadable, match=f"can't read {read.TRACKER_FILE}: {problem}"):
         read.tracker_gap(text, macros(A=True))
+
+
+@pytest.mark.parametrize(
+    ("text", "values", "steps"),
+    [
+        (fixtures.CONFIGURATION_NEXTRUDER_H, {}, (380, 400)),
+        (fixtures.CONFIGURATION_MK3_5_H, {}, (266, 280)),
+        (fixtures.CONFIGURATION_MINI_H, {}, (325, 325)),
+        (fixtures.CONFIGURATION_CORE_ONE_H, {"HAS_INDX": False}, (380, 400)),
+        (fixtures.CONFIGURATION_CORE_ONE_H, {"HAS_INDX": True}, (550, 576)),
+    ],
+)
+def test_e_steps(text, values, steps):
+    # Only the conditions around the defines are evaluated: HAS_MMU2 and the MINI's
+    # `#ifdef` would fail the read.
+    assert read.e_steps(text, macros(**values), "Configuration_X.h") == steps
+
+
+@pytest.mark.parametrize(
+    ("text", "values", "lengths"),
+    [
+        (fixtures.ADVANCED_NEXTRUDER_H, {"HAS_PAUSE": True}, (4, 8, 105, 30, 50, 27)),
+        (fixtures.ADVANCED_MK3_5_H, {"HAS_PAUSE": True}, (4, 8, 105, 30, 50, 21)),
+        (fixtures.ADVANCED_MINI_H, {"HAS_PAUSE": True}, (4, 8, 400, 40, 320, 50)),
+        (fixtures.ADVANCED_IX_H, {"HAS_PAUSE": True}, (4, 8, 110, 40, 45, 40)),
+        (
+            fixtures.ADVANCED_CORE_ONE_H,
+            {"HAS_PAUSE": True, "HAS_INDX": False},
+            (4, 8, 105, 40, 20, 40),
+        ),
+        (
+            fixtures.ADVANCED_CORE_ONE_H,
+            {"HAS_PAUSE": True, "HAS_INDX": True},
+            (4, 8, 55, 15, 25, 40),
+        ),
+    ],
+)
+def test_pause_lengths(text, values, lengths):
+    # `EXTRUDERS > 1`, `HAS_DRIVER(TMC26X)` and HAS_NOZZLE_CLEANER aren't evaluated.
+    assert read.pause_lengths(text, macros(**values), "Configuration_X_adv.h") == lengths
+
+
+@pytest.mark.parametrize(
+    ("text", "value"),
+    [
+        ("#define A 1", 1),
+        ("#  define A -2 // a comment", -2),
+        ("/* #define A 2 */\n#define A 1", 1),
+        ("#define A \\\n    3", 3),
+        ("#define AB 2\n#define A 1\n#define B(x) x", 1),
+        ("#if HAS_DRIVER(TMC26X)\n#define B 1\n#endif\n#define A 1", 1),
+        ("#if B()\n#define A 1\n#else\n#define A 2\n#endif", 2),
+        ("#if B()\n#elif X()\n#if B()\n#endif\n#define A 3\n#endif", 3),
+        ("#ifdef UNITTESTS\n#define A 2\n#endif\n#define A 1", 1),
+    ],
+)
+def test_defines(text, value):
+    assert read.defines(text, ["A"], macros(B=False, X=True)) == (value,)
+
+
+@pytest.mark.parametrize(
+    ("text", "problem"),
+    [
+        ("", "no #define A"),
+        ("#define B 1", "no #define A"),
+        ("#define A 1\n#define A 2", "A is defined 2 times for the build"),
+        ("#if B()\n#define A 1\n#endif", "A is defined 0 times for the build"),
+        ("#if NEW()\n#define A 1\n#endif", r"unknown macro NEW\(\)"),
+        ("#if NEW()\n#else\n#define A 1\n#endif", r"unknown macro NEW\(\)"),
+        ("#if X()\n#if NEW()\n#endif\n#elif NEW()\n#define A 1\n#endif", r"unknown macro NEW"),
+        ("#ifdef USE_X\n#define A 1\n#endif", "unexpected #ifdef USE_X"),
+        ("#if EXTRUDERS > 1\n#define A 1\n#endif", "can't evaluate"),
+        ("#if X()\n#else\n#else\n#define A 1\n#endif", "#else without #if"),
+        ("#define A x", "can't read #define A x"),
+        ("#define A(x) 1", r"can't read #define A \(x\) 1"),
+        ("#define A 1\n#undef A", "#undef A"),
+        ("#else\n#define A 1", "#else without #if"),
+        ("#elif X()\n#define A 1", "#elif without #if"),
+        ("#endif\n#define A 1", "#endif without #if"),
+        ("#if X()\n#define A 1", "#if without #endif"),
+    ],
+)
+def test_defines_fail_closed(text, problem):
+    with pytest.raises(ValueError, match=problem):
+        read.defines(text, ["A"], macros(B=False, X=True))
+
+
+def test_e_steps_and_pause_lengths_name_the_file():
+    with pytest.raises(Unreadable, match="can't read a.h: no #define DEFAULT_AXIS_STEPS"):
+        read.e_steps("", macros(), "a.h")
+    with pytest.raises(Unreadable, match="can't read b.h: no #define PARK_PAUSE_PRIME_LENGTH"):
+        read.pause_lengths("", macros(), "b.h")
+
+
+NEXTRUDER_RUNOUT = ((7, 1500), (-50, 2700), (-5, 50), (-50, 1500))
+MINI_RAMMING = ((20, 1500), (-50, 2700), (-5, 50), (-50, 1500))
+
+
+def test_ramming_nextruder():
+    found = read.ramming(fixtures.RAMMING_NEXTRUDER_CPP, macros(HAS_AUTO_RETRACT=True), "n.cpp")
+    assert found.keys() == {"auto_retract", "runout", "unload"}
+    assert found["auto_retract"][:2] == ((8, 995), (-43, 6000))
+    assert found["unload"] == (*found["auto_retract"], (-50, 2000))
+    assert found["runout"] == NEXTRUDER_RUNOUT
+    without = read.ramming(fixtures.RAMMING_NEXTRUDER_CPP, macros(HAS_AUTO_RETRACT=False), "n")
+    assert without == {"runout": found["runout"], "unload": found["unload"]}
+
+
+def test_ramming_indx_has_flexible_variants():
+    found = read.ramming(fixtures.RAMMING_INDX_CPP, macros(HAS_AUTO_RETRACT=True), "i.cpp")
+    assert found["auto_retract"] == ((8, 480), (-8, 4800), (1, 1440), (-1, 1440))
+    assert found["runout"] == found["unload"]
+    assert found["runout"][0] == (8, 1500) and found["runout"][-1] == (-8, 360)
+    assert len(found["runout"]) == 12
+    assert found["runout_flexible"] == found["unload_flexible"] == ((-50, 600),)
+
+
+def test_ramming_mini_and_mk3_5():
+    mini = read.ramming(fixtures.RAMMING_MINI_CPP, macros(HAS_AUTO_RETRACT=False), "m.cpp")
+    assert mini == {"runout": MINI_RAMMING, "unload": MINI_RAMMING}
+    mk3_5 = read.ramming(fixtures.RAMMING_MK3_5_CPP, macros(HAS_AUTO_RETRACT=False), "m.cpp")
+    assert mk3_5 == {"runout": NEXTRUDER_RUNOUT, "unload": MINI_RAMMING}
+
+
+@pytest.mark.parametrize(
+    ("old", "new", "problem"),
+    [
+        ("::runout:", "::purge:", "unknown ramming sequence purge"),
+        ("::unload:", "::runout:", "ramming sequence runout appears twice"),
+        ("{ 7, 1500 }", "{ 7, 1500 / 60.F }", "can't read the steps of ramming sequence runout"),
+        ("{ 7, 1500 }", "{ 7, 0 }", "can't read the steps of ramming sequence runout"),
+        ("{ 7, 1500 }", "{ 7, -1500 }", "can't read the steps of ramming sequence runout"),
+        ("{ 7, 1500 },", "{ 7, 1500 } x", "can't read the steps of ramming sequence runout"),
+        ("return seq;\n    }\n\n    case", "f();\n    }\n\n    case", "can't read the case block"),
+        ("    }\n    }\n", "    }\n    default: break;\n    }\n", "unexpected 'default:'"),
+        ("switch (seq) {", "switch (other) {", "0 switch"),
+    ],
+)
+def test_ramming_fail_closed(old, new, problem):
+    text = fixtures.RAMMING_MK3_5_CPP
+    assert old in text
+    with pytest.raises(Unreadable, match=f"can't read r.cpp: {problem}"):
+        read.ramming(text.replace(old, new, 1), macros(HAS_AUTO_RETRACT=False), "r.cpp")
+
+
+def test_ramming_needs_the_builds_cases():
+    unload = fixtures.RAMMING_MK3_5_CPP.index("    case StandardRammingSequence::unload")
+    text = fixtures.RAMMING_MK3_5_CPP[:unload] + "    }\n}\n"
+    with pytest.raises(Unreadable, match="the cases are runout, not runout, unload"):
+        read.ramming(text, macros(HAS_AUTO_RETRACT=False), "r.cpp")
+    with pytest.raises(Unreadable, match="cases are runout, unload, not auto_retract, runout"):
+        read.ramming(fixtures.RAMMING_MINI_CPP, macros(HAS_AUTO_RETRACT=True), "r.cpp")
+    with pytest.raises(Unreadable, match=r"unknown macro HAS_AUTO_RETRACT\(\)"):
+        read.ramming(fixtures.RAMMING_NEXTRUDER_CPP, macros(), "r.cpp")
+    with pytest.raises(Unreadable, match="unbalanced braces"):
+        read.ramming("switch (seq) {", macros(), "r.cpp")
+
+
+@pytest.mark.parametrize(("indx", "purge"), [(True, (25.0, True)), (False, (0.0, False))])
+def test_cleaner_purge(indx, purge):
+    assert read.cleaner_purge(fixtures.NOZZLE_CLEANER_CPP, macros(HAS_INDX=indx)) == purge
+
+
+def purge_clean(gcode):
+    return f'{{ Sequence::purge_clean, {{ .filename = "p", .default_gcode = {gcode}, }} }}'
+
+
+@pytest.mark.parametrize(
+    ("gcode", "purge"),
+    [
+        ('"G750 E5\\n" "G750 X1 E2.5 F4\\n" "M1705 N"', (7.5, True)),
+        ('"M106 S0\\n"', (0.0, False)),
+    ],
+)
+def test_cleaner_purge_sums_the_e_moves(gcode, purge):
+    assert read.cleaner_purge(purge_clean(gcode), macros()) == purge
+
+
+@pytest.mark.parametrize(
+    ("text", "problem"),
+    [
+        ("", "no Sequence::purge_clean"),
+        (purge_clean('"G750 E5"') * 2, "Sequence::purge_clean appears 2 times"),
+        ('{ Sequence::purge_clean, { .filename = "p", } }', "no .default_gcode"),
+        (purge_clean('"G1 E25 F4"'), "can't read the E move 'G1 E25 F4'"),
+        (purge_clean('"G750 E25 E3 F4"'), "can't read the E move"),
+        (purge_clean('"G750 Ex F4"'), "can't read the E move"),
+        (purge_clean('"M1705\\nG750 E5"'), "M1705 before the last E move"),
+        (purge_clean('"M1705"'), "M1705 before the last E move"),
+        (purge_clean('"G750 E5\\t"'), "an escape other than"),
+        ("#if NEW()\n#endif", r"unknown macro NEW\(\)"),
+    ],
+)
+def test_cleaner_purge_fail_closed(text, problem):
+    with pytest.raises(Unreadable, match=f"can't read {read.CLEANER_FILE}: {problem}"):
+        read.cleaner_purge(text, macros())
