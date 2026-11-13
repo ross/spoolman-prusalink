@@ -1016,7 +1016,7 @@ def test_state_round_trip():
         deleted_spool=19,
         staged_notice=ev.StagedAtReboot(8, 7),
         provisional=Provisional(7, 400, 42),
-        since_load={7: 400, 9: -3},
+        since_load={7: 400, 9: 0},
         extruded=150,
         reboot_pending=True,
     )
@@ -1489,7 +1489,7 @@ def test_state_round_trip_with_claim_fields():
         42,
         staged_notice=ev.StagedAtReboot(8, 7),
         provisional=Provisional(7, 400, 42),
-        since_load={7: 400, 9: -3},
+        since_load={7: 400, 9: 0},
         reboot_pending=True,
     )
     assert ToolState.from_json(json.loads(json.dumps(s.to_json()))) == s
@@ -1625,6 +1625,7 @@ def test_a_new_tool_and_a_loaded_tool_are_legal():
         (ToolState(active=7), "a tool the printer hasn't reported holds nothing"),
         (replace(LEGAL, held_mm=-1), "no counter or tally is negative"),
         (replace(LEGAL, swap=SwapFlag(7, -1)), "no counter or tally is negative"),
+        (replace(LEGAL, since_load={7: 5, 9: -1}), "no counter or tally is negative"),
         (
             replace(LEGAL, evict=(5, 5)),
             "a spool awaits eviction once, and it's neither the active nor the assigned spool",
