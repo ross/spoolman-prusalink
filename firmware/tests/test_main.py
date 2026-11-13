@@ -112,3 +112,9 @@ def test_a_file_that_cant_be_read_exits_3(calls, monkeypatch, capsys):
     assert "can't read ProjectOptions.cmake: no set_feature_for_printers call" in (
         capsys.readouterr().err
     )
+
+
+def test_a_missing_git_exits_3(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("PATH", str(tmp_path))
+    assert cli.main([]) == 3
+    assert "git isn't installed or isn't on PATH" in capsys.readouterr().err

@@ -36,6 +36,19 @@ inline constexpr std::array printer_model_mmu_variant {
 """
 
 OPTIONS_CMAKE = """\
+set(PRINTER_VALID_OPTS
+    "COREONE"
+    "COREONE_INDX"
+    "COREONEL"
+    "COREONEL_INDX"
+    "MINI"
+    "MK4"
+    "MK3.5"
+    "XL"
+    "iX"
+    "XL_DEV_KIT"
+    "NONE"
+    )
 set(PRINTER "<invalid>" CACHE STRING "Select the printer (valid values are ${PRINTER_VALID_OPTS}).")
 
 function(set_feature_for_printers FEATURE_NAME)

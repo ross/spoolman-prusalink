@@ -140,7 +140,12 @@ def load(source: Source) -> Firmware:
     if unknown:
         listed = ", ".join(f"{code} ({models[code]})" for code in unknown)
         raise Unreadable(read.MODELS_FILE, f"no build for {listed}; add it to MODEL_BUILDS")
-    features = read.features(source.read(read.OPTIONS_FILE), FEATURES)
+    options = source.read(read.OPTIONS_FILE)
+    features = read.features(options, FEATURES)
+    # A build `PRINTER` can't name would read as a build with no features.
+    unknown = sorted({b for b in MODEL_BUILDS.values() if b} - read.printers(options))
+    if unknown:
+        raise Unreadable(read.OPTIONS_FILE, f"PRINTER_VALID_OPTS doesn't list {', '.join(unknown)}")
     presets_text = source.read(read.PRESETS_FILE)
     tracker_text = source.read(read.TRACKER_FILE)
     builds = {}
@@ -213,6 +218,7 @@ class _Marker:
 # Whether a table has an entry, where the other side has or lacks it.
 MISSING: Any = _Marker("missing")
 PRESENT: Any = _Marker("present")
+ANY: Any = _Marker("any")  # an `Expected` value that matches whatever a difference has
 
 
 @dataclass(frozen=True)
@@ -416,19 +422,28 @@ def _compare_sim_preset(
 
 @dataclass(frozen=True)
 class Expected:
-    """A known difference: None in `model` or `material` matches any."""
+    """A known difference, matched by its place and, where pinned, its values.
+
+    None in `model` or `material` matches any, and so does `ANY` in `firmware` or `copy`.
+    Pin the values the reason describes, so the entry can't hide another difference at the
+    same place.
+    """
 
     table: str
     model: str | None
     material: str | None
     field: str
     reason: str
+    firmware: Any = ANY
+    copy: Any = ANY
 
     def matches(self, d: Difference) -> bool:
         return (
             (self.table, self.field) == (d.table, d.field)
             and self.model in (None, d.model)
             and self.material in (None, d.material)
+            and (self.firmware is ANY or self.firmware == d.firmware)
+            and (self.copy is ANY or self.copy == d.copy)
         )
 
     def __str__(self) -> str:
@@ -445,6 +460,8 @@ EXPECTED = (
         "PPS",
         "material",
         "permanent: it needs the HT idler-door setting, which M865 can't set",
+        PRESENT,
+        MISSING,
     ),
     Expected(
         "bridge PRESETS",
@@ -452,6 +469,8 @@ EXPECTED = (
         "PPA",
         "material",
         "permanent: it needs the HT idler-door setting, which M865 can't set",
+        PRESENT,
+        MISSING,
     ),
 )
 

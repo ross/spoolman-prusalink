@@ -104,6 +104,37 @@ def test_features_fail_closed(text, problem):
         read.features(text, ["HAS_ANFC"])
 
 
+def test_printers():
+    assert read.printers(fixtures.OPTIONS_CMAKE) == {
+        "COREONE",
+        "COREONE_INDX",
+        "COREONEL",
+        "COREONEL_INDX",
+        "MINI",
+        "MK4",
+        "MK3.5",
+        "XL",
+        "iX",
+        "XL_DEV_KIT",
+        "NONE",
+    }
+
+
+@pytest.mark.parametrize(
+    ("text", "problem"),
+    [
+        ("set(X 1)", "no PRINTER_VALID_OPTS"),
+        ("set(PRINTER_VALID_OPTS)", "no PRINTER_VALID_OPTS"),
+        ('set(PRINTER_VALID_OPTS "A")\nset(PRINTER_VALID_OPTS "B")', "set more than once"),
+        ('if(X)\nset(PRINTER_VALID_OPTS "A")\nendif()', r"set by set\(\) on line 2 inside if"),
+        ('unset(PRINTER_VALID_OPTS "A")', r"set by unset\(\) on line 1$"),
+    ],
+)
+def test_printers_fail_closed(text, problem):
+    with pytest.raises(Unreadable, match=f"can't read {read.OPTIONS_FILE}: .*{problem}"):
+        read.printers(text)
+
+
 def test_features_tolerate_quotes_and_comments_in_arguments():
     text = 'set (MSG "a ) # in a string")\nset_feature_for_printers(HAS_ANFC # note\n "A")'
     assert read.features(text, ["HAS_ANFC"]) == {"HAS_ANFC": frozenset({"A"})}
@@ -428,7 +459,60 @@ def test_tracker_gap_after_a_nested_if():
 
 def test_tracker_gap_outside_any_if():
     text = "#if X()\n#endif\nstatic constexpr float extruder_to_nozzle_distance = 12.5f;"
-    assert read.tracker_gap(text, macros()) == 12.5
+    assert read.tracker_gap(text, macros(X=False)) == 12.5
+
+
+NESTED_CHAIN = """\
+#if HAS_NEXTRUDER()
+    #if HAS_INDX_HEAD()
+    static constexpr float extruder_to_nozzle_distance = 27.f;
+    #else
+    static constexpr float extruder_to_nozzle_distance = 40.f;
+    #endif
+#elif HAS_INDX_HEAD()
+    static constexpr float extruder_to_nozzle_distance = 30.f;
+#else
+    #error
+#endif
+"""
+
+
+@pytest.mark.parametrize(
+    ("values", "gap"),
+    [
+        ({"HAS_NEXTRUDER": True, "HAS_INDX_HEAD": False}, 40.0),
+        ({"HAS_NEXTRUDER": True, "HAS_INDX_HEAD": True}, 27.0),
+        ({"HAS_NEXTRUDER": False, "HAS_INDX_HEAD": True}, 30.0),
+        ({"HAS_NEXTRUDER": False, "HAS_INDX_HEAD": False}, None),
+    ],
+)
+def test_tracker_gap_in_a_nested_chain(values, gap):
+    assert read.tracker_gap(NESTED_CHAIN, macros(**values)) == gap
+
+
+GUARDED = """\
+#if !HAS_NEXTRUDER() && !HAS_INDX_HEAD()
+    #error
+#endif
+    static constexpr float extruder_to_nozzle_distance = 40.f;
+"""
+
+
+def test_tracker_gap_with_an_error_guard():
+    assert read.tracker_gap(GUARDED, macros(HAS_NEXTRUDER=True, HAS_INDX_HEAD=False)) == 40.0
+    with pytest.raises(
+        Unreadable, match="1 active extruder_to_nozzle_distance declarations and an active #error"
+    ):
+        read.tracker_gap(GUARDED, macros(HAS_NEXTRUDER=False, HAS_INDX_HEAD=False))
+
+
+def test_tracker_gap_skips_unit_test_only_lines():
+    text = (
+        "#pragma once\n#include <x.h>\n"
+        "#ifndef UNITTESTS\nfloat extruder_to_nozzle_distance = 4.f;\n"
+        "#endif\n#ifdef UNITTESTS\nfloat extruder_to_nozzle_distance = 9.f;\n#endif"
+    )
+    assert read.tracker_gap(text, macros()) == 4.0
 
 
 @pytest.mark.parametrize(
@@ -438,8 +522,15 @@ def test_tracker_gap_outside_any_if():
         ("#if A()\nfloat extruder_to_nozzle_distance = 4;\n", "#if without #endif"),
         (
             "#if A()\nfloat extruder_to_nozzle_distance = x;\n#endif",
-            "no numeric extruder_to_nozzle_distance",
+            "can't read extruder_to_nozzle_distance = x",
         ),
+        (
+            "float extruder_to_nozzle_distance = 4.f;\n#if A()\n"
+            "float extruder_to_nozzle_distance = 5.f;\n#endif",
+            "2 active extruder_to_nozzle_distance declarations",
+        ),
+        ("bool b = extruder_to_nozzle_distance == 4;", "0 active extruder_to_nozzle_distance"),
+        ("#ifdef OTHER\n#endif\nextruder_to_nozzle_distance", "unexpected #ifdef OTHER"),
     ],
 )
 def test_tracker_gap_fail_closed(text, problem):

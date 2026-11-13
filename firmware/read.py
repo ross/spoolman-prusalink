@@ -60,33 +60,43 @@ def features(text: str, needed: Iterable[str]) -> dict[str, frozenset[str]]:
     needed = set(needed)
     found: dict[str, frozenset[str]] = {}
     try:
-        blocks: list[tuple[str, int]] = []
-        for name, args, line in _cmake_commands(text):
-            words = _cmake_words(args)
-            if name in _CMAKE_OPENERS:
-                blocks.append((name, line))
-            elif name in _CMAKE_CLOSERS:
-                if not blocks:
-                    raise ValueError(f"{name}() on line {line} closes nothing")
-                blocks.pop()
-            elif name in ("set_feature_for_printers", "set_feature_for_printers_master_board"):
+        for name, words, line, block in _cmake_statements(text):
+            if name in ("set_feature_for_printers", "set_feature_for_printers_master_board"):
                 if not words or words[0] not in needed:
                     continue
                 feature = words[0]
                 if feature in found:
                     raise ValueError(f"{feature} is set more than once (again on line {line})")
-                if blocks:
-                    opener, at = blocks[-1]
-                    raise ValueError(f"{feature} is set inside {opener}() on line {at}")
+                if block:
+                    raise ValueError(f"{feature} is set inside {block}")
                 found[feature] = frozenset(words[1:])
             elif name in _CMAKE_SETTERS and words and words[0] in needed:
                 raise ValueError(f"{words[0]} is also set by {name}() on line {line}")
-        if blocks:
-            opener, at = blocks[-1]
-            raise ValueError(f"{opener}() on line {at} isn't closed")
         missing = sorted(needed - found.keys())
         if missing:
             raise ValueError(f"no set_feature_for_printers call for {', '.join(missing)}")
+    except ValueError as e:
+        raise Unreadable(OPTIONS_FILE, str(e)) from None
+    return found
+
+
+def printers(text: str) -> frozenset[str]:
+    """Return the builds `PRINTER` may name: `PRINTER_VALID_OPTS`, set once at top level."""
+    found = None
+    try:
+        for name, words, line, block in _cmake_statements(text):
+            if name not in _CMAKE_SETTERS or words[:1] != ["PRINTER_VALID_OPTS"]:
+                continue
+            if found is not None:
+                raise ValueError(f"PRINTER_VALID_OPTS is set more than once (again on line {line})")
+            if block or name != "set":
+                raise ValueError(
+                    f"PRINTER_VALID_OPTS is set by {name}() on line {line}"
+                    + (f" inside {block}" if block else "")
+                )
+            found = frozenset(words[1:])
+        if not found:
+            raise ValueError("no PRINTER_VALID_OPTS")
     except ValueError as e:
         raise Unreadable(OPTIONS_FILE, str(e)) from None
     return found
@@ -195,43 +205,49 @@ def aliases(text: str) -> dict[str, str]:
     return dict(found)
 
 
-_GAP_NAME = r"\bextruder_to_nozzle_distance\s*="
+_GAP_DECLARATION = re.compile(r"\bextruder_to_nozzle_distance\s*=(?!=)\s*([^;]*);")
 
 
 def tracker_gap(text: str, macros: Macros) -> float | None:
     """Return `extruder_to_nozzle_distance` for one build, or None where it's an #error.
 
-    The value sits in an `#if` chain; a build none of its branches covers can't build the
-    filament tracker.
+    The whole file is evaluated for the build. It needs exactly one active declaration and
+    no active `#error`, or an active `#error` and no declaration: a build the header
+    stops with `#error` can't build the filament tracker.
     """
     try:
-        lines = _strip_comments(text).splitlines()
-        at = next(
-            (i for i, line in enumerate(lines) if re.search(_GAP_NAME, line)),
-            None,
-        )
-        if at is None:
+        text = _strip_comments(text)
+        if "extruder_to_nozzle_distance" not in text:
             raise ValueError("no extruder_to_nozzle_distance")
-        block = _enclosing_block(lines, at)
-        active = "\n".join(active_lines(block, macros))
-        if re.search(r"^\s*#\s*error\b", active, re.M):
+        active = "\n".join(active_lines(text.splitlines(), macros))
+        values = _GAP_DECLARATION.findall(active)
+        error = re.search(r"^\s*#\s*error\b", active, re.M) is not None
+        if error and not values:
             return None
-        return float(
-            _one(
-                r"extruder_to_nozzle_distance\s*=\s*(\d+(?:\.\d*)?)f?\s*;",
-                active,
-                "numeric extruder_to_nozzle_distance",
+        if error or len(values) != 1:
+            raise ValueError(
+                f"{len(values)} active extruder_to_nozzle_distance declarations"
+                + (" and an active #error" if error else "")
             )
-        )
+        m = re.fullmatch(r"(\d+(?:\.\d*)?)f?", values[0].strip())
+        if not m:
+            raise ValueError(f"can't read extruder_to_nozzle_distance = {values[0].strip()}")
+        return float(m.group(1))
     except ValueError as e:
         raise Unreadable(TRACKER_FILE, str(e)) from None
+
+
+# Directives kept as lines when active, for the caller to see or ignore.
+_KEPT_DIRECTIVES = frozenset({"error", "include", "pragma"})
 
 
 def active_lines(lines: Iterable[str], macros: Macros) -> list[str]:
     """Return the lines the preprocessor keeps for one build.
 
-    Handles `#if`, `#elif`, `#else` and `#endif` with conditions `evaluate` reads. Keeps an
-    active `#error` line for the caller to see. Any other directive is an error.
+    Handles `#if`, `#elif`, `#else` and `#endif` with conditions `evaluate` reads, and
+    `#ifdef` and `#ifndef` on `UNITTESTS`, which no firmware build defines. Keeps active
+    `#error`, `#include` and `#pragma` lines for the caller to see. Any other directive is
+    an error.
     """
     out: list[str] = []
     # Per open #if: whether the enclosing lines are active, whether a branch was taken,
@@ -250,9 +266,15 @@ def active_lines(lines: Iterable[str], macros: Macros) -> list[str]:
         directive, rest = m.groups()
         # Conditions are evaluated in inactive branches too, so an unknown macro fails
         # whatever the build.
-        if directive == "if":
+        if directive in ("if", "ifdef", "ifndef"):
+            if directive == "if":
+                value = bool(evaluate(rest, macros))
+            elif rest == "UNITTESTS":  # defined only in the firmware's unit-test builds
+                value = directive == "ifndef"
+            else:
+                raise ValueError(f"unexpected #{directive} {rest}")
             outer = active()
-            taken = bool(evaluate(rest, macros)) and outer
+            taken = value and outer
             stack.append([outer, taken, taken, False])
         elif directive == "elif":
             if not stack or stack[-1][3]:
@@ -269,7 +291,7 @@ def active_lines(lines: Iterable[str], macros: Macros) -> list[str]:
             if not stack:
                 raise ValueError("#endif without #if")
             stack.pop()
-        elif directive == "error":
+        elif directive in _KEPT_DIRECTIVES:
             if active():
                 out.append(line)
         else:
@@ -454,38 +476,6 @@ def _initializers(fields: str, kind: str) -> Iterable[tuple[str, str]]:
         yield m.group(1), m.group(2)
 
 
-def _enclosing_block(lines: list[str], at: int) -> list[str]:
-    """Return the `#if` ... `#endif` block around line `at`, or just that line."""
-    depth = 0
-    start = None
-    for i in range(at - 1, -1, -1):
-        directive = _directive(lines[i])
-        if directive == "endif":
-            depth += 1
-        elif directive in ("if", "ifdef", "ifndef"):
-            if depth == 0:
-                start = i
-                break
-            depth -= 1
-    if start is None:
-        return [lines[at]]
-    depth = 0
-    for i in range(start, len(lines)):
-        directive = _directive(lines[i])
-        if directive in ("if", "ifdef", "ifndef"):
-            depth += 1
-        elif directive == "endif":
-            depth -= 1
-            if depth == 0:
-                return lines[start : i + 1]
-    raise ValueError("#if without #endif")
-
-
-def _directive(line: str) -> str | None:
-    m = re.match(r"\s*#\s*(\w+)", line)
-    return m.group(1) if m else None
-
-
 def _strip_comments(text: str) -> str:
     return re.sub(
         r'("(?:[^"\\\n]|\\.)*")|//[^\n]*|/\*.*?\*/',
@@ -552,6 +542,25 @@ def _cmake_commands(text: str) -> Iterable[tuple[str, str, int]]:
                 depth += {"(": 1, ")": -1}.get(c, 0)
                 i += 1
             yield m.group().lower(), text[start : i - 1], line
+
+
+def _cmake_statements(text: str) -> Iterable[tuple[str, list[str], int, str | None]]:
+    """Yield each command other than block openers and closers as (lowercase name, words,
+    line number, the innermost enclosing block such as "if() on line 3", or None)."""
+    blocks: list[tuple[str, int]] = []
+    for name, args, line in _cmake_commands(text):
+        if name in _CMAKE_OPENERS:
+            blocks.append((name, line))
+        elif name in _CMAKE_CLOSERS:
+            if not blocks:
+                raise ValueError(f"{name}() on line {line} closes nothing")
+            blocks.pop()
+        else:
+            block = f"{blocks[-1][0]}() on line {blocks[-1][1]}" if blocks else None
+            yield name, _cmake_words(args), line, block
+    if blocks:
+        opener, at = blocks[-1]
+        raise ValueError(f"{opener}() on line {at} isn't closed")
 
 
 def _cmake_words(args: str) -> list[str]:

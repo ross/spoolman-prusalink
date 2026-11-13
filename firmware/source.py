@@ -48,9 +48,12 @@ def upstream(ref: str) -> Iterator[Source]:
 
 
 def _git(repo: Path, *args: str, what: str | None = None) -> str:
-    result = subprocess.run(
-        ["git", "-C", str(repo), *args], capture_output=True, text=True, check=False
-    )
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(repo), *args], capture_output=True, text=True, check=False
+        )
+    except FileNotFoundError:
+        raise Unreadable(what or str(repo), "git isn't installed or isn't on PATH") from None
     if result.returncode != 0:
         detail = result.stderr.strip() or f"git {args[0]} exited with {result.returncode}"
         raise Unreadable(what or str(repo), detail)

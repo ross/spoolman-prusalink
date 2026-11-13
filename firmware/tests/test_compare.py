@@ -45,6 +45,13 @@ def test_load_fails_on_a_model_without_a_build():
         compare.load(fixtures.FakeSource(files))
 
 
+def test_load_fails_on_a_build_printer_cant_name():
+    options = fixtures.OPTIONS_CMAKE.replace('    "XL_DEV_KIT"\n    "NONE"', '    "NONE"')
+    files = {**fixtures.FILES, read.OPTIONS_FILE: options}
+    with pytest.raises(Unreadable, match="PRINTER_VALID_OPTS doesn't list XL_DEV_KIT"):
+        compare.load(fixtures.FakeSource(files))
+
+
 def test_load_fails_on_a_missing_file():
     files = dict(fixtures.FILES)
     del files[read.TRACKER_FILE]
@@ -346,6 +353,25 @@ def test_report_fails_on_a_stale_expected_difference():
     assert lines[-1] == "0 unexpected differences, 1 expected, 1 stale expected entries"
 
 
+def test_a_pinned_entry_doesnt_mask_another_value():
+    entry = Expected("bridge PRINTER_MODELS", "4.1.0", None, "unsupported", "why", "1 tool")
+    assert entry.copy is compare.ANY
+    other = Difference(
+        "bridge PRINTER_MODELS", "4.1.0", None, "unsupported", "has the filament tracker", "x"
+    )
+    lines, ok = compare.report([other], (entry,))
+    assert not ok
+    assert "  4.1.0 unsupported: firmware 'has the filament tracker', copy 'x'" in lines
+    assert lines[-1] == "1 unexpected differences, 0 expected, 1 stale expected entries"
+    pinned = Expected("bridge PRESETS", None, "PPS", "material", "why", PRESENT, MISSING)
+    assert pinned.matches(
+        Difference("bridge PRESETS", "7.1.0", "PPS", "material", PRESENT, MISSING)
+    )
+    assert not pinned.matches(
+        Difference("bridge PRESETS", None, "PPS", "material", MISSING, PRESENT)
+    )
+
+
 def test_expected_matching():
     entry = Expected("bridge PRESETS", "7.1.0", None, "material", "why")
     assert entry.matches(Difference("bridge PRESETS", "7.1.0", "PPA", "material", 1, 2))
@@ -359,3 +385,4 @@ def test_expected_entries_have_reasons():
     for entry in compare.EXPECTED:
         assert entry.table in compare.TABLES
         assert entry.reason
+        assert compare.ANY not in (entry.firmware, entry.copy)

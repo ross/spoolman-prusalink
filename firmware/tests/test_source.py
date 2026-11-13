@@ -70,3 +70,9 @@ def test_upstream_fails_closed(repo, monkeypatch):
     monkeypatch.setattr(source, "REPO_URL", repo.as_uri())
     with pytest.raises(Unreadable, match="can't read nope: "), source.upstream("nope"):
         pass
+
+
+def test_a_missing_git_is_unreadable(tmp_path, monkeypatch):
+    monkeypatch.setenv("PATH", str(tmp_path))
+    with pytest.raises(Unreadable, match="git isn't installed or isn't on PATH"):
+        Source(tmp_path, "HEAD")
