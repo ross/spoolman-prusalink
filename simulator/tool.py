@@ -11,6 +11,7 @@ from typing import Any
 
 # Nozzle, preheat and bed temperatures of the firmware's preset filaments
 # (`src/common/filament_presets.cpp`), with the preheat for printers with a load cell.
+# `docs/firmware-pin.txt` records the firmware version these were read from.
 PRESET_TEMPERATURES = {
     "PLA": (215, 170, 60),
     "PETG": (230, 170, 85),

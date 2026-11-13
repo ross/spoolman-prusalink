@@ -116,7 +116,8 @@ class Preset:
 # parameter to the defaults in the firmware's `filament.hpp` (nozzle 215, preheat 170,
 # bed 60, everything else unset or off), and `J` (inherit a preset) is ignored on these
 # models, so the job writes each value. PPS and PPA are left out: they need the HT
-# idler-door setting, which `M865` can't set.
+# idler-door setting, which `M865` can't set. `docs/firmware-pin.txt` records the firmware
+# version these were read from.
 PRESETS = {
     "PLA": Preset(215, 60, chamber=(20, 15, 38)),
     "PETG": Preset(230, 85, chamber=(30, 15, 45)),

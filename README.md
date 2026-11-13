@@ -503,6 +503,7 @@ pattern, so the same commands work in every checkout and in CI:
 | `script/test` | Runs the unit suite. |
 | `script/integration` | Runs the end-to-end tests in `integration/` against a Spoolman. See [Tests](#tests). |
 | `script/lint` | Checks lint rules and formatting with ruff. Changes nothing. |
+| `script/firmware-check` | Checks the firmware files the preset tables were copied from for changes. See `docs/firmware-pin.txt`. |
 | `script/format` | Formats the code and applies ruff's safe fixes. |
 | `script/cibuild` | Runs what CI runs: bootstrap, lint, and the unit suite with coverage. |
 
