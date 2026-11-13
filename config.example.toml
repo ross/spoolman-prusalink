@@ -75,6 +75,10 @@ flag_field = "bridge_flag"
 # it. Usage since the tool's last unload or the printer's last reboot moves to it. The
 # bridge creates the field if it's missing and clears the box. "" disables claims.
 claim_field = "bridge_claim"
+# Spool extra field (type integer, shown as "Jobs used on") that tracks how many jobs a
+# spool was used on. The bridge creates the field if it's missing. "" disables job
+# counting.
+jobs_field = "jobs_used_on"
 
 # Several printers: replace [printer] and [[tools]] with one [[printers]] entry per
 # printer. Each takes the [printer] settings above plus its own [[printers.tools]].

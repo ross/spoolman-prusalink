@@ -68,6 +68,7 @@ class Spool:
     archived: bool = False
     claim: bool = False  # The claim box is ticked.
     last_used: datetime | None = None
+    jobs_used_on: int = 0
 
     def mm_to_grams(self, mm: float) -> float:
         """Convert a filament length to weight, as Spoolman does for `use_length`."""

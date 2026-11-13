@@ -36,6 +36,17 @@ def _extra_true(extra: dict | None, key: str | None) -> bool:
         return False
 
 
+def _extra_int(extra: dict | None, key: str | None) -> int:
+    """Decode an integer extra field. Missing or invalid values read as 0."""
+    if not key or not extra or key not in extra:
+        return 0
+    try:
+        value = json.loads(extra[key])
+    except (TypeError, ValueError):
+        return 0
+    return value if isinstance(value, int) and not isinstance(value, bool) else 0
+
+
 def _timestamp(value: object) -> datetime | None:
     """Parse a Spoolman timestamp such as `2026-11-07T01:47:16Z`, read as UTC."""
     if not isinstance(value, str) or not value:
@@ -52,6 +63,7 @@ def parse_spool(
     uuid_field: str | None = None,
     flag_field: str | None = None,
     claim_field: str | None = None,
+    jobs_field: str | None = None,
 ) -> Spool:
     filament = data.get("filament") or {}
     vendor = (filament.get("vendor") or {}).get("name")
@@ -82,6 +94,7 @@ def parse_spool(
         archived=bool(data.get("archived", False)),
         claim=_extra_true(data.get("extra"), claim_field),
         last_used=_timestamp(data.get("last_used")),
+        jobs_used_on=_extra_int(data.get("extra"), jobs_field),
     )
 
 
@@ -93,12 +106,14 @@ class Spoolman:
         uuid_field: str | None = None,
         flag_field: str | None = None,
         claim_field: str | None = None,
+        jobs_field: str | None = None,
         timeout: float = 10.0,
         transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
         self._uuid_field = uuid_field
         self._flag_field = flag_field
         self._claim_field = claim_field
+        self._jobs_field = jobs_field
         self._client = httpx.AsyncClient(
             base_url=url.rstrip("/"), timeout=timeout, transport=transport
         )
@@ -129,7 +144,9 @@ class Spoolman:
             return self._parse(resp.json())
 
     def _parse(self, data: dict) -> Spool:
-        return parse_spool(data, self._uuid_field, self._flag_field, self._claim_field)
+        return parse_spool(
+            data, self._uuid_field, self._flag_field, self._claim_field, self._jobs_field
+        )
 
     async def use_length(self, spool_id: int, mm: float) -> float | None:
         """Charge (or, with a negative value, refund) filament length.

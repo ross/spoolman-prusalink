@@ -104,6 +104,7 @@ def full_state() -> State:
             8: Runout("Core", 400.0, None, None),
         },
         claimed=[3, 9],
+        job_deltas={7: 2, 8: -1},
     )
 
 
@@ -119,8 +120,28 @@ def test_round_trip_of_every_field(path):
     assert db.save(state)
     db.close()
     assert read_state(path) == state
+
+    # Zero deltas are not persisted.
+    db = Database.open(path)
+    loaded = db.load()
+    loaded.job_deltas[9] = 0
+    assert not db.save(loaded)
+    db.close()
+    assert read_state(path) == state
     db = Database.open(path)
     assert db.load() == state
+    db.close()
+
+
+def test_existing_database_without_job_deltas_gets_table(path):
+    db = Database.open(path)
+    db.close()
+    conn = sqlite3.connect(path)
+    with conn:
+        conn.execute("DROP TABLE job_deltas")
+    conn.close()
+    db = Database.open(path)
+    assert db.load().job_deltas == {}
     db.close()
 
 

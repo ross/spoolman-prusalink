@@ -5,6 +5,7 @@ import logging
 import sqlite3
 from dataclasses import replace
 
+import httpx
 import pytest
 from harness import (
     CLAIMED,
@@ -289,7 +290,8 @@ async def test_unconfirmed_swap_flag_is_set_then_cleared(tmp_path):
     for _ in range(3):
         station.tool.extruded += 50
         await bridge.poll()
-    assert fake.writes.count(("patch", 19)) == patches
+    # One patch for jobs_used_on at print start; the flag stays unchanged until the print ends.
+    assert fake.writes.count(("patch", 19)) == patches + 1
     end_job(station)
     await bridge.poll()
     assert "assumed reloaded and 200 mm" in fake.flag(19)
@@ -3372,4 +3374,232 @@ async def test_a_sync_job_asks_for_the_next_poll_soon(tmp_path):
     station.finish_job()
     await bridge.poll()
     assert bridge.interval() == bridge.config.poll_idle
+    await bridge.aclose()
+
+
+async def test_jobs_used_on_tracks_prints_reloads_and_claims(tmp_path):
+    bridge, fake, station = make(tmp_path, [spool(19), spool_x(20, location=None)])
+    await bridge.poll()
+    assert fake.jobs(19) is None
+
+    # Preheat does not increment; first extrusion increments to 1.
+    start_job(station)
+    await bridge.poll()
+    assert fake.jobs(19) is None
+    station.tool.extruded += 50
+    await bridge.poll()
+    assert ("field", "/api/v1/field/spool/jobs_used_on") in fake.writes
+    assert fake.jobs(19) == 1
+
+    # Unload and reload the same spool mid-print: still 1.
+    station.tool.unload_count, station.tool.extruded_at_unload = 1, station.tool.extruded
+    await bridge.poll()
+    station.tool.extruded += 30
+    await bridge.poll()
+    assert fake.jobs(19) == 1
+    end_job(station)
+    await bridge.poll()
+
+    # Manual extrude while idle does not increment.
+    station.tool.extruded += 20
+    await bridge.poll()
+    assert fake.jobs(19) == 1
+
+    # Unconfirmed swap before a second print, then claimed by spool 20:
+    # spool 19 goes back to 1 (2 -> 1), spool 20 becomes 1.
+    station.tool.unload_count, station.tool.extruded_at_unload = 2, station.tool.extruded
+    await bridge.poll()
+    start_job(station)
+    await bridge.poll()
+    station.tool.extruded += 40
+    await bridge.poll()
+    assert fake.jobs(19) == 2
+
+    fake.spools[20]["location"] = fake.spools[19]["location"]
+    fake.spools[20]["extra"]["bridge_claim"] = "true"
+    await bridge.poll()
+    assert fake.jobs(19) == 1
+    assert fake.jobs(20) == 1
+    await bridge.aclose()
+
+
+async def test_jobs_used_on_disabled(tmp_path):
+    bridge, fake, station = make(tmp_path, [spool(19)], jobs_field=None)
+    start_job(station)
+    await bridge.poll()
+    station.tool.extruded += 50
+    await bridge.poll()
+    assert ("field", "/api/v1/field/spool/jobs_used_on") not in fake.writes
+    assert fake.jobs(19) is None
+    await bridge.aclose()
+
+
+async def test_jobs_used_on_coalesces_deltas(tmp_path):
+    bridge, fake, station = make(tmp_path, [spool(19), spool_x(20, location=None)])
+    await bridge.poll()
+    handle = fake.handle
+
+    def fail_jobs_patch(request):
+        if request.method == "PATCH" and request.url.path.startswith("/api/v1/spool/"):
+            body = json.loads(request.content)
+            if "jobs_used_on" in body.get("extra", {}):
+                return httpx.Response(503)
+        return handle(request)
+
+    fake.handle = fail_jobs_patch
+    # Two prints fail to flush -> +1 + 1 = +2 queued for spool 19.
+    for _ in range(2):
+        start_job(station)
+        await bridge.poll()
+        station.tool.extruded += 50
+        await bridge.poll()
+        end_job(station)
+    assert bridge.state.job_deltas == {19: 2}
+
+    # Unconfirmed swap before a 3rd print (spool 19 -> +3), then claimed by spool 20
+    # before flush -> spool 19 drops back to +2 and spool 20 gets +1.
+    station.tool.unload_count, station.tool.extruded_at_unload = 1, station.tool.extruded
+    await bridge.poll()
+    start_job(station)
+    await bridge.poll()
+    station.tool.extruded += 50
+    await bridge.poll()
+    assert bridge.state.job_deltas == {19: 3}
+
+    fake.spools[20]["location"] = fake.spools[19]["location"]
+    fake.spools[20]["extra"]["bridge_claim"] = "true"
+    await bridge.poll()
+    assert bridge.state.job_deltas == {19: 2, 20: 1}
+
+    # Now let a queued +1 and -1 cancel out to 0 and be dropped from job_deltas.
+    fake.handle = handle
+    await bridge.poll()
+    assert bridge.state.job_deltas == {}
+    assert fake.jobs(19) == 2
+    assert fake.jobs(20) == 1
+
+    # Verify +1 and -1 in the same queued state cancel to 0 and remove the key.
+    fake.handle = fail_jobs_patch
+    end_job(station)
+    station.tool.unload_count, station.tool.extruded_at_unload = 2, station.tool.extruded
+    await bridge.poll()
+    station.finish_job()
+    start_job(station)
+    await bridge.poll()
+    station.tool.extruded += 50
+    await bridge.poll()
+    assert bridge.state.job_deltas == {20: 1}
+    fake.spools[19]["location"] = LOC
+    fake.spools[19]["extra"]["bridge_claim"] = "true"
+    await bridge.poll()
+    assert bridge.state.job_deltas == {19: 1}
+    assert 20 not in bridge.state.job_deltas
+    await bridge.aclose()
+
+
+async def test_jobs_used_on_error_and_retry_paths(tmp_path, caplog):
+    bridge, fake, station = make(tmp_path, [spool(19)])
+    await bridge.poll()
+
+    # 1. ensure_field fails transiently -> stays queued, succeeds on retry.
+    handle = fake.handle
+
+    def fail_field(request):
+        if request.url.path == "/api/v1/field/spool":
+            return httpx.Response(503)
+        return handle(request)
+
+    fake.handle = fail_field
+    start_job(station)
+    await bridge.poll()
+    station.tool.extruded += 50
+    await bridge.poll()
+    assert bridge.state.job_deltas == {19: 1}
+    fake.handle = handle
+    await bridge.poll()
+    assert bridge.state.job_deltas == {}
+    assert fake.jobs(19) == 1
+
+    # 2. set_extra fails with 503 twice (warning then debug), then succeeds.
+    end_job(station)
+    start_job(station)
+    await bridge.poll()
+
+    def fail_patch(request):
+        if request.method == "PATCH" and request.url.path == "/api/v1/spool/19":
+            body = json.loads(request.content)
+            if "jobs_used_on" in body.get("extra", {}):
+                return httpx.Response(503)
+        return handle(request)
+
+    fake.handle = fail_patch
+    caplog.set_level("DEBUG")
+    caplog.clear()
+    station.tool.extruded += 50
+    await bridge.poll()
+    assert bridge.state.job_deltas == {19: 1}
+    await bridge.poll()
+    assert bridge.state.job_deltas == {19: 1}
+    assert levels(caplog, "can't update jobs_used_on on spool 19") == ["WARNING", "DEBUG"]
+    caplog.clear()
+    fake.handle = handle
+    await bridge.poll()
+    assert bridge.state.job_deltas == {}
+    assert fake.jobs(19) == 2
+    assert levels(caplog, "updated jobs_used_on on spool 19") == ["INFO"]
+
+    # 3. Direct flush_jobs paths for missing/deleted/rejected spools.
+    # 404 on spool lookup
+    bridge.state.job_deltas[999] = 1
+    await bridge.flush_jobs()
+    assert 999 not in bridge.state.job_deltas
+
+    # 400 on spool lookup
+    def reject_spool_get(request):
+        if request.method == "GET" and request.url.path == "/api/v1/spool/998":
+            return httpx.Response(400)
+        return handle(request)
+
+    fake.handle = reject_spool_get
+    bridge.state.job_deltas[998] = 1
+    await bridge.flush_jobs()
+    assert 998 not in bridge.state.job_deltas
+
+    # 503 twice on spool lookup
+    def fail_spool_get(request):
+        if request.method == "GET" and request.url.path == "/api/v1/spool/997":
+            return httpx.Response(503)
+        return handle(request)
+
+    fake.handle = fail_spool_get
+    caplog.clear()
+    bridge.state.job_deltas[997] = 1
+    await bridge.flush_jobs()
+    await bridge.flush_jobs()
+    assert 997 in bridge.state.job_deltas
+    assert levels(caplog, "can't read spool 997 for jobs_used_on") == ["WARNING", "DEBUG"]
+    bridge.state.job_deltas.pop(997, None)
+
+    # 404 on set_extra
+    def not_found_patch(request):
+        if request.method == "PATCH" and request.url.path == "/api/v1/spool/19":
+            return httpx.Response(404)
+        return handle(request)
+
+    fake.handle = not_found_patch
+    bridge.state.job_deltas[19] = 1
+    await bridge.flush_jobs()
+    assert 19 not in bridge.state.job_deltas
+
+    # 400 on set_extra
+    def reject_patch(request):
+        if request.method == "PATCH" and request.url.path == "/api/v1/spool/19":
+            return httpx.Response(400)
+        return handle(request)
+
+    fake.handle = reject_patch
+    bridge.state.job_deltas[19] = 1
+    await bridge.flush_jobs()
+    assert 19 not in bridge.state.job_deltas
+    await bridge.aclose()
     await bridge.aclose()

@@ -183,6 +183,12 @@ def test_parse_spool_ignores_malformed_extras_and_timestamps():
     assert (s.instance_uuid, s.flag, s.claim, s.last_used) == (None, None, False, None)
     data["extra"]["instance_uuid"] = json.dumps(5)  # Valid JSON, but not text.
     assert parse_spool(data, "instance_uuid").instance_uuid is None
+    data["extra"]["jobs_used_on"] = "3"
+    assert parse_spool(data, jobs_field="jobs_used_on").jobs_used_on == 3
+    for bad in ("not json", json.dumps(True), json.dumps("3"), json.dumps(1.5)):
+        data["extra"]["jobs_used_on"] = bad
+        assert parse_spool(data, jobs_field="jobs_used_on").jobs_used_on == 0
+    assert parse_spool(data).jobs_used_on == 0
 
 
 @pytest.mark.parametrize("body", ["[]", "not json"])
@@ -454,12 +460,17 @@ def test_config_load(tmp_path):
 
     assert cfg.flag_field == "bridge_flag"
     assert cfg.claim_field == "bridge_claim"
+    assert cfg.jobs_field == "jobs_used_on"
     base = p.read_text()
     p.write_text(base + '[bridge]\nclaim_field = "bridge_flag"\n')
     with pytest.raises(ConfigError, match="must differ"):
         load(p, env={"PRUSALINK_API_KEY": "secret"})
-    p.write_text(base + '[bridge]\nclaim_field = ""\n')
-    assert load(p, env={"PRUSALINK_API_KEY": "secret"}).claim_field is None
+    p.write_text(base + '[bridge]\njobs_field = "bridge_flag"\n')
+    with pytest.raises(ConfigError, match="must differ"):
+        load(p, env={"PRUSALINK_API_KEY": "secret"})
+    p.write_text(base + '[bridge]\nclaim_field = ""\njobs_field = ""\n')
+    disabled = load(p, env={"PRUSALINK_API_KEY": "secret"})
+    assert disabled.claim_field is None and disabled.jobs_field is None
     p.write_text(base)
     p.write_text(p.read_text() + '[bridge]\nflag_field = "Bad Key"\n')
     with pytest.raises(ConfigError, match="flag_field"):
@@ -509,6 +520,7 @@ CONFIG_BASE = (
         ("[bridge]\nuuid_field = 5\n", "bridge.uuid_field must be a string"),
         ("[bridge]\nflag_field = true\n", "bridge.flag_field must be a string"),
         ('[bridge]\nclaim_field = ["a"]\n', "bridge.claim_field must be a string"),
+        ("[bridge]\njobs_field = 5\n", "bridge.jobs_field must be a string"),
         ("[bridge]\ndb_file = 5\n", "bridge.db_file must be a string"),
         ("[bridge]\neviction_location = 5\n", "bridge.eviction_location must be a string"),
         ('[printer]\nsync_file = "a/b.txt"\n', "printer.sync_file must be a plain .gcode file"),

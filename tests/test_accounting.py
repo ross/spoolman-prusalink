@@ -1019,6 +1019,8 @@ def test_state_round_trip():
         since_load={7: 400, 9: -3},
         extruded=150,
         reboot_pending=True,
+        job_spools={42: (7,)},
+        jobs_since_load={7: (42,)},
     )
     # Every field is set, so a field left out of to_json or from_json fails here.
     defaults = ToolState()
@@ -1664,3 +1666,127 @@ def test_an_event_kind_says_how_it_is_reported():
     # The value is the name alone, as the ledger and saved notices store it.
     assert EventKind("ambiguous") is EventKind.AMBIGUOUS
     assert json.dumps(EventKind.AMBIGUOUS) == '"ambiguous"'
+
+
+def test_job_count_credits_once_per_job_including_reload():
+    state = ToolState()
+    deltas = []
+    for step in [
+        (BOOT, r(100), loc(7)),
+        (BOOT, r(100), loc(7), 42),  # Preheat: pending_job=42, no extrusion yet.
+        (BOOT, r(120), loc(7), 42),  # First extrusion: +1 for spool 7.
+        (BOOT, r(150), loc(7), 42),  # More extrusion on same job: no extra +1.
+        (BOOT, r(150, unloads=1, at_unload=150), loc(7), 42),  # Jam/unload mid-print.
+        (BOOT, r(180, unloads=1, at_unload=150), loc(7), 42),  # Same spool reloaded: still +1.
+    ]:
+        res = account(state, *step)
+        state = res.state
+        deltas.extend((d.spool_id, d.delta, d.job_id) for d in res.job_deltas)
+    assert deltas == [(7, 1, 42)]
+
+
+def test_job_count_credits_different_spool_after_mid_print_swap_and_claim():
+    _, _, state = run(
+        [
+            (BOOT, r(100), loc(7)),
+            (BOOT, r(100), loc(7), 42),
+            (BOOT, r(130), loc(7), 42),  # Spool 7 gets +1 before unload.
+            (BOOT, r(130, unloads=1, at_unload=130), loc(7), 42),  # Unload mid-print.
+            (BOOT, r(150, unloads=1, at_unload=130), loc(7), 42),  # Provisional on 7.
+        ]
+    )
+    res = account(state, BOOT, r(160, unloads=1, at_unload=130), loc(7, 8), 42, claim=8)
+    # Spool 7 keeps its +1 from before the unload; spool 8 gets +1 for its part.
+    assert [(d.spool_id, d.delta, d.job_id) for d in res.job_deltas] == [(8, 1, 42)]
+
+
+def test_job_count_moves_with_claim_and_swap_confirmation():
+    # Unconfirmed swap before print start, provisional print on 7, then claim to 8.
+    _, _, state = run(
+        [
+            (BOOT, r(100), loc(7)),
+            (BOOT, r(100, unloads=1, at_unload=100), loc(7)),
+            (BOOT, r(100, unloads=1, at_unload=100), loc(7), 42),
+            (BOOT, r(120, unloads=1, at_unload=100), loc(7), 42),
+            (BOOT, r(120, unloads=1, at_unload=100), loc(7)),  # Print ended; now idle.
+        ]
+    )
+    res = account(state, BOOT, r(120, unloads=1, at_unload=100), loc(7, 8), claim=8)
+    assert [(d.spool_id, d.delta, d.job_id) for d in res.job_deltas] == [
+        (7, -1, 42),
+        (8, 1, 42),
+    ]
+
+    # Confirmed swap via UUID match on provisional charge, plus an earlier job since load.
+    _, _, state = run(
+        [
+            (BOOT, r(100), loc(7)),
+            (BOOT, r(100, unloads=1, at_unload=100), loc(7)),
+            (BOOT, r(100, unloads=1, at_unload=100), loc(7), 43),
+            (BOOT, r(120, unloads=1, at_unload=100), loc(7), 43),
+            (BOOT, r(120, unloads=1, at_unload=100), loc(7), 44),
+            (BOOT, r(140, unloads=1, at_unload=100), loc(7), 44),
+        ]
+    )
+    res = account(
+        state,
+        BOOT,
+        r(140, unloads=1, at_unload=100),
+        loc(8),
+        44,
+        matches=lambda i: i == 8,
+    )
+    assert [(d.spool_id, d.delta, d.job_id) for d in res.job_deltas] == [
+        (7, -1, 43),
+        (8, 1, 43),
+        (7, -1, 44),
+        (8, 1, 44),
+    ]
+
+    # Confirmed swap while swap is still open.
+    _, _, state = run(
+        [
+            (BOOT, r(100), loc(7)),
+            (BOOT, r(100), loc(7), 45),
+            (BOOT, r(110), loc(7), 45),  # +1 to 7 on job 45.
+            (BOOT, r(110, unloads=1, at_unload=110), loc(7), 45),
+            (BOOT, r(120, unloads=1, at_unload=110), loc(7), 45),  # swap.mm = 10
+        ]
+    )
+    res = account(state, BOOT, r(120, unloads=1, at_unload=110), loc(8), 45)
+    assert [(d.spool_id, d.delta, d.job_id) for d in res.job_deltas] == [(8, 1, 45)]
+
+
+def test_job_count_claim_after_new_job_does_not_double_credit_earlier_job():
+    _, _, state = run(
+        [
+            (BOOT, r(100), loc(8)),
+            (BOOT, r(100), loc(8), 43),
+            (BOOT, r(120), loc(8), 43),  # Spool 8 credited for job 43.
+            (BOOT, r(120, unloads=1, at_unload=120), loc(7), 43),  # Mid-print swap to 7.
+            (BOOT, r(140, unloads=1, at_unload=120), loc(7), 43),  # Spool 7 credited for job 43.
+            (BOOT, r(140, unloads=1, at_unload=120), loc(7)),  # Job 43 ends.
+            (BOOT, r(140, unloads=1, at_unload=120), loc(7), 44),
+            (BOOT, r(160, unloads=1, at_unload=120), loc(7), 44),  # Spool 7 credited for job 44.
+        ]
+    )
+    res = account(state, BOOT, r(160, unloads=1, at_unload=120), loc(7, 8), 44, claim=8)
+    # 7 loses both 43 and 44; 8 gains 44 only (already credited for 43 before the unload).
+    assert [(d.spool_id, d.delta, d.job_id) for d in res.job_deltas] == [
+        (7, -1, 43),
+        (7, -1, 44),
+        (8, 1, 44),
+    ]
+
+
+def test_hold_deleted_clears_jobs_since_load():
+    _, _, state = run(
+        [
+            (BOOT, r(100), loc(7)),
+            (BOOT, r(100), loc(7), 42),
+            (BOOT, r(120), loc(7), 42),
+        ]
+    )
+    assert 7 in state.jobs_since_load
+    held = hold_deleted(state, 7, 20)
+    assert 7 not in held.jobs_since_load

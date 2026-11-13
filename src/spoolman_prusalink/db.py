@@ -64,6 +64,7 @@ CREATE TABLE outbox (
 );
 CREATE TABLE flagged (spool_id INTEGER PRIMARY KEY);
 CREATE TABLE claimed (spool_id INTEGER PRIMARY KEY);
+CREATE TABLE job_deltas (spool_id INTEGER PRIMARY KEY, delta INTEGER NOT NULL);
 CREATE TABLE runouts (
     spool_id INTEGER PRIMARY KEY,
     location TEXT NOT NULL,
@@ -95,6 +96,7 @@ _KEYED = {
     "writes": (("printer", "tool"), ("due", "attempts", "written")),
     "flagged": (("spool_id",), ()),
     "claimed": (("spool_id",), ()),
+    "job_deltas": (("spool_id",), ("delta",)),
     "runouts": (("spool_id",), ("location", "remaining", "net", "used")),
 }
 # Outbox columns copied out of each record; the `record` column holds the rest.
@@ -322,6 +324,11 @@ def _connect(path: Path) -> sqlite3.Connection:
                 f"INSERT INTO meta (key, value) VALUES ('schema_version', '{SCHEMA_VERSION}');\n"
                 "COMMIT;"
             )
+        else:
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS job_deltas "
+                "(spool_id INTEGER PRIMARY KEY, delta INTEGER NOT NULL)"
+            )
     except sqlite3.Error as e:
         conn.close()
         raise DatabaseError(f"{path}: {e}") from e
@@ -403,6 +410,9 @@ def _rows(state: State) -> Rows:
         rows["flagged"][(spool_id,)] = ()
     for spool_id in state.claimed:
         rows["claimed"][(spool_id,)] = ()
+    for spool_id, delta in state.job_deltas.items():
+        if delta:
+            rows["job_deltas"][(spool_id,)] = (delta,)
     for spool_id, r in state.runouts.items():
         rows["runouts"][(spool_id,)] = (r.location, r.remaining, r.net, r.used)
     return rows
@@ -452,6 +462,7 @@ def _read(conn: sqlite3.Connection) -> tuple[State, Rows]:
     state.printers = dict(sorted(state.printers.items()))
     state.flagged = [k for (k,) in rows["flagged"]]
     state.claimed = [k for (k,) in rows["claimed"]]
+    state.job_deltas = {k: delta for (k,), (delta,) in rows["job_deltas"].items()}
     state.runouts = {k: Runout(*v) for (k,), v in rows["runouts"].items()}
     outbox = []
     for id_, *columns, extra in conn.execute(

@@ -68,6 +68,8 @@ class State:
     # Spools whose claim the bridge has handled while the box still shows ticked, so a
     # claim is handled once even if clearing the box fails.
     claimed: list[int] = field(default_factory=list)
+    # Pending `jobs_used_on` deltas by spool ID, saved with tool state until flushed.
+    job_deltas: dict[int, int] = field(default_factory=dict)
 
     def tools(self, printer: str) -> dict[int, ToolState]:
         """Return the tool states of `printer`, creating its entry."""

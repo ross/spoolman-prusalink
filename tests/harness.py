@@ -141,6 +141,10 @@ class FakeSpoolman:
         raw = self.spools[spool_id].get("extra", {}).get("bridge_flag")
         return None if raw is None else json.loads(raw)
 
+    def jobs(self, spool_id, key="jobs_used_on"):
+        raw = self.spools[spool_id].get("extra", {}).get(key)
+        return None if raw is None else json.loads(raw)
+
 
 def spool(id, location=LOC, flag=None):
     extra = {} if flag is None else {"bridge_flag": json.dumps(flag)}
@@ -224,7 +228,8 @@ def make(tmp_path, spools, **cfg):
             uuid_field=config.uuid_field,
             flag_field=config.flag_field,
             claim_field=config.claim_field,
-            transport=httpx.MockTransport(fake.handle),
+            jobs_field=config.jobs_field,
+            transport=httpx.MockTransport(lambda request: fake.handle(request)),
         ),
     )
     guard_polls(bridge, [printer])
@@ -394,6 +399,7 @@ def two_printers(tmp_path, spools, **cfg):
             uuid_field=config.uuid_field,
             flag_field=config.flag_field,
             claim_field=config.claim_field,
+            jobs_field=config.jobs_field,
             # Late bound, so a test can replace `fake.handle`.
             transport=httpx.MockTransport(lambda request: fake.handle(request)),
         ),
