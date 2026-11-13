@@ -537,8 +537,7 @@ need a Spoolman to talk to and take longer, so they run only when asked:
 script/integration
 ```
 
-It starts a throwaway Spoolman container with Podman or Docker and removes it
-afterwards. To use a Spoolman you already have, one no bridge uses, set
-`INTEGRATION_SPOOLMAN_URL`.
+It starts a throwaway Spoolman container with Podman or Docker for each run
+and removes it afterwards.
 
 CI runs both, as separate jobs. See [integration/README.md](integration/README.md).

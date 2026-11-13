@@ -36,14 +36,14 @@ local port, runs the tests against it, and removes it afterwards. Arguments go
 to pytest, for example `script/integration -k runout`. `SPOOLMAN_IMAGE`
 overrides the image and `CONTAINER_ENGINE` picks `podman` or `docker`.
 
-To use a Spoolman you already have, one that no bridge uses and no other run
-shares (see [What they assume](#what-they-assume)), point the tests at it:
+Every run gets its own Spoolman, so runs from several worktrees can overlap.
+From a worktree, the first run creates that worktree's own `.venv`.
 
-```sh
-INTEGRATION_SPOOLMAN_URL=http://127.0.0.1:7912 script/integration
-```
-
-Without `INTEGRATION_SPOOLMAN_URL`, a plain `pytest integration` skips every test.
+The script passes the container's URL to the tests in
+`INTEGRATION_SPOOLMAN_URL`, and refuses to run if it's already set: the tests
+don't run against a Spoolman you already have (see
+[What they assume](#what-they-assume)). A plain `pytest integration` skips
+every test.
 The tests never read `SPOOLMAN_URL`, the bridge's own setting, so a shell
 set up for a real bridge can't point them at a real Spoolman.
 
@@ -62,14 +62,14 @@ script/integration --cov=spoolman_prusalink --cov-fail-under=0
 
 ## What they assume
 
-- **A Spoolman no other bridge uses.** Each test makes its own vendor,
-  filaments and spools, and deletes them afterwards, even when it fails. One
-  bridge per Spoolman is the supported setup, though: a bridge flags any
-  claimed spool outside its own tool locations, so a deployed bridge or a
-  second test run on the same Spoolman can flag this run's spools, and this
-  run's bridges can flag theirs. Don't run the tests against a Spoolman a
-  bridge uses, and don't let two runs overlap. `script/integration` without
-  `INTEGRATION_SPOOLMAN_URL`, as in CI, starts a fresh Spoolman each run.
+- **A Spoolman of their own.** Each test makes its own vendor, filaments and
+  spools, and deletes them afterwards, even when it fails. That isn't enough
+  to share a Spoolman: one bridge per Spoolman is the supported setup, and a
+  bridge flags any claimed spool outside its own tool locations. A deployed
+  bridge or a second test run on the same Spoolman would flag this run's
+  spools, and this run's bridges would flag theirs. Two runs also share
+  extra fields and any fixed tag UUID a test uses. So `script/integration`
+  starts a fresh Spoolman for every run, locally as in CI.
 - **Unique location names.** Location names are what map a spool to a tool, so
   they're the isolation. Each test picks a prefix such as `it-3fa2c1` and uses
   `<prefix> T` for the tool and `<prefix> shelf` for spare spools. Spool
