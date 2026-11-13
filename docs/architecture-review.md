@@ -113,27 +113,10 @@ Nothing to do now. If changing both suites for each behavior change becomes
 a burden, narrow the integration suite to the scenarios where Spoolman's
 own behavior decides the outcome. Don't narrow the unit suite.
 
-## Simulator
-
-The simulator review read every file in `simulator/`.
-
-### S4. `SimPrinter` holds too much
-
-`SimPrinter` (`model.py`) holds the physical and job state machine,
-the PrusaLink wire format, the page's JSON view, a G-code interpreter, and
-checks on raw JSON input. The trace recorder samples the wire format in
-process, so the format must stay callable without HTTP.
-
-Shape: a pure `prusalink.render(printer)` for the wire views, the G-code
-interpreter in its own module, and input checks in the control layer.
-
-Size: large.
-
 ## Order and dependencies
 
 | # | Workstream | Findings | Depends on |
 | --- | --- | --- | --- |
 | 5 | Narrow the bridge boundary | B4, T1 | Nothing |
-| 8 | Simulator state | S4 | Nothing. S4 continues the move that put the PrusaLink routing in `prusalink.serve` |
 
 T3 has no work, so it isn't in a workstream.

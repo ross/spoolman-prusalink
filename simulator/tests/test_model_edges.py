@@ -6,7 +6,7 @@ import json
 
 import pytest
 
-from simulator import gcode
+from simulator import gcode, sync
 from simulator.model import (
     PHASE_STATES,
     Attention,
@@ -47,14 +47,14 @@ def printing(**kw):
 
 def test_unload_of_an_empty_type_is_not_counted():
     sim, p = make(tools=[SimTool(0)])
-    p.apply(gcode.parse("M865 I1 L0"))  # copies "none" over nothing
+    sync.apply(p, gcode.parse("M865 I1 L0"))  # copies "none" over nothing
     assert tool0(p).unload_count == 0
     assert messages(sim, "unload") == ["T0 M865 copied empty T1: no type stored, not counted"]
 
 
 def test_m865_for_a_tool_the_model_lacks_is_dropped():
     sim, p = make()
-    p.apply(gcode.parse('M865 X R N"PLA" L4'))
+    sync.apply(p, gcode.parse('M865 X R N"PLA" L4'))
     assert messages(sim) == ["M865 L4 dropped: no such tool"]
     assert list(p.tools) == [0]
 
@@ -62,20 +62,20 @@ def test_m865_for_a_tool_the_model_lacks_is_dropped():
 def test_m865_with_nothing_to_write_changes_nothing():
     sim, p = make(tools=[SimTool(0)])
     before = p.to_json()
-    p.apply(gcode.parse("M865 L0"))
+    sync.apply(p, gcode.parse("M865 L0"))
     assert messages(sim) == ["M865 L0: nothing to write"]
-    p.apply(gcode.parse('M865 O"#000000" L0'))  # an edit needs a stored type
+    sync.apply(p, gcode.parse('M865 O"#000000" L0'))  # an edit needs a stored type
     assert messages(sim)[-1] == "M865 L0: nothing to write"
     assert p.to_json() == before
 
 
 def test_m865_copy_onto_tool_0_of_a_tag_model_keeps_the_uuids():
     sim, p = make("8.1.0", [SimTool(0)])
-    p.apply(gcode.parse('M865 X R N"PETG" O"#186bb5" L0'))
-    p.apply(gcode.parse(f'M865.1 I0 C"{TAG}"'))
+    sync.apply(p, gcode.parse('M865 X R N"PETG" O"#186bb5" L0'))
+    sync.apply(p, gcode.parse(f'M865.1 I0 C"{TAG}"'))
     uuids = tool0(p).material.instance_uuid
     assert uuids == TAG
-    p.apply(gcode.parse("M865 I0 L0"))
+    sync.apply(p, gcode.parse("M865 I0 L0"))
     assert tool0(p).material.instance_uuid == TAG
     assert "copied from T0" in messages(sim)[-1]
 
@@ -85,7 +85,7 @@ def test_m865_copy_onto_another_tool_drops_the_uuids():
     sim, p = make("1.4.1", [loaded(0, tagged)])
     p.tools[1] = SimTool(1, enabled=False)
     p.model = type(p.model)("x", "X", uuids=True, max_tools=2)  # only tool 0 holds UUIDs
-    p.apply(gcode.parse("M865 I0 L1"))
+    sync.apply(p, gcode.parse("M865 I0 L1"))
     copy = p.tools[1].material
     assert (copy.name, copy.instance_uuid, copy.material_uuid, copy.package_uuid) == (
         "PETG",
@@ -253,17 +253,6 @@ def test_start_print_validation():
     assert p.job is None and p.state is State.IDLE
 
 
-def test_print_spec_from_dict():
-    spec = PrintSpec.from_dict(
-        {"segments": [{"tool": 1, "slicer_mm": 5}], "duration_s": 9, "color_changes_mm": [2]}
-    )
-    assert spec == PrintSpec([Segment(1, 5.0)], duration_s=9.0, color_changes_mm=[2.0])
-    assert spec.name == "part.bgcode"
-    for bad in ({}, {"segments": [{"tool": 0}]}, {"segments": [{"tool": "x", "slicer_mm": 1}]}):
-        with pytest.raises(Invalid, match="bad print"):
-            PrintSpec.from_dict(bad)
-
-
 def test_runout_and_jam_need_a_print_with_a_loaded_selected_tool():
     sim, p = make()
     with pytest.raises(Busy, match="needs a print in progress"):
@@ -286,15 +275,6 @@ def test_clear_jam_and_tap_through_without_anything_to_answer():
         p.clear_jam()
     with pytest.raises(Busy, match="nothing to tap through"):
         p.tap_through()
-
-
-def test_extruded_at_unload_must_be_an_integer():
-    sim, p = make()
-    for bad in (1.5, "3", True):
-        with pytest.raises(Invalid, match="value must be an integer"):
-            p.set_extruded_at_unload(0, bad)
-    p.set_extruded_at_unload(0, 7)
-    assert tool0(p).extruded_at_unload == 7
 
 
 def test_settings_update_validates_before_changing_anything():
