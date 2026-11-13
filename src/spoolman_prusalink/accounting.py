@@ -103,6 +103,16 @@ class Charge:
 
 
 @dataclass(frozen=True)
+class JobDelta:
+    """A change to a spool's `jobs_used_on` count (+1 when used, -1 when moved away)."""
+
+    spool_id: int
+    delta: int
+    job_id: int
+    reason: str
+
+
+@dataclass(frozen=True)
 class SwapFlag:
     """An unload the user hasn't confirmed by changing Spoolman."""
 
@@ -168,6 +178,10 @@ class ToolState:
     # A poll skipped as ambiguous applied a reboot: the next poll that isn't skipped
     # checks for a staged spool as if it saw the reboot itself.
     reboot_pending: bool = False
+    # Spools already credited for the current `job_id`, so a reload doesn't double-count.
+    job_spools: tuple[int, ...] = ()
+    # Jobs credited to each spool since the last unload or reboot, which move with a claim.
+    jobs_since_load: dict[int, tuple[int, ...]] = field(default_factory=dict)
 
     def to_json(self) -> dict:
         return {
@@ -201,6 +215,8 @@ class ToolState:
             "since_load": {str(k): v for k, v in sorted(self.since_load.items())},
             "extruded": self.extruded,
             "reboot_pending": self.reboot_pending,
+            "job_spools": list(self.job_spools),
+            "jobs_since_load": {str(k): list(v) for k, v in sorted(self.jobs_since_load.items())},
         }
 
     @classmethod
@@ -238,6 +254,10 @@ class ToolState:
             since_load={int(k): int(v) for k, v in data["since_load"].items()},
             extruded=int(data["extruded"]),
             reboot_pending=bool(data["reboot_pending"]),
+            job_spools=tuple(int(i) for i in data.get("job_spools", ())),
+            jobs_since_load={
+                int(k): tuple(int(j) for j in v) for k, v in data.get("jobs_since_load", {}).items()
+            },
         )
 
 
@@ -268,6 +288,7 @@ def _notice_from_json(data: dict | None) -> StagedAtPrint | StagedAtReboot | Non
 class Result:
     state: ToolState
     charges: list[Charge] = field(default_factory=list)
+    job_deltas: list[JobDelta] = field(default_factory=list)
     events: list[Event] = field(default_factory=list)
     # True when the assignment was ambiguous: nothing is charged and only the counter
     # and any reboot are recorded.
@@ -429,6 +450,11 @@ def hold_deleted(state: ToolState, spool_id: int, mm: int = 0, queued: int = 0) 
         state = replace(
             state, since_load={k: v for k, v in state.since_load.items() if k != spool_id}
         )
+    if spool_id in state.jobs_since_load:
+        state = replace(
+            state,
+            jobs_since_load={k: v for k, v in state.jobs_since_load.items() if k != spool_id},
+        )
     return replace(state, held_mm=held + max(mm, 0))
 
 
@@ -537,7 +563,7 @@ class _Poll:
     def event(self, ev: Event) -> None:
         self.out.events.append(ev)
 
-    def charge(self, target: int, mm: int, reason: str) -> None:
+    def charge(self, target: int, mm: int, reason: str, *, credit_job: bool = True) -> None:
         """Charge `mm` to a spool, and add it to each tally kept on that spool.
 
         Every charge goes through here, so no charge site updates a tally itself. A
@@ -556,6 +582,37 @@ class _Poll:
             current.swap = replace(swap, mm=swap.mm + mm)
         if provisional is not None and provisional.spool_id == target:
             current.provisional = replace(provisional, mm=provisional.mm + mm)
+        if credit_job and mm > 0 and self.job_id is not None and self.job_id == current.job_id:
+            self.credit_job(target, self.job_id, reason)
+
+    def credit_job(self, spool_id: int, job_id: int, reason: str) -> None:
+        """Credit `spool_id` with +1 job for `job_id`, deduplicating within the current job."""
+        current = self.current
+        window = current.jobs_since_load
+        jobs = window.get(spool_id, ())
+        if job_id in jobs:
+            return
+        if job_id == current.job_id:
+            if spool_id in current.job_spools:
+                return
+            current.job_spools = (*current.job_spools, spool_id)
+        self.out.job_deltas.append(JobDelta(spool_id, 1, job_id, reason))
+        current.jobs_since_load = {**window, spool_id: (*jobs, job_id)}
+
+    def move_jobs(self, from_spool: int, to_spool: int, moved_mm: int, reason: str) -> None:
+        """Move job attributions from `from_spool` to `to_spool` when usage moves."""
+        current = self.current
+        window = current.jobs_since_load
+        jobs = window.get(from_spool, ())
+        if jobs:
+            current.jobs_since_load = {k: v for k, v in window.items() if k != from_spool}
+            for jid in jobs:
+                self.out.job_deltas.append(JobDelta(from_spool, -1, jid, reason))
+                if jid == current.job_id:
+                    current.job_spools = tuple(s for s in current.job_spools if s != from_spool)
+                self.credit_job(to_spool, jid, reason)
+        if moved_mm > 0 and self.job_id is not None and self.job_id == current.job_id:
+            self.credit_job(to_spool, self.job_id, reason)
 
     def retire(self, old: int | None) -> None:
         """Mark the outgoing spool for eviction if it's still in the location."""
@@ -581,9 +638,10 @@ class _Poll:
         # Charge before refunding: Spoolman clamps used_weight at 0, so a refund applied
         # first could be truncated if the charge then fails.
         moved = {i: mm for i, mm in sorted(current.since_load.items()) if i != target and mm > 0}
-        self.charge(target, sum(moved.values()), f"{how} usage since load")
+        self.charge(target, sum(moved.values()), f"{how} usage since load", credit_job=False)
         for i, mm in moved.items():
-            self.charge(i, -mm, f"moved to {how} spool")
+            self.charge(i, -mm, f"moved to {how} spool", credit_job=False)
+            self.move_jobs(i, target, mm, f"moved to {how} spool")
         evict = tuple(i for i in current.evict if i != target)
         old = current.active
         if old is not None and old in self.location_ids and old not in evict:
@@ -630,6 +688,7 @@ class _Poll:
         # An unload just before a reboot can be missed, so a claim moves only usage
         # since the reboot.
         current.since_load = {}
+        current.jobs_since_load = {}
 
     def skip(self, ids: list[int]) -> None:
         """The location is ambiguous: charge nothing, and record only the counter."""
@@ -696,6 +755,7 @@ class _Poll:
         current.charged = at
         current.unload_count = reading.unload_count
         current.since_load = {}
+        current.jobs_since_load = {}
         current.swap = None  # A new unload supersedes any open swap.
         current.notice = None
         current.staged_notice = None
@@ -775,8 +835,15 @@ class _Poll:
             if moved > 0:
                 # Charge before refunding: Spoolman clamps used_weight at 0, so a refund
                 # applied first could be truncated if the charge then fails.
-                self.charge(current.assigned, moved, "usage since unconfirmed swap")
-                self.charge(swap.spool_id, -moved, "moved to confirmed swap spool")
+                self.charge(
+                    current.assigned, moved, "usage since unconfirmed swap", credit_job=False
+                )
+                self.charge(
+                    swap.spool_id, -moved, "moved to confirmed swap spool", credit_job=False
+                )
+                self.move_jobs(
+                    swap.spool_id, current.assigned, moved, "moved to confirmed swap spool"
+                )
             self.event(SwapConfirmed(moved, swap.spool_id, current.assigned))
             self.retire(current.active)
             current.active = current.assigned
@@ -838,6 +905,7 @@ class _Poll:
             return
         current.pending_job = None
         current.job_id = job_id
+        current.job_spools = ()
         current.notice = None
         if (
             current.deleted_spool is not None

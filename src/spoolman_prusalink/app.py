@@ -15,7 +15,7 @@ from typing import NamedTuple
 import httpx  # For the transport types `from_config` takes; errors come from .errors.
 
 from . import conditions, drift, printer_sync, tags
-from .accounting import ToolState, account, hold_deleted
+from .accounting import JobDelta, ToolState, account, hold_deleted
 from .archive import ArchivedSpools
 from .conditions import (
     CLAIM_FIELD_NAME,
@@ -172,6 +172,7 @@ WEIGHT_EPSILON = 0.01
 
 # Sync jobs per swap before the bridge gives up and flags the spool.
 MAX_SYNC_ATTEMPTS = 2
+JOBS_FIELD_NAME = "Jobs used on"
 
 
 def _outbox_outcome(sent: int, held: int, dropped: int) -> str:
@@ -213,6 +214,7 @@ class Plan:
     # For the bridge to save with the printer's state: the charges to queue, the events
     # for the ledger, the runout flags to set (or None to clear), and the claims handled.
     charges: list[ChargeRecord] = field(default_factory=list)
+    job_deltas: list[JobDelta] = field(default_factory=list)
     events: list[EventRecord] = field(default_factory=list)
     runouts: dict[int, Runout | None] = field(default_factory=dict)
     claimed: list[int] = field(default_factory=list)
@@ -599,6 +601,7 @@ class PrinterBridge:
                 log.log(level, "[%s] %s", location, ev.message)
                 plan.events.append(EventRecord(now, self.name, tool, location, ev))
 
+            plan.job_deltas.extend(result.job_deltas)
             for c in result.charges:
                 # An archived spool is still charged until the next unload, but isn't listed.
                 spool = by_id.get(c.spool_id) or self.archived.get(c.spool_id)
@@ -1049,6 +1052,7 @@ class Bridge:
     # What's failing now, by spool, with the last error logged for each.
     _unclaim_failing: dict[int, str] = field(default_factory=dict)
     _evict_failing: dict[int, str] = field(default_factory=dict)
+    _jobs_failing: dict[int, str] = field(default_factory=dict)
     # The status or error code of a charge that's stuck in the outbox, if one is.
     _charge_failing: str | None = None
     # Active or flagged spools missing from Spoolman's list that turned out to be archived.
@@ -1123,6 +1127,7 @@ class Bridge:
                 uuid_field=config.uuid_field,
                 flag_field=config.flag_field,
                 claim_field=config.claim_field,
+                jobs_field=config.jobs_field,
                 transport=spoolman_transport,
             ),
             state=db.load(),
@@ -1192,6 +1197,7 @@ class Bridge:
         self._check_negative(spools)
         _add_flags(flags, self._runout_flags(spools))
         await self.flush()
+        await self.flush_jobs(by_id)
         for printer in self.printers:
             if printer.name in plans:
                 plans[printer.name] = await printer.adopt_uuids(plans[printer.name])
@@ -1217,6 +1223,13 @@ class Bridge:
         save them in one transaction with its state and events."""
         for rec in plan.charges:
             self.state.outbox.push(rec)
+        if self.config.jobs_field is not None:
+            for jd in plan.job_deltas:
+                new_delta = self.state.job_deltas.get(jd.spool_id, 0) + jd.delta
+                if new_delta:
+                    self.state.job_deltas[jd.spool_id] = new_delta
+                else:
+                    self.state.job_deltas.pop(jd.spool_id, None)
         for spool_id, runout in plan.runouts.items():
             if runout is None:
                 self.state.runouts.pop(spool_id, None)
@@ -1450,6 +1463,79 @@ class Bridge:
             self._charge_failing = None
             log.warning("%s", _outbox_outcome(sent, held, dropped))
         return True
+
+    async def flush_jobs(self, by_id: Mapping[int, Spool] | None = None) -> None:
+        """Apply pending `jobs_used_on` deltas to Spoolman."""
+        key = self.config.jobs_field
+        if key is None or not self.state.job_deltas:
+            return
+        if not await self.fields.ensure(key, JOBS_FIELD_NAME, "integer"):
+            return
+        for spool_id, delta in sorted(self.state.job_deltas.items()):
+            spool = by_id.get(spool_id) if by_id is not None else None
+            if spool is None:
+                try:
+                    spool = await self.spoolman.spool(spool_id)
+                except Rejected as e:
+                    log.error(
+                        "Spoolman rejected reading spool %d for %s (%s); dropping update",
+                        spool_id,
+                        key,
+                        e,
+                    )
+                    self.state.job_deltas.pop(spool_id, None)
+                    self._jobs_failing.pop(spool_id, None)
+                    self._save()
+                    continue
+                except ServiceError as e:
+                    if record_failure(self._jobs_failing, spool_id, e):
+                        log.warning("can't read spool %d for %s: %s", spool_id, key, e)
+                    else:
+                        log.debug("can't read spool %d for %s: %s", spool_id, key, e)
+                    continue
+                if spool is None:
+                    log.debug("spool %d was deleted; dropping %s update", spool_id, key)
+                    self.state.job_deltas.pop(spool_id, None)
+                    self._jobs_failing.pop(spool_id, None)
+                    self._save()
+                    continue
+            new_value = max(0, spool.jobs_used_on + delta)
+            try:
+                await self.spoolman.set_extra(spool_id, key, new_value)
+            except NotFound:
+                log.debug("spool %d was deleted; dropping %s update", spool_id, key)
+                self.state.job_deltas.pop(spool_id, None)
+                self._jobs_failing.pop(spool_id, None)
+                self._save()
+            except Rejected as e:
+                log.error(
+                    "Spoolman rejected %s=%d on spool %d (%s); dropping update",
+                    key,
+                    new_value,
+                    spool_id,
+                    e,
+                )
+                self.state.job_deltas.pop(spool_id, None)
+                self._jobs_failing.pop(spool_id, None)
+                self._save()
+            except ServiceError as e:
+                if record_failure(self._jobs_failing, spool_id, e):
+                    log.warning("can't update %s on spool %d: %s", key, spool_id, e)
+                else:
+                    log.debug("can't update %s on spool %d: %s", key, spool_id, e)
+            else:
+                if self._jobs_failing.pop(spool_id, None) is not None:
+                    log.info("updated %s on spool %d", key, spool_id)
+                log.info(
+                    "updated spool %d (%s) %s: %d (%+d)",
+                    spool_id,
+                    spool.name,
+                    key,
+                    new_value,
+                    delta,
+                )
+                self.state.job_deltas.pop(spool_id, None)
+                self._save()
 
     def _charge_stuck(self, spool_id: int, error: ServiceError, queued: int) -> None:
         """Log a charge that's stuck, once per distinct error."""

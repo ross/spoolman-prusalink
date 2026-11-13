@@ -63,6 +63,9 @@ class Config:
     # Spool extra field (type boolean) the user ticks to claim a spool is in a tool;
     # None disables claims.
     claim_field: str | None = "bridge_claim"
+    # Spool extra field (type integer) tracking how many jobs a spool was used on;
+    # None disables job counting.
+    jobs_field: str | None = "jobs_used_on"
 
 
 def _bool(table: dict, key: str, default: bool, name: str) -> bool:
@@ -353,13 +356,19 @@ def load(path: str | os.PathLike | None, env: dict[str, str] | None = None) -> C
     uuid_field = _str(bridge, "uuid_field", "instance_uuid", "bridge.uuid_field") or None
     flag_field = _str(bridge, "flag_field", "bridge_flag", "bridge.flag_field") or None
     claim_field = _str(bridge, "claim_field", "bridge_claim", "bridge.claim_field") or None
-    fields = (("uuid_field", uuid_field), ("flag_field", flag_field), ("claim_field", claim_field))
+    jobs_field = _str(bridge, "jobs_field", "jobs_used_on", "bridge.jobs_field") or None
+    fields = (
+        ("uuid_field", uuid_field),
+        ("flag_field", flag_field),
+        ("claim_field", claim_field),
+        ("jobs_field", jobs_field),
+    )
     for name, key in fields:
         if key is not None and not re.fullmatch(r"[a-z0-9_]{1,64}", key):
             raise ConfigError(f"{name} must match [a-z0-9_]{{1,64}}, got {key!r}")
     keys = [key for _, key in fields if key is not None]
     if len(keys) != len(set(keys)):
-        raise ConfigError("uuid_field, flag_field and claim_field must differ")
+        raise ConfigError("uuid_field, flag_field, claim_field and jobs_field must differ")
     return Config(
         spoolman_url=spoolman_url,
         printers=printers,
@@ -370,4 +379,5 @@ def load(path: str | os.PathLike | None, env: dict[str, str] | None = None) -> C
         eviction_location=_str(bridge, "eviction_location", "", "bridge.eviction_location"),
         flag_field=flag_field,
         claim_field=claim_field,
+        jobs_field=jobs_field,
     )
