@@ -3,33 +3,37 @@
 #
 # docs/firmware-pin.txt lists each file with its git blob hash. This compares those
 # hashes with the firmware's and exits 1 if any file changed or is missing, 0 if all
-# match, 2 on a usage error.
+# match, 2 on a usage error. Any other status is git's: it couldn't fetch or read the
+# ref, or DIR isn't a repository.
 #
 #   script/firmware-check                    # upstream master
-#   script/firmware-check REF                # an upstream branch, tag or commit
+#   script/firmware-check REF                # an upstream branch, tag or full commit hash
 #   script/firmware-check --checkout DIR [REF]   # a local checkout, at REF (default HEAD)
 #
-# Upstream mode fetches from GitHub without the API or a token. Needs git.
+# Upstream mode fetches from GitHub without the API or a token, and can't fetch a
+# commit by a short hash. Needs git.
 set -euo pipefail
-cd "$(dirname "$0")/.."
 
 usage() {
     echo "usage: script/firmware-check [REF | --checkout DIR [REF]]" >&2
     exit 2
 }
 
-pin=docs/firmware-pin.txt
 checkout=""
 ref=""
 if [ "${1:-}" = "--checkout" ]; then
     [ $# -ge 2 ] && [ $# -le 3 ] || usage
-    checkout=$2
+    # Resolve DIR from the caller's directory, before the cd below.
+    checkout=$(cd "$2" && pwd) || usage
     ref=${3:-HEAD}
 else
     [ $# -le 1 ] || usage
     ref=${1:-master}
     case $ref in -*) usage ;; esac
 fi
+
+cd "$(dirname "$0")/.."
+pin=docs/firmware-pin.txt
 
 repo=$(awk '$1 == "repo" { print $2 }' "$pin")
 [ -n "$repo" ] || { echo "no repo line in $pin" >&2; exit 2; }
