@@ -27,6 +27,7 @@ from integration.temperatures import TEMPERATURES, WRITTEN
 from simulator import prusalink
 from simulator.model import MODELS, JobPhase, Material, ModelInfo, State
 from simulator.prusalink import DROP, Answer, Reply
+from simulator.tool import MK4_EXTRUDER
 from spoolman_prusalink.printer_sync import PRINTER_MODELS, default_preamble
 
 COREONEL_PREAMBLE = default_preamble(PRINTER_MODELS["8.1.0"])
@@ -401,7 +402,11 @@ async def test_w9_temperature_drift_is_flagged_unless_sync_drift(
 @pytest.mark.parametrize(
     "model, preamble, problem",
     [
-        (ModelInfo("99.1.0", "FUTURE"), None, "printer type '99.1.0' isn't one the bridge knows"),
+        (
+            ModelInfo("99.1.0", "FUTURE", MK4_EXTRUDER),
+            None,
+            "printer type '99.1.0' isn't one the bridge knows",
+        ),
         (MODELS["3.1.0"], None, "XL isn't supported: multi-tool printers aren't supported yet"),
         (
             MODELS["1.4.0"],

@@ -7,7 +7,7 @@ the same tables from the firmware source for each firmware build and lists every
 a copy differs. A difference on `EXPECTED` is reported but doesn't fail the check.
 
 Each build also carries its extruder numbers (steps per mm, filament change lengths,
-ramming sequences and the nozzle cleaner's purge), which nothing compares yet.
+ramming sequences and the nozzle cleaner's purge), which the simulator's models copy.
 """
 
 from __future__ import annotations
@@ -479,6 +479,27 @@ def _compare_sim_models(
         differ(table, code, None, "max_tools", build.tools, model.max_tools)
         if build.gap_mm is not None:
             differ(table, code, None, "gap_mm", build.gap_mm, model.gap_mm)
+        differ(table, code, None, "mmu", "HAS_MMU2" in build.features, model.mmu)
+        _compare_extruder(table, code, build, model.extruder, differ)
+
+
+def _compare_extruder(table: str, code: str, build: Build, extruder: Any, differ: Differ) -> None:
+    """Compare one model's `simulator.tool.Extruder` with its build."""
+    for i, which in enumerate(("default", "calibrated")):
+        differ(table, code, None, f"e_steps {which}", build.e_steps[i], extruder.e_steps[i])
+    for f in fields(Pause):
+        fw, copy = getattr(build.pause, f.name), getattr(extruder.lengths, f.name)
+        differ(table, code, None, f"lengths.{f.name}", fw, copy)
+    for case in sorted(build.ramming.keys() | extruder.ramming.keys()):
+        fw, copy = build.ramming.get(case, MISSING), extruder.ramming.get(case, MISSING)
+        differ(table, code, None, f"ramming.{case}", fw, copy)
+    switchable = "HAS_SWITCHABLE_AUTO_RETRACT" in build.features
+    copied = extruder.auto_retract_switchable
+    differ(table, code, None, "auto_retract_switchable", switchable, copied)
+    purge = build.cleaner_purge
+    fw_mm, fw_retract = (None, False) if purge is None else (purge.e_mm, purge.auto_retract)
+    differ(table, code, None, "cleaner_purge_mm", fw_mm, extruder.cleaner_purge_mm)
+    differ(table, code, None, "cleaner_auto_retract", fw_retract, extruder.cleaner_auto_retract)
 
 
 def _compare_bridge_preset(

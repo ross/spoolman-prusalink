@@ -19,6 +19,7 @@ from firmware.compare import (
 from firmware.source import Unreadable
 from firmware.tests import fixtures
 from simulator.model import ModelInfo
+from simulator.tool import Extruder, Lengths
 from spoolman_prusalink.printer_sync import Preset, PrinterModel
 
 NO_COUNTERS = "no counters"
@@ -70,6 +71,8 @@ NEXTRUDER_PAUSE = Pause(4, 8, 105, 30, 50, 27)
 CORE_ONE_PAUSE = Pause(4, 8, 105, 40, 20, 40)
 INDX_PAUSE = Pause(4, 8, 55, 15, 25, 40)
 INDX_PURGE = CleanerPurge(25.0, True)
+# The simulator's copy of the extruder `build()` gives every build.
+EXTRUDER = Extruder((380, 400), Lengths(4, 8, 105, 30, 50, 27), NEXTRUDER)
 
 # Per build: E steps (default, calibrated), pause lengths, ramming and the cleaner's purge.
 EXTRUDERS = {
@@ -249,6 +252,7 @@ def test_current_copies():
     assert copies.sim_aliases["TPU"] == "FLEX"
     assert copies.bridge_models["1.4.0"].name == "MK4"
     assert copies.sim_models["1.4.0"].name == "MK4"
+    assert copies.sim_models["1.4.0"].extruder.e_steps == (380, 400)
 
 
 def fw_preset(nozzle, preheat, bed, chamber=None, filtration=None, flexible=False, door=None):
@@ -349,10 +353,10 @@ def synthetic():
         default_preheat=170,
         preset_preheat=170,
         sim_models={
-            "1.4.0": ModelInfo("1.4.0", "MK4"),
-            "2.1.0": ModelInfo("2.1.0", "MINI", counters=False, gap_mm=99.0),
-            "3.1.0": ModelInfo("3.1.0", "XL", max_tools=5),
-            "7.1.0": ModelInfo("7.1.0", "COREONE", uuids=True),
+            "1.4.0": ModelInfo("1.4.0", "MK4", EXTRUDER),
+            "2.1.0": ModelInfo("2.1.0", "MINI", EXTRUDER, counters=False, gap_mm=99.0),
+            "3.1.0": ModelInfo("3.1.0", "XL", EXTRUDER, max_tools=5),
+            "7.1.0": ModelInfo("7.1.0", "COREONE", EXTRUDER, uuids=True),
         },
         sim_presets={"PLA": (215, 170, 60), "FLEX": (240, 210, 50), "PPS": (320, 170, 105)},
         sim_defaults=(215, 170, 60),
@@ -380,8 +384,8 @@ def test_model_differences():
     bridge["7.1.0"] = PrinterModel("CORE", NO_COUNTERS)  # it has the tracker and UUIDs
     bridge["9.9.9"] = PrinterModel("NEW")
     sim = dict(copies.sim_models)
-    sim["1.4.0"] = ModelInfo("1.4.0", "MK4", gap_mm=27.0, max_tools=2, counters=False)
-    sim["2.1.0"] = ModelInfo("2.1.0", "MINI", uuids=True)
+    sim["1.4.0"] = ModelInfo("1.4.0", "MK4", EXTRUDER, gap_mm=27.0, max_tools=2, counters=False)
+    sim["2.1.0"] = ModelInfo("2.1.0", "MINI", EXTRUDER, uuids=True)
     del sim["7.1.0"]
     copies = replace(copies, bridge_models=bridge, sim_models=sim)
     b, s = "bridge PRINTER_MODELS", "simulator MODELS"
@@ -403,6 +407,50 @@ def test_model_differences():
         # the door table notices the Core One's PPS.
         Difference("bridge HT_IDLER_DOOR", None, None, "materials", [], ["PPS"]),
     ]
+
+
+def test_extruder_differences():
+    firmware, copies = synthetic()
+    mk4, xl = firmware.builds["MK4"], firmware.builds["XL"]
+    builds = {
+        **firmware.builds,
+        "MK4": replace(mk4, features=mk4.features | {"HAS_SWITCHABLE_AUTO_RETRACT", "HAS_MMU2"}),
+        "XL": replace(xl, cleaner_purge=CleanerPurge(25.0, True)),
+    }
+    firmware = replace(firmware, builds=builds)
+    sim = dict(copies.sim_models)
+    ramming = {"runout": NEXTRUDER_RUNOUT, "unload": NEXTRUDER_AUTO_RETRACT, "extra": ((1, 1),)}
+    mk4_extruder = replace(
+        EXTRUDER,
+        e_steps=(381, 401),
+        lengths=replace(EXTRUDER.lengths, purge_mm=28),
+        ramming=ramming,
+    )
+    sim["1.4.0"] = replace(sim["1.4.0"], extruder=mk4_extruder)
+    mini_extruder = replace(EXTRUDER, auto_retract_switchable=True, cleaner_purge_mm=0.0)
+    sim["2.1.0"] = replace(sim["2.1.0"], mmu=True, extruder=mini_extruder)
+    # The cleaner's purge matches; its auto-retract doesn't.
+    sim["3.1.0"] = replace(sim["3.1.0"], extruder=replace(EXTRUDER, cleaner_purge_mm=25.0))
+    sim["7.1.0"] = replace(sim["7.1.0"], extruder=replace(EXTRUDER, cleaner_auto_retract=True))
+    s = "simulator MODELS"
+    found = compare.compare(firmware, replace(copies, sim_models=sim))
+    assert found == [
+        Difference(s, "1.4.0", None, "mmu", True, False),
+        Difference(s, "1.4.0", None, "e_steps default", 380, 381),
+        Difference(s, "1.4.0", None, "e_steps calibrated", 400, 401),
+        Difference(s, "1.4.0", None, "lengths.purge_mm", 27, 28),
+        Difference(s, "1.4.0", None, "ramming.auto_retract", NEXTRUDER_AUTO_RETRACT, MISSING),
+        Difference(s, "1.4.0", None, "ramming.extra", MISSING, ((1, 1),)),
+        Difference(s, "1.4.0", None, "ramming.unload", NEXTRUDER_UNLOAD, NEXTRUDER_AUTO_RETRACT),
+        Difference(s, "1.4.0", None, "auto_retract_switchable", True, False),
+        Difference(s, "2.1.0", None, "mmu", False, True),
+        Difference(s, "2.1.0", None, "auto_retract_switchable", False, True),
+        Difference(s, "2.1.0", None, "cleaner_purge_mm", None, 0.0),
+        Difference(s, "3.1.0", None, "cleaner_auto_retract", True, False),
+        Difference(s, "7.1.0", None, "cleaner_auto_retract", False, True),
+    ]
+    assert str(found[3]) == "1.4.0 lengths.purge_mm: firmware 27, copy 28"
+    assert str(found[5]) == "1.4.0 ramming.extra: firmware missing, copy ((1, 1),)"
 
 
 def test_a_model_refused_for_another_reason_passes():

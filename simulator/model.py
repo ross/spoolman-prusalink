@@ -18,6 +18,14 @@ from typing import Any, ClassVar
 
 from simulator import gcode, sync
 from simulator.tool import (
+    CORE_ONE_EXTRUDER,
+    INDX_EXTRUDER,
+    IX_EXTRUDER,
+    MINI_EXTRUDER,
+    MK3_5_EXTRUDER,
+    MK4_EXTRUDER,
+    XL_DEV_KIT_EXTRUDER,
+    Extruder,
     LoadProcess,
     Material,
     SimTool,
@@ -152,10 +160,12 @@ class Attention:
 class ModelInfo:
     code: str
     name: str
+    extruder: Extruder
     uuids: bool = False
     gap_mm: float = 40.0
     max_tools: int = 1
     counters: bool = True
+    mmu: bool = False  # whether the build can drive an MMU3: HAS_MMU2
 
     def holds_uuid(self, tool: int) -> bool:
         """Whether `tool` keeps tag UUIDs: tool 0 of a model with a tag reader (F21).
@@ -172,22 +182,22 @@ def _models(*infos: ModelInfo) -> dict[str, ModelInfo]:
 
 # The printer models, from the firmware: `script/firmware-check` compares them with its source.
 MODELS = _models(
-    ModelInfo("1.3.5", "MK3.5", counters=False),
-    ModelInfo("1.3.6", "MK3.5S", counters=False),
-    ModelInfo("1.3.9", "MK3.9"),
-    ModelInfo("1.3.10", "MK3.9S"),
-    ModelInfo("1.4.0", "MK4"),
-    ModelInfo("1.4.1", "MK4S"),
-    ModelInfo("2.1.0", "MINI", counters=False),
-    ModelInfo("3.1.0", "XL", max_tools=5),
-    ModelInfo("3.1.1", "XLP", max_tools=5),
-    ModelInfo("5.1.0", "XL", max_tools=5, counters=False),
-    ModelInfo("4.1.0", "iX"),
-    ModelInfo("7.1.0", "COREONE", uuids=True),
-    ModelInfo("7.2.0", "COREONEOAK", uuids=True),
-    ModelInfo("8.1.0", "COREONEL", uuids=True),
-    ModelInfo("7.10.0", "COREONEINDX", gap_mm=27.0, max_tools=8),
-    ModelInfo("8.10.0", "COREONEL-INDX", gap_mm=27.0, max_tools=8),
+    ModelInfo("1.3.5", "MK3.5", MK3_5_EXTRUDER, counters=False, mmu=True),
+    ModelInfo("1.3.6", "MK3.5S", MK3_5_EXTRUDER, counters=False, mmu=True),
+    ModelInfo("1.3.9", "MK3.9", MK4_EXTRUDER, mmu=True),
+    ModelInfo("1.3.10", "MK3.9S", MK4_EXTRUDER, mmu=True),
+    ModelInfo("1.4.0", "MK4", MK4_EXTRUDER, mmu=True),
+    ModelInfo("1.4.1", "MK4S", MK4_EXTRUDER, mmu=True),
+    ModelInfo("2.1.0", "MINI", MINI_EXTRUDER, counters=False),
+    ModelInfo("3.1.0", "XL", MK4_EXTRUDER, max_tools=5),
+    ModelInfo("3.1.1", "XLP", MK4_EXTRUDER, max_tools=5),
+    ModelInfo("5.1.0", "XL", XL_DEV_KIT_EXTRUDER, max_tools=5, counters=False),
+    ModelInfo("4.1.0", "iX", IX_EXTRUDER),
+    ModelInfo("7.1.0", "COREONE", CORE_ONE_EXTRUDER, uuids=True, mmu=True),
+    ModelInfo("7.2.0", "COREONEOAK", CORE_ONE_EXTRUDER, uuids=True, mmu=True),
+    ModelInfo("8.1.0", "COREONEL", CORE_ONE_EXTRUDER, uuids=True, mmu=True),
+    ModelInfo("7.10.0", "COREONEINDX", INDX_EXTRUDER, gap_mm=27.0, max_tools=8),
+    ModelInfo("8.10.0", "COREONEL-INDX", INDX_EXTRUDER, gap_mm=27.0, max_tools=8),
 )
 
 
