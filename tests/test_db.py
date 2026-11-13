@@ -133,6 +133,18 @@ def test_round_trip_of_every_field(path):
     db.close()
 
 
+def test_existing_database_without_job_deltas_gets_table(path):
+    db = Database.open(path)
+    db.close()
+    conn = sqlite3.connect(path)
+    with conn:
+        conn.execute("DROP TABLE job_deltas")
+    conn.close()
+    db = Database.open(path)
+    assert db.load().job_deltas == {}
+    db.close()
+
+
 def test_no_write_when_unchanged(path):
     db = Database.open(path)
     state = full_state()

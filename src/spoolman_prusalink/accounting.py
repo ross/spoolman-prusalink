@@ -178,8 +178,9 @@ class ToolState:
     # A poll skipped as ambiguous applied a reboot: the next poll that isn't skipped
     # checks for a staged spool as if it saw the reboot itself.
     reboot_pending: bool = False
-    # Spools already credited for the current `job_id`, so a reload doesn't double-count.
-    job_spools: tuple[int, ...] = ()
+    # Spools already credited for each tracked job, keyed by job ID, so neither reloads
+    # nor claims of earlier jobs double-count.
+    job_spools: dict[int, tuple[int, ...]] = field(default_factory=dict)
     # Jobs credited to each spool since the last unload or reboot, which move with a claim.
     jobs_since_load: dict[int, tuple[int, ...]] = field(default_factory=dict)
 
@@ -215,7 +216,7 @@ class ToolState:
             "since_load": {str(k): v for k, v in sorted(self.since_load.items())},
             "extruded": self.extruded,
             "reboot_pending": self.reboot_pending,
-            "job_spools": list(self.job_spools),
+            "job_spools": {str(k): list(v) for k, v in sorted(self.job_spools.items())},
             "jobs_since_load": {str(k): list(v) for k, v in sorted(self.jobs_since_load.items())},
         }
 
@@ -254,7 +255,9 @@ class ToolState:
             since_load={int(k): int(v) for k, v in data["since_load"].items()},
             extruded=int(data["extruded"]),
             reboot_pending=bool(data["reboot_pending"]),
-            job_spools=tuple(int(i) for i in data.get("job_spools", ())),
+            job_spools={
+                int(k): tuple(int(s) for s in v) for k, v in data.get("job_spools", {}).items()
+            },
             jobs_since_load={
                 int(k): tuple(int(j) for j in v) for k, v in data.get("jobs_since_load", {}).items()
             },
@@ -586,18 +589,26 @@ class _Poll:
             self.credit_job(target, self.job_id, reason)
 
     def credit_job(self, spool_id: int, job_id: int, reason: str) -> None:
-        """Credit `spool_id` with +1 job for `job_id`, deduplicating within the current job."""
+        """Credit `spool_id` with +1 job for `job_id`, deduplicating across reloads and claims."""
         current = self.current
+        credited = current.job_spools.get(job_id, ())
+        if spool_id in credited:
+            return
+        current.job_spools = {**current.job_spools, job_id: (*credited, spool_id)}
+        self.out.job_deltas.append(JobDelta(spool_id, 1, job_id, reason))
         window = current.jobs_since_load
         jobs = window.get(spool_id, ())
-        if job_id in jobs:
-            return
-        if job_id == current.job_id:
-            if spool_id in current.job_spools:
-                return
-            current.job_spools = (*current.job_spools, spool_id)
-        self.out.job_deltas.append(JobDelta(spool_id, 1, job_id, reason))
         current.jobs_since_load = {**window, spool_id: (*jobs, job_id)}
+
+    def prune_job_spools(self) -> None:
+        """Keep `job_spools` only for the current job and jobs still in `jobs_since_load`."""
+        current = self.current
+        keep = {jid for jobs in current.jobs_since_load.values() for jid in jobs}
+        if current.job_id is not None:
+            keep.add(current.job_id)
+        current.job_spools = {
+            jid: spools for jid, spools in current.job_spools.items() if jid in keep
+        }
 
     def move_jobs(self, from_spool: int, to_spool: int, moved_mm: int, reason: str) -> None:
         """Move job attributions from `from_spool` to `to_spool` when usage moves."""
@@ -608,8 +619,11 @@ class _Poll:
             current.jobs_since_load = {k: v for k, v in window.items() if k != from_spool}
             for jid in jobs:
                 self.out.job_deltas.append(JobDelta(from_spool, -1, jid, reason))
-                if jid == current.job_id:
-                    current.job_spools = tuple(s for s in current.job_spools if s != from_spool)
+                credited = tuple(s for s in current.job_spools.get(jid, ()) if s != from_spool)
+                if credited:
+                    current.job_spools = {**current.job_spools, jid: credited}
+                else:
+                    current.job_spools = {k: v for k, v in current.job_spools.items() if k != jid}
                 self.credit_job(to_spool, jid, reason)
         if moved_mm > 0 and self.job_id is not None and self.job_id == current.job_id:
             self.credit_job(to_spool, self.job_id, reason)
@@ -689,6 +703,7 @@ class _Poll:
         # since the reboot.
         current.since_load = {}
         current.jobs_since_load = {}
+        self.prune_job_spools()
 
     def skip(self, ids: list[int]) -> None:
         """The location is ambiguous: charge nothing, and record only the counter."""
@@ -756,6 +771,7 @@ class _Poll:
         current.unload_count = reading.unload_count
         current.since_load = {}
         current.jobs_since_load = {}
+        self.prune_job_spools()
         current.swap = None  # A new unload supersedes any open swap.
         current.notice = None
         current.staged_notice = None
@@ -905,7 +921,7 @@ class _Poll:
             return
         current.pending_job = None
         current.job_id = job_id
-        current.job_spools = ()
+        self.prune_job_spools()
         current.notice = None
         if (
             current.deleted_spool is not None

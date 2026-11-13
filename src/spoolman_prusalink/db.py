@@ -324,6 +324,11 @@ def _connect(path: Path) -> sqlite3.Connection:
                 f"INSERT INTO meta (key, value) VALUES ('schema_version', '{SCHEMA_VERSION}');\n"
                 "COMMIT;"
             )
+        else:
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS job_deltas "
+                "(spool_id INTEGER PRIMARY KEY, delta INTEGER NOT NULL)"
+            )
     except sqlite3.Error as e:
         conn.close()
         raise DatabaseError(f"{path}: {e}") from e

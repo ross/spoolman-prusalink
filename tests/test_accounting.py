@@ -1019,7 +1019,7 @@ def test_state_round_trip():
         since_load={7: 400, 9: -3},
         extruded=150,
         reboot_pending=True,
-        job_spools=(7,),
+        job_spools={42: (7,)},
         jobs_since_load={7: (42,)},
     )
     # Every field is set, so a field left out of to_json or from_json fails here.
@@ -1743,17 +1743,7 @@ def test_job_count_moves_with_claim_and_swap_confirmation():
         (8, 1, 44),
     ]
 
-    # Confirmed swap while swap is still open (before print_start closes it).
-    _, _, state = run(
-        [
-            (BOOT, r(100), loc(7)),
-            (BOOT, r(100, unloads=1, at_unload=100), loc(7)),
-            (BOOT, r(100, unloads=1, at_unload=100), loc(7), 45),
-            (BOOT, r(120, unloads=1, at_unload=100), loc(), 45),
-        ]
-    )
-    # No active spool when empty, so swap stayed open; assigning 8 confirms it?
-    # Actually swap.mm was 0 when empty, so test confirming swap with mm > 0:
+    # Confirmed swap while swap is still open.
     _, _, state = run(
         [
             (BOOT, r(100), loc(7)),
@@ -1765,6 +1755,28 @@ def test_job_count_moves_with_claim_and_swap_confirmation():
     )
     res = account(state, BOOT, r(120, unloads=1, at_unload=110), loc(8), 45)
     assert [(d.spool_id, d.delta, d.job_id) for d in res.job_deltas] == [(8, 1, 45)]
+
+
+def test_job_count_claim_after_new_job_does_not_double_credit_earlier_job():
+    _, _, state = run(
+        [
+            (BOOT, r(100), loc(8)),
+            (BOOT, r(100), loc(8), 43),
+            (BOOT, r(120), loc(8), 43),  # Spool 8 credited for job 43.
+            (BOOT, r(120, unloads=1, at_unload=120), loc(7), 43),  # Mid-print swap to 7.
+            (BOOT, r(140, unloads=1, at_unload=120), loc(7), 43),  # Spool 7 credited for job 43.
+            (BOOT, r(140, unloads=1, at_unload=120), loc(7)),  # Job 43 ends.
+            (BOOT, r(140, unloads=1, at_unload=120), loc(7), 44),
+            (BOOT, r(160, unloads=1, at_unload=120), loc(7), 44),  # Spool 7 credited for job 44.
+        ]
+    )
+    res = account(state, BOOT, r(160, unloads=1, at_unload=120), loc(7, 8), 44, claim=8)
+    # 7 loses both 43 and 44; 8 gains 44 only (already credited for 43 before the unload).
+    assert [(d.spool_id, d.delta, d.job_id) for d in res.job_deltas] == [
+        (7, -1, 43),
+        (7, -1, 44),
+        (8, 1, 44),
+    ]
 
 
 def test_hold_deleted_clears_jobs_since_load():

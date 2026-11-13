@@ -3423,7 +3423,7 @@ async def test_jobs_used_on_tracks_prints_reloads_and_claims(tmp_path):
     await bridge.aclose()
 
 
-async def test_jobs_used_on_disabled_and_coalesced(tmp_path):
+async def test_jobs_used_on_disabled(tmp_path):
     bridge, fake, station = make(tmp_path, [spool(19)], jobs_field=None)
     start_job(station)
     await bridge.poll()
@@ -3431,6 +3431,69 @@ async def test_jobs_used_on_disabled_and_coalesced(tmp_path):
     await bridge.poll()
     assert ("field", "/api/v1/field/spool/jobs_used_on") not in fake.writes
     assert fake.jobs(19) is None
+    await bridge.aclose()
+
+
+async def test_jobs_used_on_coalesces_deltas(tmp_path):
+    bridge, fake, station = make(tmp_path, [spool(19), spool_x(20, location=None)])
+    await bridge.poll()
+    handle = fake.handle
+
+    def fail_jobs_patch(request):
+        if request.method == "PATCH" and request.url.path.startswith("/api/v1/spool/"):
+            body = json.loads(request.content)
+            if "jobs_used_on" in body.get("extra", {}):
+                return httpx.Response(503)
+        return handle(request)
+
+    fake.handle = fail_jobs_patch
+    # Two prints fail to flush -> +1 + 1 = +2 queued for spool 19.
+    for _ in range(2):
+        start_job(station)
+        await bridge.poll()
+        station.tool.extruded += 50
+        await bridge.poll()
+        end_job(station)
+    assert bridge.state.job_deltas == {19: 2}
+
+    # Unconfirmed swap before a 3rd print (spool 19 -> +3), then claimed by spool 20
+    # before flush -> spool 19 drops back to +2 and spool 20 gets +1.
+    station.tool.unload_count, station.tool.extruded_at_unload = 1, station.tool.extruded
+    await bridge.poll()
+    start_job(station)
+    await bridge.poll()
+    station.tool.extruded += 50
+    await bridge.poll()
+    assert bridge.state.job_deltas == {19: 3}
+
+    fake.spools[20]["location"] = fake.spools[19]["location"]
+    fake.spools[20]["extra"]["bridge_claim"] = "true"
+    await bridge.poll()
+    assert bridge.state.job_deltas == {19: 2, 20: 1}
+
+    # Now let a queued +1 and -1 cancel out to 0 and be dropped from job_deltas.
+    fake.handle = handle
+    await bridge.poll()
+    assert bridge.state.job_deltas == {}
+    assert fake.jobs(19) == 2
+    assert fake.jobs(20) == 1
+
+    # Verify +1 and -1 in the same queued state cancel to 0 and remove the key.
+    fake.handle = fail_jobs_patch
+    end_job(station)
+    station.tool.unload_count, station.tool.extruded_at_unload = 2, station.tool.extruded
+    await bridge.poll()
+    station.finish_job()
+    start_job(station)
+    await bridge.poll()
+    station.tool.extruded += 50
+    await bridge.poll()
+    assert bridge.state.job_deltas == {20: 1}
+    fake.spools[19]["location"] = LOC
+    fake.spools[19]["extra"]["bridge_claim"] = "true"
+    await bridge.poll()
+    assert bridge.state.job_deltas == {19: 1}
+    assert 20 not in bridge.state.job_deltas
     await bridge.aclose()
 
 
@@ -3471,15 +3534,19 @@ async def test_jobs_used_on_error_and_retry_paths(tmp_path, caplog):
 
     fake.handle = fail_patch
     caplog.set_level("DEBUG")
+    caplog.clear()
     station.tool.extruded += 50
     await bridge.poll()
     assert bridge.state.job_deltas == {19: 1}
     await bridge.poll()
     assert bridge.state.job_deltas == {19: 1}
+    assert levels(caplog, "can't update jobs_used_on on spool 19") == ["WARNING", "DEBUG"]
+    caplog.clear()
     fake.handle = handle
     await bridge.poll()
     assert bridge.state.job_deltas == {}
     assert fake.jobs(19) == 2
+    assert levels(caplog, "updated jobs_used_on on spool 19") == ["INFO"]
 
     # 3. Direct flush_jobs paths for missing/deleted/rejected spools.
     # 404 on spool lookup
@@ -3505,10 +3572,12 @@ async def test_jobs_used_on_error_and_retry_paths(tmp_path, caplog):
         return handle(request)
 
     fake.handle = fail_spool_get
+    caplog.clear()
     bridge.state.job_deltas[997] = 1
     await bridge.flush_jobs()
     await bridge.flush_jobs()
     assert 997 in bridge.state.job_deltas
+    assert levels(caplog, "can't read spool 997 for jobs_used_on") == ["WARNING", "DEBUG"]
     bridge.state.job_deltas.pop(997, None)
 
     # 404 on set_extra
