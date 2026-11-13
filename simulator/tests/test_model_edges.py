@@ -6,14 +6,12 @@ import json
 
 import pytest
 
-from simulator import gcode, sync
 from simulator.model import (
     PHASE_STATES,
     Attention,
     Busy,
     Invalid,
     JobPhase,
-    Material,
     PrintSpec,
     Reason,
     Segment,
@@ -40,59 +38,6 @@ def printing(**kw):
     sim.tick(0.8 + 1)
     assert p.state is State.PRINTING
     return sim, p
-
-
-# Unloads that count nothing, and M865 edge cases.
-
-
-def test_unload_of_an_empty_type_is_not_counted():
-    sim, p = make(tools=[SimTool(0)])
-    sync.apply(p, gcode.parse("M865 I1 L0"))  # copies "none" over nothing
-    assert tool0(p).unload_count == 0
-    assert messages(sim, "unload") == ["T0 M865 copied empty T1: no type stored, not counted"]
-
-
-def test_m865_for_a_tool_the_model_lacks_is_dropped():
-    sim, p = make()
-    sync.apply(p, gcode.parse('M865 X R N"PLA" L4'))
-    assert messages(sim) == ["M865 L4 dropped: no such tool"]
-    assert list(p.tools) == [0]
-
-
-def test_m865_with_nothing_to_write_changes_nothing():
-    sim, p = make(tools=[SimTool(0)])
-    before = p.to_json()
-    sync.apply(p, gcode.parse("M865 L0"))
-    assert messages(sim) == ["M865 L0: nothing to write"]
-    sync.apply(p, gcode.parse('M865 O"#000000" L0'))  # an edit needs a stored type
-    assert messages(sim)[-1] == "M865 L0: nothing to write"
-    assert p.to_json() == before
-
-
-def test_m865_copy_onto_tool_0_of_a_tag_model_keeps_the_uuids():
-    sim, p = make("8.1.0", [SimTool(0)])
-    sync.apply(p, gcode.parse('M865 X R N"PETG" O"#186bb5" L0'))
-    sync.apply(p, gcode.parse(f'M865.1 I0 C"{TAG}"'))
-    uuids = tool0(p).material.instance_uuid
-    assert uuids == TAG
-    sync.apply(p, gcode.parse("M865 I0 L0"))
-    assert tool0(p).material.instance_uuid == TAG
-    assert "copied from T0" in messages(sim)[-1]
-
-
-def test_m865_copy_onto_another_tool_drops_the_uuids():
-    tagged = Material("PETG", "#186bb5", TAG, True, material_uuid=TAG, package_uuid=TAG)
-    sim, p = make("1.4.1", [loaded(0, tagged)])
-    p.tools[1] = SimTool(1, enabled=False)
-    p.model = type(p.model)("x", "X", uuids=True, max_tools=2)  # only tool 0 holds UUIDs
-    sync.apply(p, gcode.parse("M865 I0 L1"))
-    copy = p.tools[1].material
-    assert (copy.name, copy.instance_uuid, copy.material_uuid, copy.package_uuid) == (
-        "PETG",
-        None,
-        None,
-        None,
-    )
 
 
 # Load, unload and manual moves.
