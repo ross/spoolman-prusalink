@@ -9,6 +9,22 @@ a scenario runs the same way every time and the suite takes about a second.
 They aren't part of the default `pytest` run, which collects the unit tests in
 `tests/` and `simulator/tests`.
 
+## The test layers
+
+Each layer keeps the one below it honest.
+
+| Layer | Role | Runs |
+| --- | --- | --- |
+| Unit suite (`tests/`, `simulator/tests/`) | Covers everything. The coverage floor counts this suite only, as a cheap check that nothing lacks a test. | Constantly during development, so it stays fast and needs no container. |
+| Integration suite (`integration/`) | Checks that the unit suite's fakes and state setup haven't diverged from a real Spoolman. | In CI and before a merge. Development doesn't depend on it. |
+| Live checks and firmware reading | Keep the simulator behaving like a real printer, which can't be put in a test loop. | By hand, at the printer. |
+
+Some scenarios are tested in both suites, such as most W rows of
+`docs/scenarios.md`. That's accepted. Don't move coverage out of the unit
+suite to remove it. If changing both suites for each behavior change becomes a
+burden, narrow this suite to the scenarios where Spoolman's own behavior
+decides the outcome.
+
 ## Run them
 
 ```sh
