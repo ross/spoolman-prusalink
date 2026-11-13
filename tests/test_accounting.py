@@ -1261,6 +1261,52 @@ def test_claim_moves_only_usage_since_reboot():
     assert (state.active, state.evict, state.staged_notice) == (9, (7,), None)
 
 
+def test_swap_confirmed_after_reboot_leaves_usage_before_it_out_of_since_load():
+    # #164: the swap's usage from before the reboot moves to the new spool, but a later
+    # claim moves only usage since the reboot, as it does with no swap.
+    _, _, state = run(
+        [
+            (BOOT, r(100), loc(7)),
+            (BOOT, r(400, unloads=1, at_unload=100), loc(7)),  # Swap open, 300 to 7
+            (222, r(0), loc(7)),  # reboot
+        ]
+    )
+    assert (state.swap, state.since_load) == (SwapFlag(7, 300), {})
+    res = account(state, 222, r(0), loc(9, 7))
+    assert res.charges == [
+        Charge(9, 300, "usage since unconfirmed swap"),
+        Charge(7, -300, "moved to confirmed swap spool"),
+    ]
+    assert res.state.since_load == {}
+    _, _, state = run([(222, r(0), loc(9)), (222, r(0), loc(9, 7))], res.state, lambda i: i == 7)
+    assert state.active == 7
+    _, _, state = run([(222, r(100), loc(7))], state)
+    assert state.since_load == {7: 100}
+    res = account(state, 222, r(100), loc(7, 10), claim=10)
+    assert res.charges == [
+        Charge(10, 100, "claimed usage since load"),
+        Charge(7, -100, "moved to claimed spool"),
+    ]
+
+
+def test_swap_confirmed_after_reboot_moves_usage_since_it_in_since_load():
+    # Usage on the old spool since the reboot moves in `since_load` with the swap.
+    _, _, state = run(
+        [
+            (BOOT, r(100), loc(7)),
+            (BOOT, r(400, unloads=1, at_unload=100), loc(7)),  # Swap open, 300 to 7
+            (222, r(50), loc(7)),  # reboot, then 50 to 7
+        ]
+    )
+    assert (state.swap, state.since_load) == (SwapFlag(7, 350), {7: 50})
+    res = account(state, 222, r(50), loc(9, 7))
+    assert res.charges == [
+        Charge(9, 350, "usage since unconfirmed swap"),
+        Charge(7, -350, "moved to confirmed swap spool"),
+    ]
+    assert res.state.since_load == {7: 0, 9: 50}
+
+
 def test_claim_moves_usage_from_every_spool_since_load():
     _, _, state = run(
         [

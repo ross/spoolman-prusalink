@@ -307,11 +307,10 @@ _INVARIANTS: tuple[tuple[str, Callable[[ToolState], bool]], ...] = (
         lambda s: s.boot_id is not None or s == ToolState(),
     ),
     (
-        # Not `since_load`: a swap confirmed after a reboot refunds usage from before the
-        # reboot, which the usage since load no longer counts (#164).
         "no counter or tally is negative",
         lambda s: (
             min(
+                *s.since_load.values(),
                 s.charged,
                 s.unload_count,
                 s.pending_at,
@@ -537,20 +536,25 @@ class _Poll:
     def event(self, ev: Event) -> None:
         self.out.events.append(ev)
 
-    def charge(self, target: int, mm: int, reason: str) -> None:
+    def charge(self, target: int, mm: int, reason: str, since_load: int | None = None) -> None:
         """Charge `mm` to a spool, and add it to each tally kept on that spool.
 
         Every charge goes through here, so no charge site updates a tally itself. A
         refund counts too: it moves usage to another spool, which the usage since load
         has to follow. `take()` and a confirmed swap close the open swap and the
         provisional charge before they refund, so those two never see one.
+
+        `since_load` is the part of `mm` that the usage since load counts, all of it if
+        None. Usage from before a reboot moves without it.
         """
         if not mm:
             return
         current = self.current
         self.out.charges.append(Charge(target, mm, reason))
-        window = current.since_load
-        current.since_load = {**window, target: window.get(target, 0) + mm}
+        counted = mm if since_load is None else since_load
+        if counted:
+            window = current.since_load
+            current.since_load = {**window, target: window.get(target, 0) + counted}
         swap, provisional = current.swap, current.provisional
         if swap is not None and swap.spool_id == target:
             current.swap = replace(swap, mm=swap.mm + mm)
@@ -773,10 +777,13 @@ class _Poll:
             moved = swap.mm
             current.swap = None
             if moved > 0:
+                # The usage since load counts only the part since a reboot, which a claim
+                # would move; the rest moves outside it (#164).
+                counted = min(moved, current.since_load.get(swap.spool_id, 0))
                 # Charge before refunding: Spoolman clamps used_weight at 0, so a refund
                 # applied first could be truncated if the charge then fails.
-                self.charge(current.assigned, moved, "usage since unconfirmed swap")
-                self.charge(swap.spool_id, -moved, "moved to confirmed swap spool")
+                self.charge(current.assigned, moved, "usage since unconfirmed swap", counted)
+                self.charge(swap.spool_id, -moved, "moved to confirmed swap spool", -counted)
             self.event(SwapConfirmed(moved, swap.spool_id, current.assigned))
             self.retire(current.active)
             current.active = current.assigned

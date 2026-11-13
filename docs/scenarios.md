@@ -81,7 +81,7 @@ archived active spool (M3, M3a) is logged once when the bridge finds it.
 
 | # | Scenario | What the bridge does | Status |
 | --- | --- | --- | --- |
-| C1 | Printer reboots or is power-cycled between prints. | New boot ID: counters restart from 0. Metadata stays on the printer. Usage held at the reboot, because the tool reported no filament, no spool was assigned or the location was ambiguous, is kept. It goes to the active spool as soon as there is one, and is logged then. An unload with no spool active first reports it lost, as in S6. | Seen live; held usage is tested; end to end, including usage held over a reboot with an unconfirmed swap open, charged to the old spool and moved with the swap; usage held over a reboot with a provisional charge open, joining it |
+| C1 | Printer reboots or is power-cycled between prints. | New boot ID: counters restart from 0. Metadata stays on the printer. Usage held at the reboot, because the tool reported no filament, no spool was assigned or the location was ambiguous, is kept. It goes to the active spool as soon as there is one, and is logged then. An unload with no spool active first reports it lost, as in S6. An unconfirmed swap stays open: if Spoolman confirms it later, all of its usage moves to the new spool, but a later claim moves only the part since the reboot (see [Claims](#claims)). | Seen live; held usage is tested; end to end, including usage held over a reboot with an unconfirmed swap open, charged to the old spool and moved with the swap; usage held over a reboot with a provisional charge open, joining it; a swap confirmed after a reboot and then a claim is tested (#164) |
 | C2 | Printer switched off for hours. | Logs once when it goes away, hourly while it's away, and once when it's back. Polls every 60 s. | Tested; end to end |
 | C3 | Reboot and an unload in the same poll. | Handled in order: reboot, then unload. | Tested; end to end |
 | C4 | Counter goes backward within one boot. | Logs a counter anomaly and resyncs without charging. | Tested; end to end |
@@ -158,7 +158,9 @@ bridge can't know. It answers Q1, Q2 and Q3. Decided and implemented.
   old one, as for a confirmed swap. It keeps a per-tool record of what it
   charged to each spool in that window (`since_load` in the database), so
   usage charged to more than one spool, such as across a correction, all
-  moves.
+  moves. A swap confirmed after a reboot moves its usage from before the
+  reboot outside that record, so a later claim leaves it where the swap put
+  it.
 - **When.** At the next poll, even during a print or while a job waits for
   its first extrusion. The user only claims a spool once they know it's
   loaded, so there's nothing to wait for.
