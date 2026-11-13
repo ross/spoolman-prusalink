@@ -259,9 +259,11 @@ A parse error fails the job in `ATTENTION` with the offending line.
   simulator/
     __main__.py      # python -m simulator -c simulator/sim.example.toml
     config.py        # the TOML: printers, tools, ports, time scale
-    model.py         # Simulation, SimPrinter, SimTool, the state machine
+    model.py         # Simulation, SimPrinter, the state machine
+    tool.py          # SimTool and Material
     prusalink.py     # the PrusaLink clone, one aiohttp app per printer
     gcode.py         # the sync-job parser
+    sync.py          # the sync-job interpreter
     control.py       # the simulator's own API and SSE stream
     static/index.html, app.js, app.css   # the page, no build step
     seed.py          # creates spools and locations in Spoolman

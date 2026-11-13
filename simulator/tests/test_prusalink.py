@@ -199,7 +199,7 @@ async def test_before_request_may_answer_or_drop_a_request():
 
     async with TestClient(TestServer(prusalink.make_app(sim, "p", hook))) as client:
         p.start_print(PrintSpec([Segment(0, 100)], duration_s=10))
-        assert p.job_json() is not None
+        assert prusalink.job(p) is not None
         assert (await client.get("/api/v1/status", headers=AUTH)).status == 200
         # The printer has a job, but the hook's answer is the one sent, and logged.
         assert (await client.get("/api/v1/job", headers=AUTH)).status == 204
@@ -239,7 +239,7 @@ async def test_hung_printer_drops_the_request_once_it_comes_back(setup, monkeypa
 def test_serve_answers_without_a_socket():
     sim, p = make()
     answer = prusalink.serve(sim, "p", "GET", "/api/v1/status", {"x-API-key": KEY}, "")
-    assert answer.status == 200 and answer.json == p.status_json()
+    assert answer.status == 200 and answer.json == prusalink.status(p)
     assert prusalink.serve(sim, "p", "GET", "/api/v1/job", AUTH, "") == prusalink.Answer(204)
     assert prusalink.serve(sim, "p", "GET", "/api/v1/status", {}, "").status == 401
     p.set_power("off")
