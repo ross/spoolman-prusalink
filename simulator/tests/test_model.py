@@ -7,7 +7,7 @@ from dataclasses import replace
 
 import pytest
 
-from simulator import gcode
+from simulator import gcode, prusalink, sync
 from simulator.model import (
     Busy,
     Firmware,
@@ -37,7 +37,7 @@ RESET = {"nozzle": 215, "preheat": 170, "bed": 60}
 
 def shown(printer, index=0):
     """The material the API shows for a tool, without its temperatures, or None."""
-    for t in printer.filament_json()["tools"]:
+    for t in prusalink.filament(printer)["tools"]:
         if t["index"] == index:
             m = t.get("material")
             return None if m is None else {k: v for k, v in m.items() if k not in TEMPERATURE_KEYS}
@@ -167,7 +167,7 @@ def test_tag_load_sets_uuid_on_uuids_model_only():
     assert tag == {"name": "PETG", "color": "#186bb5", "instance_uuid": uuid}
 
     # The bridge's write starts the type afresh: only its own instance UUID is left.
-    p.apply(gcode.parse(f'M865 X R N"PETG" O"#186bb5" L0\nM865.1 I0 C"{uuid}"'))
+    sync.apply(p, gcode.parse(f'M865 X R N"PETG" O"#186bb5" L0\nM865.1 I0 C"{uuid}"'))
     assert shown(p) == {"name": "PETG", "color": "#186bb5", "instance_uuid": uuid}
 
     sim, mk4 = make("1.4.1", [SimTool(0)])
@@ -221,14 +221,14 @@ def test_print_phases_and_start_blip():
     sim, p = make()
     p.start_print(one_segment(10))
     assert p.job_counter == 1 and p.state is State.PRINTING
-    assert p.status_json()["job"]["id"] == 1
+    assert prusalink.status(p)["job"]["id"] == 1
     sim.tick(0.5)  # scanning done: the blip hides the job
     assert p.job.phase is JobPhase.BLIP and p.state is State.IDLE
-    assert "job" not in p.status_json() and p.job_json() is None
+    assert "job" not in prusalink.status(p) and prusalink.job(p) is None
     assert not p.can_print()
     sim.tick(0.3)
     assert p.job.phase is JobPhase.PREHEAT and p.state is State.PRINTING
-    assert p.job_json()["state"] == "PRINTING"
+    assert prusalink.job(p)["state"] == "PRINTING"
     sim.tick(5.0)
     assert p.job.phase is JobPhase.PRINTING
     assert tool0(p).extruded == 0
@@ -238,7 +238,7 @@ def test_print_phases_and_start_blip():
     assert p.job.phase is JobPhase.PARKING and p.state is State.PRINTING
     sim.tick(1.0)
     assert p.job is None and p.state is State.FINISHED
-    assert p.job_json() is None
+    assert prusalink.job(p) is None
     assert tool0(p).extruded == pytest.approx(9.5)
 
 
@@ -295,7 +295,7 @@ def test_pause_resume_cancel_dismiss():
     sim.tick(0.8 + 1)
     before = tool0(p).extruded
     p.pause()
-    assert p.state is State.PAUSED and p.job_json()["state"] == "PAUSED"
+    assert p.state is State.PAUSED and prusalink.job(p)["state"] == "PAUSED"
     sim.tick(10)
     assert tool0(p).extruded == before
     p.resume()
@@ -335,7 +335,7 @@ def test_runout_keeps_previous_and_reload_restores_it():
     assert p.state is State.ATTENTION and str(p.job.attention) == "runout tool 0"
     assert (t.unload_count, t.extruded_at_unload, t.material) == (1, at, None)
     assert t.previous == PLA
-    assert p.job_json()["state"] == "PAUSED"
+    assert prusalink.job(p)["state"] == "PAUSED"
     with pytest.raises(Busy):
         p.resume()
     p.load(0)  # keep previous
@@ -505,7 +505,7 @@ def test_counter_anomalies():
     p.counter_step_back(0, 300)
     assert tool0(p).extruded == 0
     p.set_extruded_at_unload(0, 9999)
-    assert p.filament_json()["tools"][0]["extruded_at_unload"] == 9999
+    assert prusalink.filament(p)["tools"][0]["extruded_at_unload"] == 9999
 
 
 def test_disable_tool_rules():
@@ -525,7 +525,7 @@ def test_disable_tool_rules():
 def test_filament_json_full():
     sim, p = make()
     tool0(p).extruded = 12.9
-    assert p.filament_json() == {
+    assert prusalink.filament(p) == {
         "boot_id": p.boot_id,
         "tools": [
             {
@@ -549,7 +549,7 @@ def test_filament_json_full():
 def test_filament_json_no_counters_and_no_endpoint():
     sim, p = make()
     p.set_firmware("no_counters")
-    assert p.filament_json() == {
+    assert prusalink.filament(p) == {
         "tools": [
             {
                 "index": 0,
@@ -565,9 +565,7 @@ def test_filament_json_no_counters_and_no_endpoint():
         ]
     }
     p.set_firmware(Firmware.NO_ENDPOINT)
-    assert p.filament_json() is None
-    with pytest.raises(Invalid):
-        p.set_firmware("bogus")
+    assert prusalink.filament(p) is None
 
 
 def test_filament_json_multi_tool_skips_disabled_and_hides_uuids():
@@ -578,12 +576,12 @@ def test_filament_json_multi_tool_skips_disabled_and_hides_uuids():
         SimTool(3),
     ]
     sim, p = make("8.10.0", tools)
-    data = p.filament_json()
+    data = prusalink.filament(p)
     assert [t["index"] for t in data["tools"]] == [0, 2, 3]
     assert shown(p) == {"name": "PLA", "color": "#73737b"}
     assert "material" not in data["tools"][2]
     p.set_sensor_fault(2, True)
-    assert "material" not in p.filament_json()["tools"][1]
+    assert "material" not in prusalink.filament(p)["tools"][1]
 
 
 # Sync jobs and G-code.
@@ -606,11 +604,11 @@ def run_sync(sim, p, body=JOB, name="spoolman.gcode"):
 def test_sync_job_applies_and_finishes():
     sim, p = make()
     p.upload("spoolman.gcode", JOB, print_after=True, overwrite=True)
-    assert p.job_json()["file"]["display_name"] == "spoolman.gcode"
+    assert prusalink.job(p)["file"]["display_name"] == "spoolman.gcode"
     sim.tick(0.5)
-    assert p.state is State.IDLE and p.job_json() is None  # the blip
+    assert p.state is State.IDLE and prusalink.job(p) is None  # the blip
     sim.tick(0.3)
-    assert p.state is State.PRINTING and p.job_json() is not None
+    assert p.state is State.PRINTING and prusalink.job(p) is not None
     m = tool0(p).material
     uuid = "8b6a3e3e-3f6c-4d7b-9a43-6c1f0e7d2a11"
     assert m == Material("PETG", "#186bb5", uuid, nozzle=230, preheat=170, bed=85)
@@ -639,13 +637,13 @@ def test_model_check_asks_before_the_job_is_counted():
     p.upload("s.gcode", JOB.replace("COREONEL", "MK4S"), print_after=True, overwrite=True)
     assert p.state is State.ATTENTION and str(p.job.attention) == "model check"
     assert p.job_counter == 0 and p.job.id is None
-    assert p.job_json() is None and "job" not in p.status_json()
+    assert prusalink.job(p) is None and "job" not in prusalink.status(p)
     assert not p.can_print()
     sim.tick(100)
     assert p.state is State.ATTENTION and tool0(p).material == PLA  # nothing applied yet
     p.tap_through()
     assert p.job_counter == 1 and p.state is State.PRINTING
-    assert p.status_json()["job"]["id"] == 1
+    assert prusalink.status(p)["job"]["id"] == 1
     sim.tick(0.8)
     assert tool0(p).material.name == "PETG"
     sim.tick(10)
@@ -689,27 +687,27 @@ def test_m865_on_missing_tool_is_a_parse_error():
 
 def test_m865_reset_clears_uuid_and_preset_write_ignores_parameters():
     sim, p = make()
-    p.apply(gcode.parse('M865 X R N"ASA" O"#de3129" L0'))
+    sync.apply(p, gcode.parse('M865 X R N"ASA" O"#de3129" L0'))
     assert tool0(p).material == Material("ASA", "#de3129", **RESET)
-    p.apply(gcode.parse('M865.1 I0 C"8b6a3e3e-3f6c-4d7b-9a43-6c1f0e7d2a11"'))
+    sync.apply(p, gcode.parse('M865.1 I0 C"8b6a3e3e-3f6c-4d7b-9a43-6c1f0e7d2a11"'))
     assert tool0(p).material.instance_uuid
-    p.apply(gcode.parse('M865 X O"#000000" L0'))  # ad-hoc edit keeps the UUID
+    sync.apply(p, gcode.parse('M865 X O"#000000" L0'))  # ad-hoc edit keeps the UUID
     assert tool0(p).material.instance_uuid and tool0(p).material.color == "#000000"
-    p.apply(gcode.parse('M865 N"PETG" O"#ffffff" T250 L0'))
+    sync.apply(p, gcode.parse('M865 N"PETG" O"#ffffff" T250 L0'))
     assert tool0(p).material == Material("PETG", adhoc=False, **preset_temperatures("PETG"))
 
 
 def test_preset_ignores_edits_and_adhoc_write_edits_the_slot():
     uuid = "8b6a3e3e-3f6c-4d7b-9a43-6c1f0e7d2a11"
     sim, p = make()
-    p.apply(gcode.parse('M865 N"PETG" L0'))
+    sync.apply(p, gcode.parse('M865 N"PETG" L0'))
     assert tool0(p).previous == PLA  # a preset write leaves the ad-hoc slot alone
-    p.apply(gcode.parse(f'M865.1 I0 C"{uuid}"\nM865 O"#ffffff" L0'))
+    sync.apply(p, gcode.parse(f'M865.1 I0 C"{uuid}"\nM865 O"#ffffff" L0'))
     assert tool0(p).material == Material("PETG", adhoc=False, **preset_temperatures("PETG"))
     assert "ignored on preset" in sim.events[-1].text
-    p.apply(gcode.parse('M865 X O"#000000" L0'))  # the slot is the base, not the preset
+    sync.apply(p, gcode.parse('M865 X O"#000000" L0'))  # the slot is the base, not the preset
     assert tool0(p).material == replace(PLA, color="#000000")
-    p.apply(gcode.parse('M865 O"#111111" L0'))  # an ad-hoc type takes an edit
+    sync.apply(p, gcode.parse('M865 O"#111111" L0'))  # an ad-hoc type takes an edit
     assert tool0(p).material.color == "#101010"  # stored in 5 bits a channel (F25)
 
 
@@ -719,7 +717,7 @@ def test_m865_writes_disabled_and_unconfigured_tools():
     assert p.job.phase is JobPhase.RUN
     assert p.tools[1].material.name == "PLA" and not p.tools[1].enabled
     assert p.tools[5].material.name == "ASA" and not p.tools[5].enabled
-    assert [t["index"] for t in p.filament_json()["tools"]] == [0]
+    assert [t["index"] for t in prusalink.filament(p)["tools"]] == [0]
     sim, p = make("8.10.0", [loaded(0, PETG)])
     run_sync(sim, p, 'M865 X R N"PLA" L8\n')
     assert str(p.job.attention).startswith("parse error")
@@ -727,29 +725,29 @@ def test_m865_writes_disabled_and_unconfigured_tools():
 
 def test_m865_writes_an_unloaded_tool():
     sim, p = make(tools=[SimTool(0)])
-    p.apply(gcode.parse('M865 X R N"PLA" L0'))
+    sync.apply(p, gcode.parse('M865 X R N"PLA" L0'))
     assert tool0(p).material == Material("PLA", **RESET) and not tool0(p).loaded
 
 
 def test_m865_1_only_on_tool_0_of_uuids_model():
     uuid = "8b6a3e3e-3f6c-4d7b-9a43-6c1f0e7d2a11"
     sim, p = make("8.10.0", [loaded(0, PETG), loaded(1, PETG)])
-    p.apply(gcode.parse(f'M865.1 I0 C"{uuid}"\nM865.1 I1 C"{uuid}"'))
+    sync.apply(p, gcode.parse(f'M865.1 I0 C"{uuid}"\nM865.1 I1 C"{uuid}"'))
     assert p.tools[0].material.instance_uuid is None
     assert p.tools[1].material.instance_uuid is None
     sim, p = make(tools=[SimTool(0)])
-    p.apply(gcode.parse(f'M865.1 I0 C"{uuid}"'))
+    sync.apply(p, gcode.parse(f'M865.1 I0 C"{uuid}"'))
     assert tool0(p).material is None  # nothing stored to attach it to
 
 
 def test_m865_on_other_tool_and_copy_from_empty_tool():
     sim, p = make("8.10.0", [loaded(0, PETG), loaded(1, PETG), SimTool(2)])
-    p.apply(gcode.parse('M865 X R N"PLA" O"#73737b" L1'))
+    sync.apply(p, gcode.parse('M865 X R N"PLA" O"#73737b" L1'))
     assert p.tools[1].material == Material("PLA", "#73737b", **RESET)
     assert p.selected_tool == 0
-    p.apply(gcode.parse("M865 I2 L1"))  # copies "none": an unload of T1
+    sync.apply(p, gcode.parse("M865 I2 L1"))  # copies "none": an unload of T1
     assert p.tools[1].material is None and p.tools[1].unload_count == 1
-    p.apply(gcode.parse("M865 I0 L2"))
+    sync.apply(p, gcode.parse("M865 I0 L2"))
     assert p.tools[2].material == PETG
 
 
@@ -925,7 +923,7 @@ def test_power_loss_with_a_cold_bed_waits_for_the_user():
     p.set_power("on", resume=True, cold_bed=True)
     assert p.job.id == 1 and p.state is State.BUSY
     sim.tick(2)
-    assert p.state is State.ATTENTION and p.job_json()["state"] == "PAUSED"
+    assert p.state is State.ATTENTION and prusalink.job(p)["state"] == "PAUSED"
     assert tool0(p).extruded == 0  # no nozzle clean before the user answers
     sim.tick(60)
     assert p.state is State.ATTENTION  # nothing happens until the user resumes
@@ -984,7 +982,7 @@ def test_upload_during_the_start_blip_is_dropped():
 
 
 def temperatures(printer, index=0):
-    m = next(t for t in printer.filament_json()["tools"] if t["index"] == index)["material"]
+    m = next(t for t in prusalink.filament(printer)["tools"] if t["index"] == index)["material"]
     return tuple(m[k] for k in TEMPERATURE_KEYS)
 
 
@@ -1000,11 +998,11 @@ def test_preset_load_reports_the_preset_temperatures():
 def test_m865_temperatures():
     sim, p = make()
     # R resets to the firmware defaults, not the PC preset's preheat.
-    p.apply(gcode.parse('M865 X R N"PC" T260 B90 L0'))
+    sync.apply(p, gcode.parse('M865 X R N"PC" T260 B90 L0'))
     assert temperatures(p) == (260, 170, 90)
-    p.apply(gcode.parse("M865 X P200 L0"))  # an ad-hoc edit keeps the rest
+    sync.apply(p, gcode.parse("M865 X P200 L0"))  # an ad-hoc edit keeps the rest
     assert temperatures(p) == (260, 200, 90)
-    p.apply(gcode.parse('M865 N"PETG" T250 L0'))  # a preset write ignores them
+    sync.apply(p, gcode.parse('M865 N"PETG" T250 L0'))  # a preset write ignores them
     assert temperatures(p) == (230, 170, 85)
 
 
@@ -1018,7 +1016,7 @@ def test_temperatures_are_set_when_the_material_is_built():
     sim.tick(3.0)
     p.load(0, source="preset", name="PLA", color="#ff0000")
     sim.tick(100.0)
-    p.apply(gcode.parse('M865 X N"PC" L0'))  # without R, only renames
+    sync.apply(p, gcode.parse('M865 X N"PC" L0'))  # without R, only renames
     assert temperatures(p) == (215, 170, 60)
     sim, p = make(tools=[SimTool(0)])
     p.load(0, source="tag", name="petg", uuid="8b6a3e3e-3f6c-4d7b-9a43-6c1f0e7d2a11")
@@ -1029,8 +1027,8 @@ def test_temperatures_are_set_when_the_material_is_built():
 def test_a_written_color_reads_back_in_5_bits_a_channel():
     """F25: the firmware stores a color as Color555, so `#73767d` reads back `#73737b`."""
     sim, p = make()
-    p.apply(gcode.parse('M865 X R N"PLA" O"#73767d" L0\n'))
-    assert p.filament_json()["tools"][0]["material"]["color"] == "#73737b"
+    sync.apply(p, gcode.parse('M865 X R N"PLA" O"#73767d" L0\n'))
+    assert prusalink.filament(p)["tools"][0]["material"]["color"] == "#73737b"
     assert tool0(p).previous.color == "#73737b"
     p.unload(0)
     run(sim, 3.1)

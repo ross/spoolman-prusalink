@@ -3,14 +3,18 @@
 from __future__ import annotations
 
 import asyncio
+import enum
 import inspect
 import json
-from dataclasses import asdict
+import math
+import types
+from dataclasses import asdict, fields
 from pathlib import Path
+from typing import Any, Union, get_args, get_origin, get_type_hints
 
 from aiohttp import web
 
-from simulator.model import SNAPSHOT_NAME, Busy, Event, Invalid, PrintSpec, Simulation
+from simulator.model import SNAPSHOT_NAME, Busy, Event, Invalid, PrintSpec, Segment, Simulation
 
 STATIC = Path(__file__).parent / "static"
 STATE_INTERVAL = 0.1  # at most ten state events a second per client
@@ -106,21 +110,108 @@ async def _body(request: web.Request) -> dict:
     return data
 
 
+_KINDS = {bool: "true or false", int: "an integer", float: "a finite number", str: "a string"}
+
+
+def _check(where: str, value: Any, hint: Any) -> Any:
+    """`value`, from JSON, as the type `hint` names, or Invalid naming `where`.
+
+    The actions are typed, so their hints say what each parameter takes: JSON true and
+    false only for a bool, a number but not a bool for an int or a float, and a listed
+    value for an enum. A hint this doesn't know is a bug, so it raises TypeError, which
+    answers 500.
+    """
+    origin, args = get_origin(hint), get_args(hint)
+    if origin in (Union, types.UnionType):
+        if value is None and type(None) in args:
+            return None
+        (hint,) = [a for a in args if a is not type(None)]
+        return _check(where, value, hint)
+    if isinstance(hint, type) and issubclass(hint, enum.Enum):
+        choices = [v.value for v in hint]
+        if isinstance(value, str) and value in choices:
+            return hint(value)
+        raise Invalid(f"{where} must be one of {', '.join(choices)}, got {value!r}")
+    if origin is list:
+        if not isinstance(value, list):
+            raise Invalid(f"{where} must be a list, got {value!r}")
+        return [_check(f"{where}[{i}]", v, args[0]) for i, v in enumerate(value)]
+    if hint not in _KINDS:
+        raise TypeError(f"no input check for {hint!r}")
+    if hint is bool:
+        ok = isinstance(value, bool)
+    elif hint is str:
+        ok = isinstance(value, str)
+    elif hint is int:
+        ok = isinstance(value, int) and not isinstance(value, bool)
+    else:
+        ok = isinstance(value, int | float) and not isinstance(value, bool)
+        if ok:
+            # An integer past the float range doesn't convert, and Python's json reads
+            # NaN and Infinity, which no length or time can be.
+            try:
+                ok = math.isfinite(number := float(value))
+            except OverflowError:
+                ok = False
+            else:
+                value = number
+    if not ok:
+        raise Invalid(f"{where} must be {_KINDS[hint]}, got {value!r}")
+    return value
+
+
+_SEGMENT_KEYS = {f.name for f in fields(Segment)}
+_PRINT_KEYS = {f.name for f in fields(PrintSpec)}
+
+
+def _print_spec(body: dict) -> PrintSpec:
+    """The print `start_print` asks for, checked the way `_check` checks parameters."""
+    if extra := set(body) - _PRINT_KEYS:
+        raise Invalid(
+            f"start_print takes {', '.join(sorted(_PRINT_KEYS))}, not {', '.join(sorted(extra))}"
+        )
+    segments = body.get("segments")
+    shape = 'segments, a list of {"tool": T, "slicer_mm": MM}'
+    if not isinstance(segments, list) or not all(
+        isinstance(s, dict) and set(s) == _SEGMENT_KEYS for s in segments
+    ):
+        raise Invalid(f"start_print needs {shape}, got {segments!r}")
+    where = "start_print segments"
+    return PrintSpec(
+        segments=[
+            Segment(
+                _check(f"{where}[{i}] tool", s["tool"], int),
+                _check(f"{where}[{i}] slicer_mm", s["slicer_mm"], float),
+            )
+            for i, s in enumerate(segments)
+        ],
+        duration_s=_check("start_print duration_s", body.get("duration_s"), float | None),
+        preheat_s=_check("start_print preheat_s", body.get("preheat_s"), float | None),
+        # Check before the default, so a falsy value of the wrong type is refused too.
+        color_changes_mm=_check(
+            "start_print color_changes_mm", body.get("color_changes_mm"), list[float] | None
+        )
+        or [],
+        name=_check("start_print name", body.get("name"), str | None) or "part.bgcode",
+    )
+
+
 def _call(sim: Simulation, name: str, action: str, body: dict) -> None:
     printer = sim.printer(name)
     if action not in ACTIONS:
         raise Invalid(f"unknown action {action!r}")
     if action == "start_print":
-        printer.start_print(PrintSpec.from_dict(body))
+        printer.start_print(_print_spec(body))
         return
     method = getattr(printer, action)
-    # Check the parameters against the signature before the call, so a TypeError raised
-    # inside the action is a bug that answers 500, not a bad request.
+    # Check the parameters against the signature and the type hints before the call, so a
+    # TypeError raised inside the action is a bug that answers 500, not a bad request.
     try:
-        inspect.signature(method).bind(**body)
+        bound = inspect.signature(method).bind(**body)
     except TypeError as e:
         raise Invalid(f"bad parameters for {action}: {e}") from None
-    method(**body)
+    hints = get_type_hints(method)
+    method(**{k: _check(f"{action} {k}", v, hints[k]) for k, v in bound.arguments.items()})
 
 
 def make_app(sim: Simulation) -> web.Application:
