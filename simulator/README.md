@@ -2,9 +2,10 @@
 
 A stand-in for one or more Prusa printers, for developing and testing the
 bridge without hardware. It serves the parts of PrusaLink the bridge calls,
-one listener per printer, keeps a physical model of each tool's counters and
-filament, and gives you a page with buttons for what a user or the filament
-does: load, unload, print, run out, jam, reboot, switch off. It runs against
+and `/api/v1/info`, which the bridge doesn't call yet, on one listener per
+printer. It keeps a physical model of each tool's counters and filament, and
+gives you a page with buttons for what a user or the filament does: load,
+unload, print, run out, jam, reboot, switch off. It runs against
 a real Spoolman. The plan behind it is [docs/plans.md](../docs/plans.md).
 
 The bridge never imports this package, and the Docker image doesn't ship it.
