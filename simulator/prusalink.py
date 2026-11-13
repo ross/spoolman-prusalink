@@ -28,6 +28,7 @@ from simulator.model import (
 
 TRUE_HEADERS = ("?1", "1", "true")
 FILES = "/api/v1/files/"
+NOZZLE_DIAMETER = 0.4
 
 
 @dataclass(frozen=True)
@@ -200,16 +201,29 @@ def filament(p: SimPrinter) -> dict | None:
     return {"boot_id": p.boot_id, "tools": tools} if counters else {"tools": tools}
 
 
+# The keys of `version` and `info` are in the firmware's order.
+
+
 def version(p: SimPrinter) -> dict:
     return {
         "api": "2.0.0",
         "server": "2.1.2",
+        "nozzle_diameter": NOZZLE_DIAMETER,
         "text": "PrusaLink",
-        "firmware": "6.4.0-sim",
         "hostname": p.name,
+        "firmware": "6.4.0-sim",
         "printer": p.model.code,
-        "nozzle_diameter": 0.4,
         "capabilities": {"upload-by-put": True},
+    }
+
+
+def info(p: SimPrinter) -> dict:
+    return {
+        "nozzle_diameter": NOZZLE_DIAMETER,
+        "mmu": False,
+        "serial": f"SIM-{p.name}",
+        "hostname": p.name,
+        "min_extrusion_temp": 170,
     }
 
 
@@ -225,6 +239,7 @@ def _filament_answer(p: SimPrinter) -> Answer:
 
 VIEWS: dict[str, Callable[[SimPrinter], Answer]] = {
     "/api/version": lambda p: Answer(200, version(p)),
+    "/api/v1/info": lambda p: Answer(200, info(p)),
     "/api/v1/status": lambda p: Answer(200, status(p)),
     "/api/v1/job": _job_answer,
     "/api/v1/filament": _filament_answer,

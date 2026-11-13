@@ -28,6 +28,44 @@ async def setup():
     await client.close()
 
 
+async def test_info_and_version_follow_the_firmware(setup):
+    sim, p, client = setup
+    for firmware in Firmware:
+        p.set_firmware(firmware)
+        resp = await client.get("/api/v1/info", headers=AUTH)
+        assert resp.status == 200
+        info = await resp.json()
+        assert list(info) == [
+            "nozzle_diameter",
+            "mmu",
+            "serial",
+            "hostname",
+            "min_extrusion_temp",
+        ]
+    assert info == {
+        "nozzle_diameter": 0.4,
+        "mmu": False,
+        "serial": "SIM-p",
+        "hostname": "p",
+        "min_extrusion_temp": 170,
+    }
+    assert (await client.get("/api/v1/info")).status == 401
+    assert (await client.post("/api/v1/info", headers=AUTH)).status == 405
+
+    version = await (await client.get("/api/version", headers=AUTH)).json()
+    assert list(version) == [
+        "api",
+        "server",
+        "nozzle_diameter",
+        "text",
+        "hostname",
+        "firmware",
+        "printer",
+        "capabilities",
+    ]
+    assert version["nozzle_diameter"] == info["nozzle_diameter"]
+
+
 async def test_version_status_job_filament(setup):
     sim, p, client = setup
     resp = await client.get("/api/version", headers=AUTH)

@@ -85,8 +85,8 @@ firmware update.
 - The model check stops a job in `ATTENTION` when `M862.3` names anything
   but the model or its MMU3 name. The job has no ID until the question is
   accepted.
-- It serves `/api/version`, `/api/v1/status`, `/api/v1/job` and
-  `/api/v1/filament`, and not `/api/v1/info`.
+- It serves `/api/version`, `/api/v1/info`, `/api/v1/status`, `/api/v1/job`
+  and `/api/v1/filament`. `/api/v1/info` always reports `mmu` as false.
 - Tests: the unit harness always builds one Core One L with one tool.
   Integration runs T1 to T7 on a two-tool INDX, and a few rows on an MK4,
   an MK3.9 and a MINI.
