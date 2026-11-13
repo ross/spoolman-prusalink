@@ -10,8 +10,9 @@ import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
 from simulator import prusalink
-from simulator.model import PrintSpec, Segment, SimTool, State
-from simulator.tests.util import KEY, PLA, make
+from simulator.model import Firmware, PrintSpec, Segment, SimTool, State
+from simulator.tests.test_model import PETG, shown, tool0
+from simulator.tests.util import KEY, PLA, loaded, make
 
 AUTH = {"X-Api-Key": KEY}
 UPLOAD = {**AUTH, "Print-After-Upload": "?1", "Overwrite": "?1", "Content-Type": "text/x.gcode"}
@@ -288,3 +289,65 @@ async def test_transport_raises_when_the_printer_gives_no_answer():
             await client.get("/api/v1/status")
         p.set_power("on")
         assert (await client.get("/api/v1/status")).status_code == 200
+
+
+def test_filament_full():
+    sim, p = make()
+    tool0(p).extruded = 12.9
+    assert prusalink.filament(p) == {
+        "boot_id": p.boot_id,
+        "tools": [
+            {
+                "index": 0,
+                "extruded": 12,
+                "unload_count": 0,
+                "extruded_at_unload": 0,
+                "material": {
+                    "name": "PLA",
+                    "nozzle_temperature": 215,
+                    "preheat_temperature": 170,
+                    "bed_temperature": 60,
+                    "color": "#73737b",
+                    "instance_uuid": PLA.instance_uuid,
+                },
+            }
+        ],
+    }
+
+
+def test_filament_no_counters_and_no_endpoint():
+    sim, p = make()
+    p.set_firmware("no_counters")
+    assert prusalink.filament(p) == {
+        "tools": [
+            {
+                "index": 0,
+                "material": {
+                    "name": "PLA",
+                    "nozzle_temperature": 215,
+                    "preheat_temperature": 170,
+                    "bed_temperature": 60,
+                    "color": "#73737b",
+                    "instance_uuid": PLA.instance_uuid,
+                },
+            }
+        ]
+    }
+    p.set_firmware(Firmware.NO_ENDPOINT)
+    assert prusalink.filament(p) is None
+
+
+def test_filament_multi_tool_skips_disabled_and_hides_uuids():
+    tools = [
+        loaded(0, PLA),
+        SimTool(1, enabled=False),
+        loaded(2, PETG),
+        SimTool(3),
+    ]
+    sim, p = make("8.10.0", tools)
+    data = prusalink.filament(p)
+    assert [t["index"] for t in data["tools"]] == [0, 2, 3]
+    assert shown(p) == {"name": "PLA", "color": "#73737b"}
+    assert "material" not in data["tools"][2]
+    p.set_sensor_fault(2, True)
+    assert "material" not in prusalink.filament(p)["tools"][1]
