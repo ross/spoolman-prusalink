@@ -181,6 +181,9 @@ def test_load_fails_on_a_build_printer_cant_name():
     "path",
     [
         read.TRACKER_FILE,
+        read.CONFIGURATION_FILE,
+        read.ADVANCED_FILE,
+        read.RAMMING_CMAKE_FILE,
         read.advanced_file("MINI"),
         read.configuration_file("XL_DEV_KIT"),
         read.ramming_file("mk3_5"),
@@ -198,28 +201,6 @@ def test_every_build_has_its_printer_is_macro():
     builds = {b for b in compare.MODEL_BUILDS.values() if b}
     covered = set().union(*compare.PRINTER_IS.values())
     assert builds == covered
-
-
-def test_every_build_has_its_configuration():
-    assert compare.CONFIGURATIONS.keys() == {b for b in compare.MODEL_BUILDS.values() if b}
-
-
-@pytest.mark.parametrize(
-    ("build", "features", "variant"),
-    [
-        ("MK4", {"HAS_NEXTRUDER"}, "nextruder"),
-        ("COREONE_INDX", {"HAS_INDX"}, "indx"),
-        ("MINI", set(), "mini"),
-        ("MK3.5", set(), "mk3_5"),
-    ],
-)
-def test_ramming_file(build, features, variant):
-    assert compare.ramming_file(build, frozenset(features)) == read.ramming_file(variant)
-
-
-def test_ramming_file_fails_on_a_build_without_one():
-    with pytest.raises(Unreadable, match=f"can't read {read.RAMMING_CMAKE_FILE}: .* for NEW"):
-        compare.ramming_file("NEW", frozenset())
 
 
 @pytest.mark.parametrize(
@@ -240,10 +221,15 @@ def test_macros():
     assert value("PRINTER_IS_PRUSA_COREONEL")
     assert not value("PRINTER_IS_PRUSA_COREONE")
     assert compare.macros("XL_DEV_KIT", {})("PRINTER_IS_PRUSA_XL")
+    assert compare.macros("XL", {})("BOARD_IS_XLBUDDY")
+    assert not compare.macros("XL", {})("BOARD_IS_DWARF")
+    assert not value("BOARD_IS_XLBUDDY")
     with pytest.raises(KeyError):
         value("HAS_NEW")
     with pytest.raises(KeyError):
         value("PRINTER_IS_PRUSA_NEW")
+    with pytest.raises(KeyError):
+        value("BOARD_IS_NEW")
 
 
 def test_current_copies():

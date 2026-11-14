@@ -904,6 +904,81 @@ static constexpr EnumArray<Sequence, GCodeFile, static_cast<int>(Sequence::_cnt)
 } // namespace nozzle_cleaner
 """
 
+CONFIGURATION_H = """\
+//! @file
+#pragma once
+
+#include "config.h"
+
+#if PRINTER_IS_PRUSA_MINI()
+    #include "Configuration_MINI.h"
+#elif PRINTER_IS_PRUSA_XL_DEV_KIT()
+    #include "Configuration_XL_DEV_KIT.h"
+#elif PRINTER_IS_PRUSA_XL() && BOARD_IS_XLBUDDY()
+    #include "Configuration_XL.h"
+#elif PRINTER_IS_PRUSA_XL() && BOARD_IS_DWARF()
+    #include "Configuration_XL_Dwarf.h"
+#elif PRINTER_IS_PRUSA_MK4()
+    #include "Configuration_MK4.h"
+#elif PRINTER_IS_PRUSA_MK3_5()
+    #include "Configuration_MK3.5.h"
+#elif PRINTER_IS_PRUSA_iX()
+    #include "Configuration_iX.h"
+#elif PRINTER_IS_PRUSA_COREONE()
+    #include "Configuration_COREONE.h"
+#elif PRINTER_IS_PRUSA_COREONEL()
+    #include "Configuration_COREONEL.h"
+#else
+    #error "Unknown PRINTER_TYPE!"
+#endif
+"""
+
+CONFIGURATION_ADV_H = """\
+//! @file
+#pragma once
+
+#include <device/board.h>
+#include "config.h"
+
+#if PRINTER_IS_PRUSA_MINI()
+    #include "Configuration_MINI_adv.h"
+#elif PRINTER_IS_PRUSA_XL_DEV_KIT()
+    #include "Configuration_XL_DEV_KIT_adv.h"
+#elif PRINTER_IS_PRUSA_XL() && BOARD_IS_XLBUDDY()
+    #include "Configuration_XL_adv.h"
+#elif PRINTER_IS_PRUSA_XL() && BOARD_IS_DWARF()
+    #include "Configuration_XL_Dwarf_adv.h"
+#elif PRINTER_IS_PRUSA_MK4()
+    #include "Configuration_MK4_adv.h"
+#elif PRINTER_IS_PRUSA_MK3_5()
+    #include "Configuration_MK3.5_adv.h"
+#elif PRINTER_IS_PRUSA_iX()
+    #include "Configuration_iX_adv.h"
+#elif PRINTER_IS_PRUSA_COREONE()
+    #include "Configuration_COREONE_adv.h"
+#elif PRINTER_IS_PRUSA_COREONEL()
+    #include "Configuration_COREONEL_adv.h"
+#else
+    #error "Unknown PRINTER_TYPE!"
+#endif
+"""
+
+RAMMING_CMAKE = """\
+target_sources(firmware PRIVATE ramming_sequence.cpp)
+
+if(HAS_NEXTRUDER)
+  target_sources(firmware PRIVATE standard_ramming_sequence_nextruder.cpp)
+elseif(HAS_INDX)
+  target_sources(firmware PRIVATE standard_ramming_sequence_indx.cpp)
+elseif(PRINTER STREQUAL "MINI")
+  target_sources(firmware PRIVATE standard_ramming_sequence_mini.cpp)
+elseif(PRINTER STREQUAL "MK3.5")
+  target_sources(firmware PRIVATE standard_ramming_sequence_mk3_5.cpp)
+else()
+  message(FATAL_ERROR "Missing ramming sequence setup for \\"${PRINTER}\\".")
+endif()
+"""
+
 FILES = {
     read.MODELS_FILE: MODELS_HPP,
     read.OPTIONS_FILE: OPTIONS_CMAKE,
@@ -911,6 +986,9 @@ FILES = {
     read.FILAMENT_FILE: FILAMENT_HPP,
     read.ALIASES_FILE: DATA_UTILS_CPP,
     read.TRACKER_FILE: TRACKER_HPP,
+    read.CONFIGURATION_FILE: CONFIGURATION_H,
+    read.ADVANCED_FILE: CONFIGURATION_ADV_H,
+    read.RAMMING_CMAKE_FILE: RAMMING_CMAKE,
     **{read.configuration_file(n): CONFIGURATION_NEXTRUDER_H for n in ("MK4", "iX", "XL")},
     read.configuration_file("XL_DEV_KIT"): CONFIGURATION_NEXTRUDER_H,
     read.configuration_file("MK3.5"): CONFIGURATION_MK3_5_H,

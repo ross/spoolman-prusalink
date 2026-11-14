@@ -62,22 +62,16 @@ PRINTER_IS = {
     "COREONEL": {"COREONEL", "COREONEL_INDX"},
 }
 
-# Each build's `include/marlin/Configuration_<X>.h` and `Configuration_<X>_adv.h`, as the
-# `#elif` chains in `Configuration.h` and `Configuration_adv.h` pick them by
-# `PRINTER_IS_PRUSA_<X>()`: the INDX builds share their base model's files, which branch
-# on `HAS_INDX()` inside. The XL build is the main board's; `Configuration_XL_Dwarf.h` is
-# the tool head's.
-CONFIGURATIONS = {
-    "MINI": "MINI",
-    "MK3.5": "MK3.5",
-    "MK4": "MK4",
-    "XL": "XL",
-    "XL_DEV_KIT": "XL_DEV_KIT",
-    "iX": "iX",
-    "COREONE": "COREONE",
-    "COREONE_INDX": "COREONE",
-    "COREONEL": "COREONEL",
-    "COREONEL_INDX": "COREONEL",
+# The builds each `BOARD_IS_<X>()` is true for, on the printer's main board: the one the
+# bridge talks to. This stays hand-stated. `utils/presets/presets.json` gives each firmware
+# image's PRINTER and BOARD, but which of a printer's boards is the main one is decided by
+# the `BOARD_IS_MASTER_BOARD` condition in `ProjectOptions.cmake`, and
+# `include/device/board.h` maps a BOARD onto these macros. The XL's main board is the
+# XLBUDDY, and the dev kit's XL_DEV_KIT_XLB defines `BOARD_IS_XLBUDDY()` too. The DWARF is
+# the XL tool head's own firmware, not a printer build. A macro missing here fails the read.
+BOARD_IS: dict[str, set[str]] = {
+    "XLBUDDY": {"XL", "XL_DEV_KIT"},
+    "DWARF": set(),
 }
 
 # The `ProjectOptions.cmake` features the comparison, the readers and the simulator's
@@ -199,27 +193,14 @@ def tools(features: frozenset[str]) -> int:
     return 1
 
 
-def ramming_file(build: str, features: frozenset[str]) -> str:
-    """Return the standard ramming sequence file a build compiles.
-
-    Mirrors the `if()` chain in `src/feature/ramming/CMakeLists.txt`.
-    """
-    if "HAS_NEXTRUDER" in features:
-        return read.ramming_file("nextruder")
-    if "HAS_INDX" in features:
-        return read.ramming_file("indx")
-    variants = {"MINI": "mini", "MK3.5": "mk3_5"}
-    if build not in variants:
-        raise Unreadable(read.RAMMING_CMAKE_FILE, f"no ramming sequence for {build}")
-    return read.ramming_file(variants[build])
-
-
 def macros(build: str, features: Mapping[str, frozenset[str]]) -> read.Macros:
     """Return the macro values for `build`; an unknown macro raises KeyError."""
 
     def value(name: str) -> bool:
         if name.startswith("PRINTER_IS_PRUSA_"):
             return build in PRINTER_IS[name.removeprefix("PRINTER_IS_PRUSA_")]
+        if name.startswith("BOARD_IS_"):
+            return build in BOARD_IS[name.removeprefix("BOARD_IS_")]
         return build in features[name]
 
     return value
@@ -240,15 +221,18 @@ def load(source: Source) -> Firmware:
         raise Unreadable(read.OPTIONS_FILE, f"PRINTER_VALID_OPTS doesn't list {', '.join(unknown)}")
     presets_text = source.read(read.PRESETS_FILE)
     tracker_text = source.read(read.TRACKER_FILE)
+    configurations = source.read(read.CONFIGURATION_FILE)
+    advanced_configurations = source.read(read.ADVANCED_FILE)
+    ramming_cmake = source.read(read.RAMMING_CMAKE_FILE)
     # Several builds share each of the files below.
     text = functools.cache(source.read)
     builds = {}
     for name in sorted({b for b in MODEL_BUILDS.values() if b is not None}):
         has = frozenset(f for f, printers in features.items() if name in printers)
         values = macros(name, features)
-        configuration = read.configuration_file(CONFIGURATIONS[name])
-        advanced = read.advanced_file(CONFIGURATIONS[name])
-        ramming = ramming_file(name, has)
+        configuration = read.configuration_file(read.configuration(configurations, values))
+        advanced = read.advanced_file(read.configuration(advanced_configurations, values, True))
+        ramming = read.ramming_file(read.ramming_variant(ramming_cmake, name, features))
         cleaner = None
         if "HAS_NOZZLE_CLEANER" in has:
             cleaner = CleanerPurge(*read.cleaner_purge(text(read.CLEANER_FILE), values))
