@@ -1736,6 +1736,189 @@ BOARD_H = """\
 #endif
 """
 
+# An excerpt of `utils/presets/presets.json`: one image or more per build, with tool
+# head, bed, extension, NFC and INDX head images.
+PRESETS_JSON = """\
+{
+    "$schema": "./presets_schema.json",
+    "presets": [
+        {
+            "name": "coreone",
+            "description": "Original Prusa CORE One",
+            "cacheVariables": {
+                "PRINTER": "COREONE",
+                "SIGNATURE_OAK": "OFF",
+                "BOARD": "XBUDDY",
+                "XBUDDY_EXTENSION_VARIANT": "STANDARD"
+            }
+        },
+        {
+            "name": "coreone_indx",
+            "description": "Original Prusa CORE One with INDX",
+            "cacheVariables": {
+                "PRINTER": "COREONE_INDX",
+                "SIGNATURE_OAK": "OFF",
+                "BOARD": "XBUDDY",
+                "XBUDDY_EXTENSION_VARIANT": "STANDARD"
+            }
+        },
+        {
+            "name": "coreonel",
+            "description": "Original Prusa CORE One L",
+            "cacheVariables": {
+                "PRINTER": "COREONEL",
+                "SIGNATURE_OAK": "OFF",
+                "BOARD": "XBUDDY",
+                "XBUDDY_EXTENSION_VARIANT": "STANDARD"
+            }
+        },
+        {
+            "name": "coreonel_indx",
+            "description": "Original Prusa CORE One L",
+            "cacheVariables": {
+                "PRINTER": "COREONEL_INDX",
+                "SIGNATURE_OAK": "OFF",
+                "BOARD": "XBUDDY",
+                "XBUDDY_EXTENSION_VARIANT": "STANDARD"
+            }
+        },
+        {
+            "name": "mini",
+            "description": "Original Prusa MINI",
+            "cacheVariables": {
+                "PRINTER": "MINI",
+                "SIGNATURE_OAK": "OFF",
+                "BOARD": "BUDDY"
+            }
+        },
+        {
+            "name": "mini-en-cs",
+            "description": "Original Prusa MINI (EN & CS translation)",
+            "cacheVariables": {
+                "PRINTER": "MINI",
+                "SIGNATURE_OAK": "OFF",
+                "BOARD": "BUDDY",
+                "TRANSLATIONS_LIST": "cs"
+            }
+        },
+        {
+            "name": "mk4",
+            "description": "Original Prusa MK4 with xBuddy 0.2.7c or newer fw compatible, 400-step motors and planetary gearbox",
+            "cacheVariables": {
+                "PRINTER": "MK4",
+                "SIGNATURE_OAK": "OFF",
+                "BOARD": "XBUDDY"
+            }
+        },
+        {
+            "name": "mk3.5",
+            "description": "Original Prusa MK3.5 with xBuddy 0.2.7c or newer fw compatible, 200-step motors and MK3 extruder",
+            "cacheVariables": {
+                "PRINTER": "MK3.5",
+                "SIGNATURE_OAK": "OFF",
+                "BOARD": "XBUDDY"
+            }
+        },
+        {
+            "name": "ix",
+            "description": "Original Prusa iX",
+            "cacheVariables": {
+                "PRINTER": "iX",
+                "SIGNATURE_OAK": "OFF",
+                "BOARD": "XBUDDY",
+                "XBUDDY_EXTENSION_VARIANT": "iX"
+            }
+        },
+        {
+            "name": "xl",
+            "description": "Original Prusa XL",
+            "cacheVariables": {
+                "PRINTER": "XL",
+                "SIGNATURE_OAK": "OFF",
+                "BOARD": "XLBUDDY"
+            }
+        },
+        {
+            "name": "xl_dev_kit",
+            "description": "Original Prusa xl_dev_kit",
+            "cacheVariables": {
+                "PRINTER": "XL_DEV_KIT",
+                "SIGNATURE_OAK": "OFF",
+                "BOARD": "XL_DEV_KIT_XLB"
+            }
+        },
+        {
+            "name": "xl-dwarf",
+            "description": "Original Prusa XL's Dwarf (the extruder puppy)",
+            "cacheVariables": {
+                "PRINTER": "XL",
+                "SIGNATURE_OAK": "OFF",
+                "BOARD": "DWARF"
+            }
+        },
+        {
+            "name": "xl-modularbed",
+            "description": "Original Prusa XL's Modular Bed",
+            "cacheVariables": {
+                "PRINTER": "XL",
+                "SIGNATURE_OAK": "OFF",
+                "BOARD": "MODULARBED"
+            }
+        },
+        {
+            "name": "ix-modularbed",
+            "description": "Original Prusa iX's Modular Bed",
+            "cacheVariables": {
+                "PRINTER": "iX",
+                "SIGNATURE_OAK": "OFF",
+                "BOARD": "MODULARBED"
+            }
+        },
+        {
+            "name": "coreone_indx-xbuddy_extension",
+            "description": "Original Prusa CORE One INDX Extension Board",
+            "cacheVariables": {
+                "PRINTER": "COREONE_INDX",
+                "SIGNATURE_OAK": "OFF",
+                "BOARD": "XBUDDY_EXTENSION"
+            }
+        },
+        {
+            "name": "anfc",
+            "description": "Firmware for NFC addon (dev-kit)",
+            "cacheVariables": {
+                "PRINTER": "NONE",
+                "SIGNATURE_OAK": "OFF",
+                "BOARD": "ANFC",
+                "CAN_BUS_TYPE": "PUB6",
+                "NFC_BOARD_HAS_LEFT_RIGHT_DETECTION_PIN": "YES",
+                "NFC_BOARD_HAS_FILAMENT_SENSORS": "YES",
+                "HAS_CYPHAL_LOGGING": "YES"
+            }
+        },
+        {
+            "name": "coreone_indx-anfc",
+            "description": "Firmware for NFC addon for CoreOne printer with INDX",
+            "cacheVariables": {
+                "PRINTER": "COREONE_INDX",
+                "SIGNATURE_OAK": "OFF",
+                "BOARD": "ANFC",
+                "CAN_BUS_TYPE": "PUB6",
+                "NFC_ST25R3919B_ENABLED_ANTENNAS": "ANTENNA_2"
+            }
+        },
+        {
+            "name": "coreone_indx-indx_head",
+            "description": "Firmware for INDX head",
+            "cacheVariables": {
+                "PRINTER": "COREONE_INDX",
+                "BOARD": "INDX_HEAD"
+            }
+        }
+    ]
+}
+"""  # noqa: E501 (verbatim firmware lines)
+
 FILES = {
     read.MODELS_FILE: MODELS_HPP,
     read.GCODE_INFO_FILE: GCODE_INFO_HPP,
@@ -1772,6 +1955,7 @@ FILES = {
     "include/device/board.h": BOARD_H,
     "src/common/gcode/gcode_info.cpp": GCODE_INFO_CPP,
     "src/common/tools_mapping.cpp": TOOLS_MAPPING_CPP,
+    read.IMAGES_FILE: PRESETS_JSON,
     read.PAUSE_SETTINGS_FILE: PAUSE_SETTINGS_HPP,
 }
 

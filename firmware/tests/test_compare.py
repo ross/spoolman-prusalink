@@ -1,5 +1,6 @@
 """Rebuilding the firmware's tables per model, and comparing them with the copies."""
 
+import json
 from dataclasses import replace
 
 import pytest
@@ -121,6 +122,11 @@ def test_load_reads_every_build():
     assert firmware.defaults == (215, 170, 60)
     assert firmware.aliases == {"TPU": "FLEX"}
     assert firmware.minimal_purge_mm == 1.0
+    # Of the XL's images only the XLBUDDY's is a main board, and the dev kit's board is one
+    # though it isn't a buddy board.
+    assert firmware.main_boards == {
+        build: frozenset({board}) for build, board in compare.MAIN_BOARDS.items()
+    }
     assert firmware.built().keys() == {"1.4.0", "2.1.0", "7.1.0"}  # the MK3 isn't built
 
     mk4, mini, xl = (firmware.builds[b] for b in ("MK4", "MINI", "XL"))
@@ -232,6 +238,7 @@ def test_load_fails_on_a_build_printer_cant_name():
         read.AUTO_RETRACT_FILE,
         read.PAUSE_FILE,
         read.PAUSE_SETTINGS_FILE,
+        read.IMAGES_FILE,
     ],
 )
 def test_load_fails_on_a_missing_file(path):
@@ -276,6 +283,60 @@ def test_macros():
         value("BOARD_IS_NEW")
 
 
+def test_board_is_follows_the_main_boards():
+    assert {"XLBUDDY": {"XL", "XL_DEV_KIT"}, "DWARF": set()} == compare.BOARD_IS
+    assert compare.MAIN_BOARDS.keys() == {b for b in compare.MODEL_BUILDS.values() if b}
+
+
+def test_main_boards():
+    images = json.dumps(
+        {
+            "$schema": "x",
+            "presets": [
+                {"name": n, "description": "", "cacheVariables": {"PRINTER": p, "BOARD": b}}
+                for n, p, b in (
+                    ("xl", "XL", "XLBUDDY"),
+                    ("xl-dwarf", "XL", "DWARF"),
+                    ("kit", "XL_DEV_KIT", "XL_DEV_KIT_XLB"),
+                    ("mk4", "MK4", "XBUDDY"),
+                    ("mk4-other", "MK4", "BUDDY"),
+                    ("anfc", "NONE", "ANFC"),
+                )
+            ],
+        }
+    )
+    found = compare.main_boards(images, frozenset({"BUDDY", "XBUDDY", "XLBUDDY"}))
+    assert found["XL"] == {"XLBUDDY"}
+    assert found["XL_DEV_KIT"] == {"XL_DEV_KIT_XLB"}
+    assert found["MK4"] == {"BUDDY", "XBUDDY"}  # two main boards
+    assert found["MINI"] == set()  # no image
+    assert "NONE" not in found
+    # A board that's neither a buddy board nor another main board isn't one.
+    assert compare.main_boards(images, frozenset({"BUDDY"}))["XL"] == set()
+
+
+def test_main_board_differences():
+    firmware, copies = synthetic()
+    boards = {
+        **firmware.main_boards,
+        "MK4": frozenset({"XBUDDY", "BUDDY"}),
+        "MINI": frozenset(),
+        "XL": frozenset({"XLBUDDY"}),
+    }
+    firmware = replace(firmware, main_boards=boards)
+    copy = {**copies.main_boards, "XL": "XL_DEV_KIT_XLB", "iX": "XBUDDY"}
+    copy.pop("COREONE")
+    found = compare.compare(firmware, replace(copies, main_boards=copy))
+    table = "firmware-check MAIN_BOARDS"
+    assert found == [
+        Difference(table, None, "COREONE", "main boards", ["XBUDDY"], []),
+        Difference(table, None, "MINI", "main boards", [], ["BUDDY"]),
+        Difference(table, None, "MK4", "main boards", ["BUDDY", "XBUDDY"], ["XBUDDY"]),
+        Difference(table, None, "XL", "main boards", ["XLBUDDY"], ["XL_DEV_KIT_XLB"]),
+        Difference(table, None, "iX", "main boards", [], ["XBUDDY"]),
+    ]
+
+
 def test_current_copies():
     copies = Copies.current()
     assert copies.preset_preheat == copies.default_preheat == 170
@@ -285,6 +346,7 @@ def test_current_copies():
     assert copies.sim_models["1.4.0"].name == "MK4"
     assert copies.sim_models["1.4.0"].extruder.e_steps == (380, 400)
     assert copies.sim_minimal_purge == 1.0
+    assert copies.main_boards is compare.MAIN_BOARDS
 
 
 def fw_preset(nozzle, preheat, bed, chamber=None, filtration=None, flexible=False, door=None):
@@ -385,6 +447,12 @@ def synthetic():
         defaults=(215, 170, 60),
         aliases={"TPU": "FLEX"},
         minimal_purge_mm=1.0,
+        main_boards={
+            "MK4": frozenset({"XBUDDY"}),
+            "MINI": frozenset({"BUDDY"}),
+            "XL": frozenset({"XLBUDDY"}),
+            "COREONE": frozenset({"XBUDDY"}),
+        },
     )
     copies = Copies(
         bridge_models={
@@ -442,6 +510,7 @@ def synthetic():
         sim_defaults=(215, 170, 60),
         sim_aliases={"TPU": "FLEX"},
         sim_minimal_purge=1.0,
+        main_boards={"MK4": "XBUDDY", "MINI": "BUDDY", "XL": "XLBUDDY", "COREONE": "XBUDDY"},
     )
     return firmware, copies
 

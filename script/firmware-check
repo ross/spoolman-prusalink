@@ -5,7 +5,8 @@
 # change lengths, ramming sequences, the nozzle cleaner's purge, the auto-retract's
 # fully-retracted threshold, the cold unload, the purge before an unload, the G-code
 # compatibility mode and the M862.6 feature names; each G-code model name with its
-# group; and the shortest purge a load runs.
+# group; the shortest purge a load runs; and each build's main board, from the firmware's
+# build presets.
 #
 # It rebuilds each table from Prusa-Firmware-Buddy for every firmware build and lists each
 # difference; firmware/compare.py has the details and the list of expected differences.

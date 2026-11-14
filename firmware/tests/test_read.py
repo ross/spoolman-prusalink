@@ -1,5 +1,7 @@
 """The readers, on excerpts of the firmware files."""
 
+import json
+
 import pytest
 
 from firmware import compare, read
@@ -559,6 +561,78 @@ def test_reset_defaults_fail_closed():
         read.reset_defaults(twice)
     with pytest.raises(Unreadable, match="no struct FilamentTypeParameters"):
         read.reset_defaults("")
+
+
+def test_buddy_boards():
+    assert read.buddy_boards(fixtures.OPTIONS_CMAKE) == {"BUDDY", "XBUDDY", "XLBUDDY"}
+
+
+@pytest.mark.parametrize(
+    "text, problem",
+    [
+        ("set(OTHER 1)\n", "no BUDDY_BOARDS"),
+        ('set(BUDDY_BOARDS "A")\nset(BUDDY_BOARDS "B")\n', "set more than once"),
+        ('if(X)\n  set(BUDDY_BOARDS "A")\nendif()\n', "set by set\\(\\) on line 2 inside if"),
+        (
+            'set(BUDDY_BOARDS "A")\nlist(APPEND BUDDY_BOARDS "B")\n',
+            "changed by list\\(\\) on line 2",
+        ),
+    ],
+)
+def test_buddy_boards_fail_closed(text, problem):
+    with pytest.raises(Unreadable, match=rf"{read.OPTIONS_FILE}: .*{problem}"):
+        read.buddy_boards(text)
+
+
+def preset(name="xl", **variables):
+    return {"name": name, "description": "", "cacheVariables": variables}
+
+
+def presets_json(*presets, **top):
+    return json.dumps({"$schema": "./presets_schema.json", "presets": list(presets), **top})
+
+
+def test_images():
+    found = read.images(fixtures.PRESETS_JSON)
+    assert ("XL", "XLBUDDY") in found
+    assert ("XL", "DWARF") in found
+    assert ("XL_DEV_KIT", "XL_DEV_KIT_XLB") in found
+    assert ("COREONE_INDX", "INDX_HEAD") in found
+    assert ("NONE", "ANFC") in found
+    assert len(found) == len(json.loads(fixtures.PRESETS_JSON)["presets"])
+
+
+@pytest.mark.parametrize(
+    "text, problem",
+    [
+        ("{", "not JSON"),
+        ("[]", "the top level isn't an object of \\$schema and presets"),
+        (presets_json(preset(PRINTER="XL", BOARD="XLBUDDY"), extra=1), "the top level isn't"),
+        (json.dumps({"$schema": "x", "presets": []}), "presets isn't a list of presets"),
+        (presets_json(preset(PRINTER="XL")), "can't read xl's BOARD None"),
+        (presets_json(preset(BOARD="XLBUDDY")), "can't read xl's PRINTER None"),
+        (presets_json(preset(PRINTER="XL", BOARD=True)), "can't read xl's BOARD True"),
+        (
+            presets_json(preset(PRINTER="XL", BOARD={"type": "STRING", "value": "XLBUDDY"})),
+            "can't read xl's BOARD",
+        ),
+        (presets_json(preset(PRINTER="XL", BOARD="${B}")), "can't read xl's BOARD '\\$\\{B\\}'"),
+        (
+            presets_json({**preset(PRINTER="XL", BOARD="XLBUDDY"), "inherits": "base"}),
+            "a preset isn't an object of cacheVariables, description, name",
+        ),
+        (presets_json(["xl"]), "a preset isn't an object"),
+        (
+            presets_json(preset(PRINTER="XL", BOARD="A"), preset(PRINTER="XL", BOARD="B")),
+            "a missing or repeated preset name 'xl'",
+        ),
+        (presets_json(preset(name="", PRINTER="XL", BOARD="A")), "a missing or repeated"),
+        (presets_json({**preset(), "cacheVariables": []}), "xl's cacheVariables isn't an object"),
+    ],
+)
+def test_images_fail_closed(text, problem):
+    with pytest.raises(Unreadable, match=rf"{read.IMAGES_FILE}: {problem}"):
+        read.images(text)
 
 
 def test_minimal_purge():

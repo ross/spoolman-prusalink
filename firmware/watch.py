@@ -100,31 +100,24 @@ WATCHED = (
         "tool_mapping in simulator/preview.py",
         "136be5698acb0b96",
     ),
-    # The next eight guard `BOARD_IS` in firmware/compare.py. A main board is a buddy board or
-    # the dev kit's; of those, only the XL's and the dev kit's define `BOARD_IS_XLBUDDY()`,
-    # none defines `BOARD_IS_DWARF()`, and both macros are 0 where no board defines them.
-    Watched(
-        "the buddy boards",
-        read.OPTIONS_FILE,
-        "cmake",
-        "set(BUDDY_BOARDS",
-        "BOARD_IS in firmware/compare.py",
-        "3c077407f5ecebdd",
-    ),
+    # The main boards besides the buddy boards: `OTHER_MAIN_BOARDS` in firmware/compare.py.
     Watched(
         "the main board condition",
         read.OPTIONS_FILE,
         "cmake",
         "if(BOARD IN_LIST BUDDY_BOARDS OR",
-        "BOARD_IS in firmware/compare.py",
+        "OTHER_MAIN_BOARDS in firmware/compare.py",
         "c6120ac728f42a92",
     ),
+    # The next six guard `BOARD_DEFINES` in firmware/compare.py: of the main boards, only
+    # XLBUDDY and XL_DEV_KIT_XLB define `BOARD_IS_XLBUDDY()`, none defines
+    # `BOARD_IS_DWARF()`, and both macros are 0 where no board defines them.
     Watched(
         "the XLBUDDY board's macros",
         "include/device/board.h",
         "directive",
         "#elif BOARD() == BOARD_XLBUDDY()",
-        "BOARD_IS in firmware/compare.py",
+        "BOARD_DEFINES in firmware/compare.py",
         "1b5878d336656cec",
     ),
     Watched(
@@ -132,7 +125,7 @@ WATCHED = (
         "include/device/board.h",
         "directive",
         "#elif BOARD() == BOARD_XL_DEV_KIT_XLB()",
-        "BOARD_IS in firmware/compare.py",
+        "BOARD_DEFINES in firmware/compare.py",
         "8d2733394e9e16e1",
     ),
     Watched(
@@ -140,7 +133,7 @@ WATCHED = (
         "include/device/board.h",
         "directive",
         "#elif BOARD() == BOARD_BUDDY()",
-        "BOARD_IS in firmware/compare.py",
+        "BOARD_DEFINES in firmware/compare.py",
         "34ada32dca12a264",
     ),
     Watched(
@@ -148,7 +141,7 @@ WATCHED = (
         "include/device/board.h",
         "directive",
         "#elif BOARD() == BOARD_XBUDDY()",
-        "BOARD_IS in firmware/compare.py",
+        "BOARD_DEFINES in firmware/compare.py",
         "b366077de8f45a00",
     ),
     Watched(
@@ -156,7 +149,7 @@ WATCHED = (
         "include/device/board.h",
         "directive",
         "#ifndef BOARD_IS_XLBUDDY",
-        "BOARD_IS in firmware/compare.py",
+        "BOARD_DEFINES in firmware/compare.py",
         "6bacb277dac47d33",
     ),
     Watched(
@@ -164,7 +157,7 @@ WATCHED = (
         "include/device/board.h",
         "directive",
         "#ifndef BOARD_IS_DWARF",
-        "BOARD_IS in firmware/compare.py",
+        "BOARD_DEFINES in firmware/compare.py",
         "04c9261a6da4db2d",
     ),
     # The load's purge: the high-flow doubling in `SimPrinter._load_lengths`, and the

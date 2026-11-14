@@ -8,6 +8,7 @@ the files use today, nothing more: see `evaluate` and `active_lines`.
 
 from __future__ import annotations
 
+import json
 import re
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
@@ -18,6 +19,7 @@ from firmware.source import Unreadable
 MODELS_FILE = "include/common/printer_model_data.hpp"
 GCODE_INFO_FILE = "src/common/gcode/gcode_info.hpp"
 OPTIONS_FILE = "ProjectOptions.cmake"
+IMAGES_FILE = "utils/presets/presets.json"
 PRESETS_FILE = "src/common/filament_presets.cpp"
 FILAMENT_FILE = "src/common/filament.hpp"
 ALIASES_FILE = "src/feature/openprinttag/data_utils.cpp"
@@ -189,23 +191,80 @@ def features(text: str, needed: Iterable[str]) -> dict[str, frozenset[str]]:
 
 def printers(text: str) -> frozenset[str]:
     """Return the builds `PRINTER` may name: `PRINTER_VALID_OPTS`, set once at top level."""
+    return _set_once(text, "PRINTER_VALID_OPTS")
+
+
+def buddy_boards(text: str) -> frozenset[str]:
+    """Return the `BUDDY_BOARDS`, set once at top level: the buddy main boards."""
+    return _set_once(text, "BUDDY_BOARDS")
+
+
+def _set_once(text: str, variable: str) -> frozenset[str]:
+    """Return the list one `set()` at the top level of `ProjectOptions.cmake` gives
+    `variable`. Any other command that sets it or changes it as a list fails the read."""
     found = None
     try:
         for name, words, line, block in _cmake_statements(text):
-            if name not in _CMAKE_SETTERS or words[:1] != ["PRINTER_VALID_OPTS"]:
+            if name == "list" and words[1:2] == [variable]:
+                raise ValueError(f"{variable} is changed by list() on line {line}")
+            if name not in _CMAKE_SETTERS or words[:1] != [variable]:
                 continue
             if found is not None:
-                raise ValueError(f"PRINTER_VALID_OPTS is set more than once (again on line {line})")
+                raise ValueError(f"{variable} is set more than once (again on line {line})")
             if block or name != "set":
                 raise ValueError(
-                    f"PRINTER_VALID_OPTS is set by {name}() on line {line}"
+                    f"{variable} is set by {name}() on line {line}"
                     + (f" inside {block}" if block else "")
                 )
             found = frozenset(words[1:])
         if not found:
-            raise ValueError("no PRINTER_VALID_OPTS")
+            raise ValueError(f"no {variable}")
     except ValueError as e:
         raise Unreadable(OPTIONS_FILE, str(e)) from None
+    return found
+
+
+_IMAGE_KEYS = frozenset({"name", "description", "cacheVariables"})
+
+
+def images(text: str) -> list[tuple[str, str]]:
+    """Return the `PRINTER` and `BOARD` of each firmware image `utils/presets/presets.json`
+    lists, as `utils/build.py` loads it.
+
+    The file has to be what it is today: an object holding `$schema` and `presets`, each
+    preset holding exactly a unique `name`, a `description` and `cacheVariables`, with
+    `PRINTER` and `BOARD` plain strings. A preset that inherits from another, or a value
+    with CMake's `${...}` expansion, fails the read rather than being misread.
+    """
+    try:
+        try:
+            data = json.loads(text)
+        except json.JSONDecodeError as e:
+            raise ValueError(f"not JSON: {e}") from None
+        if not isinstance(data, dict) or data.keys() != {"$schema", "presets"}:
+            raise ValueError("the top level isn't an object of $schema and presets")
+        if not isinstance(data["presets"], list) or not data["presets"]:
+            raise ValueError("presets isn't a list of presets")
+        found = []
+        names = set()
+        for preset in data["presets"]:
+            if not isinstance(preset, dict) or preset.keys() != _IMAGE_KEYS:
+                raise ValueError(f"a preset isn't an object of {', '.join(sorted(_IMAGE_KEYS))}")
+            name, variables = preset["name"], preset["cacheVariables"]
+            if not isinstance(name, str) or not name or name in names:
+                raise ValueError(f"a missing or repeated preset name {name!r}")
+            names.add(name)
+            if not isinstance(variables, dict):
+                raise ValueError(f"{name}'s cacheVariables isn't an object")
+            values = []
+            for variable in ("PRINTER", "BOARD"):
+                value = variables.get(variable)
+                if not isinstance(value, str) or not value or "$" in value:
+                    raise ValueError(f"can't read {name}'s {variable} {value!r}")
+                values.append(value)
+            found.append((values[0], values[1]))
+    except ValueError as e:
+        raise Unreadable(IMAGES_FILE, str(e)) from None
     return found
 
 

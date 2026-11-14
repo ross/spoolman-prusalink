@@ -181,7 +181,8 @@ purge, the auto-retract's fully-retracted threshold, whether it can unload cold,
 purge before an unload. It also keeps its G-code compatibility group, whether its build
 has a compatibility mode, and the `M862.6` feature names its build knows. The simulator
 also lists the flexible presets, every G-code model name with its group, and the shortest
-purge a load runs.
+purge a load runs. `firmware/compare.py` itself keeps each build's main board, which its
+board macros follow.
 `script/firmware-check` rebuilds the tables from the firmware source and lists each
 difference. A weekly workflow runs it.
 

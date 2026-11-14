@@ -12,6 +12,7 @@ threshold and cold unload, and the purge before an unload) and what its G-code c
 (the compatibility mode and the `M862.6` feature names), which the simulator's models
 copy. The simulator's `GROUPS` copies every name a file's `M862.3` can carry, with its
 compatibility group, and its `MINIMAL_PURGE_MM` copies the shortest purge a load runs.
+This module's `MAIN_BOARDS`, which `BOARD_IS` follows, copies each build's main board.
 """
 
 from __future__ import annotations
@@ -65,19 +66,40 @@ PRINTER_IS = {
     "COREONEL": {"COREONEL", "COREONEL_INDX"},
 }
 
-# The builds each `BOARD_IS_<X>()` is true for, on the printer's main board: the one the
-# bridge talks to. This stays hand-stated. `utils/presets/presets.json` gives each firmware
-# image's PRINTER and BOARD, but which of a printer's boards is the main one is decided by
-# the `BOARD_IS_MASTER_BOARD` condition in `ProjectOptions.cmake`, and
-# `include/device/board.h` maps a BOARD onto these macros. The XL's main board is the
-# XLBUDDY, and the dev kit's XL_DEV_KIT_XLB defines `BOARD_IS_XLBUDDY()` too. The DWARF is
-# the XL tool head's own firmware, not a printer build. A macro missing here fails the read.
-# The `WATCHED` rows in `firmware/watch.py` that name `BOARD_IS` guard the buddy boards,
-# the main-board condition, the BUDDY, XBUDDY, XLBUDDY and dev kit boards' macros, and the
-# `BOARD_IS_XLBUDDY()` and `BOARD_IS_DWARF()` defaults; `presets.json` isn't watched.
+# Each build's main board: the BOARD of the printer's board the bridge talks to. The check
+# compares it with the main boards of the build's images in `utils/presets/presets.json`,
+# where a main board is one of `BUDDY_BOARDS` in `ProjectOptions.cmake` or one of
+# `OTHER_MAIN_BOARDS`.
+MAIN_BOARDS = {
+    "MK3.5": "XBUDDY",
+    "MK4": "XBUDDY",
+    "MINI": "BUDDY",
+    "XL": "XLBUDDY",
+    "XL_DEV_KIT": "XL_DEV_KIT_XLB",
+    "iX": "XBUDDY",
+    "COREONE": "XBUDDY",
+    "COREONEL": "XBUDDY",
+    "COREONE_INDX": "XBUDDY",
+    "COREONEL_INDX": "XBUDDY",
+}
+# The main boards besides the buddy boards, as the `BOARD_IS_MASTER_BOARD` condition in
+# `ProjectOptions.cmake` names them. The "main board condition" row of `WATCHED` in
+# `firmware/watch.py` guards it.
+OTHER_MAIN_BOARDS = frozenset({"XL_DEV_KIT_XLB"})
+
+# The boards that define each `BOARD_IS_<X>()` used here, as `include/device/board.h`
+# defines them: the dev kit's board defines `BOARD_IS_XLBUDDY()` too, and the DWARF is the
+# XL tool head's own board. Every other main board leaves both at 0. The `WATCHED` rows in
+# `firmware/watch.py` that name `BOARD_DEFINES` guard this.
+BOARD_DEFINES = {
+    "XLBUDDY": {"XLBUDDY", "XL_DEV_KIT_XLB"},
+    "DWARF": {"DWARF"},
+}
+# The builds each `BOARD_IS_<X>()` is true for, on the main board. A macro missing here
+# fails the read.
 BOARD_IS: dict[str, set[str]] = {
-    "XLBUDDY": {"XL", "XL_DEV_KIT"},
-    "DWARF": set(),
+    macro: {build for build, board in MAIN_BOARDS.items() if board in boards}
+    for macro, boards in BOARD_DEFINES.items()
 }
 
 # The `ProjectOptions.cmake` features the comparison, the readers and the simulator's
@@ -189,6 +211,7 @@ class Firmware:
     defaults: tuple[int, int, int]  # what `M865 R` resets nozzle, preheat and bed to
     aliases: Mapping[str, str]
     minimal_purge_mm: float  # the shortest purge a load runs, on every build
+    main_boards: Mapping[str, frozenset[str]]  # by build, the main boards of its images
 
     def groups(self) -> dict[str, str]:
         """Return every name a file's `M862.3` can carry, with its compatibility group.
@@ -298,7 +321,18 @@ def load(source: Source) -> Firmware:
         defaults=read.reset_defaults(source.read(read.FILAMENT_FILE)),
         aliases=read.aliases(source.read(read.ALIASES_FILE)),
         minimal_purge_mm=read.minimal_purge(source.read(read.PAUSE_SETTINGS_FILE)),
+        main_boards=main_boards(source.read(read.IMAGES_FILE), read.buddy_boards(options)),
     )
+
+
+def main_boards(images: str, buddy_boards: frozenset[str]) -> dict[str, frozenset[str]]:
+    """Return each build's main boards: the boards of its images in `presets.json` that are
+    buddy boards or in `OTHER_MAIN_BOARDS`."""
+    found: dict[str, set[str]] = {b: set() for b in MODEL_BUILDS.values() if b is not None}
+    for printer, board in read.images(images):
+        if printer in found and (board in buddy_boards or board in OTHER_MAIN_BOARDS):
+            found[printer].add(board)
+    return {build: frozenset(boards) for build, boards in found.items()}
 
 
 @dataclass(frozen=True)
@@ -319,6 +353,7 @@ class Copies:
     sim_defaults: tuple[int, int, int]
     sim_aliases: Mapping[str, str]
     sim_minimal_purge: float
+    main_boards: Mapping[str, str]
 
     @classmethod
     def current(cls) -> Copies:
@@ -341,6 +376,7 @@ class Copies:
             sim_defaults=tool.DEFAULT_TEMPERATURES,
             sim_aliases=tool.PRESET_ALIASES,
             sim_minimal_purge=model.MINIMAL_PURGE_MM,
+            main_boards=MAIN_BOARDS,
         )
 
 
@@ -385,6 +421,7 @@ TABLES = (
     "simulator DEFAULT_TEMPERATURES",
     "simulator PRESET_ALIASES",
     "simulator MINIMAL_PURGE_MM",
+    "firmware-check MAIN_BOARDS",
 )
 
 
@@ -457,6 +494,11 @@ def compare(firmware: Firmware, copies: Copies) -> list[Difference]:
             )
     fw, copy = firmware.minimal_purge_mm, copies.sim_minimal_purge
     differ("simulator MINIMAL_PURGE_MM", None, None, "minimal_purge", fw, copy)
+    # A build with no main board or several in its images can't match the one copied.
+    for build in sorted(firmware.main_boards.keys() | copies.main_boards.keys()):
+        fw = sorted(firmware.main_boards.get(build, ()))
+        copy = [copies.main_boards[build]] if build in copies.main_boards else []
+        differ("firmware-check MAIN_BOARDS", None, build, "main boards", fw, copy)
     return found
 
 
