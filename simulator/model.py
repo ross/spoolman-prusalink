@@ -2426,6 +2426,7 @@ class SimPrinter:
             "boot_id": self.boot_id,
             "state": str(self.state),
             "selected_tool": self.selected_tool,
+            "toolchanger": self.toolchanger,
             "message": self.message,
             "homed": self.homed,
             "job": job,

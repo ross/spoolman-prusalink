@@ -295,6 +295,7 @@ def test_a_one_tool_xl_has_no_tool_to_pick_or_park(action):
     with pytest.raises(Invalid, match="XL has one tool"):
         getattr(p, action)(*args)
     assert not p.toolchanger and make(XL, [loaded(0), loaded(1)])[1].toolchanger
+    assert p.to_json()["toolchanger"] is False  # the page hides the multi-tool fields
     # One enabled tool of two is the same printer; INDX docks whatever it has.
     assert not make(XL, [loaded(0), SimTool(1, enabled=False)])[1].toolchanger
     assert make(INDX)[1].toolchanger

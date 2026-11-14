@@ -316,7 +316,7 @@ function renderPrinter(p) {
       '<label>duration s' + inp(p, 'start.duration', '', 'type="number" step="any"') + '</label>' +
       '<label>preheat s' + inp(p, 'start.preheat', '', 'type="number" step="any"') + '</label>' +
       '<label>color changes mm (a, b)' + inp(p, 'start.cc', '', 'type="text"') + '</label>' +
-      (p.model.max_tools > 1
+      (p.toolchanger
         ? '<label title="the slicer profile\'s prime; empty for the stock one">prime mm' + inp(p, 'start.prime', '', 'type="number" step="any"') + '</label>' +
           '<label title="the slicer profile\'s tool-change purge; empty for the stock one">tool-change purge mm' + inp(p, 'start.tcpurge', '', 'type="number" step="any"') + '</label>'
         : '') +
