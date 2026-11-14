@@ -2,14 +2,17 @@
 
 This is the plan for making the simulator behave like each printer the
 bridge can meet: every single-tool model, the toolchangers (XL and INDX),
-and printers with an MMU3. Today it copies one printer closely, the Core
-One L, and treats the rest as that printer with a different name, tool
-count and retraction gap.
+and printers with an MMU3. It started as a close copy of one printer, the
+Core One L, with the rest treated as that printer under a different name,
+tool count and retraction gap.
 
-Draft, 2026-11-13. Workstream 1 is in progress: each model has its profile
-data and the firmware readers check it, but the simulator's behavior hasn't
-changed yet. [Open questions](#open-questions) lists what the work still has
-to settle.
+Draft, 2026-11-13. Workstream 1 is built: each model has its profile and
+its build's presets, and `script/firmware-check` compares them with the
+source. The tracker counts with the model's gap and feed ratio, a load runs
+the model's lengths, the ramming and auto-retract run per build, and the
+tests run the bridge against each family. Workstreams 2 to 6 aren't
+started. [Open questions](#open-questions)
+lists what the work still has to settle.
 
 ## Goal and non-goals
 
@@ -98,9 +101,13 @@ firmware update.
   accepted.
 - It serves `/api/version`, `/api/v1/info`, `/api/v1/status`, `/api/v1/job`
   and `/api/v1/filament`. `/api/v1/info` always reports `mmu` as false.
-- Tests: the unit harness always builds one Core One L with one tool.
-  Integration runs T1 to T7 on a two-tool INDX, and a few rows on an MK4,
-  an MK3.9 and a MINI.
+- Tests: the unit harness and the integration fixtures take a model and a
+  tool count. `tests/test_families.py` runs one story (a print with a tool
+  change, a swap, a reboot) on the Core One L, MK4S, iX, XL, Core One L INDX
+  and MINI, with charges worked by hand from the firmware's numbers.
+  Integration runs T1 to T7 on a two-tool INDX, T1 on a five-tool XL, and a
+  few rows on an MK4, an MK4S, an MK3.9 and a MINI. The MMU families wait
+  for Workstream 5.
 
 ## What's missing
 
