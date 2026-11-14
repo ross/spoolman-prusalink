@@ -328,7 +328,7 @@ class UserJob(SimJob):
     toolchange_purge: bool = False  # a tool change into an empty tool purges after the reload
     cold_bed: bool = False  # a power-panic resume waits for the user when the bed went cold
     clean_at: float | None = None  # RECOVER time left when the nozzle clean purges
-    unpark_mm: float = 0.0  # what the resume feeds back after a reload
+    restore_gap: float | None = None  # the tool's gap when a filament change began
 
     def progress(self) -> int:
         return int(100 * self.fed_mm / self.spec.total_mm)
@@ -762,10 +762,13 @@ class SimPrinter:
             self._recover(job, clean=True)
             return
         self._log("action", "resume")
-        if job.unpark_mm:
-            # The unpark feeds back what the reload's last retract pulled in.
-            self._track(self.tools[self.selected_tool], job.unpark_mm)
-            job.unpark_mm = 0.0
+        if job.restore_gap is not None:
+            # The unpark's feed and `restore_retracted_distance` put the filament back at
+            # the gap it had when the change began (`Pause::filament_change` in
+            # `src/marlin_stubs/pause/pause.cpp`).
+            tool = self.tools[self.selected_tool]
+            self._track(tool, tool.gap - job.restore_gap)
+            job.restore_gap = None
         if job.paused_from is JobPhase.PREHEAT:
             job.enter(JobPhase.PREHEAT)
             self._show_state()
@@ -838,6 +841,7 @@ class SimPrinter:
         job = self.job
         # Only a print in progress runs out, so the phase is PRINTING or PREHEAT here.
         job.paused_from = job.phase
+        job.restore_gap = t.gap
         self._physical_unload(t, str(reason))
         job.enter(JobPhase.WAIT_LOAD, Attention(reason, t.index))
         self._show_state()
@@ -899,6 +903,7 @@ class SimPrinter:
             self.job, self.screen = None, State.IDLE
             self._show_state()
             return
+        job.restore_gap = None  # a power loss ends the filament change before its restore
         if was_paused:
             job.paused_from = JobPhase.PRINTING
             job.enter(JobPhase.PAUSED)
@@ -1173,8 +1178,6 @@ class SimPrinter:
     def _process_done(self) -> None:
         job = self.job
         if job is not None and job.phase is JobPhase.WAIT_LOAD:
-            # A reload during a print ends retracted; the resume's unpark feeds it back.
-            job.unpark_mm = self.model.extruder.lengths.retract_mm
             job.enter(JobPhase.PAUSED)
         self._show_state()
 
@@ -1250,6 +1253,8 @@ class SimPrinter:
 
     def _wait_for_filament(self, job: UserJob, tool: int) -> None:
         job.paused_from = JobPhase.PRINTING
+        # An empty tool has no gap to go back to, so the reload resumes with none.
+        job.restore_gap = 0.0
         job.enter(JobPhase.WAIT_LOAD, Attention(Reason.NO_FILAMENT, tool))
         self._show_state()
 

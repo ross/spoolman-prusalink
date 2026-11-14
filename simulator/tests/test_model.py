@@ -778,7 +778,7 @@ def test_tool_change_into_an_empty_tool_purges_after_the_reload():
     # 550/576. The 8 mm retract after the prime only opens the gap.
     assert p.tools[1].extruded == pytest.approx(69 * 550 / 576)
     assert p.tools[1].gap == pytest.approx(8)
-    p.resume()  # the unpark feeds the 8 mm back, then the tool change purges 30
+    p.resume()  # back to the empty tool's gap 0: 8 fed, then the tool change purges 30
     assert p.tools[1].extruded == pytest.approx((69 + 30) * 550 / 576)
     sim.tick(10)
     assert p.state is State.FINISHED

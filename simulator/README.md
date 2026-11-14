@@ -143,7 +143,8 @@ that trace. The points that matter for the bridge, in short:
   retract, except on the iX and INDX, whose nozzle cleaners end it. A
   high-flow nozzle doubles the purge, except on INDX, whose cleaner purges a
   fixed 25 mm. A reload during a print then primes 4 mm and retracts 8 mm,
-  and the resume feeds the 8 mm back. From a full gap, a Core One L load
+  and the resume puts the tool back at the gap it had when the change
+  started. From a full gap, a Core One L load
   counts 20 mm before the material shows and 40 mm after, times the feed
   ratio.
 - Every print start shows `PRINTING`, then a brief `IDLE` with no job, then

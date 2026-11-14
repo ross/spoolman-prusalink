@@ -161,11 +161,11 @@ def test_a_reload_during_a_print_on_the_mk4():
     # purge's retract 8: gap 8. The prime 4: gap 4, nothing counts. The retract 8: gap 12.
     assert p.tools[0].extruded - before == pytest.approx((40 + 27) * 0.95)
     assert p.tools[0].gap == pytest.approx(12)
-    p.resume()  # the unpark feeds 8 back: gap 4, nothing counts
+    p.resume()  # back to the gap 0 the runout found: 12 fed, all refill the gap
     assert p.tools[0].extruded - before == pytest.approx((40 + 27) * 0.95)
-    assert p.tools[0].gap == pytest.approx(4)
-    sim.tick(1)  # 5 mm printed: 4 refill the gap, 1 counts
-    assert p.tools[0].extruded - before == pytest.approx((40 + 27 + 1) * 0.95)
+    assert p.tools[0].gap == 0
+    sim.tick(1)  # 5 mm printed, all counted
+    assert p.tools[0].extruded - before == pytest.approx((40 + 27 + 5) * 0.95)
 
 
 def test_a_reload_during_a_print_on_the_ix():
@@ -177,11 +177,62 @@ def test_a_reload_during_a_print_on_the_ix():
     # The prime 4: counts. The retract 8: gap 8.
     assert p.tools[0].extruded - before == pytest.approx((45 + 40 + 4) * 0.95)
     assert p.tools[0].gap == pytest.approx(8)
-    p.resume()  # the unpark feeds 8 back: gap 0, nothing counts
+    p.resume()  # back to the gap 0 the runout found: 8 fed, all refill the gap
     assert p.tools[0].extruded - before == pytest.approx((45 + 40 + 4) * 0.95)
     assert p.tools[0].gap == 0
     sim.tick(1)  # 5 mm printed, all counted
     assert p.tools[0].extruded - before == pytest.approx((45 + 40 + 4 + 5) * 0.95)
+
+
+def test_a_reload_resumes_at_the_gap_the_runout_found():
+    sim, p = make("1.4.1", [loaded(0, PLA)])
+    p.retract(0, 10)
+    p.start_print(PrintSpec([Segment(0, 100)], preheat_s=0))
+    sim.tick(0.8 + 1)  # 5 mm printed into the 10 mm gap: gap 5, nothing counts
+    assert (p.tools[0].gap, p.tools[0].extruded) == (5, 0)
+    p.runout(0)
+    p.load(0)
+    sim.advance(100)
+    # As on the MK4 above: (40 + 27) counted, gap 12.
+    assert p.tools[0].extruded == pytest.approx((40 + 27) * 0.95)
+    assert p.tools[0].gap == pytest.approx(12)
+    p.resume()  # 12 - 5 = 7 fed: gap 5, nothing counts
+    assert p.tools[0].gap == pytest.approx(5)
+    assert p.tools[0].extruded == pytest.approx((40 + 27) * 0.95)
+    sim.tick(1)  # 5 mm printed refill the gap
+    assert p.tools[0].extruded == pytest.approx((40 + 27) * 0.95)
+    sim.tick(1)  # 5 mm printed, all counted
+    assert p.tools[0].extruded == pytest.approx((40 + 27 + 5) * 0.95)
+
+
+def test_a_reload_in_the_preheat_resumes_at_its_gap():
+    sim, p = make("1.4.1", [loaded(0, PLA)])
+    p.retract(0, 10)
+    p.start_print(PrintSpec([Segment(0, 100)], preheat_s=5))
+    sim.tick(0.8 + 1)
+    assert p.job.phase is JobPhase.PREHEAT
+    p.runout(0)  # the gap is still the 10 mm retract
+    p.load(0)
+    sim.advance(100)
+    assert p.tools[0].gap == pytest.approx(12)
+    p.resume()  # 12 - 10 = 2 fed: gap 10, back to the preheat
+    assert p.job.phase is JobPhase.PREHEAT
+    assert p.tools[0].gap == pytest.approx(10)
+    assert p.tools[0].extruded == pytest.approx((40 + 27) * 0.95)
+
+
+def test_a_power_loss_after_a_reload_drops_the_restore():
+    sim, p = make("1.4.1", [loaded(0, PLA)])
+    p.retract(0, 10)
+    p.start_print(PrintSpec([Segment(0, 100)], preheat_s=0))
+    sim.tick(0.8 + 1)
+    p.runout(0)  # at gap 5
+    p.load(0)
+    sim.advance(100)
+    p.reboot(keep_job=True)  # the counters and gaps restart at 0
+    assert p.job.phase is JobPhase.PAUSED
+    p.resume()  # the filament change never got to its restore, so nothing moves
+    assert (p.tools[0].extruded, p.tools[0].gap) == (0, 0)
 
 
 def test_a_plain_pause_and_resume_move_nothing():

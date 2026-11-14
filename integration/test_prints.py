@@ -574,7 +574,7 @@ async def test_p6_jam_is_an_unconfirmed_swap_and_its_purge_is_charged(world: Wor
 
     # The reload after a jam purges 60 mm more than a load. Past the 40 mm gap: the 20 mm
     # fast load and the 40 + 60 mm purge, (20 + 100) * 0.95 = 114. The retract, prime and
-    # retract after it, and the resume's unpark, move only within the gap.
+    # retract after it, and the resume's feed back to the jam's gap 0, move only within the gap.
     mark = w.mark()
     await reload_and_resume(w)
     assert w.counter - at_jam == 114
