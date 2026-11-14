@@ -1,5 +1,7 @@
 """The readers, on excerpts of the firmware files."""
 
+import json
+
 import pytest
 
 from firmware import compare, read
@@ -17,11 +19,31 @@ def macros(**values):
 
 def test_printer_models():
     assert read.printer_models(fixtures.MODELS_HPP) == {
-        "1.3.0": "MK3",
-        "1.4.0": "MK4",
-        "2.1.0": "MINI",
-        "7.1.0": "COREONE",
+        "1.3.0": read.PrinterModel("MK3", "mk3"),
+        "1.4.0": read.PrinterModel("MK4", "mk4"),
+        "2.1.0": read.PrinterModel("MINI", "mini"),
+        "7.1.0": read.PrinterModel("COREONE", "coreone"),
     }
+
+
+def model_entry(model="mk4", group="mk4", version="1, 4, 0", name="MK4", extra=""):
+    return (
+        f"PrinterModelInfo {{ .model = PrinterModel::{model},"
+        f" .compatibility_group = PrinterModelCompatibilityGroup::{group},"
+        f' .version = {{ {version} }}, .id_str = "{name}",{extra} }},'
+    )
+
+
+def model_table(*entries, variants=""):
+    text = "printer_model_info {\n" + "\n".join(entries) + "\n};\n"
+    if variants:
+        text += f"printer_model_mmu_variant {{\n{variants}\n}};\n"
+    return text
+
+
+def test_printer_models_ignore_comments():
+    entry = model_entry(extra=' // .id_str = "OLD", .model = PrinterModel::mk3,\n')
+    assert read.printer_models(model_table(entry)) == {"1.4.0": read.PrinterModel("MK4", "mk4")}
 
 
 @pytest.mark.parametrize(
@@ -29,24 +51,137 @@ def test_printer_models():
     [
         ("int x;", "no printer_model_info array"),
         ("printer_model_info {\n};", "no PrinterModelInfo entries"),
+        (model_table(model_entry().replace(' .id_str = "MK4",', "")), "no .id_str"),
+        (model_table(model_entry(), model_entry(model="mk4s")), "model 1.4.0 appears twice"),
         (
-            "printer_model_info {\n PrinterModelInfo { .version = { 1, 4, 0 }, },\n};",
-            "no .id_str",
+            model_table(model_entry(), model_entry(version="1, 4, 1")),
+            "PrinterModel::mk4 appears twice",
+        ),
+        (model_table(model_entry(version="1, 4")), "no .version"),
+        (
+            model_table(model_entry().replace("PrinterModel::mk4,", "mk4,")),
+            "can't read .model = mk4",
         ),
         (
-            'printer_model_info {\n PrinterModelInfo { .version = { 1, 4, 0 }, .id_str = "A" },'
-            ' PrinterModelInfo { .version = { 1, 4, 0 }, .id_str = "B" },\n};',
-            "model 1.4.0 appears twice",
+            model_table(model_entry().replace("PrinterModelCompatibilityGroup::", "")),
+            "can't read .compatibility_group = mk4",
         ),
         (
-            'printer_model_info {\n PrinterModelInfo { .version = { 1, 4 }, .id_str = "A" },\n};',
-            "no .version",
+            model_table(model_entry().replace(" .compatibility_group = ", " .group = ")),
+            "no .compatibility_group",
         ),
+        (
+            model_table(model_entry(extra=" .compatibility_group = 3,")),
+            ".compatibility_group appears 2 times",
+        ),
+        (
+            model_table("#if HAS_X()", model_entry(), "#endif"),
+            "a preprocessor line in printer_model_info",
+        ),
+        (model_table(model_entry(name='MK4" "S')), r'can\'t read .id_str = "MK4" "S"'),
+        (
+            model_table('{ .model = PrinterModel::xl, .id_str = "XL" },', model_entry()),
+            "unexpected '{ .model = PrinterModel::xl, .id_str = \"XL\" },' before the first "
+            "PrinterModelInfo in printer_model_info",
+        ),
+        (
+            model_table(model_entry(), "    mk3x_info,", model_entry(version="1, 4, 1")),
+            r"unexpected ',\\n    mk3x_info,' after a PrinterModelInfo in printer_model_info",
+        ),
+        (model_table(model_entry() + " }"), "unexpected ', }' after a PrinterModelInfo"),
     ],
 )
 def test_printer_models_fail_closed(text, problem):
     with pytest.raises(Unreadable, match=f"can't read {read.MODELS_FILE}: {problem}"):
         read.printer_models(text)
+
+
+def test_mmu_variants():
+    assert read.mmu_variants(fixtures.MODELS_HPP) == {
+        "MK3MMU2": "1.3.0",
+        "MK4MMU3": "1.4.0",
+        "COREONEMMU3": "7.1.0",
+    }
+
+
+def variant(model="mk4", name="MK4MMU3"):
+    return f'PrinterModelMMUVariant {{ .model = PrinterModel::{model}, .id_str = "{name}" }},'
+
+
+@pytest.mark.parametrize(
+    ("text", "problem"),
+    [
+        ("int x;", "no printer_model_info array"),
+        (model_table(model_entry()), "no printer_model_mmu_variant array"),
+        (model_table(model_entry(), variants="// none"), "no PrinterModelMMUVariant entries"),
+        (
+            model_table(model_entry(), variants=variant(model="mk4s")),
+            "the MMU variant MK4MMU3 names an unknown PrinterModel::mk4s",
+        ),
+        (
+            model_table(model_entry(), variants=variant() + variant()),
+            "the MMU variant MK4MMU3 appears twice",
+        ),
+        (model_table(model_entry(), variants=variant().replace(".model", ".m")), "no .model"),
+        (model_table(model_entry(), variants=variant().replace(".id_str", ".s")), "no .id_str"),
+        (
+            model_table(model_entry(), variants=f"#if HAS_X()\n{variant()}\n#endif"),
+            "a preprocessor line in printer_model_mmu_variant",
+        ),
+        (
+            model_table(model_entry(), variants=variant(name='MK4" "MMU3')),
+            r'can\'t read .id_str = "MK4" "MMU3"',
+        ),
+        (
+            model_table(model_entry(), variants=f'{{ .id_str = "MK4X" }}, {variant()}'),
+            "unexpected '{ .id_str = \"MK4X\" },' before the first PrinterModelMMUVariant",
+        ),
+        (
+            model_table(model_entry(), variants=f"{variant()}\n    PrinterModelMMUVariant(mk3x),"),
+            r"unexpected ',\\n    PrinterModelMMUVariant\(mk3x\),' after a PrinterModelMMUVariant",
+        ),
+    ],
+)
+def test_mmu_variants_fail_closed(text, problem):
+    with pytest.raises(Unreadable, match=f"can't read {read.MODELS_FILE}: {problem}"):
+        read.mmu_variants(text)
+
+
+def gcode_macros(**values):
+    return macros(**{"HAS_MMU2": False, "HAS_INDX": False, "HAS_HT_HOTEND": False, **values})
+
+
+@pytest.mark.parametrize(
+    ("values", "names"),
+    [
+        ({}, {"Input Shaper"}),
+        ({"HAS_MMU2": True, "HAS_HT_HOTEND": True}, {"Input Shaper", "MMU3", "HT Hotend"}),
+        ({"HAS_INDX": True}, {"Input Shaper", "INDX lock"}),
+    ],
+)
+def test_feature_names(values, names):
+    # `#if EXTRUDERS > 1`, which `evaluate` can't read, is left alone.
+    assert read.feature_names(fixtures.GCODE_INFO_HPP, gcode_macros(**values)) == names
+
+
+DECLARE = 'inline constexpr const char *m862_6_{} = "{}";'
+
+
+@pytest.mark.parametrize(
+    ("text", "problem"),
+    [
+        ("", "no M862.6 feature names"),
+        ("#if HAS_MMU2()\n" + DECLARE.format("mmu", "MMU3") + "\n#endif", "no M862.6 feature"),
+        ("#if NEW()\n" + DECLARE.format("mmu", "MMU3") + "\n#endif", r"unknown macro NEW\(\)"),
+        ("const char *m862_6_mmu = MMU_NAME;", "can't read 'const char \\*m862_6_mmu"),
+        (DECLARE.format("a", "A") + "\n" + DECLARE.format("a", "B"), "m862_6_a is declared twice"),
+        ("#if HAS_MMU2()\n" + DECLARE.format("mmu", "MMU3"), "#if without #endif"),
+        ("#endif\n" + DECLARE.format("a", "A"), "#endif without #if"),
+    ],
+)
+def test_feature_names_fail_closed(text, problem):
+    with pytest.raises(Unreadable, match=f"can't read {read.GCODE_INFO_FILE}: {problem}"):
+        read.feature_names(text, gcode_macros())
 
 
 def test_features():
@@ -126,8 +261,9 @@ def test_printers():
         ("set(X 1)", "no PRINTER_VALID_OPTS"),
         ("set(PRINTER_VALID_OPTS)", "no PRINTER_VALID_OPTS"),
         ('set(PRINTER_VALID_OPTS "A")\nset(PRINTER_VALID_OPTS "B")', "set more than once"),
-        ('if(X)\nset(PRINTER_VALID_OPTS "A")\nendif()', r"set by set\(\) on line 2 inside if"),
-        ('unset(PRINTER_VALID_OPTS "A")', r"set by unset\(\) on line 1$"),
+        ('if(X)\nset(PRINTER_VALID_OPTS "A")\nendif()', r"appears in set\(\) on line 2 inside if"),
+        ('unset(PRINTER_VALID_OPTS "A")', r"appears in unset\(\) on line 1$"),
+        ('set(PRINTER_VALID_OPTS "A" ${MORE})', r"value '\$\{MORE\}' on line 1"),
     ],
 )
 def test_printers_fail_closed(text, problem):
@@ -426,6 +562,120 @@ def test_reset_defaults_fail_closed():
         read.reset_defaults(twice)
     with pytest.raises(Unreadable, match="no struct FilamentTypeParameters"):
         read.reset_defaults("")
+
+
+def test_buddy_boards():
+    assert read.buddy_boards(fixtures.OPTIONS_CMAKE) == {"BUDDY", "XBUDDY", "XLBUDDY"}
+
+
+@pytest.mark.parametrize(
+    "text, problem",
+    [
+        ("set(OTHER 1)\n", "no BUDDY_BOARDS"),
+        ('set(BUDDY_BOARDS "A")\nset(BUDDY_BOARDS "B")\n', "set more than once"),
+        ('if(X)\n  set(BUDDY_BOARDS "A")\nendif()\n', "appears in set\\(\\) on line 2 inside if"),
+        ('list(APPEND BUDDY_BOARDS "B")\nset(BUDDY_BOARDS "A")', r"in list\(\) on line 1"),
+        ('set(BUDDY_BOARDS "A")\nlist(APPEND BUDDY_BOARDS "B")', r"in list\(\) on line 2"),
+        ('set(BUDDY_BOARDS "A")\nlist(LENGTH X BUDDY_BOARDS)', r"in list\(\) on line 2"),
+        ('set(BUDDY_BOARDS "A")\nstring(APPEND BUDDY_BOARDS ";B")\n', r"appears in string\(\)"),
+        ('set(OTHER ${X} BUDDY_BOARDS)\nset(BUDDY_BOARDS "A")\n', r"appears in set\(\) on line 1"),
+        ('set(BUDDY_BOARDS "A" ${EXTRA})\n', r"can't read BUDDY_BOARDS's value '\$\{EXTRA\}'"),
+        ('set(BUDDY_BOARDS "A;B" "C")\n', "value 'A;B' on line 1"),
+        ('set(BUDDY_BOARDS "A" CACHE STRING "d")\n', "value 'CACHE'"),
+        ('set(BUDDY_BOARDS "A" PARENT_SCOPE)\n', "value 'PARENT_SCOPE'"),
+        ('set(BUDDY_BOARDS "A" "")\n', "value '' on line 1"),
+    ],
+)
+def test_buddy_boards_fail_closed(text, problem):
+    with pytest.raises(Unreadable, match=rf"{read.OPTIONS_FILE}: .*{problem}"):
+        read.buddy_boards(text)
+
+
+def preset(name="xl", **variables):
+    return {"name": name, "description": "", "cacheVariables": variables}
+
+
+def presets_json(*presets, **top):
+    return json.dumps({"$schema": "./presets_schema.json", "presets": list(presets), **top})
+
+
+def test_images():
+    found = read.images(fixtures.PRESETS_JSON)
+    assert ("XL", "XLBUDDY") in found
+    assert ("XL", "DWARF") in found
+    assert ("XL_DEV_KIT", "XL_DEV_KIT_XLB") in found
+    assert ("COREONE_INDX", "INDX_HEAD") in found
+    assert ("NONE", "ANFC") in found
+    assert len(found) == len(json.loads(fixtures.PRESETS_JSON)["presets"])
+
+
+@pytest.mark.parametrize(
+    "text, problem",
+    [
+        ("{", "not JSON"),
+        ("[]", "the top level isn't an object of \\$schema and presets"),
+        (presets_json(preset(PRINTER="XL", BOARD="XLBUDDY"), extra=1), "the top level isn't"),
+        (json.dumps({"$schema": "x", "presets": []}), "presets isn't a list of presets"),
+        (presets_json(preset(PRINTER="XL")), "can't read xl's BOARD None"),
+        (presets_json(preset(BOARD="XLBUDDY")), "can't read xl's PRINTER None"),
+        (presets_json(preset(PRINTER="XL", BOARD=True)), "can't read xl's BOARD True"),
+        (presets_json(preset(PRINTER="XL", BOARD="")), "can't read xl's BOARD ''"),
+        (presets_json(preset(PRINTER="", BOARD="XLBUDDY")), "can't read xl's PRINTER ''"),
+        (
+            presets_json(preset(PRINTER="XL", BOARD={"type": "STRING", "value": "XLBUDDY"})),
+            "can't read xl's BOARD",
+        ),
+        (presets_json(preset(PRINTER="XL", BOARD="${B}")), "can't read xl's BOARD '\\$\\{B\\}'"),
+        (
+            presets_json({**preset(PRINTER="XL", BOARD="XLBUDDY"), "inherits": "base"}),
+            "a preset isn't an object of cacheVariables, description, name",
+        ),
+        (presets_json(["xl"]), "a preset isn't an object"),
+        (
+            presets_json(preset(PRINTER="XL", BOARD="A"), preset(PRINTER="XL", BOARD="B")),
+            "a missing or repeated preset name 'xl'",
+        ),
+        (presets_json(preset(name="", PRINTER="XL", BOARD="A")), "a missing or repeated"),
+        (presets_json({**preset(), "cacheVariables": []}), "xl's cacheVariables isn't an object"),
+    ],
+)
+def test_images_fail_closed(text, problem):
+    with pytest.raises(Unreadable, match=rf"{read.IMAGES_FILE}: {problem}"):
+        read.images(text)
+
+
+def test_minimal_purge():
+    assert read.minimal_purge(fixtures.PAUSE_SETTINGS_HPP) == 1.0
+    two = "    static constexpr float minimal_purge = 2.5f; // mm\n"
+    assert read.minimal_purge(two) == 2.5
+
+
+@pytest.mark.parametrize(
+    "text, problem",
+    [
+        ("float purge_length() const;\n", "0 minimal_purge declarations"),
+        (
+            "static constexpr const float minimal_purge = 1;\n" * 2,
+            "2 minimal_purge declarations",
+        ),
+        (
+            "static constexpr const float minimal_purge = MINIMAL;\n",
+            "can't read 'static constexpr const float minimal_purge = MINIMAL;'",
+        ),
+        ("return std::max(r, minimal_purge);\n", "can't read 'return std::max"),
+        (
+            "#if HAS_X()\nstatic constexpr const float minimal_purge = 1;\n#endif\n",
+            "minimal_purge is declared inside an #if",
+        ),
+        (
+            "#if A()\n#else\nstatic constexpr const float minimal_purge = 1;\n#endif\n",
+            "minimal_purge is declared inside an #if",
+        ),
+    ],
+)
+def test_minimal_purge_fail_closed(text, problem):
+    with pytest.raises(Unreadable, match=rf"{read.PAUSE_SETTINGS_FILE}: {problem}"):
+        read.minimal_purge(text)
 
 
 def test_aliases():
@@ -872,3 +1122,113 @@ def test_cleaner_purge_sums_the_e_moves(gcode, purge):
 def test_cleaner_purge_fail_closed(text, problem):
     with pytest.raises(Unreadable, match=f"can't read {read.CLEANER_FILE}: {problem}"):
         read.cleaner_purge(text, macros())
+
+
+NEXTRUDER = {"HAS_NEXTRUDER": True, "HAS_INDX_HEAD": False}
+
+
+@pytest.mark.parametrize(
+    ("values", "constants"),
+    [(NEXTRUDER, (20.0, True)), ({"HAS_NEXTRUDER": False, "HAS_INDX_HEAD": True}, (8.0, False))],
+)
+def test_auto_retract(values, constants):
+    assert read.auto_retract(fixtures.AUTO_RETRACT_HPP, macros(**values)) == constants
+
+
+COLD_UNLOAD = "    static constexpr bool supports_cold_unload = true;\n"
+
+
+@pytest.mark.parametrize(
+    ("old", "new", "problem"),
+    [
+        ("= 20.f;", "= 20.f * 2;", "can't read 'static constexpr float full_retract_distance"),
+        ("unload = true;", "unload = HAS_X();", "can't read 'static constexpr bool supports_cold"),
+        (COLD_UNLOAD, "    bool supports_cold_unload = full_retract_distance > 0;\n", "can't read"),
+        (COLD_UNLOAD, "", "no supports_cold_unload for the build"),
+        (COLD_UNLOAD, COLD_UNLOAD * 2, "supports_cold_unload is declared twice for the build"),
+        ("#if HAS_NEXTRUDER()", "#if HAS_NEW()", r"unknown macro HAS_NEW\(\)"),
+    ],
+)
+def test_auto_retract_fail_closed(old, new, problem):
+    text = fixtures.AUTO_RETRACT_HPP
+    assert old in text
+    with pytest.raises(Unreadable, match=f"can't read {read.AUTO_RETRACT_FILE}: {problem}"):
+        read.auto_retract(text.replace(old, new, 1), macros(**NEXTRUDER))
+
+
+def test_auto_retract_fails_on_a_build_the_header_stops():
+    values = macros(HAS_NEXTRUDER=False, HAS_INDX_HEAD=False)
+    with pytest.raises(Unreadable, match="the build reaches #error"):
+        read.auto_retract(fixtures.AUTO_RETRACT_HPP, values)
+
+
+@pytest.mark.parametrize(("indx", "purge"), [(True, 2.0), (False, 0.0)])
+def test_unload_purge(indx, purge):
+    assert read.unload_purge(fixtures.PAUSE_CPP, macros(HAS_PAUSE=True, HAS_INDX=indx)) == purge
+    text = fixtures.PAUSE_CPP.replace("= 2.0f;", "= 3.5;")
+    assert read.unload_purge(text, macros(HAS_PAUSE=True, HAS_INDX=True)) == 3.5
+
+
+def test_no_unload_purge_without_pause():
+    assert read.unload_purge("", macros(HAS_PAUSE=False)) == 0.0
+
+
+ENTRY = "    set(LoadState::unload_purge);\n"
+DECLARATION = "    static constexpr float unload_purge_length = 2.0f; // mm\n"
+MOVE = "    std::ignore = do_e_move_notify_progress_hotextrude("
+PURGE = "void Pause::unload_purge_process([[maybe_unused]] Response response) {"
+WAIT = "void Pause::unload_wait_temp_process([[maybe_unused]] Response response) {"
+WAIT_BODY = "unexpected code in Pause::unload_wait_temp_process"
+PURGE_BODY = "unexpected code in Pause::unload_purge_process"
+INDX_ENTRY = "#if HAS_INDX()\n    set"
+ANOTHER_WAY_IN = "void Pause::f() { set(k ? LoadState::unload_purge : LoadState::ram_sequence); }\n"
+
+
+@pytest.mark.parametrize(
+    ("old", "new", "problem"),
+    [
+        ("= 2.0f;", "= 2.0f * k;", PURGE_BODY),
+        ("Purging_unstoppable", "Purging_xnstoppable", PURGE_BODY),
+        ("UserStopped", "UserStoppex", PURGE_BODY),
+        (MOVE, f"    if (k)\n{MOVE}", PURGE_BODY),
+        (DECLARATION, f"    return;\n{DECLARATION}", PURGE_BODY),
+        (MOVE, f"{MOVE}2.0f, 1);\n{MOVE}", PURGE_BODY),
+        (DECLARATION, "    purge();\n", PURGE_BODY),
+        (DECLARATION, f"    f();\n{DECLARATION}", PURGE_BODY),
+        (ENTRY, "    if (k) set(LoadState::unload_purge); else f();\n", WAIT_BODY),
+        (INDX_ENTRY, f"    set(LoadState::ram_sequence);\n    return;\n{INDX_ENTRY}", WAIT_BODY),
+        (ENTRY, ENTRY * 2, WAIT_BODY),
+        (PURGE, f"{ANOTHER_WAY_IN}{PURGE}", "LoadState::unload_purge outside Pause::unload_wait"),
+        (PURGE, "void Pause::purge() {", "0 definitions of Pause::unload_purge_process"),
+        (PURGE, f"{PURGE}}}\n{PURGE}", "2 definitions of Pause::unload_purge_process"),
+        (WAIT, "void Pause::wait() {", "0 definitions of Pause::unload_wait_temp_process"),
+        (WAIT, f"#if 0\n{WAIT}}}\n#endif\nvoid Pause::f() {{", "the build doesn't compile Pause::"),
+        ("#if HAS_INDX()", "#if HAS_NEW()", r"unknown macro HAS_NEW\(\)"),
+    ],
+)
+def test_unload_purge_fail_closed(old, new, problem):
+    text = fixtures.PAUSE_CPP
+    assert old in text
+    with pytest.raises(Unreadable, match=f"can't read {read.PAUSE_FILE}: {problem}"):
+        read.unload_purge(text.replace(old, new, 1), macros(HAS_PAUSE=True, HAS_INDX=True))
+
+
+def test_unload_purge_fails_without_its_move():
+    end = "StopConditions::UserStopped);\n"
+    text = fixtures.PAUSE_CPP.replace(MOVE, f"#if 0\n{MOVE}").replace(end, f"{end}#endif\n")
+    with pytest.raises(Unreadable, match=PURGE_BODY):
+        read.unload_purge(text, macros(HAS_PAUSE=True, HAS_INDX=True))
+
+
+@pytest.mark.parametrize(
+    ("indx", "problem"),
+    [
+        (True, "compiles Pause::unload_purge_process but doesn't reach it"),
+        (False, "reaches Pause::unload_purge_process but doesn't compile it"),
+    ],
+)
+def test_unload_purge_needs_its_way_in(indx, problem):
+    # The way in is compiled for the builds that don't compile the purge.
+    text = fixtures.PAUSE_CPP.replace("#if HAS_INDX()", "#if !HAS_INDX()", 1)
+    with pytest.raises(Unreadable, match=problem):
+        read.unload_purge(text, macros(HAS_PAUSE=True, HAS_INDX=indx))

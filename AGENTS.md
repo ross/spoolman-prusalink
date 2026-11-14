@@ -48,7 +48,7 @@ Before you finish a change, run `script/test` and `script/lint`. CI also runs
 | `integration/` | The end-to-end tests. The bridge and the simulator run in the test process, against a real Spoolman. |
 | `firmware/` | The code behind `script/firmware-check`. |
 | `tests/`, `simulator/tests/`, `firmware/tests/` | The unit suite. |
-| `docs/` | The scenario list, the printer behaviors, and plans. |
+| `docs/` | The scenario list, the printer behaviors, the bridge findings, and plans. |
 
 ## Bridge architecture
 
@@ -171,19 +171,45 @@ status says how far the evidence goes, from read in the source to traced on the 
 Change the simulator's printer behavior only on that evidence: the firmware source or a
 trace.
 
+`docs/bridge-findings.md` tracks what the simulator work found the bridge gets wrong, by
+BF ID, in priority stages. A new finding gets an entry there, not a GitHub issue.
+
 ## Firmware tables
 
 `printer_sync.py` and the simulator hold copies of tables from the firmware: printer
 models, preset filaments, reset defaults, and tag aliases. The bridge keeps one preset
 table for every model. Each simulator model keeps its build's presets and extruder
-numbers: steps per mm, filament change lengths, ramming sequences, and the nozzle
-cleaner's purge. The simulator also lists the flexible presets. `script/firmware-check`
-rebuilds the tables from the firmware source and lists each difference. A weekly
-workflow runs it.
+numbers: steps per mm, filament change lengths, ramming sequences, the nozzle cleaner's
+purge, the auto-retract's fully-retracted threshold, whether it can unload cold, and the
+purge before an unload. It also keeps its G-code compatibility group, whether its build
+has a compatibility mode, and the `M862.6` feature names its build knows. The simulator
+also lists the flexible presets, every G-code model name with its group, and the shortest
+purge a load runs. `firmware/compare.py` itself keeps each build's main board, which its
+board macros follow.
+`script/firmware-check` rebuilds the tables from the firmware source and lists each
+difference. A weekly workflow runs it.
 
 After you change a copied table, run the check. If a difference is intended, add it to
 `EXPECTED` in `firmware/compare.py`. The check also fails when an expected difference no
 longer occurs.
+
+A few copied rules are code in the firmware, which the check can't rebuild as a table. For
+each, `WATCHED` in `firmware/watch.py` records a fingerprint of the firmware code it came
+from: a watched region. Each row also records the firmware commit the region was last
+read at. When the check reports a changed region, do these steps in order:
+
+1. In a firmware checkout, run `git fetch` if the checkout doesn't have the newer commit,
+   then run the `git diff` that the check prints.
+2. Re-read the copy that the check names.
+3. If the rule changed, update the copy.
+4. Record the new fingerprint and commit that the check prints.
+
+Update a row only when its region changed. A region with the same text at a newer commit
+passes, and its row keeps its commit.
+
+When the check says the recorded fingerprint is wrong, the checked commit is the row's
+own, and there's no diff to read. Re-read the region at the recorded commit and the copy
+it names, then record the fingerprint the check found and keep the commit.
 
 ## Conventions
 

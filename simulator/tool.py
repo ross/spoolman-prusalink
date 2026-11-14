@@ -164,11 +164,11 @@ class Extruder:
     # retracted, and whether that lets an unload skip the ramming: `full_retract_distance`
     # and `supports_cold_unload` in `src/feature/auto_retract/auto_retract.hpp`, 20 mm and
     # true on a Nextruder, 8 mm and false on INDX. Only a build that auto-retracts uses
-    # them, and `script/firmware-check` doesn't compare them.
+    # them, so `script/firmware-check` compares them for those builds only.
     full_retract_mm: float = 20.0
     cold_unload: bool = True
     # What an unload purges before the ramming: 2 mm on INDX (`unload_purge_process` in
-    # `src/marlin_stubs/pause/pause.cpp`), not compared either.
+    # `src/marlin_stubs/pause/pause.cpp`).
     unload_purge_mm: float = 0.0
 
     @property

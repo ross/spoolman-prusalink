@@ -6,19 +6,23 @@ models, the preset filaments, the reset defaults and the tag aliases. This modul
 the same tables from the firmware source for each firmware build and lists every place
 a copy differs. A difference on `EXPECTED` is reported but doesn't fail the check.
 
-Each build also carries its preset filaments and its extruder numbers (steps per mm,
-filament change lengths, ramming sequences and the nozzle cleaner's purge), which the
-simulator's models copy.
+Each build also carries its preset filaments, its extruder numbers (steps per mm,
+filament change lengths, ramming sequences, the nozzle cleaner's purge, the auto-retract's
+threshold and cold unload, and the purge before an unload) and what its G-code checks know
+(the compatibility mode and the `M862.6` feature names), which the simulator's models
+copy. The simulator's `GROUPS` copies every name a file's `M862.3` can carry, with its
+compatibility group, and its `MINIMAL_PURGE_MM` copies the shortest purge a load runs.
+This module's `MAIN_BOARDS`, which `BOARD_IS` follows, copies each build's main board.
 """
 
 from __future__ import annotations
 
 import functools
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, fields
 from typing import Any
 
-from firmware import read
+from firmware import read, watch
 from firmware.source import Source, Unreadable
 
 # Printer type code (`/api/version`'s `printer`) to the firmware build that runs it: the
@@ -62,16 +66,40 @@ PRINTER_IS = {
     "COREONEL": {"COREONEL", "COREONEL_INDX"},
 }
 
-# The builds each `BOARD_IS_<X>()` is true for, on the printer's main board: the one the
-# bridge talks to. This stays hand-stated. `utils/presets/presets.json` gives each firmware
-# image's PRINTER and BOARD, but which of a printer's boards is the main one is decided by
-# the `BOARD_IS_MASTER_BOARD` condition in `ProjectOptions.cmake`, and
-# `include/device/board.h` maps a BOARD onto these macros. The XL's main board is the
-# XLBUDDY, and the dev kit's XL_DEV_KIT_XLB defines `BOARD_IS_XLBUDDY()` too. The DWARF is
-# the XL tool head's own firmware, not a printer build. A macro missing here fails the read.
+# Each build's main board: the BOARD of the printer's board the bridge talks to. The check
+# compares it with the main boards of the build's images in `utils/presets/presets.json`,
+# where a main board is one of `BUDDY_BOARDS` in `ProjectOptions.cmake` or one of
+# `OTHER_MAIN_BOARDS`.
+MAIN_BOARDS = {
+    "MK3.5": "XBUDDY",
+    "MK4": "XBUDDY",
+    "MINI": "BUDDY",
+    "XL": "XLBUDDY",
+    "XL_DEV_KIT": "XL_DEV_KIT_XLB",
+    "iX": "XBUDDY",
+    "COREONE": "XBUDDY",
+    "COREONEL": "XBUDDY",
+    "COREONE_INDX": "XBUDDY",
+    "COREONEL_INDX": "XBUDDY",
+}
+# The main boards besides the buddy boards, as the `BOARD_IS_MASTER_BOARD` condition in
+# `ProjectOptions.cmake` names them. The "main board condition" row of `WATCHED` in
+# `firmware/watch.py` guards it.
+OTHER_MAIN_BOARDS = frozenset({"XL_DEV_KIT_XLB"})
+
+# The boards that define each `BOARD_IS_<X>()` used here, as `include/device/board.h`
+# defines them: the dev kit's board defines `BOARD_IS_XLBUDDY()` too, and the DWARF is the
+# XL tool head's own board. Every other main board leaves both at 0. The `WATCHED` rows in
+# `firmware/watch.py` that name `BOARD_DEFINES` guard this.
+BOARD_DEFINES = {
+    "XLBUDDY": {"XLBUDDY", "XL_DEV_KIT_XLB"},
+    "DWARF": {"DWARF"},
+}
+# The builds each `BOARD_IS_<X>()` is true for, on the main board. A macro missing here
+# fails the read.
 BOARD_IS: dict[str, set[str]] = {
-    "XLBUDDY": {"XL", "XL_DEV_KIT"},
-    "DWARF": set(),
+    macro: {build for build, board in MAIN_BOARDS.items() if board in boards}
+    for macro, boards in BOARD_DEFINES.items()
 }
 
 # The `ProjectOptions.cmake` features the comparison, the readers and the simulator's
@@ -93,6 +121,7 @@ FEATURES = (
     "HAS_SWITCHABLE_AUTO_RETRACT",
     "HAS_NOZZLE_CLEANER",
     "HAS_MMU2",
+    "HAS_GCODE_COMPATIBILITY",
 )
 
 Ramming = tuple[read.Step, ...]
@@ -134,6 +163,14 @@ class CleanerPurge:
 
 
 @dataclass(frozen=True)
+class AutoRetract:
+    """A build's `AutoRetract` constants in `auto_retract.hpp`."""
+
+    full_retract_mm: float  # `full_retract_distance`
+    cold_unload: bool  # `supports_cold_unload`
+
+
+@dataclass(frozen=True)
 class Build:
     name: str
     features: frozenset[str]
@@ -146,6 +183,9 @@ class Build:
     # gets another sequence.
     ramming: Mapping[str, Ramming]
     cleaner_purge: CleanerPurge | None  # None without HAS_NOZZLE_CLEANER
+    auto_retract: AutoRetract | None  # None without HAS_AUTO_RETRACT
+    unload_purge_mm: float  # what an unload purges before the ramming
+    feature_names: frozenset[str]  # the `M862.6` names it knows
 
     @property
     def counters(self) -> bool:
@@ -165,10 +205,26 @@ class Build:
 @dataclass(frozen=True)
 class Firmware:
     commit: str
-    models: Mapping[str, str]  # type code to `id_str`, built or not
+    models: Mapping[str, read.PrinterModel]  # by type code, built or not
+    mmu_variants: Mapping[str, str]  # name to the base model's type code
     builds: Mapping[str, Build]
     defaults: tuple[int, int, int]  # what `M865 R` resets nozzle, preheat and bed to
     aliases: Mapping[str, str]
+    minimal_purge_mm: float  # the shortest purge a load runs, on every build
+    main_boards: Mapping[str, frozenset[str]]  # by build, the main boards of its images
+
+    def groups(self) -> dict[str, str]:
+        """Return every name a file's `M862.3` can carry, with its compatibility group.
+
+        Where two entries share a name, the first that `PrinterModelInfo::from_id_str`
+        tries wins: the MMU variants, then the models in order.
+        """
+        groups: dict[str, str] = {}
+        for name, code in self.mmu_variants.items():
+            groups.setdefault(name, self.models[code].group)
+        for model in self.models.values():
+            groups.setdefault(model.name, model.group)
+        return groups
 
     def built(self) -> dict[str, Build]:
         """Return each type code some build runs, with that build."""
@@ -208,10 +264,11 @@ def macros(build: str, features: Mapping[str, frozenset[str]]) -> read.Macros:
 
 def load(source: Source) -> Firmware:
     """Read the firmware's tables from `source` and evaluate them for every build."""
-    models = read.printer_models(source.read(read.MODELS_FILE))
+    models_text = source.read(read.MODELS_FILE)
+    models = read.printer_models(models_text)
     unknown = sorted(models.keys() - MODEL_BUILDS.keys(), key=_version)
     if unknown:
-        listed = ", ".join(f"{code} ({models[code]})" for code in unknown)
+        listed = ", ".join(f"{code} ({models[code].name})" for code in unknown)
         raise Unreadable(read.MODELS_FILE, f"no build for {listed}; add it to MODEL_BUILDS")
     options = source.read(read.OPTIONS_FILE)
     features = read.features(options, FEATURES)
@@ -224,6 +281,7 @@ def load(source: Source) -> Firmware:
     configurations = source.read(read.CONFIGURATION_FILE)
     advanced_configurations = source.read(read.ADVANCED_FILE)
     ramming_cmake = source.read(read.RAMMING_CMAKE_FILE)
+    gcode_info = source.read(read.GCODE_INFO_FILE)
     # Several builds share each of the files below.
     text = functools.cache(source.read)
     builds = {}
@@ -236,6 +294,11 @@ def load(source: Source) -> Firmware:
         cleaner = None
         if "HAS_NOZZLE_CLEANER" in has:
             cleaner = CleanerPurge(*read.cleaner_purge(text(read.CLEANER_FILE), values))
+        # `src/feature/CMakeLists.txt` compiles the auto-retract only with HAS_AUTO_RETRACT,
+        # and the header stops the other builds without a Nextruder or INDX with `#error`.
+        retract = None
+        if "HAS_AUTO_RETRACT" in has:
+            retract = AutoRetract(*read.auto_retract(text(read.AUTO_RETRACT_FILE), values))
         builds[name] = Build(
             name=name,
             features=has,
@@ -246,14 +309,30 @@ def load(source: Source) -> Firmware:
             pause=Pause(*read.pause_lengths(text(advanced), values, advanced)),
             ramming=read.ramming(text(ramming), values, ramming),
             cleaner_purge=cleaner,
+            auto_retract=retract,
+            unload_purge_mm=read.unload_purge(text(read.PAUSE_FILE), values),
+            feature_names=read.feature_names(gcode_info, values),
         )
     return Firmware(
         commit=source.commit,
         models=models,
+        mmu_variants=read.mmu_variants(models_text),
         builds=builds,
         defaults=read.reset_defaults(source.read(read.FILAMENT_FILE)),
         aliases=read.aliases(source.read(read.ALIASES_FILE)),
+        minimal_purge_mm=read.minimal_purge(source.read(read.PAUSE_SETTINGS_FILE)),
+        main_boards=main_boards(source.read(read.IMAGES_FILE), read.buddy_boards(options)),
     )
+
+
+def main_boards(images: str, buddy_boards: frozenset[str]) -> dict[str, frozenset[str]]:
+    """Return each build's main boards: the boards of its images in `presets.json` that are
+    buddy boards or in `OTHER_MAIN_BOARDS`."""
+    found: dict[str, set[str]] = {b: set() for b in MODEL_BUILDS.values() if b is not None}
+    for printer, board in read.images(images):
+        if printer in found and (board in buddy_boards or board in OTHER_MAIN_BOARDS):
+            found[printer].add(board)
+    return {build: frozenset(boards) for build, boards in found.items()}
 
 
 @dataclass(frozen=True)
@@ -269,13 +348,16 @@ class Copies:
     default_preheat: int
     preset_preheat: int  # the `Preset` dataclass's preheat default
     sim_models: Mapping[str, Any]  # simulator.model.ModelInfo
+    sim_groups: Mapping[str, str]
     sim_flexible: frozenset[str]
     sim_defaults: tuple[int, int, int]
     sim_aliases: Mapping[str, str]
+    sim_minimal_purge: float
+    main_boards: Mapping[str, str]
 
     @classmethod
     def current(cls) -> Copies:
-        from simulator import model, tool
+        from simulator import compatibility, model, tool
         from spoolman_prusalink import printer_sync as bridge
 
         preheat = next(f.default for f in fields(bridge.Preset) if f.name == "preheat")
@@ -289,9 +371,12 @@ class Copies:
             default_preheat=bridge.DEFAULT_PREHEAT,
             preset_preheat=preheat,  # type: ignore[arg-type]
             sim_models=model.MODELS,
+            sim_groups=compatibility.GROUPS,
             sim_flexible=tool.FLEXIBLE_PRESETS,
             sim_defaults=tool.DEFAULT_TEMPERATURES,
             sim_aliases=tool.PRESET_ALIASES,
+            sim_minimal_purge=model.MINIMAL_PURGE_MM,
+            main_boards=MAIN_BOARDS,
         )
 
 
@@ -331,9 +416,12 @@ TABLES = (
     "bridge DEFAULT_PREHEAT",
     "bridge PRESET_ALIASES",
     "simulator MODELS",
+    "simulator GROUPS",
     "simulator presets",
     "simulator DEFAULT_TEMPERATURES",
     "simulator PRESET_ALIASES",
+    "simulator MINIMAL_PURGE_MM",
+    "firmware-check MAIN_BOARDS",
 )
 
 
@@ -348,6 +436,10 @@ def compare(firmware: Firmware, copies: Copies) -> list[Difference]:
     built = firmware.built()
     _compare_bridge_models(built, firmware.models, copies, differ)
     _compare_sim_models(built, firmware.models, copies, differ)
+    groups = firmware.groups()
+    for name in sorted(groups.keys() | copies.sim_groups.keys()):
+        fw, copy = groups.get(name, MISSING), copies.sim_groups.get(name, MISSING)
+        differ("simulator GROUPS", None, name, "group", fw, copy)
 
     # The presets of each model the bridge writes to. The bridge holds one table for
     # every model; a material only some builds have (PPS and PPA) may be in it.
@@ -400,6 +492,13 @@ def compare(firmware: Firmware, copies: Copies) -> list[Difference]:
                 firmware.aliases.get(name, MISSING),
                 aliases.get(name, MISSING),
             )
+    fw, copy = firmware.minimal_purge_mm, copies.sim_minimal_purge
+    differ("simulator MINIMAL_PURGE_MM", None, None, "minimal_purge", fw, copy)
+    # A build with no main board or several in its images can't match the one copied.
+    for build in sorted(firmware.main_boards.keys() | copies.main_boards.keys()):
+        fw = sorted(firmware.main_boards.get(build, ()))
+        copy = [copies.main_boards[build]] if build in copies.main_boards else []
+        differ("firmware-check MAIN_BOARDS", None, build, "main boards", fw, copy)
     return found
 
 
@@ -407,7 +506,10 @@ Differ = Callable[[str, str | None, str | None, str, Any, Any], None]
 
 
 def _compare_bridge_models(
-    built: Mapping[str, Build], names: Mapping[str, str], copies: Copies, differ: Differ
+    built: Mapping[str, Build],
+    models: Mapping[str, read.PrinterModel],
+    copies: Copies,
+    differ: Differ,
 ) -> None:
     table = "bridge PRINTER_MODELS"
     for code in sorted(built.keys() | copies.bridge_models.keys(), key=_version):
@@ -418,11 +520,11 @@ def _compare_bridge_models(
                 code,
                 None,
                 "model",
-                names[code] if build else MISSING,
+                models[code].name if build else MISSING,
                 model.name if model else MISSING,
             )
             continue
-        differ(table, code, None, "name", names[code], model.name)
+        differ(table, code, None, "name", models[code].name, model.name)
         differ(table, code, None, "uuids", build.uuids, model.uuids)
         # The reason the bridge gives has to be true. A model the bridge can't serve has
         # to be refused, for that reason or another: it keeps one reason per model.
@@ -444,7 +546,10 @@ def _compare_bridge_models(
 
 
 def _compare_sim_models(
-    built: Mapping[str, Build], names: Mapping[str, str], copies: Copies, differ: Differ
+    built: Mapping[str, Build],
+    models: Mapping[str, read.PrinterModel],
+    copies: Copies,
+    differ: Differ,
 ) -> None:
     table = "simulator MODELS"
     for code in sorted(built.keys() | copies.sim_models.keys(), key=_version):
@@ -455,17 +560,23 @@ def _compare_sim_models(
                 code,
                 None,
                 "model",
-                names[code] if build else MISSING,
+                models[code].name if build else MISSING,
                 model.name if model else MISSING,
             )
             continue
-        differ(table, code, None, "name", names[code], model.name)
+        differ(table, code, None, "name", models[code].name, model.name)
         differ(table, code, None, "uuids", build.uuids, model.uuids)
         differ(table, code, None, "counters", build.counters, model.counters)
         differ(table, code, None, "max_tools", build.tools, model.max_tools)
         if build.gap_mm is not None:
             differ(table, code, None, "gap_mm", build.gap_mm, model.gap_mm)
         differ(table, code, None, "mmu", "HAS_MMU2" in build.features, model.mmu)
+        # The model's own group, as `PrinterModelInfo::current` picks it on every build.
+        differ(table, code, None, "group", models[code].group, model.group)
+        mode = "HAS_GCODE_COMPATIBILITY" in build.features
+        differ(table, code, None, "compatibility_mode", mode, model.checks.compatibility_mode)
+        names = sorted(model.checks.features)
+        differ(table, code, None, "feature_names", sorted(build.feature_names), names)
         _compare_extruder(table, code, build, model.extruder, differ)
 
 
@@ -486,6 +597,15 @@ def _compare_extruder(table: str, code: str, build: Build, extruder: Any, differ
     fw_mm, fw_retract = (None, False) if purge is None else (purge.e_mm, purge.auto_retract)
     differ(table, code, None, "cleaner_purge_mm", fw_mm, extruder.cleaner_purge_mm)
     differ(table, code, None, "cleaner_auto_retract", fw_retract, extruder.cleaner_auto_retract)
+    # A build without HAS_AUTO_RETRACT has no such constants. The simulator uses its model's
+    # only when the model auto-retracts, and the ramming above already checks that it
+    # doesn't: it has no `auto_retract` sequence.
+    retract = build.auto_retract
+    if retract is not None:
+        threshold = retract.full_retract_mm
+        differ(table, code, None, "full_retract_mm", threshold, extruder.full_retract_mm)
+        differ(table, code, None, "cold_unload", retract.cold_unload, extruder.cold_unload)
+    differ(table, code, None, "unload_purge_mm", build.unload_purge_mm, extruder.unload_purge_mm)
 
 
 def _compare_bridge_preset(
@@ -588,12 +708,15 @@ EXPECTED = (
 
 
 def report(
-    differences: list[Difference], expected: tuple[Expected, ...] | None = None
+    differences: list[Difference],
+    expected: tuple[Expected, ...] | None = None,
+    changes: Sequence[watch.Change] = (),
 ) -> tuple[list[str], bool]:
-    """Return the report's lines, per table, and whether the check passes.
+    """Return the report's lines, per table and then for the watched source, and whether
+    the check passes.
 
-    It passes when every difference is expected (on `EXPECTED` by default) and every
-    expected entry still occurs.
+    It passes when every difference is expected (on `EXPECTED` by default), every expected
+    entry still occurs and no watched region has changed.
     """
     if expected is None:
         expected = EXPECTED
@@ -617,12 +740,17 @@ def report(
     stale = [e for e in expected if e not in used]
     for e in stale:
         lines.append(f"stale expected difference, no longer found: {e}; remove it from EXPECTED")
+    if changes:
+        lines.append("watched source:")
+        lines.extend(f"  {c}" for c in changes)
+    else:
+        lines.append("watched source: ok")
     matched = len(differences) - unexpected
     lines.append(
         f"{unexpected} unexpected differences, {matched} expected, "
-        f"{len(stale)} stale expected entries"
+        f"{len(stale)} stale expected entries, {len(changes)} changed watched regions"
     )
-    return lines, unexpected == 0 and not stale
+    return lines, unexpected == 0 and not stale and not changes
 
 
 def _version(code: str) -> tuple[int, ...]:

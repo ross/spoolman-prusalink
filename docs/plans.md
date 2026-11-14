@@ -157,7 +157,7 @@ the middle sees a partial value, as on a real printer.
 | Cancel | `PRINTING` while parking, then `STOPPED`. `job` disappears. | Seen live (P7) |
 | Finish | `PRINTING` while parking, then `FINISHED`. `job` disappears. `FINISHED` and `STOPPED` persist with no timeout until dismissed on the screen, and a new print can start without dismissing. | Answer 5; seen live |
 | Sync job | 409 unless the state allows a print. Assigns a job ID, shows `PRINTING` (with the start blip) for the scan and park time, a few seconds, with `display_name` equal to the file name, applies the G-code, then `FINISHED`. No extrusion. | Answers 5 to 7; seen live (W1, W6) |
-| Model check | An `M862.3` naming another model (not this one or its MMU3 variant) stops the job in `ATTENTION` until tapped through on the page, or at once with the auto-accept toggle. | README (W10) |
+| Print preview | The job is counted first. A failed `M862` check, such as an `M862.3` for a model outside the printer's compatibility group, holds the job in `ATTENTION` until tapped through or cancelled on the page. A per-printer `checks` setting ignores, warns or aborts. A print started from the page asks about the tools it uses: one with no filament, a disabled one, or one holding another type than its segment names. | F27, F28 |
 | Power-panic resume | Reboot as above, then the same job ID continues in `PRINTING`. | Decided (P12); the kept ID is from source |
 | Manual extrude and retract | Retract grows `gap` up to the clamp and changes nothing else. Extrude fills `gap` first, then counts. | Answer 2; C6 |
 | Idle sensor clear | Outside a print, selecting a tool whose sensor sees no filament while it has a `material` counts an unload. Multi-tool only in practice. | `filament_sensors_handler.cpp:306` |
@@ -275,12 +275,11 @@ A parse error fails the job in `ATTENTION` with the offending line.
   `127.0.0.1` unless `--host` says otherwise, for a bridge running in a
   container with `--network host`.
 - **Config.** One TOML file. Per printer: `name`, `model`, `api_key`,
-  `firmware`, and `[[tools]]` with an optional initial material, counters
+  `firmware`, `checks`, and `[[tools]]` with an optional initial material, counters
   and `enabled`, so a run can start with filament loaded and usage on the
   clock (B1). Global: `time_scale`, `print_rate_mm_s`, `feed_ratio`,
   `sync_job_seconds`, `preheat_seconds`, `load_feed_mm`, `purge_mm`,
-  `toolchange_purge_mm`, `start_blip_seconds`, `auto_accept_model_check`,
-  `host`.
+  `toolchange_purge_mm`, `start_blip_seconds`, `host`.
 - **Bridge config output.** `python -m simulator bridge-config` prints a
   `[[printers]]` block for the bridge with every URL and key, and one
   location per tool named `<printer> T<n+1>` (or `<printer>` for one tool),
@@ -358,8 +357,8 @@ step maps to one or two actions.
   no job for a moment. The bridge should survive a poll landing there, so
   the simulator reproduces it, with a config switch to turn it off when it
   gets in the way.
-- **The model check stops by default.** Faithful, with an auto-accept
-  toggle in config and on the page for when it's not what's being tested.
+- **The print preview warns by default**, as the firmware does. A printer's
+  `checks` setting, in config and on the page, ignores or aborts instead.
 - **Counters report the floor** of a float, so a slow print still shows the
   counter moving between polls.
 - **Load lengths are configurable, not fixed.** The measured 116 mm is the

@@ -10,8 +10,11 @@ Draft, 2026-11-13. Workstream 1 is built: each model has its profile and
 its build's presets, and `script/firmware-check` compares them with the
 source. The tracker counts with the model's gap and feed ratio, a load runs
 the model's lengths, the ramming and auto-retract run per build, and the
-tests run the bridge against each family. Workstreams 2 to 6 aren't
-started. [Open questions](#open-questions)
+tests run the bridge against each family. Workstream 2 is built: an
+uploaded file goes through the preview's checks of its `M862` lines, and a
+print with segments goes through its checks of the tools it uses. The MMU's
+filament-inserted question belongs to Workstream 5. Workstreams 3 to 6
+aren't started. [Open questions](#open-questions)
 lists what the work still has to settle.
 
 ## Goal and non-goals
@@ -36,7 +39,8 @@ Not in scope:
   change takes are out. So is `READY`: only Prusa Connect is told it, and
   PrusaLink reports the state underneath (`status_renderer.cpp:30`).
 - **Bridge changes.** Where the source shows the bridge would misbehave,
-  [Bridge findings](#bridge-findings) records it. Fixing it is other work.
+  [bridge-findings.md](bridge-findings.md) records it. Fixing it is other
+  work.
 - **Models with no counters beyond what exists.** The MINI, MK3.5 and
   MK3.5S report materials only, and the bridge charges nothing there. Their
   load lengths don't matter.
@@ -96,9 +100,24 @@ firmware update.
 - A tool has its own counters, material, gap and sensor. A print is a list
   of (tool, mm) segments with a fixed purge at each tool change. Picking a
   tool can trigger the idle sensor clear. A tool can be disabled.
-- The model check stops a job in `ATTENTION` when `M862.3` names anything
-  but the model or its MMU3 name. The job has no ID until the question is
-  accepted.
+- An uploaded file's job is counted at once. When the scan ends, the
+  print preview checks the file's `M862` lines: the model by compatibility
+  group, the G-code level, input shaper, the INDX lock, the MMU3 feature
+  and unknown features. A failed check holds the job in `ATTENTION`, with
+  its ID, until it's answered. One `checks` setting per printer ignores,
+  warns or aborts; the INDX lock always warns.
+- A print started from the page is counted at once, as the user pressing
+  Print. The preview then checks the tools its segments use, with the
+  firmware's fixed severities: a disabled tool refuses, and a tool with no
+  filament warns and then waits for a load, which reads `BUSY` with no job.
+  A segment can name a filament type, and a tool holding another one asks.
+  On the XL and INDX these rows are one tools-mapping question, which a
+  print it applies to asks with nothing wrong too, and the idle sensor
+  clear runs on the picked tool while it's up. Print there asks once for
+  each kind of failed row: a tool with no filament asks to turn every
+  filament sensor off, then a tool holding another type asks. The print
+  then counts on the empty tool with no material. A printer's `sensors` switch turns off the
+  runout, the idle sensor clear and the preview's filament question.
 - It serves `/api/version`, `/api/v1/info`, `/api/v1/status`, `/api/v1/job`
   and `/api/v1/filament`. `/api/v1/info` always reports `mmu` as false.
 - Tests: the unit harness and the integration fixtures take a model and a
@@ -120,9 +139,9 @@ Paths are in the firmware at `ff61540d4`.
 | Load lengths | Slow and fast feed, then the purge: Core One and Core One L 40, 20, 40; MK4 and XL 30, 50, 27; iX 40, 45, 40; INDX 15, 25, 25. A high-flow nozzle doubles the purge, except on INDX. | `include/marlin/Configuration_*_adv.h`, `pause.cpp:688-866`, `nozzle_cleaner.cpp:76-92` |
 | The purge's end | Most builds retract 8 mm after the purge. The iX purges in 5 mm steps with no retract. INDX runs `G750 E25` once, then the auto-retract. | `pause.cpp:817-888` |
 | Feed ratio | E steps over calibrated E steps: 380/400 on every build but INDX, which is 550/576. | `planner.cpp:2210-2218`, `Configuration_COREONE.h:476-484` |
-| Auto-retract | After an idle load and at the end of a print, a Nextruder's sequence leaves the filament 55 mm retracted, but the tracker's gap stops at 40. The sequence first feeds back whatever the tracker says is retracted, so it starts from a gap of 0 and counts 23 mm: its 8 mm feed, which does leave the nozzle, and 15 mm that never does. When the tracker has lost the distance (the gap at its limit), only the 15 mm counts. The next forward move counts 15 mm more that never left the nozzle. INDX is exact. Off for flexible filament and when the user turns it off. | `standard_ramming_sequence_nextruder.cpp`, `ramming_sequence.cpp`, `mapi/motion.cpp`, `marlin_server.cpp:763-770, 1045-1080` |
+| Auto-retract | After an idle load and at the end of a print, a Nextruder's sequence leaves the filament 55 mm retracted, but the tracker's gap stops at 40. The sequence first feeds back whatever the tracker says is retracted, so it starts from a gap of 0 and counts 23 mm: its 8 mm feed, which does leave the nozzle, and 15 mm that never does. When the tracker has lost the distance (the gap at its limit), only the 15 mm counts. The next forward move counts 15 mm more that never left the nozzle. INDX is exact. Off for flexible filament and when the user turns it off. | `standard_ramming_sequence_nextruder.cpp`, `ramming_sequence.cpp`, `mapi/motion.cpp`, `marlin_server.cpp:763-770, 1045-1080`, `pause.cpp:1041-1044` |
 | Unload | A menu unload rams first. It counts about 23 mm on a Nextruder that isn't auto-retracted and about 19 mm on INDX, before the unload is recorded. | `pause.cpp` |
-| Power-panic resume | INDX purges 25 mm (`G750 E25`). The MK4 family, Core One, Core One L and iX feed back the 8 mm they retracted at the cut. The XL moves nothing. This reading disagrees with F12, which has the 25 mm on the single-tool Core One L: the F12 trace decides. | `power_panic.cpp:110-116, 480-521` |
+| Power-panic resume | INDX purges 25 mm (`G750 E25`). The MK4 family, Core One, Core One L and iX feed back the 8 mm they retracted at the cut. The XL moves nothing. F12 in printer-behaviors.md reads the same; the simulator still purges 25 mm on every model (`panic_purge_mm`), and the F12 trace decides. | `power_panic.cpp:110-116, 480-521` |
 | Nozzle-cleaner sequences | On the iX and INDX, a file under `/usb/macros/nozzle_cleaner/` replaces a built-in sequence, the INDX purges included. The simulator assumes the built-in ones. | `gcode_loader.cpp:24-30, 105-115` |
 
 With the gap full, a Core One L menu load counts 20 mm before the type
@@ -142,36 +161,43 @@ counts, and print-after-upload goes through the same checks
   `/api/v1/job` answers 200 with `PAUSED`. The upload itself answers 201.
   Declining goes to `IDLE`, not `STOPPED`, with the ID used up and the file
   kept (`wui_api.cpp:291`, `marlin_print_preview.cpp:414-425`,
-  `marlin_server.cpp:1113-1136, 2300-2316`). The simulator gives the job no
-  ID until the question is accepted, which is wrong.
+  `marlin_server.cpp:1113-1136, 2300-2331`).
 - **Severity is a user setting** per kind of check, picked in the printer's
   menu and kept in its config store, not compiled in: ignore, warn (the
   default on every build) or abort. Every failed check shows on one screen, and the worst
   severity decides: a warning waits for a tap, an abort can only be
-  declined (`gcode_compatibility.cpp:48-150`,
+  declined (`gcode_compatibility.cpp:48-153`,
   `marlin_print_preview.cpp:921-971`).
 - **The model check compares groups, not names.** A Core One L takes Core
   One G-code as its own. A Core One takes Core One Oak. An MK4 takes MK3.9.
   An MMU3 name resolves to its base model whether or not an MMU is on.
   Older models' G-code is "compatibility mode", which asks. INDX builds
-  take only their own name (`printer_model.cpp:124-198`).
+  take only their own name (`printer_model.cpp:140-198`).
 - **INDX asks about a file with no `M862.6 P"INDX lock"`**, and no setting
-  turns that off. An INDX whose nozzle cleaner isn't calibrated refuses
-  every print (`gcode_compatibility.cpp:92-101, 372-376`).
+  turns that off (`gcode_compatibility.cpp:92-101, 372-376`). An INDX
+  whose nozzle-cleaner calibration selftest hasn't passed refuses every
+  print: `nozzle_cleaner_not_calibrated` is a fixed abort
+  (`gcode_compatibility.cpp:143-152, 392-396`).
 - **A file sliced for an MMU3 is refused or asked about when the MMU is
-  off**, under the firmware-version setting.
+  off**, under the firmware setting.
 - **The per-tool checks need the file's filament-used metadata**: a tool
-  with no filament or another type asks, and a disabled tool refuses. The
-  bridge's sync job has no such metadata, so it raises none of them
-  (`gcode_info.hpp:95-98`, `gcode_compatibility.cpp:198-211, 420-423`).
+  with no filament or another type asks, and a disabled tool refuses.
+  Those severities are fixed; only the nozzle checks follow a menu
+  setting (`gcode_compatibility.cpp:155-265`). The bridge's sync
+  job has no such metadata, so it raises none of them (`gcode_info.hpp:95-98`,
+  `gcode_compatibility.cpp:156-205, 420-423`).
 - **With an MMU and filament at the nozzle, the preview asks to unload
-  first**, whatever the settings. Yes unloads. No starts the print as it is
-  (`marlin_print_preview.cpp:228-256, 699-704`).
+  first**, unless the filament sensors are off, or a single-tool file of
+  the loaded type meets filament at the sensor, which starts at once. Yes
+  unloads. No starts the print as it is
+  (`marlin_print_preview.cpp:228-256, 699-708`).
 
 The idle sensor clear runs while the preview opens and stops once a question
-shows (`marlin_server.cpp:1448-1460`).
+shows, except on the tools-mapping screen (`marlin_server.cpp:1448-1460`).
 
-The simulator has one of these, the model check, by exact name.
+The simulator has the checks of an uploaded file and of a print's tools.
+The MMU's question is still missing. A print raises no model question: it
+has no `M862` lines.
 
 ### `/api/v1/info`
 
@@ -186,9 +212,9 @@ builds that can take one and false elsewhere (`basic_gets.cpp:229-253`).
 | Tool change in a print | No unload and no firmware E move on the XL. The INDX head-lock moves are excluded from counting. The slicer's ramming counts on whichever tool is picked. | `toolchanger_indx.cpp:365-376`, `planner.cpp:2194` |
 | Menu load or unload of another tool | Picks that tool first. INDX docks it again afterwards; the XL leaves it picked. | `M701_2.cpp:136-139` |
 | No tool picked | Extrusion isn't counted and the idle sensor clear doesn't run. | `planner.cpp:2207` |
-| The picked tool at rest | INDX docks its tool after a load, an unload, a pause and a print, so an idle INDX has none picked. At boot it has one only if a tool is physically on the head. An XL has whichever tool is physically on the head, which after a print depends on the end G-code; the stock profile parks it. | `marlin_server.cpp:1098, 2561`, `toolchanger_indx.cpp:222-262`, `toolchanger_xl.cpp:582-597` |
+| The picked tool at rest | INDX docks its tool after a load, an unload, a pause and a print, so an idle INDX has none picked. At boot it has one only if a tool is physically on the head. An XL has whichever tool is physically on the head, which after a print depends on the end G-code; the stock profile parks it. | `M701_2.cpp:135-140, 194-197, 339-342`, `pause.cpp:1395-1402`, `marlin_server.cpp:1098, 2561`, `toolchanger_indx.cpp:222-262`, `toolchanger_xl.cpp:582-597` |
 | Idle sensor clear | Only the picked tool. So it never runs on an idle INDX, and rarely on an XL. A tool emptied by hand while docked keeps its type. Nothing sweeps the tools at boot or at a print start. | `filament_sensors_handler.cpp:294-312` |
-| Runout with a spool join | Counts an unload on the old tool, and the print goes on with the join's tool. The new tool's type isn't set or copied. Its purge counts on it: 27 mm on the XL, 25 mm on INDX. | `spool_join.cpp:258-342`, `toolchanger_xl.cpp:505-549` |
+| Runout with a spool join | Counts an unload on the old tool, and the print goes on with the join's tool. The new tool's type isn't set or copied. Its purge counts on it: 27 mm on the XL, 25 mm on INDX. | `spool_join.cpp:258-342`, `toolchanger_xl.cpp:505-549`, `nozzle_cleaner.cpp:87` |
 | Runout without one | `M600` on the same tool, as on a single-tool printer. | `filament_sensors_handler.cpp:237` |
 | `M600 T<n>` | Picks tool `n`, changes its filament, and goes back. | `M600.cpp:223-241, 319` |
 | Change all, from the XL menu | For each enabled tool: an unload, the new type, a purge. | `multi_filament_change.cpp:186-233` |
@@ -224,11 +250,13 @@ One L (and the MK3.5, which has no counters). With it on:
   unload and after every boot. Extrusion with no slot selected isn't
   counted (`mmu2_mk4.cpp:175, 674`, `planner.cpp:2207`).
 - **A tool change credits the outgoing slot with feed that isn't its
-  own.** The firmware plans about 190 mm to reach the filament sensor, then
-  up to 57 mm more, while the old slot is still selected. Less the gap,
-  that's roughly 200 mm on the old slot per change, and more on a retry.
-  This is inferred from the planner counting at plan time
-  (`mmu2_mk4.cpp:524-701`).
+  own.** The firmware plans about 190 mm to reach the filament sensor
+  (`mmu2_mk4.cpp:55, 1528, 1590`), then up to 57 mm more: 7 mm past the
+  sensor (`mmu2_mk4.cpp:1583`, `mmu2_config.h:35`) and 50 mm of feed
+  (`mmu2_config.h:69`, `mmu2_mk4.cpp:524-533`), while the old slot is
+  still selected (`mmu2_mk4.cpp:674`). Less the gap, that's roughly
+  200 mm on the old slot per change, and more on a retry. This is
+  inferred from the planner counting at plan time.
 - **An idle load counts 47 mm less the gap** on the new slot. An idle
   unload counts up to 20 mm (`mmu2_config.h:70-84`,
   `Configuration_MK4_adv.h:573`).
@@ -238,8 +266,11 @@ One L (and the MK3.5, which has no counters). With it on:
   (`printer_state.cpp:152-176, 238-247`).
 - **The tag reader is off**, so slot 0 can keep UUIDs from an earlier tag
   load but gets no new ones (`request_manager.cpp:263-266`).
-- **A sync job's write lands only on slot 0.** An ad-hoc write to slots 1
-  to 4 is a no-op on release firmware (`filament.cpp:396-402`).
+- **Slots 1 to 4 keep no UUIDs.** `M865 L<n>` takes every slot and
+  stores its type (`M865.cpp:194-196`, `store_definition.cpp:243-279`).
+  An ad-hoc write stores the name, temperatures and color for any slot,
+  and the UUIDs for slot 0 only; for another slot it skips them, behind a
+  `debug_assert` that fires on a debug build (`filament.cpp:380-402`).
 
 The simulator has none of this.
 
@@ -308,7 +339,9 @@ Each printer has one severity for the checks a setting governs: ignore,
 warn or abort. That replaces `auto_accept_model_check`, which becomes
 "ignore". The firmware has a setting per kind of check, but they share one
 screen and the worst decides, so one setting shows the bridge every
-outcome. The INDX lock and MMU questions always ask, as in the firmware.
+outcome. The INDX lock question always asks, as in the firmware. The MMU
+question is under the firmware setting
+(`gcode_compatibility.cpp:106`).
 
 A print's segment can name the filament type it was sliced for. A segment
 whose tool holds another type, or none, raises the filament question at the
@@ -394,8 +427,9 @@ Runs 1 and 3 go in before Workstream 5, runs 4 and 5 before Workstream 4.
 
 ## Before the INDX upgrade
 
-Once the printer is an INDX, these can't be recorded again. Sittings A, B
-and C in printer-behaviors.md cover F1 to F13 and F24. This plan adds:
+Once the printer is an INDX, these can't be recorded again. Sittings A to
+D in printer-behaviors.md cover F1 to F13, F24, F28 and F29. The first
+six below are what this plan adds; the last two are sitting D's:
 
 - **The load's split.** F3 at `--interval 0.5`: how much counts before the
   type appears, and whether about 23 mm counts at the end of the load
@@ -403,10 +437,10 @@ and C in printer-behaviors.md cover F1 to F13 and F24. This plan adds:
 - **The auto-retract around a print.** F5 with the counters watched during
   parking and at the next print's first move: about 23 mm (15 mm when the
   gap is already at its limit), then about 15 mm.
-- **An unload that isn't auto-retracted.** Unload after a Move E, to see
-  the ramming count.
-- **A preview question.** Upload a file sliced for an MK4S, and one for a
-  Core One: the first should ask, the second shouldn't. While it asks,
+- **An unload that isn't auto-retracted.** F26: unload after a Move E, to
+  see the ramming count.
+- **A preview question.** F27: upload a file sliced for an MK4S, and one
+  for a Core One: the first should ask, the second shouldn't. While it asks,
   expect `ATTENTION`, a `job` with a new ID, and `/api/v1/job` reading
   `PAUSED`. Decline one and expect `IDLE`.
 - **The power-panic resume's purge.** F12 decides between 25 mm and 8 mm on
@@ -414,72 +448,26 @@ and C in printer-behaviors.md cover F1 to F13 and F24. This plan adds:
   the resume.
 - **Everything with a tag**: F4 and F24's tag rows. The INDX has no tag
   reader until the firmware adds one.
+- **A load at the preview, then Abort.** `F28-load-then-decline`, steps 1
+  and 2 of sitting D: whether BF23's print start shows on the printer.
+- **A print with the sensor off.** `F29-sensors-off-print`, steps 3 to 7
+  of sitting D: the single-tool path to BF24 and BF25, which the
+  simulator doesn't model.
 
 ## Bridge findings
 
-Recorded, not planned. Each is from the source, and the simulator will be
-able to show it once the workstream named is built.
-
-1. **INDX: every sync job asks.** The default preamble has no
-   `M862.6 P"INDX lock"`, so the job waits in `ATTENTION` for a tap.
-   (Workstream 2.)
-2. **The model check is stricter than the firmware's.** `model_problem`
-   wants the exact name; the firmware takes a group. A Core One preamble on
-   a Core One L is refused by the bridge and fine for the printer. (2.)
-3. **A printer set to abort on a model mismatch**, or to ignore one,
-   behaves differently from the warning the bridge's docs describe. (2.)
-4. **Hand swaps on a toolchanger can be missed.** A docked tool emptied by
-   hand keeps its type and counts no unload, and an idle INDX has every
-   tool docked. Only a menu unload counts there. (4.)
-5. **A spool join** counts an unload on the old tool in the middle of a
-   print, and the rest of the print is charged to the join's tool. (4.)
-6. **The auto-retract charges filament that wasn't used**: 15 mm per idle
-   load and per print, and 15 mm more at the next forward move, on every
-   Nextruder. The 8 mm it also counts is extruded. (1.)
-7. **MMU: swaps are invisible.** `unload_count` doesn't move, so the bridge
-   never sees a spool change on a slot. (5.)
-8. **MMU: each tool change over-charges the outgoing slot** by roughly
-   200 mm. (5.)
-9. **MMU: nothing is counted after a boot** until the next tool change or
-   load, a power-panic resume included. (5.)
-10. **MMU: the sync job can wait on a question** when filament is in the
-    nozzle, and answering yes unloads it. The stock end G-code unloads
-    after every print, so this is a printer left loaded by hand. (5.)
-11. **MMU: writes reach slot 0 only**, UUIDs too, and the tag reader is
-    off. (5.)
-12. **MMU printers are on the bridge's supported list** as single-tool
-    models. `/api/v1/info` has an `mmu` flag the bridge doesn't read. (5.)
-13. **A failed `M865` is silent.** A bad name prints a serial error, stores
-    nothing, and the job still reads `FINISHED`. The bridge's "didn't take"
-    check covers it.
-14. **Presets differ by model**, as [plans.md](plans.md) already notes for
-    INDX.
-15. **A declined or refused sync job uses up a job ID** and shows as a job
-    in `ATTENTION`, then `IDLE` with no `FINISHED`. (2.)
-16. **An INDX with an uncalibrated nozzle cleaner refuses every print**, the
-    sync job included. (2.)
-17. **`READY` in the bridge's `IDLE_STATES` never arrives** over PrusaLink.
-    It's harmless.
-18. **A print cancelled in preheat can look started.** On a tool that
-    isn't auto-retracted, the end of the print rams about 22 mm (23
-    commanded × 0.95) while the job is still visible.
-    `accounting.print_start` takes the first counter rise in a new job as
-    the print's start, so it would take that ramming as one. No test covers
-    it: the P8 test's tool is already auto-retracted. (1.)
+[bridge-findings.md](bridge-findings.md) lists the places where the
+firmware source or the simulator shows the bridge would charge wrongly,
+miss a swap, or fail to write, each by its BF ID and in a proposed order
+of work. A finding from a later workstream gets an entry there.
 
 ## Open questions
 
 Left to the work:
 
-- Three extruder numbers are copied by hand, and `script/firmware-check`
-  doesn't compare them yet: the auto-retract's fully-retracted threshold,
-  whether a build can unload cold, and the purge before an INDX unload.
-
-- Which menu setting governs the filament-type question, and whether it
-  can be set to ignore or abort. Read it in Workstream 2.
-
-- F12 against this plan on the single-tool power-panic purge, 25 mm or
-  8 mm. The F12 trace decides; until then the simulator keeps 25 mm.
+- The single-tool power-panic resume: the source gives a plain Core One L
+  the 8 mm fed back, not a 25 mm purge (F12). The F12 trace decides; until
+  then the simulator purges 25 mm on every model.
 - PrusaSlicer's default wiping volume, from [slicer run](#slicer-runs) 1.
 - Whether an INDX profile's retract before a tool change is emitted, from
   slicer run 5.
@@ -487,6 +475,6 @@ Left to the work:
 Only hardware could tell, and none is expected:
 
 - How long an MMU's push to the filament sensor takes, which sets the size
-  of finding 8.
+  of BF16 in [bridge-findings.md](bridge-findings.md).
 - The iX's assisted-insertion length.
 - How the real slow feed compares with the tracker's fixed gap.

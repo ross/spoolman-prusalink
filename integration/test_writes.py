@@ -24,6 +24,7 @@ from integration.conftest import (
 from integration.faults import set_extra_text
 from integration.temperatures import TEMPERATURES, WRITTEN
 from simulator import prusalink
+from simulator.compatibility import MK4_CHECKS
 from simulator.model import MODELS, JobPhase, Material, ModelInfo, State
 from simulator.prusalink import DROP, Answer, Reply
 from simulator.tool import LOAD_CELL_PRESETS, MK4_EXTRUDER
@@ -410,7 +411,14 @@ async def test_w9_temperature_drift_is_flagged_unless_sync_drift(
     "model, preamble, problem, charged",
     [
         (
-            ModelInfo("99.1.0", "FUTURE", MK4_EXTRUDER, LOAD_CELL_PRESETS),
+            ModelInfo(
+                "99.1.0",
+                "FUTURE",
+                MK4_EXTRUDER,
+                LOAD_CELL_PRESETS,
+                group="future",
+                checks=MK4_CHECKS,
+            ),
             None,
             "printer type '99.1.0' isn't one the bridge knows",
             129,

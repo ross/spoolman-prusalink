@@ -8,20 +8,27 @@ the files use today, nothing more: see `evaluate` and `active_lines`.
 
 from __future__ import annotations
 
+import json
 import re
 from collections.abc import Callable, Iterable, Mapping
+from dataclasses import dataclass
 from typing import NoReturn
 
 from firmware.source import Unreadable
 
 MODELS_FILE = "include/common/printer_model_data.hpp"
+GCODE_INFO_FILE = "src/common/gcode/gcode_info.hpp"
 OPTIONS_FILE = "ProjectOptions.cmake"
+IMAGES_FILE = "utils/presets/presets.json"
 PRESETS_FILE = "src/common/filament_presets.cpp"
 FILAMENT_FILE = "src/common/filament.hpp"
 ALIASES_FILE = "src/feature/openprinttag/data_utils.cpp"
 TRACKER_FILE = "src/feature/filament_tracker/filament_tracker.hpp"
 RAMMING_CMAKE_FILE = "src/feature/ramming/CMakeLists.txt"
 CLEANER_FILE = "src/feature/nozzle_cleaner/nozzle_cleaner.cpp"
+AUTO_RETRACT_FILE = "src/feature/auto_retract/auto_retract.hpp"
+PAUSE_FILE = "src/marlin_stubs/pause/pause.cpp"
+PAUSE_SETTINGS_FILE = "src/marlin_stubs/include/pause_settings.hpp"
 CONFIGURATION_FILE = "include/marlin/Configuration.h"
 ADVANCED_FILE = "include/marlin/Configuration_adv.h"
 
@@ -47,26 +54,108 @@ Macros = Callable[[str], bool]
 Value = int | bool | str | None
 
 
-def printer_models(text: str) -> dict[str, str]:
-    """Return each printer model's type code, as "a.b.c", with its `id_str`."""
+@dataclass(frozen=True)
+class PrinterModel:
+    """One `printer_model_info` entry."""
+
+    name: str  # `id_str`, the name a file's `M862.3` gives the model
+    group: str  # its `PrinterModelCompatibilityGroup`
+
+
+def printer_models(text: str) -> dict[str, PrinterModel]:
+    """Return each printer model's type code, as "a.b.c", with its entry."""
     try:
-        region = _one(r"printer_model_info\s*\{(.*?)\n\};", text, "printer_model_info array")
-        entries = re.split(r"PrinterModelInfo\s*\{", region)[1:]
-        if not entries:
-            raise ValueError("no PrinterModelInfo entries")
-        models: dict[str, str] = {}
-        for entry in entries:
-            version = _one(
-                r"\.version\s*=\s*\{\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*\}", entry, ".version", 3
-            )
-            name = _one(r'\.id_str\s*=\s*"([^"]*)"', entry, ".id_str")
-            code = ".".join(version)
-            if code in models:
-                raise ValueError(f"model {code} appears twice")
-            models[code] = name
+        entries = _model_entries(_strip_comments(text))
     except ValueError as e:
         raise Unreadable(MODELS_FILE, str(e)) from None
-    return models
+    return {code: PrinterModel(name, group) for _, code, name, group in entries}
+
+
+def mmu_variants(text: str) -> dict[str, str]:
+    """Return each `printer_model_mmu_variant` name with its base model's type code.
+
+    `PrinterModelInfo::from_id_str` takes a file's `M862.3` name as the base model.
+    """
+    try:
+        text = _strip_comments(text)
+        codes = {model: code for model, code, _, _ in _model_entries(text)}
+        variants: dict[str, str] = {}
+        for entry in _array_entries(text, "printer_model_mmu_variant", "PrinterModelMMUVariant"):
+            model = _enum_field(entry, "model", "PrinterModel")
+            name = _id_str(entry)
+            if model not in codes:
+                raise ValueError(f"the MMU variant {name} names an unknown PrinterModel::{model}")
+            if name in variants:
+                raise ValueError(f"the MMU variant {name} appears twice")
+            variants[name] = codes[model]
+    except ValueError as e:
+        raise Unreadable(MODELS_FILE, str(e)) from None
+    return variants
+
+
+def _array_entries(text: str, array: str, kind: str) -> list[str]:
+    """Return the text inside each `kind { ... }` entry in the brace table `array`.
+
+    The table may hold only those entries: a preprocessor line could leave an entry out of
+    some builds, and text before an entry or after one, other than its comma, would be an
+    entry of another shape.
+    """
+    region = _one(rf"{array}\s*\{{(.*?)\n\}};", text, f"{array} array")
+    if re.search(r"^[ \t]*#", region, re.M):
+        raise ValueError(f"a preprocessor line in {array}")
+    before, *pieces = re.split(rf"{kind}\s*(?=\{{)", region)
+    if before.strip():
+        raise ValueError(f"unexpected {before.strip()!r} before the first {kind} in {array}")
+    if not pieces:
+        raise ValueError(f"no {kind} entries")
+    entries = []
+    for piece in pieces:
+        end = _closing_brace(piece, 0)
+        after = piece[end:].strip()
+        if after not in ("", ","):
+            raise ValueError(f"unexpected {after!r} after a {kind} in {array}")
+        entries.append(piece[1 : end - 1])
+    return entries
+
+
+def _id_str(entry: str) -> str:
+    """Return an entry's `.id_str`: one string literal, then the end of the initializer."""
+    name, rest = _one(r'\.id_str\s*=\s*"([^"]*)"([^,}]*)', entry, ".id_str", 2)
+    if rest.strip():
+        raise ValueError(f'can\'t read .id_str = "{name}"{rest.rstrip()}')
+    return name
+
+
+def _enum_field(entry: str, field: str, enum: str) -> str:
+    """Return the member a designated initializer `.field = enum::member` names."""
+    value = _one(rf"\.{field}\s*=\s*([^,}}]*)", entry, f".{field}").strip()
+    m = re.fullmatch(rf"{enum}::(\w+)", value)
+    if not m:
+        raise ValueError(f"can't read .{field} = {value}")
+    return m.group(1)
+
+
+def _model_entries(text: str) -> list[tuple[str, str, str, str]]:
+    """Return each `printer_model_info` entry as (`PrinterModel` member, type code, `id_str`,
+    compatibility group). Raises ValueError."""
+    found = []
+    codes, models = set(), set()
+    for entry in _array_entries(text, "printer_model_info", "PrinterModelInfo"):
+        model = _enum_field(entry, "model", "PrinterModel")
+        group = _enum_field(entry, "compatibility_group", "PrinterModelCompatibilityGroup")
+        version = _one(
+            r"\.version\s*=\s*\{\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*\}", entry, ".version", 3
+        )
+        name = _id_str(entry)
+        code = ".".join(version)
+        if code in codes:
+            raise ValueError(f"model {code} appears twice")
+        if model in models:
+            raise ValueError(f"PrinterModel::{model} appears twice")
+        codes.add(code)
+        models.add(model)
+        found.append((model, code, name, group))
+    return found
 
 
 def features(text: str, needed: Iterable[str]) -> dict[str, frozenset[str]]:
@@ -102,23 +191,88 @@ def features(text: str, needed: Iterable[str]) -> dict[str, frozenset[str]]:
 
 def printers(text: str) -> frozenset[str]:
     """Return the builds `PRINTER` may name: `PRINTER_VALID_OPTS`, set once at top level."""
+    return _set_once(text, "PRINTER_VALID_OPTS")
+
+
+def buddy_boards(text: str) -> frozenset[str]:
+    """Return the `BUDDY_BOARDS`, set once at top level: the buddy main boards."""
+    return _set_once(text, "BUDDY_BOARDS")
+
+
+def _set_once(text: str, variable: str) -> frozenset[str]:
+    """Return the list one `set()` at the top level of `ProjectOptions.cmake` gives
+    `variable`, each value a plain word.
+
+    Any other statement with `variable` as one of its words fails the read, since CMake
+    commands name the variable they write in different places (`string(APPEND X ...)`,
+    `list(LENGTH L X)`). So does a value CMake would expand, split or take as a keyword:
+    one holding `$` or `;`, an empty one, `CACHE` or `PARENT_SCOPE`. A `${X}` inside a
+    longer word only reads the variable, so it passes.
+    """
     found = None
     try:
         for name, words, line, block in _cmake_statements(text):
-            if name not in _CMAKE_SETTERS or words[:1] != ["PRINTER_VALID_OPTS"]:
+            if variable not in words:
                 continue
-            if found is not None:
-                raise ValueError(f"PRINTER_VALID_OPTS is set more than once (again on line {line})")
-            if block or name != "set":
+            if found is not None and name == "set" and words[0] == variable:
+                raise ValueError(f"{variable} is set more than once (again on line {line})")
+            if block or name != "set" or words[0] != variable:
                 raise ValueError(
-                    f"PRINTER_VALID_OPTS is set by {name}() on line {line}"
+                    f"{variable} appears in {name}() on line {line}"
                     + (f" inside {block}" if block else "")
                 )
+            for word in words[1:]:
+                if not word or "$" in word or ";" in word or word in _CMAKE_SET_KEYWORDS:
+                    raise ValueError(f"can't read {variable}'s value {word!r} on line {line}")
             found = frozenset(words[1:])
         if not found:
-            raise ValueError("no PRINTER_VALID_OPTS")
+            raise ValueError(f"no {variable}")
     except ValueError as e:
         raise Unreadable(OPTIONS_FILE, str(e)) from None
+    return found
+
+
+_IMAGE_KEYS = frozenset({"name", "description", "cacheVariables"})
+
+
+def images(text: str) -> list[tuple[str, str]]:
+    """Return the `PRINTER` and `BOARD` of each firmware image `utils/presets/presets.json`
+    lists, as `utils/build.py` loads it.
+
+    The file has to be what it is today: an object holding `$schema` and `presets`, each
+    preset holding exactly a unique `name`, a `description` and `cacheVariables`, with
+    `PRINTER` and `BOARD` plain strings. A preset that inherits from another, or a value
+    with CMake's `${...}` expansion, fails the read rather than being misread.
+    """
+    try:
+        try:
+            data = json.loads(text)
+        except json.JSONDecodeError as e:
+            raise ValueError(f"not JSON: {e}") from None
+        if not isinstance(data, dict) or data.keys() != {"$schema", "presets"}:
+            raise ValueError("the top level isn't an object of $schema and presets")
+        if not isinstance(data["presets"], list) or not data["presets"]:
+            raise ValueError("presets isn't a list of presets")
+        found = []
+        names = set()
+        for preset in data["presets"]:
+            if not isinstance(preset, dict) or preset.keys() != _IMAGE_KEYS:
+                raise ValueError(f"a preset isn't an object of {', '.join(sorted(_IMAGE_KEYS))}")
+            name, variables = preset["name"], preset["cacheVariables"]
+            if not isinstance(name, str) or not name or name in names:
+                raise ValueError(f"a missing or repeated preset name {name!r}")
+            names.add(name)
+            if not isinstance(variables, dict):
+                raise ValueError(f"{name}'s cacheVariables isn't an object")
+            values = []
+            for variable in ("PRINTER", "BOARD"):
+                value = variables.get(variable)
+                if not isinstance(value, str) or not value or "$" in value:
+                    raise ValueError(f"can't read {name}'s {variable} {value!r}")
+                values.append(value)
+            found.append((values[0], values[1]))
+    except ValueError as e:
+        raise Unreadable(IMAGES_FILE, str(e)) from None
     return found
 
 
@@ -421,14 +575,48 @@ def defines(text: str, names: Iterable[str], macros: Macros) -> tuple[int, ...]:
     Raises ValueError otherwise.
     """
     text = _strip_comments(text).replace("\\\n", " ")
+    found: dict[str, list[tuple[list[str], str]]] = {name: [] for name in names}
+    for line, scope in _scoped(text):
+        m = re.match(r"\s*#\s*(\w+)\s*(.*?)\s*$", line)
+        if not m or m.group(1) not in ("define", "undef"):
+            continue
+        name, value = re.match(r"(\w*)(.*)", m.group(2)).groups()  # type: ignore[union-attr]
+        if name not in found:
+            continue
+        if m.group(1) == "undef":
+            raise ValueError(f"#undef {name}")
+        found[name].append((scope, value))
+    values = []
+    for name, defined in found.items():
+        if not defined:
+            raise ValueError(f"no #define {name}")
+        active = [value for scope, value in defined if active_lines(scope, macros)]
+        if len(active) != 1:
+            raise ValueError(f"{name} is defined {len(active)} times for the build")
+        if not re.fullmatch(r"-?\d+", active[0].strip()):
+            raise ValueError(f"can't read #define {name} {active[0].strip()}")
+        values.append(int(active[0]))
+    return tuple(values)
+
+
+_IF_FAMILY = re.compile(r"\s*#\s*(?:if|ifdef|ifndef|elif|else|endif)\b")
+
+
+def _scoped(text: str) -> list[tuple[str, list[str]]]:
+    """Pair each line outside the `#if` family with the lines `active_lines` needs to decide
+    that line alone: the `#if`, `#elif` and `#else` lines of the branches around it, a
+    stand-in for the line, and an `#endif` for each open `#if`.
+
+    `active_lines` of a line's scope is empty exactly when the line is inactive, and
+    evaluates only those conditions, so the rest of the file may use conditions `evaluate`
+    can't read.
+    """
     # Per open #if, its directive lines so far: the #if and any #elif or #else after it.
     open_ifs: list[list[str]] = []
-    found: dict[str, list[tuple[list[str], str]]] = {name: [] for name in names}
+    scoped = []
     for line in text.splitlines():
-        m = re.match(r"\s*#\s*(\w+)\s*(.*?)\s*$", line)
-        if not m:
-            continue
-        directive, rest = m.groups()
+        m = re.match(r"\s*#\s*(\w+)", line)
+        directive = m.group(1) if m else None
         if directive in ("if", "ifdef", "ifndef"):
             open_ifs.append([line])
         elif directive in ("elif", "else"):
@@ -439,28 +627,45 @@ def defines(text: str, names: Iterable[str], macros: Macros) -> tuple[int, ...]:
             if not open_ifs:
                 raise ValueError("#endif without #if")
             open_ifs.pop()
-        elif directive in ("define", "undef"):
-            name, value = re.match(r"(\w*)(.*)", rest).groups()  # type: ignore[union-attr]
-            if name not in found:
-                continue
-            if directive == "undef":
-                raise ValueError(f"#undef {name}")
+        else:
             enclosing = [d for branches in open_ifs for d in branches]
-            found[name].append((enclosing + ["define"] + ["#endif"] * len(open_ifs), value))
+            scoped.append((line, [*enclosing, "line", *["#endif"] * len(open_ifs)]))
     if open_ifs:
         raise ValueError("#if without #endif")
-    values = []
-    for name, defined in found.items():
-        if not defined:
-            raise ValueError(f"no #define {name}")
-        # Each define with only its enclosing directives, which `active_lines` evaluates.
-        active = [value for lines, value in defined if active_lines(lines, macros)]
-        if len(active) != 1:
-            raise ValueError(f"{name} is defined {len(active)} times for the build")
-        if not re.fullmatch(r"-?\d+", active[0].strip()):
-            raise ValueError(f"can't read #define {name} {active[0].strip()}")
-        values.append(int(active[0]))
-    return tuple(values)
+    return scoped
+
+
+_FEATURE_NAME = re.compile(
+    r'inline\s+constexpr\s+const\s+char\s*\*\s*(m862_6_\w+)\s*=\s*"([^"\\]*)"\s*;'
+)
+
+
+def feature_names(text: str, macros: Macros) -> frozenset[str]:
+    """Return the `M862.6` feature names one build knows: the `gcode_info::m862_6_*`
+    constants its preprocessor keeps in `gcode_info.hpp`.
+
+    Only the `#if` branches around those constants are evaluated. Any other line that names
+    one fails the read, so a constant declared another way can't go unseen.
+    """
+    try:
+        found: dict[str, str] = {}
+        for line, scope in _scoped(_strip_comments(text)):
+            if "m862_6_" not in line:
+                continue
+            m = _FEATURE_NAME.fullmatch(line.strip())
+            if not m:
+                raise ValueError(f"can't read {line.strip()!r}")
+            if not active_lines(scope, macros):
+                continue
+            constant, name = m.groups()
+            if constant in found:
+                raise ValueError(f"{constant} is declared twice for the build")
+            found[constant] = name
+        if not found:
+            raise ValueError("no M862.6 feature names")
+    except ValueError as e:
+        raise Unreadable(GCODE_INFO_FILE, str(e)) from None
+    return frozenset(found.values())
 
 
 # The `StandardRammingSequence` cases (`standard_ramming_sequence.hpp`).
@@ -601,6 +806,168 @@ def cleaner_purge(text: str, macros: Macros) -> tuple[float, bool]:
     except ValueError as e:
         raise Unreadable(CLEANER_FILE, str(e)) from None
     return extruded, retract is not None
+
+
+_MM = r"(\d+(?:\.\d*)?)[fF]?"
+_AUTO_RETRACT_CONSTANTS = {
+    "full_retract_distance": re.compile(
+        rf"static\s+constexpr\s+float\s+full_retract_distance\s*=\s*{_MM}\s*;"
+    ),
+    "supports_cold_unload": re.compile(
+        r"static\s+constexpr\s+bool\s+supports_cold_unload\s*=\s*(true|false)\s*;"
+    ),
+}
+
+
+def auto_retract(text: str, macros: Macros) -> tuple[float, bool]:
+    """Return one build's `AutoRetract::full_retract_distance` and `supports_cold_unload`.
+
+    Only the `#if` branches around the two constants and any `#error` are evaluated. Each
+    has to be declared exactly once for the build, and the build may not reach an `#error`.
+    Any other line that names one fails the read.
+    """
+    try:
+        found: dict[str, str] = {}
+        for line, scope in _scoped(_strip_comments(text).replace("\\\n", " ")):
+            names = [n for n in _AUTO_RETRACT_CONSTANTS if re.search(rf"\b{n}\b", line)]
+            error = re.match(r"\s*#\s*error\b", line)
+            if not names and not error:
+                continue
+            m = None
+            if len(names) == 1:
+                m = _AUTO_RETRACT_CONSTANTS[names[0]].fullmatch(line.strip())
+            if names and not m:
+                raise ValueError(f"can't read {line.strip()!r}")
+            if not active_lines(scope, macros):
+                continue
+            if error:
+                raise ValueError(f"the build reaches {line.strip()}")
+            if names[0] in found:
+                raise ValueError(f"{names[0]} is declared twice for the build")
+            found[names[0]] = m.group(1)  # type: ignore[union-attr]
+        missing = [n for n in _AUTO_RETRACT_CONSTANTS if n not in found]
+        if missing:
+            raise ValueError(f"no {', '.join(missing)} for the build")
+    except ValueError as e:
+        raise Unreadable(AUTO_RETRACT_FILE, str(e)) from None
+    return float(found["full_retract_distance"]), found["supports_cold_unload"] == "true"
+
+
+# The two bodies of `Pause::unload_wait_temp_process` a build may compile: the unload
+# purges first, or goes straight to the ramming.
+_UNLOAD_WAIT_BODIES = {
+    "if (!ensureSafeTemperatureNotifyProgress()) { return; } set(LoadState::unload_purge);": True,
+    "if (!ensureSafeTemperatureNotifyProgress()) { return; } set(LoadState::ram_sequence);": False,
+}
+# The body of `Pause::unload_purge_process`, around the purge's length.
+_UNLOAD_PURGE_BODY = (
+    "setPhase(PhasesLoadUnload::Purging_unstoppable); static constexpr float unload_purge_length =",
+    "; std::ignore = do_e_move_notify_progress_hotextrude(unload_purge_length,"
+    " standard_feedrates::extruder(standard_feedrates::Extruder::advanced_pause_purge,"
+    " FilamentType::for_tool_heuristic(settings.virtual_tool())), StopConditions::UserStopped);"
+    " set(LoadState::ram_sequence);",
+)
+# Where the purge's state may appear outside the body above: the progress tables' steps.
+_UNLOAD_PURGE_STEP = re.compile(r"\{\s*LoadState::unload_purge\s*,\s*\d+\s*\}")
+
+
+def unload_purge(text: str, macros: Macros) -> float:
+    """Return how far one build purges before an unload's ramming, in mm: the
+    `unload_purge_length` of `Pause::unload_purge_process`, or 0 where the build doesn't
+    reach it. A build without `HAS_PAUSE` purges 0: `src/marlin_stubs/pause/CMakeLists.txt`
+    compiles `pause.cpp` only with it.
+
+    Each of `Pause::unload_wait_temp_process` and `Pause::unload_purge_process` has to be
+    defined once. The build's text of each body has to be a known one, apart from the
+    purge's length, so a condition, an early return or another move fails the read. The
+    wait has to be compiled, and it decides whether the unload purges. The purge function
+    has to be compiled exactly when the wait goes to it. `LoadState::unload_purge` may
+    appear elsewhere only as a progress table's step, so there's no other way in. Only the
+    `#if` branches around and inside the two functions are evaluated.
+    """
+    try:
+        if not evaluate("HAS_PAUSE()", macros):
+            return 0.0
+        text = _strip_comments(text).replace("\\\n", " ")
+        wait = _pause_body(text, "unload_wait_temp_process", macros)
+        purge = _pause_body(text, "unload_purge_process", macros)
+        if wait is None:
+            raise ValueError("the build doesn't compile Pause::unload_wait_temp_process")
+        reached = {_tokens(b): r for b, r in _UNLOAD_WAIT_BODIES.items()}.get(_tokens(wait[1]))
+        if reached is None:
+            raise ValueError("unexpected code in Pause::unload_wait_temp_process")
+        start, end = wait[0]
+        outside = _UNLOAD_PURGE_STEP.sub("", text[:start] + text[end:])
+        if re.search(r"\bLoadState::unload_purge\b", outside):
+            raise ValueError("LoadState::unload_purge outside Pause::unload_wait_temp_process")
+        if (purge is not None) != reached:
+            raise ValueError(
+                "the build compiles Pause::unload_purge_process but doesn't reach it"
+                if purge
+                else "the build reaches Pause::unload_purge_process but doesn't compile it"
+            )
+        if purge is None:
+            return 0.0
+        before, after = (_tokens(part) for part in _UNLOAD_PURGE_BODY)
+        body = _tokens(purge[1])
+        value = body[len(before) : len(body) - len(after)].replace(" ", "")
+        m = re.fullmatch(_MM, value)
+        if not (body.startswith(before + " ") and body.endswith(" " + after) and m):
+            raise ValueError("unexpected code in Pause::unload_purge_process")
+    except ValueError as e:
+        raise Unreadable(PAUSE_FILE, str(e)) from None
+    return float(m.group(1))
+
+
+_MINIMAL_PURGE = re.compile(
+    rf"static\s+constexpr\s+(?:const\s+)?float\s+minimal_purge\s*=\s*{_MM}\s*;"
+)
+
+
+def minimal_purge(text: str) -> float:
+    """Return `pause::Settings::minimal_purge`, the shortest purge a load runs, in mm.
+
+    The one line that names it has to declare it to a plain number, outside any `#if`, so
+    it's the same for every build. Any other line that names it fails the read.
+    """
+    try:
+        found = []
+        for line, scope in _scoped(_strip_comments(text).replace("\\\n", " ")):
+            if not re.search(r"\bminimal_purge\b", line):
+                continue
+            m = _MINIMAL_PURGE.fullmatch(line.strip())
+            if not m:
+                raise ValueError(f"can't read {line.strip()!r}")
+            if scope != ["line"]:
+                raise ValueError("minimal_purge is declared inside an #if")
+            found.append(m.group(1))
+        if len(found) != 1:
+            raise ValueError(f"{len(found)} minimal_purge declarations")
+    except ValueError as e:
+        raise Unreadable(PAUSE_SETTINGS_FILE, str(e)) from None
+    return float(found[0])
+
+
+def _pause_body(text: str, name: str, macros: Macros) -> tuple[tuple[int, int], str] | None:
+    """Return where `Pause::<name>`'s definition is in `text` and the build's text of its
+    body, or None where the build doesn't compile it."""
+    found = list(re.finditer(rf"\bvoid\s+Pause::{name}\s*\([^()]*\)\s*\{{", text))
+    if len(found) != 1:
+        raise ValueError(f"{len(found)} definitions of Pause::{name}")
+    m = found[0]
+    if not active_lines(_scope_at(text, m.start()), macros):
+        return None
+    end = _closing_brace(text, m.end() - 1)
+    body = text[m.end() : end - 1]
+    return (m.start(), end), "\n".join(active_lines(body.splitlines(), macros))
+
+
+def _scope_at(text: str, pos: int) -> list[str]:
+    """Return what `_scoped` pairs with the line holding `pos`, which isn't a directive."""
+    lines = text.splitlines()
+    number = text.count("\n", 0, pos)
+    index = sum(1 for line in lines[:number] if not _IF_FAMILY.match(line))
+    return _scoped(text)[index][1]
 
 
 def _tokens(code: str) -> str:
@@ -882,6 +1249,7 @@ _CMAKE_CLOSERS = frozenset(
     {"endif", "endfunction", "endmacro", "endforeach", "endwhile", "endblock"}
 )
 _CMAKE_SETTERS = frozenset({"set", "unset", "option", "define_boolean_option"})
+_CMAKE_SET_KEYWORDS = frozenset({"CACHE", "PARENT_SCOPE"})
 _CMAKE_NAME = re.compile(r"[A-Za-z_]\w*")
 
 

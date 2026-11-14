@@ -29,7 +29,7 @@ from harness import (
     two_printers,
 )
 
-from simulator.model import MODELS
+from simulator.model import MODELS, Reason, State
 from simulator.prusalink import Answer
 from spoolman_prusalink.accounting import ToolState
 from spoolman_prusalink.db import read_state
@@ -879,6 +879,15 @@ async def test_matching_preamble_for_other_model_writes(tmp_path):
     await swap_to_spool_20(bridge, fake, station)
     (gcode,) = jobs(station)
     assert gcode.startswith('M862.3 P "MK4S"')
+    # The preamble has no M862.6 P"Input shaper", so the printer asks before the job runs.
+    p = station.printer
+    station.tick_until(lambda: p.state is State.ATTENTION)
+    assert p.job.waits_for(Reason.PREVIEW)
+    assert p.job.attention.detail == "not sliced with input shaper"
+    p.tap_through()
+    station.finish_job()
+    await bridge.poll()  # the write took: no second job
+    assert len(jobs(station)) == 1
     await bridge.aclose()
 
 

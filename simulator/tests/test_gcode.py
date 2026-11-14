@@ -5,14 +5,18 @@ from __future__ import annotations
 import pytest
 
 from simulator.gcode import (
+    SCAN_LINES,
+    FeatureCheck,
     GcodeError,
     Home,
     Ignored,
+    LevelCheck,
     Message,
     ModelCheck,
     SetFilament,
     SetUuid,
     parse,
+    scan,
 )
 
 BRIDGE_JOB = """M862.3 P "COREONEL" ; printer model check
@@ -29,8 +33,8 @@ def test_bridge_job():
     commands = parse(BRIDGE_JOB)
     assert commands == [
         ModelCheck("COREONEL"),
-        Ignored("M862.5 P2"),
-        Ignored('M862.6 P"Input shaper"'),
+        LevelCheck(2),
+        FeatureCheck("Input shaper"),
         Home(),
         SetFilament(
             tool=0,
@@ -80,7 +84,6 @@ def test_unknown_lines_are_ignored():
         ('M865.1 I0 C"not-a-uuid"', "isn't a UUID"),
         ("M865.1 I0", "needs C"),
         ('M865 X N"PLA L0', "unterminated"),
-        ("M862.3", "needs P"),
     ],
 )
 def test_errors_name_the_line(line, reason):
@@ -91,3 +94,48 @@ def test_errors_name_the_line(line, reason):
 def test_a_parameter_that_does_not_parse_names_the_rest_of_the_line():
     with pytest.raises(GcodeError, match=r"^line 1: .*can't read '=bad'"):
         parse("M865 X =bad\n")
+
+
+@pytest.mark.parametrize(
+    ("line", "check"),
+    [
+        ('M862.3 P "MK4S"', ModelCheck("MK4S")),
+        ("M862.3 PMK4S", ModelCheck("")),  # not quoted: no name
+        ("M862.3", Ignored("M862.3")),  # no P: nothing checked
+        ("M862.3 Q", Ignored("M862.3 Q")),  # the query form
+        ('M862.3 P"MK4', ModelCheck("")),  # an unterminated quote
+        ("M862.5 P3", LevelCheck(3)),
+        ("M862.5 Px", LevelCheck(0)),
+        ("M862.5", Ignored("M862.5")),
+        ('M862.6 P" MMU3  "', FeatureCheck("MMU3")),
+        ("M862.6 P MMU3", FeatureCheck("")),
+        ("M862.6 Q", Ignored("M862.6 Q")),
+        ("M862.1 P0.4", Ignored("M862.1 P0.4")),
+        # The firmware pops one letter, reads its value if it knows the letter, then skips
+        # to the next space, so a `P` glued after another letter is never read
+        # (`GCodeInfo::parse_m862` in `src/common/gcode/gcode_info.cpp`).
+        ('M862.3 XP"MINI"', Ignored('M862.3 XP"MINI"')),
+        ('M862.3 T0P"MINI"', Ignored('M862.3 T0P"MINI"')),
+        ("M862.5 XP3", Ignored("M862.5 XP3")),
+        ('M862.3 X P"MINI"', ModelCheck("MINI")),
+    ],
+)
+def test_checks_never_fail_to_parse(line, check):
+    assert parse(line) == [check]
+
+
+def test_the_scan_reads_checks_from_the_first_200_gcode_lines():
+    assert SCAN_LINES == 200  # `search_first_x_gcodes`; the files below are built from it
+    head = "\n; a comment\n".join(["G1 X1"] * (SCAN_LINES - 1))
+    # M486, blank lines and comments don't count; a line number is skipped.
+    text = head + '\nM486 S1\n\n  ; more\nN12 M862.5 P3\nM862.3 P"MINI"\n'
+    assert scan(text) == [LevelCheck(3)]
+
+
+def test_the_scan_ignores_the_rest_of_the_line_and_the_file():
+    text = 'm862.3 P"MINI"\nM862.6 P"Input shaper" ; FW\nM865 X N"WAYTOOLONGX"\n'
+    assert scan(text) == [FeatureCheck("Input shaper")]  # the firmware matches M862 exactly
+
+
+def test_the_scan_skips_a_check_with_no_p():
+    assert scan('M862.3 Q\nM862.6 Q\nM862.5\nM862.3 P"MINI"\n') == [ModelCheck("MINI")]

@@ -74,12 +74,15 @@ poll_idle = 3
 
 See [sim.example.toml](sim.example.toml), which shows every setting with its
 default. A printer has a `model` (a PrusaLink type code such as `8.1.0`), an
-`api_key`, a `firmware` mode, `high_flow` for a high-flow nozzle, and
-`[[printers.tools]]` entries that can start loaded with a material and
-counters. The top-level settings are timing and lengths: the time scale, how
-fast loads and prints move filament, the purges of a tool change, a jam and a
-power-panic resume, the preheat and park times, and whether the start blip
-and the model check are on. The feed ratio and a load's slow, fast and purge
+`api_key`, a `firmware` mode, `checks` for the print preview, `high_flow`
+for a high-flow nozzle, `sensors` for the menu's switch of every filament
+sensor, and `[[printers.tools]]` entries that can start
+loaded with a material and counters. `checks` is `ignore`, `warn` (the
+default) or `abort`, and it stands for every setting in the printer's menu
+that governs a check of a file's `M862` lines. The top-level settings are
+timing and lengths: the time scale, how fast loads and prints move filament,
+the purges of a tool change, a jam and a power-panic resume, the preheat and
+park times, and whether the start blip is on. The feed ratio and a load's slow, fast and purge
 lengths are overrides: left out, each printer uses its model's value, which
 the page shows on the printer's card. On the page or through
 `/api/settings`, an empty value or `null` unsets an override. The purge
@@ -104,13 +107,19 @@ Actions: `load`, `unload`, `extrude`, `retract`, `select_tool`,
 `start_print`, `pause`, `resume`, `cancel`, `dismiss`, `home`, `runout`, `jam`,
 `clear_jam`, `reboot`, `set_power`, `set_fault`, `set_firmware`,
 `set_sensor_fault`, `set_stuck_write`, `set_tool_enabled`,
-`set_auto_accept`, `counter_step_back`, `set_extruded_at_unload`,
-`tap_through`. Parameter names are the keyword arguments of the methods with
+`set_checks`, `set_sensors`, `counter_step_back`,
+`set_extruded_at_unload`, `tap_through`. Parameter names are the keyword arguments of the methods with
 those names in `model.py`, and their type hints say what each takes: JSON
 `true` or `false` for a bool, an integer such as `3` (not `3.0`) for an int,
 any finite number for a float, and a listed value for an enum. An action the
 printer can't do now answers 409 with the reason; bad parameters answer 400
 and name the parameter.
+
+`start_print` takes the fields of `PrintSpec`: `segments`, each
+`{"tool": T, "slicer_mm": MM}` with an optional `"material"`, the filament
+type the file names for that tool, and the optional `duration_s`,
+`preheat_s`, `color_changes_mm` and `name`. The page's start form takes a
+segment per line as `tool:mm` or `tool:mm:TYPE`.
 
 The state lists each printer's and each tool's actions under `actions`, each
 with null when the printer would take it now or the reason it would refuse
@@ -172,13 +181,61 @@ that trace. The points that matter for the bridge, in short:
   A menu unload of a Nextruder tool that auto-retracted skips the ramming
   and counts nothing. An unload of a tool that fed since its auto-retract
   counts 23 mm times the feed ratio; a Nextruder runout counts 7 mm.
+- A print started from the page stands for the user pressing Print on the
+  file's preview: the job is counted at once and reads `PRINTING` while the
+  file is scanned. Then the preview checks the tools the print's segments
+  use, and each question holds the job in `ATTENTION`, with its ID in
+  `/api/v1/status` and `PAUSED` in `/api/v1/job`. On a printer without
+  tool mapping, the first screen lists more used tools than enabled ones
+  (a warning), a disabled used tool (Abort only) and a used tool with no
+  filament (a warning). Then, for an empty tool, the job waits for a
+  `load` of that tool, which answers Yes. The load reads `BUSY` with no
+  job. It neither primes nor runs an idle load's final auto-retract, but
+  the INDX cleaner's purge still ends with its own. A power cut while the
+  preview waits leaves nothing to resume. Then a used tool whose
+  stored type isn't the segment's `material`, compared exactly, asks
+  again. On the XL and INDX, a print that uses two tools, or any print with
+  two tools enabled, asks one tools-mapping question with every per-tool
+  row, the type included, and asks it with nothing wrong too. While that
+  question is up the printer isn't printing, so the idle sensor clear runs
+  on the picked tool. Nothing loads there. Print then asks once for each
+  kind of failed row, across all the tools: a used tool empty asks to turn
+  the filament sensors off, which `tap_through` does, and then a used tool
+  holding another type asks too, an empty one included when its segment
+  names a type. `tap_through` answers Ignore, and `cancel` goes back to the
+  tools-mapping screen with the sensors as they are. The screen keeps the
+  rows it showed when it opened, so Print asks the same questions again. A
+  disabled used tool leaves Abort the only way off the screen.
+  `tap_through` answers Print or Ok, and `cancel` answers Abort or No,
+  which ends in `IDLE` with no job and the ID used up. `checks` governs
+  none of these: the firmware's severities are fixed.
+- A print never waits for a tool with no filament. A runout needs the sensor
+  to see filament go, and nothing checks for filament when a tool is
+  picked, so a print that reaches an empty tool prints on through it: the
+  tool's `extruded` counts the purge and the moves with no `material`.
+  `sensors` is the menu's switch for every filament sensor. Off, there's no
+  runout, no idle sensor clear and no filament question at the preview, and
+  it stays off until `set_sensors` turns it on.
 - Every print start shows `PRINTING`, then a brief `IDLE` with no job, then
   `PRINTING`. `FINISHED` and `STOPPED` persist until dismissed, and the job
   disappears from `/api/v1/status` and `/api/v1/job` as soon as a print ends.
 - The sync job is accepted only when a print could start, runs as a job
-  with the uploaded file's name, applies `M865`, `M865.1` and `M117`, and
-  stops in `ATTENTION` on an `M862.3` for another model until you tap
-  through.
+  with the uploaded file's name, and applies `M865`, `M865.1` and `M117`.
+  The job is counted at once and reads `PRINTING` while the file is
+  scanned. Then the print preview checks the `M862` lines in the file's
+  first 200 G-code lines: the model by compatibility group (`M862.3`), the
+  G-code level (`M862.5`), and the features (`M862.6`): input shaper on
+  every build but the iX, the INDX lock on INDX, an MMU3 file with the MMU
+  off, and a feature the build doesn't know. A failed check that `checks`
+  doesn't ignore holds the job in `ATTENTION`, with its ID in
+  `/api/v1/status` and `PAUSED` in `/api/v1/job`, and one screen lists
+  every failed check. Under `warn`, `tap_through` answers Print: the start
+  blip, then the job runs. Under `abort`, only `cancel` answers, as Abort.
+  Abort ends in `IDLE` with no job, the ID used up and the file kept, and
+  nothing parks or moves. The INDX lock is a warning whatever `checks` is.
+  A `cancel` during the scan or the start blip ends the same way, for a
+  print started from the page too. A line with no `P`, such as the query
+  form `M862.3 Q`, checks nothing.
 - INDX and XL printers are several tools with their own counters. A tool
   change isn't an unload; the incoming tool gets a purge. Neither stores
   UUIDs, so `M865.1` does nothing there. Disabled tools don't appear in
@@ -237,6 +294,44 @@ Choices made where the firmware was silent or the plan left it open:
   filament in the simulator.
 - A power loss during a filament change drops the gap to restore: the
   resume after the reload doesn't move.
+- One `checks` setting stands for the firmware's settings per kind of check
+  (model, compatibility mode, G-code level, input shaper and firmware). The
+  checks share one screen and the worst severity decides it, so one setting
+  shows the bridge every outcome.
+- The MMU is always off, so a file with `M862.6 P"MMU3"` fails on a build
+  that knows the MMU3. A file that declares the `HT Hotend` is taken as
+  satisfied: whether the hotend is high-temperature is printer state the
+  simulator doesn't hold.
+- A print started from the page isn't a sliced file and has no `M862`
+  lines, so the preview checks only its tools: no model, level or feature
+  check. The simulator judges only the files the bridge uploads that way.
+- The preview screen before Print isn't modeled: `start_print` is the user
+  pressing Print, or Continue on the XL. The bed preheat while the
+  tools-mapping screen is up isn't modeled: the simulator reports no
+  temperatures.
+- A tool is used when a segment names it; the firmware reads the file's
+  `filament used [g]`. The filament sensor is the tool's `loaded` flag, so a
+  sensor fault doesn't raise the filament question.
+- The preview's load is the user's choice of what to load. The firmware
+  loads the file's type when it knows the name and asks otherwise. The
+  wrong-filament screen's Change, which runs a filament change, and the
+  filament-not-inserted screen's "disable the filament sensor" answer
+  aren't modeled. Neither is the
+  firmware's mapping of a print with one tool to the only enabled tool on a
+  toolchanger. The load can't be cancelled.
+- A print's end auto-retracts the picked tool even when it has no
+  filament, as the simulator does for a loaded one. The source doesn't
+  say otherwise, but a trace hasn't shown it.
+- The simulator has no spool join. The firmware refuses to turn the
+  sensors off when a print joins spools.
+- Stuck-filament detection isn't modeled. Load-cell printers have it, on by
+  default except on INDX. The MINI and MK3.5 don't have it.
+- The preview doesn't model an uncalibrated INDX nozzle cleaner, which
+  refuses every print, the unfinished-selftest screen, the
+  new-firmware screen (`M115 U`, which continues by itself after 30 s),
+  `M862.4` firmware versions, `M862.1` nozzle checks, `M862.2` numeric model
+  codes, the wastebin, file errors, answering through Connect, or
+  `DELETE /api/v1/job`.
 
 ## Tests
 

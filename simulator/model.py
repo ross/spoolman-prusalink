@@ -18,6 +18,25 @@ from pathlib import Path
 from typing import Any, ClassVar
 
 from simulator import gcode, sync
+from simulator.compatibility import (
+    CORE_ONE_CHECKS,
+    INDX_CHECKS,
+    IX_CHECKS,
+    MK3_5_CHECKS,
+    MK4_CHECKS,
+    PLAIN_CHECKS,
+    XL_CHECKS,
+    GCodeChecks,
+)
+from simulator.preview import (
+    Failed,
+    Severity,
+    ToolView,
+    preview,
+    print_checks,
+    tool_mapping,
+    wrong_types,
+)
 from simulator.tool import (
     AUTO_RETRACT_STEP,
     CORE_ONE_EXTRUDER,
@@ -55,7 +74,8 @@ EVENT_LIMIT = 2000
 SNAPSHOT_NAME = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
 EPSILON = 1e-9
 # The shortest purge a load runs, whatever the override: `minimal_purge` in
-# `src/marlin_stubs/include/pause_settings.hpp`.
+# `src/marlin_stubs/include/pause_settings.hpp`. `script/firmware-check` compares it with
+# the firmware source.
 MINIMAL_PURGE_MM = 1.0
 # The iX's nozzle cleaner purges in steps of this until it has purged the purge length
 # (`nozzle_cleaner_purge_sequence` in `src/marlin_stubs/pause/pause.cpp`).
@@ -104,6 +124,7 @@ class JobPhase(StrEnum):
     RECOVER = "RECOVER"  # BUSY after a power-panic boot, before the resume
     AWAIT_RESUME = "AWAIT_RESUME"  # ATTENTION: the bed went cold during the outage
     UNPARK = "UNPARK"  # PAUSED briefly while the head unparks, then the nozzle clean purges
+    PREVIEW_LOAD = "PREVIEW_LOAD"  # BUSY with no job: the preview's filament-not-inserted load
 
 
 IDLE_STATES = (State.IDLE, State.FINISHED, State.STOPPED)
@@ -122,6 +143,9 @@ PHASE_STATES = {
     JobPhase.RECOVER: State.BUSY,
     JobPhase.AWAIT_RESUME: State.ATTENTION,
     JobPhase.UNPARK: State.PAUSED,
+    # The load's own screen covers the preview, and with no print running yet it reads BUSY
+    # (`get_state` in `src/state/printer_state.cpp`), which has no job.
+    JobPhase.PREVIEW_LOAD: State.BUSY,
 }
 TIMED_PHASES = (
     JobPhase.SCANNING,
@@ -137,38 +161,63 @@ TIMED_PHASES = (
 class Reason(StrEnum):
     """Why a job waits for the user."""
 
-    MODEL_CHECK = "model check"  # the print preview asks about a file for another model
+    PREVIEW = "preview"  # the print preview asks about a file's failed checks
+    TOOLS_MAPPING = "tools mapping"  # a toolchanger's preview asks about the tools a print uses
+    WRONG_FILAMENT = "wrong filament"  # the preview asks about a tool holding another type
+    # Print on the tools-mapping screen asks about each kind of failed check once: a used
+    # tool empty asks to turn the sensors off, then a used tool of another type asks too.
+    SENSORS_OFF = "filament sensors off"
+    MAPPING_TYPE = "wrong filament type"
     PARSE_ERROR = "parse error"  # a sync job's G-code can't run
     JAM = "jam"
     RUNOUT = "runout"
     COLOR_CHANGE = "color change"
-    NO_FILAMENT = "no filament"  # a print reached a tool that has none
+    NO_FILAMENT = "no filament"  # the preview's filament-not-inserted screen
     COLD_BED = "cold bed"  # the bed went cold during a power panic
 
 
 # The reasons each waiting phase can have. A jam waits in HOLD when it's cleared in place,
 # and in WAIT_LOAD when it unloads the tool.
 PHASE_REASONS = {
-    JobPhase.HOLD: frozenset({Reason.MODEL_CHECK, Reason.PARSE_ERROR, Reason.JAM}),
+    JobPhase.HOLD: frozenset(
+        {
+            Reason.PREVIEW,
+            Reason.TOOLS_MAPPING,
+            Reason.WRONG_FILAMENT,
+            Reason.SENSORS_OFF,
+            Reason.MAPPING_TYPE,
+            Reason.PARSE_ERROR,
+            Reason.JAM,
+        }
+    ),
     JobPhase.WAIT_LOAD: frozenset(
         {Reason.RUNOUT, Reason.JAM, Reason.COLOR_CHANGE, Reason.NO_FILAMENT}
     ),
     JobPhase.AWAIT_RESUME: frozenset({Reason.COLD_BED}),
 }
+# The questions of the firmware's tools-mapping phase, while it isn't printing.
+MAPPING_QUESTIONS = frozenset({Reason.TOOLS_MAPPING, Reason.SENSORS_OFF, Reason.MAPPING_TYPE})
+# The questions the print preview asks with Abort and Print or Ok, which `tap_through` and
+# `cancel` answer.
+PREVIEW_QUESTIONS = MAPPING_QUESTIONS | {Reason.PREVIEW, Reason.WRONG_FILAMENT}
 
 
 @dataclass(frozen=True)
 class Attention:
-    """What the screen asks the user, with the tool it names or a parse error's text."""
+    """What the screen asks the user, with the tool it names, or the text of a parse error
+    or of the preview's failed checks. A fatal preview question offers only Abort. The
+    tools-mapping screen can have no failed checks, and then no text."""
 
     reason: Reason
     tool: int | None = None
     detail: str | None = None
+    fatal: bool = False
 
     def __str__(self) -> str:
         match self.reason:
-            case Reason.MODEL_CHECK:
-                return "model check"
+            case reason if reason in PREVIEW_QUESTIONS:
+                detail = self.detail or "nothing wrong"
+                return f"{self.reason}{' (abort only)' if self.fatal else ''}: {detail}"
             case Reason.PARSE_ERROR:
                 return f"parse error: {self.detail}"
             case Reason.NO_FILAMENT:
@@ -191,6 +240,11 @@ class ModelInfo:
     max_tools: int = 1
     counters: bool = True
     mmu: bool = False  # whether the build can drive an MMU3: HAS_MMU2
+    # Its `compatibility_group` in `printer_model_data.hpp`. The MK3.5, MK4 and XL builds
+    # run several models and check a file against the one the printer is set to
+    # (`PrinterModelInfo::current`), so each model has its own entry's group.
+    group: str = field(kw_only=True)
+    checks: GCodeChecks = field(kw_only=True)  # its build's
 
     def holds_uuid(self, tool: int) -> bool:
         """Whether `tool` keeps tag UUIDs: tool 0 of a model with a tag reader (F21).
@@ -218,22 +272,120 @@ def _models(*infos: ModelInfo) -> dict[str, ModelInfo]:
 
 # The printer models, from the firmware: `script/firmware-check` compares them with its source.
 MODELS = _models(
-    ModelInfo("1.3.5", "MK3.5", MK3_5_EXTRUDER, MK3_5_PRESETS, counters=False, mmu=True),
-    ModelInfo("1.3.6", "MK3.5S", MK3_5_EXTRUDER, MK3_5_PRESETS, counters=False, mmu=True),
-    ModelInfo("1.3.9", "MK3.9", MK4_EXTRUDER, LOAD_CELL_PRESETS, mmu=True),
-    ModelInfo("1.3.10", "MK3.9S", MK4_EXTRUDER, LOAD_CELL_PRESETS, mmu=True),
-    ModelInfo("1.4.0", "MK4", MK4_EXTRUDER, LOAD_CELL_PRESETS, mmu=True),
-    ModelInfo("1.4.1", "MK4S", MK4_EXTRUDER, LOAD_CELL_PRESETS, mmu=True),
-    ModelInfo("2.1.0", "MINI", MINI_EXTRUDER, MINI_PRESETS, counters=False),
-    ModelInfo("3.1.0", "XL", MK4_EXTRUDER, LOAD_CELL_PRESETS, max_tools=5),
-    ModelInfo("3.1.1", "XLP", MK4_EXTRUDER, LOAD_CELL_PRESETS, max_tools=5),
-    ModelInfo("5.1.0", "XL", XL_DEV_KIT_EXTRUDER, LOAD_CELL_PRESETS, max_tools=5, counters=False),
-    ModelInfo("4.1.0", "iX", IX_EXTRUDER, LOAD_CELL_PRESETS),
-    ModelInfo("7.1.0", "COREONE", CORE_ONE_EXTRUDER, CORE_ONE_PRESETS, uuids=True, mmu=True),
-    ModelInfo("7.2.0", "COREONEOAK", CORE_ONE_EXTRUDER, CORE_ONE_PRESETS, uuids=True, mmu=True),
-    ModelInfo("8.1.0", "COREONEL", CORE_ONE_EXTRUDER, CORE_ONE_PRESETS, uuids=True, mmu=True),
-    ModelInfo("7.10.0", "COREONEINDX", INDX_EXTRUDER, INDX_PRESETS, gap_mm=27.0, max_tools=8),
-    ModelInfo("8.10.0", "COREONEL-INDX", INDX_EXTRUDER, INDX_PRESETS, gap_mm=27.0, max_tools=8),
+    ModelInfo(
+        "1.3.5",
+        "MK3.5",
+        MK3_5_EXTRUDER,
+        MK3_5_PRESETS,
+        counters=False,
+        mmu=True,
+        group="mk3_5",
+        checks=MK3_5_CHECKS,
+    ),
+    ModelInfo(
+        "1.3.6",
+        "MK3.5S",
+        MK3_5_EXTRUDER,
+        MK3_5_PRESETS,
+        counters=False,
+        mmu=True,
+        group="mk3_5",
+        checks=MK3_5_CHECKS,
+    ),
+    ModelInfo(
+        "1.3.9", "MK3.9", MK4_EXTRUDER, LOAD_CELL_PRESETS, mmu=True, group="mk4", checks=MK4_CHECKS
+    ),
+    ModelInfo(
+        "1.3.10",
+        "MK3.9S",
+        MK4_EXTRUDER,
+        LOAD_CELL_PRESETS,
+        mmu=True,
+        group="mk4s",
+        checks=MK4_CHECKS,
+    ),
+    ModelInfo(
+        "1.4.0", "MK4", MK4_EXTRUDER, LOAD_CELL_PRESETS, mmu=True, group="mk4", checks=MK4_CHECKS
+    ),
+    ModelInfo(
+        "1.4.1", "MK4S", MK4_EXTRUDER, LOAD_CELL_PRESETS, mmu=True, group="mk4s", checks=MK4_CHECKS
+    ),
+    ModelInfo(
+        "2.1.0",
+        "MINI",
+        MINI_EXTRUDER,
+        MINI_PRESETS,
+        counters=False,
+        group="mini",
+        checks=PLAIN_CHECKS,
+    ),
+    ModelInfo(
+        "3.1.0", "XL", MK4_EXTRUDER, LOAD_CELL_PRESETS, max_tools=5, group="xl", checks=XL_CHECKS
+    ),
+    ModelInfo(
+        "3.1.1", "XLP", MK4_EXTRUDER, LOAD_CELL_PRESETS, max_tools=5, group="xls", checks=XL_CHECKS
+    ),
+    ModelInfo(
+        "5.1.0",
+        "XL",
+        XL_DEV_KIT_EXTRUDER,
+        LOAD_CELL_PRESETS,
+        max_tools=5,
+        counters=False,
+        group="xl",
+        checks=PLAIN_CHECKS,
+    ),
+    ModelInfo("4.1.0", "iX", IX_EXTRUDER, LOAD_CELL_PRESETS, group="ix", checks=IX_CHECKS),
+    ModelInfo(
+        "7.1.0",
+        "COREONE",
+        CORE_ONE_EXTRUDER,
+        CORE_ONE_PRESETS,
+        uuids=True,
+        mmu=True,
+        group="coreone",
+        checks=CORE_ONE_CHECKS,
+    ),
+    ModelInfo(
+        "7.2.0",
+        "COREONEOAK",
+        CORE_ONE_EXTRUDER,
+        CORE_ONE_PRESETS,
+        uuids=True,
+        mmu=True,
+        group="coreone",
+        checks=CORE_ONE_CHECKS,
+    ),
+    ModelInfo(
+        "8.1.0",
+        "COREONEL",
+        CORE_ONE_EXTRUDER,
+        CORE_ONE_PRESETS,
+        uuids=True,
+        mmu=True,
+        group="coreonel",
+        checks=CORE_ONE_CHECKS,
+    ),
+    ModelInfo(
+        "7.10.0",
+        "COREONEINDX",
+        INDX_EXTRUDER,
+        INDX_PRESETS,
+        gap_mm=27.0,
+        max_tools=8,
+        group="coreone_indx",
+        checks=INDX_CHECKS,
+    ),
+    ModelInfo(
+        "8.10.0",
+        "COREONEL-INDX",
+        INDX_EXTRUDER,
+        INDX_PRESETS,
+        gap_mm=27.0,
+        max_tools=8,
+        group="coreonel_indx",
+        checks=INDX_CHECKS,
+    ),
 )
 
 
@@ -267,7 +419,6 @@ class Settings:
     recover_seconds: float = 2.0  # BUSY after a power-panic boot
     unpark_seconds: float = 1.0  # PAUSED while the head unparks on a power-panic resume
     panic_purge_mm: float = 25.0  # the nozzle clean's purge on a power-panic resume
-    auto_accept_model_check: bool = False
     start_blip: bool = True
 
     def __post_init__(self) -> None:
@@ -304,6 +455,9 @@ class Settings:
 class Segment:
     tool: int
     slicer_mm: float
+    # The filament type the file names for this tool (`filament_type` in its metadata), or
+    # None when it names none, which skips the preview's type check.
+    material: str | None = None
 
 
 @dataclass
@@ -324,7 +478,7 @@ class SimJob:
     """What every job has. A job is a `UserJob` or a `SyncJob`."""
 
     kind: ClassVar[str]
-    id: int | None = None  # None while the preview asks its question: the job isn't counted yet
+    id: int = 0  # set when the job is counted, as it starts
     name: str
     phase: JobPhase = JobPhase.SCANNING
     attention: Attention | None = None  # set exactly while the phase waits for the user
@@ -361,10 +515,12 @@ class UserJob(SimJob):
     segment: int = 0
     pending_color_changes: list[float] = field(default_factory=list)
     paused_from: JobPhase | None = None  # where resume goes back to
-    toolchange_purge: bool = False  # a tool change into an empty tool purges after the reload
     cold_bed: bool = False  # a power-panic resume waits for the user when the bed went cold
     clean_at: float | None = None  # RECOVER time left when the nozzle clean purges
     restore_gap: float | None = None  # the tool's gap when a filament change began
+    previewing: bool = True  # until the preview lets the print begin
+    # The tools-mapping screen and the questions its Print asks, set when the screen opens.
+    mapping: list[Attention] = field(default_factory=list)
 
     def progress(self) -> int:
         return int(100 * self.fed_mm / self.spec.total_mm)
@@ -433,6 +589,14 @@ def check_color(color: Any) -> str | None:
     return color.lower()
 
 
+def check_file_type(value: Any) -> str | None:
+    """A segment's filament type, as a file's `filament_type` entry can hold it: the
+    firmware cuts each to 7 characters (`gcode_info.cpp`)."""
+    if value is not None and not (isinstance(value, str) and 0 < len(value) <= 7):
+        raise Invalid(f"a segment's material must be 1 to 7 characters, got {value!r}")
+    return value
+
+
 def check_uuid(value: Any) -> str | None:
     if value is None or value == "":
         return None
@@ -459,7 +623,12 @@ class SimPrinter:
     selected_tool: int = 0
     message: str | None = None
     homed: bool = False
-    auto_accept_model_check: bool | None = None
+    # How the print preview treats a failed check that a setting governs: the firmware has
+    # one setting per kind of check, but they share one screen and the worst decides.
+    checks: Severity = Severity.WARN
+    # The menu's switch for every filament sensor at once. Off, no sensor reads, so no
+    # runout, no idle sensor clear, and no filament check at the preview.
+    sensors: bool = True
     high_flow: bool = False  # a high-flow nozzle, which doubles the load's purge
     # The user's auto-retract switch. It has effect only on a model whose extruder has
     # one; INDX always auto-retracts, and a build without the sequence never does.
@@ -678,7 +847,9 @@ class SimPrinter:
         purge = ex.cleaner_purge_mm or lengths.purge_mm * (2 if self.high_flow else 1)
         return lengths.slow_load_mm, lengths.fast_load_mm, purge
 
-    def _load_steps(self, purge: float | None, extra: float, printing: bool) -> list[LoadStep]:
+    def _load_steps(
+        self, purge: float | None, extra: float, printing: bool, *, auto_retract: bool = True
+    ) -> list[LoadStep]:
         """The moves of a load (`src/marlin_stubs/pause/pause.cpp`), with the overrides.
 
         `purge` is the load's own purge override, and `extra` is added to the purge. As
@@ -692,6 +863,7 @@ class SimPrinter:
         auto-retract (`M1705`), in a print too. A load outside a print then auto-retracts
         (`load_finalize_process`). A reload during a print primes and retracts again
         instead, and the resume puts the tool back at the gap it had when the change began.
+        The preview's load does neither.
         """
         s, lengths = self.settings, self.model.extruder.lengths
         slow, fast, model_purge = self._load_lengths()
@@ -719,7 +891,7 @@ class SimPrinter:
             steps.append(LoadStep(AUTO_RETRACT_STEP))
         if printing:
             steps += [LoadStep("PRIME", lengths.prime_mm), LoadStep("RETRACT", -lengths.retract_mm)]
-        else:
+        elif auto_retract:
             steps.append(LoadStep(AUTO_RETRACT_STEP))
         return steps
 
@@ -765,6 +937,8 @@ class SimPrinter:
         tool.gap, tool.gap_valid, tool.auto_retracted = self.model.gap_mm, False, None
 
     def _idle_sensor_clear(self, tool: SimTool, *, sensor_fault_counts: bool) -> None:
+        if not self.sensors:
+            return
         empty = not tool.loaded or (sensor_fault_counts and tool.sensor_fault)
         if tool.material is not None and empty:
             self._count_unload(tool, "idle sensor clear")
@@ -773,7 +947,7 @@ class SimPrinter:
 
     def job_visible(self) -> bool:
         job = self.job
-        return job is not None and job.id is not None and job.phase is not JobPhase.BLIP
+        return job is not None and job.phase not in (JobPhase.BLIP, JobPhase.PREVIEW_LOAD)
 
     def can_print(self) -> bool:
         # The firmware's rule is state-only: IDLE, READY, STOPPED or FINISHED. A print asked
@@ -794,7 +968,8 @@ class SimPrinter:
             self.print_file(name)
 
     def print_file(self, name: str) -> None:
-        """Print a stored file. A wrong model asks first, before the firmware counts the job."""
+        """Print a stored file. The job is counted at once, and the preview checks the file
+        when the scan ends."""
         if self.job is not None and self.job.phase is JobPhase.BLIP:
             # The firmware's state check passes during PrintInit, but print_start ignores
             # the request there, so the upload succeeds and the print that's starting goes
@@ -803,18 +978,7 @@ class SimPrinter:
             return
         if not self.can_print():
             raise Busy("Can't print right now")
-        body = self.files[name]
-        wrong = sync.wrong_model(self, body)
-        if wrong and not self._auto_accept():
-            job = SyncJob(name=name, gcode=body)
-            job.enter(JobPhase.HOLD, Attention(Reason.MODEL_CHECK))
-            self.job = job
-            self._log("job", f"{name}: the preview asks about model {wrong}")
-            self._show_state()
-            return
-        if wrong:
-            self._log("gcode", f"model check for {wrong} accepted automatically")
-        self._start_job(SyncJob(name=name, gcode=body))
+        self._start_job(SyncJob(name=name, gcode=self.files[name]))
 
     # Actions on tools.
 
@@ -849,7 +1013,16 @@ class SimPrinter:
         if purge_mm is not None:
             purge_mm = _positive(purge_mm, "purge_mm")
         extra = self.settings.jam_purge_mm if waiting and job.waits_for(Reason.JAM) else 0.0
-        t.process = LoadProcess(self._load_steps(purge_mm, extra, waiting), material)
+        if waiting and isinstance(job, UserJob) and job.previewing:
+            # The preview's Yes runs `M701` (`queue_filament_gcodes` in
+            # `src/common/marlin_print_preview.cpp`): a plain load, with no prime, and no
+            # auto-retract because `is_printing()` is already true there
+            # (`load_finalize_process` in `src/marlin_stubs/pause/pause.cpp`).
+            steps = self._load_steps(purge_mm, extra, False, auto_retract=False)
+            job.enter(JobPhase.PREVIEW_LOAD)
+        else:
+            steps = self._load_steps(purge_mm, extra, waiting)
+        t.process = LoadProcess(steps, material)
         self._next_load_step(t, t.process)  # a load with no slow or fast feed types at once
         if job is None:
             self.screen = State.IDLE  # using the menu dismisses a finished or stopped screen
@@ -944,9 +1117,14 @@ class SimPrinter:
         self._check_start_print()
         if not spec.segments:
             raise Invalid("a print needs at least one segment")
+        types: dict[int, str | None] = {}
         for s in spec.segments:
-            self._tool(s.tool)
+            # A disabled tool is the preview's to refuse, after the job is counted.
+            self._tool(s.tool, enabled=False)
             _positive(s.slicer_mm, "slicer_mm")
+            check_file_type(s.material)
+            if types.setdefault(s.tool, s.material) != s.material:
+                raise Invalid(f"a file names one filament type per tool, not two for T{s.tool}")
         if spec.duration_s is not None:
             _positive(spec.duration_s, "duration_s")
         if spec.preheat_s is not None and spec.preheat_s < 0:
@@ -956,7 +1134,8 @@ class SimPrinter:
         self._start_job(UserJob(name=spec.name, spec=spec, pending_color_changes=changes))
 
     def _start_job(self, job: UserJob | SyncJob) -> None:
-        """Count the job and scan the file: the firmware does this once the preview is confirmed."""
+        """Count the job and scan the file. A print from a file is counted before the preview
+        asks anything (`init` in `src/common/marlin_print_preview.cpp`)."""
         self.homed = True  # a print starts by homing
         self.job_counter += 1
         job.id = self.job_counter
@@ -1003,9 +1182,15 @@ class SimPrinter:
     def cancel(self) -> None:
         self._check_cancel()
         job = self.job
-        if job.id is None:
-            # Declining the preview: no job was counted, so there's nothing to park.
-            self._log("action", f"cancel {job.name} at the preview")
+        if isinstance(job, UserJob) and job.attention in job.mapping[1:]:
+            self._log("action", "cancel: back to the tools-mapping screen")
+            self._wait(job, job.mapping[0])
+            return
+        if self._at_preview(job) or job.phase is JobPhase.BLIP:
+            # Abort or No at the preview, or a stop before the print begins, which
+            # `print_abort` sends to `Aborting_Preview`: `cleanup_print` in `marlin_server.cpp`
+            # goes to IDLE with nothing parked or moved, and the job's ID stays used.
+            self._log("action", f"cancel job {job.id}: abort at the preview")
             self.job, self.screen = None, State.IDLE
             self._show_state()
             return
@@ -1013,6 +1198,14 @@ class SimPrinter:
         for t in self.tools.values():
             self._abort_process(t)
         self._park(job, State.STOPPED)
+
+    @staticmethod
+    def _at_preview(job: UserJob | SyncJob) -> bool:
+        """Whether the job is still in the preview: scanned, or waiting on one of its
+        questions."""
+        if job.phase is JobPhase.SCANNING or any(job.waits_for(r) for r in PREVIEW_QUESTIONS):
+            return True
+        return isinstance(job, UserJob) and job.previewing and job.phase is JobPhase.WAIT_LOAD
 
     def _abort_process(self, t: SimTool) -> None:
         """Stop a load or unload where it stands.
@@ -1044,7 +1237,7 @@ class SimPrinter:
 
     def runout(self, tool: int) -> None:
         t = self._tool(tool)
-        self._check_runout(t)
+        self._check_sensor_runout(t)
         self._log("action", f"runout T{tool}")
         self._runout(t, Reason.RUNOUT)
 
@@ -1083,12 +1276,23 @@ class SimPrinter:
         self._show_state()
 
     def tap_through(self) -> None:
-        """Answer the screen's question: accept the model check, or abort on a parse error."""
+        """Answer the screen's question: Print or Ok at the preview, or abort on a parse
+        error."""
         self._check_tap_through()
         job = self.job
         self._log("action", f"tap through: {job.attention}")
-        if job.waits_for(Reason.MODEL_CHECK):
-            self._start_job(job)
+        if isinstance(job, UserJob) and job.waits_for(Reason.PREVIEW):
+            self._after_incompatible(job)
+        elif isinstance(job, UserJob) and job.attention in job.mapping:
+            if job.waits_for(Reason.SENSORS_OFF):
+                self.set_sensors(False)  # it stays off after the print
+            following = job.mapping[job.mapping.index(job.attention) + 1 :]
+            if following:
+                self._wait(job, following[0])
+            else:
+                self._begin(job)
+        elif any(job.waits_for(r) for r in PREVIEW_QUESTIONS):
+            self._begin(job)
         else:
             self._park(job, State.STOPPED)
 
@@ -1137,7 +1341,12 @@ class SimPrinter:
     def _reboot(self, keep_job: bool, cold_bed: bool = False) -> None:
         job = self.job
         resumable = (JobPhase.PRINTING, JobPhase.PAUSED, JobPhase.PREHEAT, JobPhase.WAIT_LOAD)
-        keep = keep_job and isinstance(job, UserJob) and job.phase in resumable
+        # A cut during the preview has nothing to resume: the firmware saves power-panic data
+        # only once the print has begun (`power_panic::prepare` in
+        # `src/common/power_panic.cpp`).
+        keep = (
+            keep_job and isinstance(job, UserJob) and not job.previewing and job.phase in resumable
+        )
         was_paused = keep and job.phase in (JobPhase.PAUSED, JobPhase.WAIT_LOAD)
         self.boot(idle_clear=not keep)
         if not keep:
@@ -1204,9 +1413,13 @@ class SimPrinter:
         t.enabled = value
         self._log("action", f"T{tool} {'enabled' if value else 'disabled'}")
 
-    def set_auto_accept(self, value: bool | None) -> None:
-        self.auto_accept_model_check = value
-        self._log("action", f"auto-accept model check {value}")
+    def set_sensors(self, value: bool) -> None:
+        self.sensors = value
+        self._log("action", f"filament sensors {'on' if value else 'off'}")
+
+    def set_checks(self, value: Severity) -> None:
+        self.checks = Severity(value)
+        self._log("action", f"preview checks {self.checks}")
 
     def counter_step_back(self, tool: int, mm: float) -> None:
         t = self._tool(tool)
@@ -1271,6 +1484,12 @@ class SimPrinter:
         if not t.loaded:
             raise Busy(f"T{t.index} has no filament")
 
+    def _check_sensor_runout(self, t: SimTool) -> None:
+        # A runout is the sensor seeing the filament go. A jam is found another way.
+        self._check_runout(t)
+        if not self.sensors:
+            raise Busy("the filament sensors are off")
+
     def _check_disable(self, t: SimTool) -> None:
         job = self.job
         in_print = isinstance(job, UserJob) and t.index in {s.tool for s in job.spec.segments}
@@ -1296,6 +1515,8 @@ class SimPrinter:
         self._need_power()
         if self.job is None or self.job.phase is JobPhase.PARKING:
             raise Busy("nothing to cancel")
+        if self.job.phase is JobPhase.PREVIEW_LOAD:
+            raise Busy("the preview's load is running")
 
     def _check_dismiss(self) -> None:
         self._need_power()
@@ -1316,8 +1537,10 @@ class SimPrinter:
     def _check_tap_through(self) -> None:
         self._need_power()
         job = self.job
-        if job is None or job.phase is not JobPhase.HOLD or not isinstance(job, SyncJob):
+        if job is None or job.phase is not JobPhase.HOLD or job.waits_for(Reason.JAM):
             raise Busy("nothing to tap through")
+        if job.attention.fatal:
+            raise Busy("the preview offers only Abort; cancel answers it")
 
     def actions_json(self) -> dict[str, str | None]:
         """Each printer action, with why it can't run now, or None when it can."""
@@ -1342,7 +1565,7 @@ class SimPrinter:
             "unload": lambda: self._check_unload(t),
             "extrude": lambda: self._check_move(t),
             "retract": lambda: self._check_move(t),
-            "runout": lambda: self._check_runout(t),
+            "runout": lambda: self._check_sensor_runout(t),
             "jam": lambda: self._check_runout(t),
             "select_tool": lambda: self._check_select(t),
             # The fault switches take any enabled tool, in any state.
@@ -1375,8 +1598,12 @@ class SimPrinter:
     def _idle_clear_selected(self) -> None:
         # The firmware clears the type whenever it isn't printing and the picked tool's sensor
         # reads empty, so a type written to an empty tool shows only until the job ends.
+        # `is_printing()` is false on the tools-mapping screen too (`marlin_server.cpp`).
         t = self.tools.get(self.selected_tool)
-        if self.job is None and self.state in IDLE_STATES and t is not None and t.process is None:
+        job = self.job
+        idle = job is None and self.state in IDLE_STATES
+        mapping = job is not None and any(job.waits_for(r) for r in MAPPING_QUESTIONS)
+        if (idle or mapping) and t is not None and t.process is None:
             self._idle_sensor_clear(t, sensor_fault_counts=True)
 
     def _tick_process(self, t: SimTool, dt: float) -> None:
@@ -1416,6 +1643,10 @@ class SimPrinter:
         job = self.job
         if job is not None and job.phase is JobPhase.WAIT_LOAD:
             job.enter(JobPhase.PAUSED)
+        elif job is not None and job.phase is JobPhase.PREVIEW_LOAD:
+            # The load's result isn't checked and no sensor is read again: the type check
+            # follows (`filament_not_inserted_load` in `marlin_print_preview.cpp`).
+            self._check_types(job)
         self._show_state()
 
     def _tick_job(self, dt: float) -> None:
@@ -1442,12 +1673,12 @@ class SimPrinter:
                 return  # paused or waiting for the user
 
     def _end_phase(self, job: UserJob | SyncJob) -> None:
-        s = self.settings
-        if job.phase is JobPhase.SCANNING and s.start_blip:
-            job.enter(JobPhase.BLIP)
-            job.remaining = s.blip_seconds
-            self._show_state()
-        elif job.phase in (JobPhase.SCANNING, JobPhase.BLIP):
+        if job.phase is JobPhase.SCANNING:
+            if isinstance(job, UserJob):
+                self._ask_print(job)
+            elif not self._ask(job):
+                self._begin(job)
+        elif job.phase is JobPhase.BLIP:
             self._after_blip(job)
         elif job.phase is JobPhase.PREHEAT:
             self._begin_feeding(job)
@@ -1466,6 +1697,113 @@ class SimPrinter:
             self._log("job", f"job {job.id} {job.end_state.lower()}")
             self._show_state()
 
+    def _begin(self, job: UserJob | SyncJob) -> None:
+        """Start the job the preview let through: the blip, then the job itself."""
+        if isinstance(job, UserJob):
+            job.previewing, job.mapping = False, []
+        if self.settings.start_blip:
+            job.enter(JobPhase.BLIP)
+            job.remaining = self.settings.blip_seconds
+            self._show_state()
+        else:
+            self._after_blip(job)
+
+    def _ask(self, job: SyncJob) -> bool:
+        """Check the file as the preview does; return whether it asks the user."""
+        rows = preview(self.model, job.gcode, self.checks)
+        if not rows:
+            return False
+        fatal = any(r.fatal for r in rows)
+        detail = "; ".join(r.text for r in rows)
+        job.enter(JobPhase.HOLD, Attention(Reason.PREVIEW, detail=detail, fatal=fatal))
+        self._log("job", f"job {job.id} waits: {job.attention}")
+        self._show_state()
+        return True
+
+    # The preview of a print with segments: the chain of `PrintPreview::Loop` in
+    # `src/common/marlin_print_preview.cpp`, each question its own wait.
+
+    def _uses(self, job: UserJob) -> dict[int, str | None]:
+        return {s.tool: s.material for s in job.spec.segments}
+
+    def _tool_views(self) -> dict[int, ToolView]:
+        # A sensor that's off reads neither filament nor none, so no check fails on it.
+        seen = {i: t.loaded or not self.sensors for i, t in self.tools.items()}
+        return {
+            i: ToolView(t.enabled, seen[i], t.material.name if t.material else None)
+            for i, t in self.tools.items()
+        }
+
+    def _preview_question(self, job: UserJob, reason: Reason, rows: list[Failed]) -> None:
+        self._wait(job, _question(reason, rows))
+
+    def _wait(self, job: UserJob, attention: Attention) -> None:
+        job.enter(JobPhase.HOLD, attention)
+        self._log("job", f"job {job.id} waits: {job.attention}")
+        self._show_state()
+
+    def _ask_print(self, job: UserJob) -> None:
+        """The "G-code incompatible" screen (`stateFromPrinterCheck`), then the rest."""
+        rows = print_checks(self.model.max_tools, self._uses(job), self._tool_views()).rows
+        if rows:
+            self._preview_question(job, Reason.PREVIEW, rows)
+        else:
+            self._after_incompatible(job)
+
+    def _after_incompatible(self, job: UserJob) -> None:
+        """The tools-mapping screen on a toolchanger, else the filament-not-inserted screen
+        (`stateFromFilamentPresence` and `checks_done`).
+
+        A print started at the printer shows the tools-mapping screen whenever tool mapping
+        applies, with nothing wrong too: only a remote start that is fully compatible skips
+        it (`checks_done` in `src/common/marlin_print_preview.cpp`).
+        """
+        checks = print_checks(self.model.max_tools, self._uses(job), self._tool_views())
+        if checks.mapped:
+            job.mapping = self._mapping_report(job, checks.mapping)
+            self._wait(job, job.mapping[0])
+        elif checks.empty:
+            job.enter(JobPhase.WAIT_LOAD, Attention(Reason.NO_FILAMENT, checks.empty[0]))
+            self._log("job", f"job {job.id} waits: {job.attention}")
+            self._show_state()
+        else:
+            self._check_types(job)
+
+    def _mapping_report(self, job: UserJob, rows: list[Failed]) -> list[Attention]:
+        """The tools-mapping screen, then the questions its Print asks.
+
+        Print confirms every failed check, each kind once for all the tools, in the order of
+        `VirtualToolCheck` in `src/feature/compatibility_checks/gcode_compatibility.hpp`: a
+        used tool with no filament asks to turn the sensors off, then a used tool holding
+        another type asks Cancel or Ignore. Cancel at either goes back to the screen, with the
+        sensors as they are. The answers come from the report the screen made when it
+        opened, which only a remap renews, so turning the sensors off doesn't clear its
+        filament row. A disabled used tool is fatal: Print shows only an error whose Cancel
+        returns to the screen, and with no remap modeled only Abort leaves it.
+        (`on_button_click` and `update_mapping` in
+        `src/gui/screen/print/frame_tool_mapping.cpp`, `gui_confirm_all_incompatibilities`
+        in `compatibility_checks_common.hpp`, `visit_failed_checks` and
+        `gui_confirm_incompatibility` in `gcode_compatibility.cpp`.)
+        """
+        uses, views = self._uses(job), self._tool_views()
+        empty = [i for i in sorted(uses) if not views[i].loaded]
+        asks = [
+            (Reason.SENSORS_OFF, [Failed(f"T{i} has no filament", False) for i in empty]),
+            (Reason.MAPPING_TYPE, wrong_types(uses, views)),
+        ]
+        screen = _question(Reason.TOOLS_MAPPING, rows)
+        return [screen, *(_question(reason, rows) for reason, rows in asks if rows)]
+
+    def _check_types(self, job: UserJob) -> None:
+        """The wrong-filament screen (`stateFromFilamentType`), which a printer with tool
+        mapping leaves to its tools-mapping screen."""
+        uses, views = self._uses(job), self._tool_views()
+        rows = [] if tool_mapping(self.model.max_tools, uses, views) else wrong_types(uses, views)
+        if rows:
+            self._preview_question(job, Reason.WRONG_FILAMENT, rows)
+        else:
+            self._begin(job)
+
     def _after_blip(self, job: UserJob | SyncJob) -> None:
         if isinstance(job, SyncJob):
             self._run_sync(job)
@@ -1477,22 +1815,8 @@ class SimPrinter:
         self._show_state()
 
     def _begin_feeding(self, job: UserJob) -> None:
-        tool = job.spec.segments[job.segment].tool
-        self.selected_tool = tool
-        if self.tools[tool].loaded:
-            if job.toolchange_purge:
-                job.toolchange_purge = False
-                self._track(self.tools[tool], self.settings.toolchange_purge_mm)
-            job.enter(JobPhase.PRINTING)
-            self._show_state()
-        else:
-            self._wait_for_filament(job, tool)
-
-    def _wait_for_filament(self, job: UserJob, tool: int) -> None:
-        job.paused_from = JobPhase.PRINTING
-        # An empty tool has no gap to go back to, so the reload resumes with none.
-        job.restore_gap = 0.0
-        job.enter(JobPhase.WAIT_LOAD, Attention(Reason.NO_FILAMENT, tool))
+        self.selected_tool = job.spec.segments[job.segment].tool
+        job.enter(JobPhase.PRINTING)
         self._show_state()
 
     def _park(self, job: UserJob | SyncJob, end: State) -> None:
@@ -1562,19 +1886,13 @@ class SimPrinter:
             return
         self.selected_tool = new
         self._log("job", f"tool change T{old} -> T{new}")
-        tool = self.tools[new]
-        if not tool.loaded:
-            job.toolchange_purge = True
-            self._wait_for_filament(job, new)
-            return
-        self._track(tool, self.settings.toolchange_purge_mm)
+        # Nothing checks for filament at a pickup, and a runout needs the sensor to go from
+        # filament to none, so an empty tool prints on and counts what it would have fed
+        # (`check_runout` in `src/feature/filament_sensor/filament_sensors_handler.cpp`,
+        # `check_for_events` in `filament_sensor.cpp`).
+        self._track(self.tools[new], self.settings.toolchange_purge_mm)
 
     # The sync job.
-
-    def _auto_accept(self) -> bool:
-        if self.auto_accept_model_check is not None:
-            return self.auto_accept_model_check
-        return self.settings.auto_accept_model_check
 
     def _run_sync(self, job: SyncJob) -> None:
         try:
@@ -1618,7 +1936,7 @@ class SimPrinter:
                 "total_mm": j.spec.total_mm if user else 0.0,
                 "attention": None
                 if a is None
-                else {"reason": str(a.reason), "tool": a.tool, "text": str(a)},
+                else {"reason": str(a.reason), "tool": a.tool, "text": str(a), "fatal": a.fatal},
                 "time_printing": j.time_printing,
                 "segment": j.segment if user else 0,
             }
@@ -1650,7 +1968,8 @@ class SimPrinter:
             "homed": self.homed,
             "job": job,
             "job_counter": self.job_counter,
-            "auto_accept_model_check": self.auto_accept_model_check,
+            "checks": str(self.checks),
+            "sensors": self.sensors,
             "actions": self.actions_json(),
             "load_sources": ["tag", "preset"] if m.uuids else ["preset"],
             "tools": [
@@ -1664,6 +1983,11 @@ def _setting_kind(default: Any) -> str:
     if isinstance(default, bool):
         return "bool"
     return "number" if default is not None else "optional"  # a number, or null for the model's
+
+
+def _question(reason: Reason, rows: list[Failed]) -> Attention:
+    detail = "; ".join(r.text for r in rows) or None
+    return Attention(reason, detail=detail, fatal=any(r.fatal for r in rows))
 
 
 def _refusal(check: Callable[[], None]) -> str | None:
@@ -1714,6 +2038,10 @@ def _tool_from(d: dict) -> SimTool:
     return SimTool(**d)
 
 
+def _attention_from(a: dict) -> Attention:
+    return Attention(Reason(a["reason"]), a["tool"], a["detail"], a["fatal"])
+
+
 def _job_from(d: dict | None) -> UserJob | SyncJob | None:
     if d is None:
         return None
@@ -1722,9 +2050,10 @@ def _job_from(d: dict | None) -> UserJob | SyncJob | None:
     d["phase"] = JobPhase(d["phase"])
     d["end_state"] = State(d["end_state"])
     if (a := d["attention"]) is not None:
-        d["attention"] = Attention(Reason(a["reason"]), a["tool"], a["detail"])
+        d["attention"] = _attention_from(a)
     if kind == "sync":
         return SyncJob(**d)
+    d["mapping"] = [_attention_from(a) for a in d["mapping"]]
     if d["paused_from"] is not None:
         d["paused_from"] = JobPhase(d["paused_from"])
     spec = dict(d["spec"])
@@ -1749,6 +2078,7 @@ def _printer_from(d: dict) -> SimPrinter:
     d["power"] = Power(d["power"])
     d["fault"] = Fault(d["fault"])
     d["screen"] = State(d["screen"])
+    d["checks"] = Severity(d["checks"])
     d["tools"] = {t["index"]: _tool_from(t) for t in d["tools"]}
     d["job"] = _job_from(d["job"])
     return SimPrinter(**d)
@@ -1855,6 +2185,7 @@ class Simulation:
                 "power": [str(v) for v in Power],
                 "fault": [str(v) for v in Fault],
                 "firmware": [str(v) for v in Firmware],
+                "checks": [str(v) for v in Severity],
             },
         }
         if events:

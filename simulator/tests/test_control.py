@@ -12,6 +12,7 @@ from yarl import URL
 
 from simulator import control
 from simulator.model import Fault, PrintSpec, Segment, State
+from simulator.preview import Severity
 from simulator.tests.util import make
 
 
@@ -228,7 +229,7 @@ def test_a_stream_queue_drops_the_oldest():
             {"tool": 0, "value": "x"},
             "set_sensor_fault value must be true or false, got 'x'",
         ),
-        ("set_auto_accept", {"value": 1}, "set_auto_accept value must be true or false, got 1"),
+        ("set_checks", {"value": "off"}, "set_checks value must be one of ignore, warn, abort"),
         ("unload", {"tool": True}, "unload tool must be an integer, got True"),
         ("unload", {"tool": 0.0}, "unload tool must be an integer, got 0.0"),
         (
@@ -258,9 +259,30 @@ def test_a_stream_queue_drops_the_oldest():
         (
             "start_print",
             {},
-            'start_print needs segments, a list of {"tool": T, "slicer_mm": MM}, got None',
+            'start_print needs segments, a list of {"tool": T, "slicer_mm": MM} with an optional'
+            ' "material", got None',
         ),
         ("start_print", {"segments": [{"tool": 0}]}, "start_print needs segments"),
+        (
+            "start_print",
+            {"segments": [{"tool": 0, "slicer_mm": 1, "colour": "red"}]},
+            "start_print needs segments",
+        ),
+        (
+            "start_print",
+            {"segments": [{"tool": 0, "slicer_mm": 1, "material": 3}]},
+            "start_print segments[0] material must be a string, got 3",
+        ),
+        (
+            "start_print",
+            {"segments": [{"tool": 0, "slicer_mm": 1, "material": "PLA-CF-X"}]},
+            "a segment's material must be 1 to 7 characters, got 'PLA-CF-X'",
+        ),
+        (
+            "start_print",
+            {"segments": [{"tool": 0, "slicer_mm": 1, "material": ""}]},
+            "a segment's material must be 1 to 7 characters, got ''",
+        ),
         (
             "start_print",
             {"segments": [{"tool": "x", "slicer_mm": 1}]},
@@ -298,16 +320,20 @@ async def test_parameters_are_checked_against_the_action_types(setup, action, bo
 
 async def test_checked_parameters_reach_the_action_as_their_types(setup):
     sim, p, client = setup
-    body = {"segments": [{"tool": 0, "slicer_mm": 5}], "duration_s": 9, "color_changes_mm": [2]}
+    segments = [{"tool": 0, "slicer_mm": 5}, {"tool": 0, "slicer_mm": 1, "material": "PLA"}]
+    body = {"segments": segments, "duration_s": 9, "color_changes_mm": [2]}
+    assert (await client.post("/api/printers/p/start_print", json=body)).status == 400
+    segments[0]["material"] = "PLA"
     assert (await client.post("/api/printers/p/start_print", json=body)).status == 200
-    assert p.job.spec == PrintSpec([Segment(0, 5.0)], duration_s=9.0, color_changes_mm=[2.0])
+    spec = PrintSpec(
+        [Segment(0, 5.0, "PLA"), Segment(0, 1.0, "PLA")], duration_s=9.0, color_changes_mm=[2.0]
+    )
+    assert p.job.spec == spec
     assert p.job.spec.name == "part.bgcode"
     assert (await client.post("/api/printers/p/set_fault", json={"fault": "error"})).status == 200
     assert p.fault is Fault.ERROR
-    assert (
-        await client.post("/api/printers/p/set_auto_accept", json={"value": None})
-    ).status == 200
-    assert p.auto_accept_model_check is None
+    assert (await client.post("/api/printers/p/set_checks", json={"value": "abort"})).status == 200
+    assert p.checks is Severity.ABORT
 
 
 def test_an_unknown_hint_is_a_bug():

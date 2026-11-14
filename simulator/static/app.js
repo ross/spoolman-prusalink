@@ -260,6 +260,8 @@ function renderPrinter(p) {
     '<label>power <select data-sel="set_power" data-field="power">' + opts(S.options.power, low(p.power)) + '</select></label>' +
     '<label>fault <select data-sel="set_fault" data-field="fault">' + opts(S.options.fault, low(p.fault)) + '</select></label>' +
     '<label>fw <select data-sel="set_firmware" data-field="firmware">' + opts(S.options.firmware, low(p.firmware)) + '</select></label>' +
+    '<label title="how the print preview treats a failed check">checks <select data-sel="set_checks" data-field="value">' +
+    opts(S.options.checks, p.checks) + '</select></label>' +
     '<small class="muted">boot ' + esc(p.boot_id) + '</small>' +
     '<small>' + (p.homed ? 'homed' : '<span class="muted">not homed</span>') + '</small>' +
     '<small>tool <b>' + esc(p.selected_tool) + '</b></small>' +
@@ -269,7 +271,7 @@ function renderPrinter(p) {
 
   h += '<div class="jobline">';
   if (job) {
-    h += '<span>job <b>#' + (job.id == null ? '?' : esc(job.id)) + '</b> ' + esc(job.kind) + ' ' + esc(job.name) +
+    h += '<span>job <b>#' + esc(job.id) + '</b> ' + esc(job.kind) + ' ' + esc(job.name) +
       ' <span class="muted">' + esc(ph) + '</span></span>';
     if (ph === 'HOLD') {
       // the attention text stands in for the bar
@@ -287,7 +289,6 @@ function renderPrinter(p) {
   if (p.message) h += '<div style="margin-top:3px"><span class="pill" title="last M117">' + esc(p.message) + '</span></div>';
 
   const a = p.actions || {};
-  const aa = p.auto_accept_model_check;
   h += '<div class="btns">' +
     btn('Start print', 'toggle', gate(a, 'start_print', { form: 'start', cls: isOpen(p, 'start') ? 'on' : '' })) +
     btn('Pause', 'pause', gate(a, 'pause')) +
@@ -301,14 +302,14 @@ function renderPrinter(p) {
     (getv(p.name, 'cold', false) ? ' checked' : '') + '>cold bed</label>' +
     btn('Tap through', 'tap_through', gate(a, 'tap_through')) +
     btn('Clear jam', 'clear_jam', gate(a, 'clear_jam')) +
-    btn('Auto-accept: ' + (aa == null ? 'default' : aa ? 'on' : 'off'), 'auto_accept', { title: 'model check; cycles default, on, off' }) +
+    btn('Filament sensors', 'sensors', { cls: p.sensors ? 'on' : '', title: 'the menu switch for every filament sensor' }) +
     btn('Counter step back', 'toggle', { form: 'counter', cls: isOpen(p, 'counter') ? 'on' : '' }) +
     btn('Set extruded_at_unload', 'toggle', { form: 'eau', cls: isOpen(p, 'eau') ? 'on' : '' }) +
     '</div>';
 
   if (isOpen(p, 'start')) {
     h += '<div class="form">' +
-      '<label>segments (tool:mm per line)<textarea data-k="start.segments">' + esc(getv(p.name, 'start.segments', '0:1000')) + '</textarea></label>' +
+      '<label>segments (tool:mm or tool:mm:TYPE per line)<textarea data-k="start.segments">' + esc(getv(p.name, 'start.segments', '0:1000')) + '</textarea></label>' +
       '<label>duration s' + inp(p, 'start.duration', '', 'type="number" step="any"') + '</label>' +
       '<label>preheat s' + inp(p, 'start.preheat', '', 'type="number" step="any"') + '</label>' +
       '<label>color changes mm (a, b)' + inp(p, 'start.cc', '', 'type="text"') + '</label>' +
@@ -387,9 +388,11 @@ function startBody(name) {
   const segs = [];
   for (const line of String(getv(name, 'start.segments', '0:1000')).split('\n')) {
     if (!line.trim()) continue;
-    const m = /^\s*(\d+)\s*[:=]\s*([0-9.]+)\s*$/.exec(line);
+    const m = /^\s*(\d+)\s*[:=]\s*([0-9.]+)\s*(?::\s*(\S+)\s*)?$/.exec(line);
     if (!m) throw new Error('Bad segment line: ' + line.trim());
-    segs.push({ tool: Number(m[1]), slicer_mm: Number(m[2]) });
+    const seg = { tool: Number(m[1]), slicer_mm: Number(m[2]) };
+    if (m[3]) seg.material = m[3];
+    segs.push(seg);
   }
   if (!segs.length) throw new Error('Add at least one segment');
   const body = { segments: segs };
@@ -440,11 +443,8 @@ function onClick(e) {
       case 'pause': case 'resume': case 'cancel': case 'dismiss': case 'reboot': case 'home':
       case 'tap_through': case 'clear_jam':
         return go(act, {});
+      case 'sensors': return go('set_sensors', { value: !p.sensors });
       case 'power_loss': return go('reboot', { keep_job: true, cold_bed: !!getv(name, 'cold', false) });
-      case 'auto_accept': {
-        const cur = p.auto_accept_model_check;
-        return go('set_auto_accept', { value: cur == null ? true : cur ? false : null });
-      }
       case 'start_submit':
         return go('start_print', startBody(name), () => { pst(name).open.start = false; renderCard(name); });
       case 'load_submit':

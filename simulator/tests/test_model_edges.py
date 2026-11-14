@@ -275,7 +275,9 @@ def test_consecutive_segments_on_one_tool_make_no_tool_change():
 def test_a_tool_change_to_a_loaded_tool_purges():
     sim, p = make("3.1.0", [loaded(0), loaded(1)])
     p.start_print(PrintSpec([Segment(0, 20), Segment(1, 20)], preheat_s=0))
-    sim.advance(0.8 + 100)
+    sim.advance(0.5)
+    p.tap_through()  # Print on the tools-mapping screen
+    sim.advance(0.3 + 100)
     assert p.state is State.FINISHED
     assert "tool change T0 -> T1" in messages(sim, "job")
     assert p.tools[1].extruded > 20 * 0.95
@@ -413,7 +415,7 @@ def test_every_phase_has_a_state():
     [
         (JobPhase.PRINTING, Attention(Reason.RUNOUT, 0)),
         (JobPhase.WAIT_LOAD, None),
-        (JobPhase.WAIT_LOAD, Attention(Reason.MODEL_CHECK)),
+        (JobPhase.WAIT_LOAD, Attention(Reason.PREVIEW, detail="x")),
         (JobPhase.AWAIT_RESUME, Attention(Reason.JAM, 0)),
     ],
 )
@@ -448,7 +450,11 @@ def test_each_state_change_is_logged_once():
 @pytest.mark.parametrize(
     ("attention", "text"),
     [
-        (Attention(Reason.MODEL_CHECK), "model check"),
+        (Attention(Reason.PREVIEW, detail="for printer MK4"), "preview: for printer MK4"),
+        (
+            Attention(Reason.PREVIEW, detail="for printer MK4", fatal=True),
+            "preview (abort only): for printer MK4",
+        ),
         (Attention(Reason.PARSE_ERROR, detail="line 1: bad"), "parse error: line 1: bad"),
         (Attention(Reason.JAM, 1), "jam tool 1"),
         (Attention(Reason.RUNOUT, 0), "runout tool 0"),
@@ -491,7 +497,8 @@ def test_a_tool_can_be_disabled_during_a_sync_job():
     """A sync job has no segments, so only the selected tool is in use."""
     sim, p = make("3.1.0", [loaded(0), loaded(1), loaded(2)])
     p.upload("x.gcode", 'M862.3 P"MK4"\nM117 x\n', print_after=True, overwrite=False)
-    assert p.job.waits_for(Reason.MODEL_CHECK)
+    sim.tick(0.5)
+    assert p.job.waits_for(Reason.PREVIEW)
     p.set_tool_enabled(2, False)
     assert not p.tools[2].enabled
     with pytest.raises(Invalid, match="T0 is in use"):

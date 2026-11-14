@@ -1,5 +1,6 @@
 """Rebuilding the firmware's tables per model, and comparing them with the copies."""
 
+import json
 from dataclasses import replace
 
 import pytest
@@ -8,6 +9,7 @@ from firmware import compare, read
 from firmware.compare import (
     MISSING,
     PRESENT,
+    AutoRetract,
     Build,
     CleanerPurge,
     Copies,
@@ -19,6 +21,7 @@ from firmware.compare import (
 from firmware.source import Unreadable
 from firmware.tests import fixtures
 from simulator import tool
+from simulator.compatibility import GCodeChecks
 from simulator.model import MODELS, ModelInfo
 from simulator.tool import Extruder, Lengths
 from spoolman_prusalink.printer_sync import Preset, PrinterModel
@@ -108,10 +111,22 @@ EXTRUDERS = {
 def test_load_reads_every_build():
     firmware = compare.load(fixtures.FakeSource())
     assert firmware.commit == "c0ffee"
-    assert firmware.models == {"1.3.0": "MK3", "1.4.0": "MK4", "2.1.0": "MINI", "7.1.0": "COREONE"}
+    assert firmware.models == {
+        "1.3.0": read.PrinterModel("MK3", "mk3"),
+        "1.4.0": read.PrinterModel("MK4", "mk4"),
+        "2.1.0": read.PrinterModel("MINI", "mini"),
+        "7.1.0": read.PrinterModel("COREONE", "coreone"),
+    }
+    assert firmware.mmu_variants == {"MK3MMU2": "1.3.0", "MK4MMU3": "1.4.0", "COREONEMMU3": "7.1.0"}
     assert firmware.builds.keys() == {b for b in compare.MODEL_BUILDS.values() if b}
     assert firmware.defaults == (215, 170, 60)
     assert firmware.aliases == {"TPU": "FLEX"}
+    assert firmware.minimal_purge_mm == 1.0
+    # Of the XL's images only the XLBUDDY's is a main board, and the dev kit's board is one
+    # though it isn't a buddy board.
+    assert firmware.main_boards == {
+        build: frozenset({board}) for build, board in compare.MAIN_BOARDS.items()
+    }
     assert firmware.built().keys() == {"1.4.0", "2.1.0", "7.1.0"}  # the MK3 isn't built
 
     mk4, mini, xl = (firmware.builds[b] for b in ("MK4", "MINI", "XL"))
@@ -126,6 +141,12 @@ def test_load_reads_every_build():
     # PRINTER_IS_PRUSA_MINI is true on the MINI build only.
     assert mini.presets["PA"]["nozzle_temperature"] == 280
     assert firmware.builds["XL_DEV_KIT"].presets["PA"]["nozzle_temperature"] == 285
+    assert "HAS_GCODE_COMPATIBILITY" in mk4.features
+    assert "HAS_GCODE_COMPATIBILITY" not in mini.features
+    assert mk4.feature_names == {"Input Shaper", "MMU3"}
+    assert mini.feature_names == {"Input Shaper"}
+    assert firmware.builds["COREONE"].feature_names == {"Input Shaper", "MMU3", "HT Hotend"}
+    assert indx.feature_names == {"Input Shaper", "INDX lock"}
 
 
 @pytest.mark.parametrize("name", sorted(EXTRUDERS))
@@ -136,6 +157,32 @@ def test_load_reads_every_builds_extruder(name):
     assert build.pause == pause
     assert build.ramming == ramming
     assert build.cleaner_purge == cleaner_purge
+
+
+NEXTRUDER_RETRACT = AutoRetract(20.0, True)
+INDX_RETRACT = AutoRetract(8.0, False)
+
+
+@pytest.mark.parametrize(
+    ("name", "retract", "purge"),
+    [
+        ("MK4", NEXTRUDER_RETRACT, 0.0),
+        ("XL", NEXTRUDER_RETRACT, 0.0),
+        ("iX", NEXTRUDER_RETRACT, 0.0),
+        ("COREONE", NEXTRUDER_RETRACT, 0.0),
+        ("COREONEL", NEXTRUDER_RETRACT, 0.0),
+        ("COREONE_INDX", INDX_RETRACT, 2.0),
+        ("COREONEL_INDX", INDX_RETRACT, 2.0),
+        # Without HAS_AUTO_RETRACT. The dev kit's header would say 20 mm, and the MINI's and
+        # MK3.5's would stop at its #error.
+        ("XL_DEV_KIT", None, 0.0),
+        ("MK3.5", None, 0.0),
+        ("MINI", None, 0.0),
+    ],
+)
+def test_load_reads_every_builds_auto_retract_and_unload_purge(name, retract, purge):
+    build = compare.load(fixtures.FakeSource()).builds[name]
+    assert (build.auto_retract, build.unload_purge_mm) == (retract, purge)
 
 
 def test_feed_ratio():
@@ -188,6 +235,10 @@ def test_load_fails_on_a_build_printer_cant_name():
         read.configuration_file("XL_DEV_KIT"),
         read.ramming_file("mk3_5"),
         read.CLEANER_FILE,
+        read.AUTO_RETRACT_FILE,
+        read.PAUSE_FILE,
+        read.PAUSE_SETTINGS_FILE,
+        read.IMAGES_FILE,
     ],
 )
 def test_load_fails_on_a_missing_file(path):
@@ -232,6 +283,62 @@ def test_macros():
         value("BOARD_IS_NEW")
 
 
+def test_board_is_follows_the_main_boards():
+    assert {"XLBUDDY": {"XL", "XL_DEV_KIT"}, "DWARF": set()} == compare.BOARD_IS
+    assert compare.MAIN_BOARDS.keys() == {b for b in compare.MODEL_BUILDS.values() if b}
+
+
+def test_main_boards():
+    images = json.dumps(
+        {
+            "$schema": "x",
+            "presets": [
+                {"name": n, "description": "", "cacheVariables": {"PRINTER": p, "BOARD": b}}
+                for n, p, b in (
+                    ("xl", "XL", "XLBUDDY"),
+                    ("xl-dwarf", "XL", "DWARF"),
+                    ("kit", "XL_DEV_KIT", "XL_DEV_KIT_XLB"),
+                    ("mk4", "MK4", "XBUDDY"),
+                    ("mk4-other", "MK4", "BUDDY"),
+                    ("anfc", "NONE", "ANFC"),
+                    ("new", "NEW", "XBUDDY"),  # a printer with no build, on a main board
+                )
+            ],
+        }
+    )
+    found = compare.main_boards(images, frozenset({"BUDDY", "XBUDDY", "XLBUDDY"}))
+    assert found["XL"] == {"XLBUDDY"}
+    assert found["XL_DEV_KIT"] == {"XL_DEV_KIT_XLB"}
+    assert found["MK4"] == {"BUDDY", "XBUDDY"}  # two main boards
+    assert found["MINI"] == set()  # no image
+    assert "NONE" not in found
+    assert "NEW" not in found
+    # A board that's neither a buddy board nor another main board isn't one.
+    assert compare.main_boards(images, frozenset({"BUDDY"}))["XL"] == set()
+
+
+def test_main_board_differences():
+    firmware, copies = synthetic()
+    boards = {
+        **firmware.main_boards,
+        "MK4": frozenset({"XBUDDY", "BUDDY"}),
+        "MINI": frozenset(),
+        "XL": frozenset({"XLBUDDY"}),
+    }
+    firmware = replace(firmware, main_boards=boards)
+    copy = {**copies.main_boards, "XL": "XL_DEV_KIT_XLB", "iX": "XBUDDY"}
+    copy.pop("COREONE")
+    found = compare.compare(firmware, replace(copies, main_boards=copy))
+    table = "firmware-check MAIN_BOARDS"
+    assert found == [
+        Difference(table, None, "COREONE", "main boards", ["XBUDDY"], []),
+        Difference(table, None, "MINI", "main boards", [], ["BUDDY"]),
+        Difference(table, None, "MK4", "main boards", ["BUDDY", "XBUDDY"], ["XBUDDY"]),
+        Difference(table, None, "XL", "main boards", ["XLBUDDY"], ["XL_DEV_KIT_XLB"]),
+        Difference(table, None, "iX", "main boards", [], ["XBUDDY"]),
+    ]
+
+
 def test_current_copies():
     copies = Copies.current()
     assert copies.preset_preheat == copies.default_preheat == 170
@@ -240,6 +347,8 @@ def test_current_copies():
     assert copies.bridge_models["1.4.0"].name == "MK4"
     assert copies.sim_models["1.4.0"].name == "MK4"
     assert copies.sim_models["1.4.0"].extruder.e_steps == (380, 400)
+    assert copies.sim_minimal_purge == 1.0
+    assert copies.main_boards is compare.MAIN_BOARDS
 
 
 def fw_preset(nozzle, preheat, bed, chamber=None, filtration=None, flexible=False, door=None):
@@ -264,8 +373,12 @@ def fw_preset(nozzle, preheat, bed, chamber=None, filtration=None, flexible=Fals
     return values
 
 
+INPUT_SHAPER = frozenset({"Input Shaper"})
+
+
 def build(name, features, tools, gap_mm, presets):
-    """A `Build` with the fields the comparison reads, and fixed extruder numbers."""
+    """A `Build` with the fields the comparison reads, and fixed extruder numbers and
+    feature names."""
     return Build(
         name,
         features,
@@ -276,12 +389,17 @@ def build(name, features, tools, gap_mm, presets):
         pause=NEXTRUDER_PAUSE,
         ramming=NEXTRUDER,
         cleaner_purge=None,
+        auto_retract=AutoRetract(20.0, True),
+        unload_purge_mm=0.0,
+        feature_names=INPUT_SHAPER,
     )
 
 
 MK4_PRESETS = {"PLA": (215, 170, 60), "FLEX": (240, 210, 50)}
 MINI_PRESETS = {"PLA": (215, 170, 60)}
 CORE_ONE_PRESETS = {**MK4_PRESETS, "PPS": (320, 170, 105)}
+MODE = GCodeChecks(True, INPUT_SHAPER, INPUT_SHAPER)
+NO_MODE = GCodeChecks(False, INPUT_SHAPER, INPUT_SHAPER)
 
 
 def synthetic():
@@ -293,12 +411,13 @@ def synthetic():
             "HAS_CHAMBER_API",
             "HAS_CHAMBER_FILTRATION_API",
             "HAS_HT_HOTEND",
+            "HAS_GCODE_COMPATIBILITY",
         }
     )
     builds = {
         "MK4": build(
             "MK4",
-            frozenset({"HAS_FILAMENT_TRACKER"}),
+            frozenset({"HAS_FILAMENT_TRACKER", "HAS_GCODE_COMPATIBILITY"}),
             1,
             40.0,
             {"PLA": fw_preset(215, 170, 60), "FLEX": fw_preset(240, 210, 50, flexible=True)},
@@ -319,10 +438,23 @@ def synthetic():
     }
     firmware = Firmware(
         commit="c0ffee",
-        models={"1.4.0": "MK4", "2.1.0": "MINI", "3.1.0": "XL", "7.1.0": "COREONE"},
+        models={
+            "1.4.0": read.PrinterModel("MK4", "mk4"),
+            "2.1.0": read.PrinterModel("MINI", "mini"),
+            "3.1.0": read.PrinterModel("XL", "xl"),
+            "7.1.0": read.PrinterModel("COREONE", "coreone"),
+        },
+        mmu_variants={"MK4MMU3": "1.4.0"},
         builds=builds,
         defaults=(215, 170, 60),
         aliases={"TPU": "FLEX"},
+        minimal_purge_mm=1.0,
+        main_boards={
+            "MK4": frozenset({"XBUDDY"}),
+            "MINI": frozenset({"BUDDY"}),
+            "XL": frozenset({"XLBUDDY"}),
+            "COREONE": frozenset({"XBUDDY"}),
+        },
     )
     copies = Copies(
         bridge_models={
@@ -345,16 +477,42 @@ def synthetic():
         default_preheat=170,
         preset_preheat=170,
         sim_models={
-            "1.4.0": ModelInfo("1.4.0", "MK4", EXTRUDER, MK4_PRESETS),
+            "1.4.0": ModelInfo("1.4.0", "MK4", EXTRUDER, MK4_PRESETS, group="mk4", checks=MODE),
             "2.1.0": ModelInfo(
-                "2.1.0", "MINI", EXTRUDER, MINI_PRESETS, counters=False, gap_mm=99.0
+                "2.1.0",
+                "MINI",
+                EXTRUDER,
+                MINI_PRESETS,
+                counters=False,
+                gap_mm=99.0,
+                group="mini",
+                checks=NO_MODE,
             ),
-            "3.1.0": ModelInfo("3.1.0", "XL", EXTRUDER, {}, max_tools=5),
-            "7.1.0": ModelInfo("7.1.0", "COREONE", EXTRUDER, CORE_ONE_PRESETS, uuids=True),
+            "3.1.0": ModelInfo(
+                "3.1.0", "XL", EXTRUDER, {}, max_tools=5, group="xl", checks=NO_MODE
+            ),
+            "7.1.0": ModelInfo(
+                "7.1.0",
+                "COREONE",
+                EXTRUDER,
+                CORE_ONE_PRESETS,
+                uuids=True,
+                group="coreone",
+                checks=MODE,
+            ),
+        },
+        sim_groups={
+            "MK4": "mk4",
+            "MK4MMU3": "mk4",
+            "MINI": "mini",
+            "XL": "xl",
+            "COREONE": "coreone",
         },
         sim_flexible=frozenset({"FLEX"}),
         sim_defaults=(215, 170, 60),
         sim_aliases={"TPU": "FLEX"},
+        sim_minimal_purge=1.0,
+        main_boards={"MK4": "XBUDDY", "MINI": "BUDDY", "XL": "XLBUDDY", "COREONE": "XBUDDY"},
     )
     return firmware, copies
 
@@ -365,7 +523,8 @@ def test_matching_copies_have_no_differences():
     lines, ok = compare.report([], ())
     assert ok
     assert lines == [f"{t}: ok" for t in compare.TABLES] + [
-        "0 unexpected differences, 0 expected, 0 stale expected entries"
+        "watched source: ok",
+        "0 unexpected differences, 0 expected, 0 stale expected entries, 0 changed watched regions",
     ]
 
 
@@ -379,7 +538,9 @@ def test_model_differences():
     bridge["9.9.9"] = PrinterModel("NEW")
     sim = dict(copies.sim_models)
     sim["1.4.0"] = replace(sim["1.4.0"], gap_mm=27.0, max_tools=2, counters=False)
-    sim["2.1.0"] = ModelInfo("2.1.0", "MINI", EXTRUDER, MINI_PRESETS, uuids=True)
+    sim["2.1.0"] = ModelInfo(
+        "2.1.0", "MINI", EXTRUDER, MINI_PRESETS, uuids=True, group="mini", checks=NO_MODE
+    )
     del sim["7.1.0"]
     copies = replace(copies, bridge_models=bridge, sim_models=sim)
     b, s = "bridge PRINTER_MODELS", "simulator MODELS"
@@ -446,6 +607,73 @@ def test_extruder_differences():
     ]
     assert str(found[3]) == "1.4.0 lengths.purge_mm: firmware 27, copy 28"
     assert str(found[5]) == "1.4.0 ramming.extra: firmware missing, copy ((1, 1),)"
+
+
+def test_auto_retract_and_unload_purge_differences():
+    firmware, copies = synthetic()
+    builds = {**firmware.builds, "MINI": replace(firmware.builds["MINI"], auto_retract=None)}
+    firmware = replace(firmware, builds=builds)
+    sim = dict(copies.sim_models)
+    wrong = replace(EXTRUDER, full_retract_mm=8.0, cold_unload=False, unload_purge_mm=2.0)
+    sim["1.4.0"] = replace(sim["1.4.0"], extruder=wrong)
+    # A build without HAS_AUTO_RETRACT has no constants to compare; its purge still counts.
+    sim["2.1.0"] = replace(sim["2.1.0"], extruder=wrong)
+    s = "simulator MODELS"
+    found = compare.compare(firmware, replace(copies, sim_models=sim))
+    assert found == [
+        Difference(s, "1.4.0", None, "full_retract_mm", 20.0, 8.0),
+        Difference(s, "1.4.0", None, "cold_unload", True, False),
+        Difference(s, "1.4.0", None, "unload_purge_mm", 0.0, 2.0),
+        Difference(s, "2.1.0", None, "unload_purge_mm", 0.0, 2.0),
+    ]
+    assert str(found[0]) == "1.4.0 full_retract_mm: firmware 20.0, copy 8.0"
+
+
+def test_gcode_check_differences():
+    firmware, copies = synthetic()
+    mk4 = firmware.builds["MK4"]
+    builds = {**firmware.builds, "MK4": replace(mk4, feature_names=INPUT_SHAPER | {"MMU3"})}
+    firmware = replace(firmware, builds=builds)
+    sim = dict(copies.sim_models)
+    sim["2.1.0"] = replace(sim["2.1.0"], group="mk4", checks=MODE)
+    sim["7.1.0"] = replace(sim["7.1.0"], checks=replace(MODE, features=frozenset({"Input"})))
+    # The MMU variant has the wrong group, the XL is missing, and the MK3 is extra.
+    groups = {**copies.sim_groups, "MK4MMU3": "mk4s", "MK3": "mk3"}
+    del groups["XL"]
+    s, g = "simulator MODELS", "simulator GROUPS"
+    found = compare.compare(firmware, replace(copies, sim_models=sim, sim_groups=groups))
+    assert found == [
+        Difference(s, "1.4.0", None, "feature_names", ["Input Shaper", "MMU3"], ["Input Shaper"]),
+        Difference(s, "2.1.0", None, "group", "mini", "mk4"),
+        Difference(s, "2.1.0", None, "compatibility_mode", False, True),
+        Difference(s, "7.1.0", None, "feature_names", ["Input Shaper"], ["Input"]),
+        Difference(g, None, "MK3", "group", MISSING, "mk3"),
+        Difference(g, None, "MK4MMU3", "group", "mk4", "mk4s"),
+        Difference(g, None, "XL", "group", "xl", MISSING),
+    ]
+    assert str(found[1]) == "2.1.0 group: firmware 'mini', copy 'mk4'"
+    assert str(found[6]) == "XL group: firmware 'xl', copy missing"
+
+
+def test_groups_follow_from_id_str():
+    firmware, _ = synthetic()
+    models = {
+        **firmware.models,
+        # The XL dev kit shares the XL's name; the first entry wins.
+        "5.1.0": read.PrinterModel("XL", "xl_dev_kit"),
+        "1.4.1": read.PrinterModel("MK4S", "mk4s"),
+    }
+    # A variant named like a model wins over it, as `from_id_str` tries variants first.
+    variants = {"MK4MMU3": "1.4.0", "MK4S": "1.4.0"}
+    firmware = replace(firmware, models=models, mmu_variants=variants)
+    assert firmware.groups() == {
+        "MK4MMU3": "mk4",
+        "MK4S": "mk4",
+        "MK4": "mk4",
+        "MINI": "mini",
+        "XL": "xl",
+        "COREONE": "coreone",
+    }
 
 
 def test_a_model_refused_for_another_reason_passes():
@@ -543,7 +771,7 @@ def test_retracted_distance_agrees_with_the_simulators():
     assert tool.retracted_distance(tool.INDX_RAMMING["auto_retract"]) == 8
 
 
-def test_default_and_alias_differences():
+def test_default_alias_and_minimal_purge_differences():
     firmware, copies = synthetic()
     copies = replace(
         copies,
@@ -552,6 +780,7 @@ def test_default_and_alias_differences():
         sim_defaults=(215, 170, 61),
         bridge_aliases={"TPU": "FLEX", "TPE": "FLEX"},
         sim_aliases={"TPU": "PLA"},
+        sim_minimal_purge=2.0,
     )
     assert compare.compare(firmware, copies) == [
         Difference("bridge DEFAULT_PREHEAT", None, None, "DEFAULT_PREHEAT", 170, 160),
@@ -566,6 +795,7 @@ def test_default_and_alias_differences():
         ),
         Difference("bridge PRESET_ALIASES", None, "TPE", "alias", MISSING, "FLEX"),
         Difference("simulator PRESET_ALIASES", None, "TPU", "alias", "FLEX", "PLA"),
+        Difference("simulator MINIMAL_PURGE_MM", None, None, "minimal_purge", 1.0, 2.0),
     ]
 
 
@@ -585,7 +815,9 @@ def test_report_marks_expected_differences():
     )
     assert "  1.4.0 max_tools: firmware 1, copy 2" in lines
     assert "simulator presets: ok" in lines
-    assert lines[-1] == "1 unexpected differences, 2 expected, 0 stale expected entries"
+    assert lines[-1] == (
+        "1 unexpected differences, 2 expected, 0 stale expected entries, 0 changed watched regions"
+    )
 
     lines, ok = compare.report(differences[:2], expected)
     assert ok
@@ -603,7 +835,9 @@ def test_report_fails_on_a_stale_expected_difference():
         "stale expected difference, no longer found: simulator MODELS: 5.1.0 counters;"
         " remove it from EXPECTED" in lines
     )
-    assert lines[-1] == "0 unexpected differences, 1 expected, 1 stale expected entries"
+    assert lines[-1] == (
+        "0 unexpected differences, 1 expected, 1 stale expected entries, 0 changed watched regions"
+    )
 
 
 def test_a_pinned_entry_doesnt_mask_another_value():
@@ -615,7 +849,9 @@ def test_a_pinned_entry_doesnt_mask_another_value():
     lines, ok = compare.report([other], (entry,))
     assert not ok
     assert "  4.1.0 unsupported: firmware 'has the filament tracker', copy 'x'" in lines
-    assert lines[-1] == "1 unexpected differences, 0 expected, 1 stale expected entries"
+    assert lines[-1] == (
+        "1 unexpected differences, 0 expected, 1 stale expected entries, 0 changed watched regions"
+    )
     pinned = Expected("bridge PRESETS", None, "PPS", "material", "why", PRESENT, MISSING)
     assert pinned.matches(
         Difference("bridge PRESETS", "7.1.0", "PPS", "material", PRESENT, MISSING)
