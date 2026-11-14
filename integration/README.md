@@ -116,8 +116,12 @@ script/integration --cov=spoolman_prusalink --cov-fail-under=0
   `logged_once(caplog, level, text)` is true when the bridge logged `text`
   once at `level` and at no other level but `DEBUG`. Both are in `conftest.py`.
 - **Short phases.** The simulator's settings in `conftest.py` make unloads,
-  loads, prints and sync jobs take a second or so. A load counts 36 mm of feed
-  and 40 mm of purge.
+  loads, prints and sync jobs take a second or so.
+- **Counts by model.** Each model counts a move only past its retraction gap,
+  times its feed ratio. The printer's counter reads whole millimetres, so a
+  charge is the difference of two whole numbers. `LOADS` in `conftest.py`
+  holds what a load after an unload counts on each model. A Core One L load
+  counts 57 mm and leaves 8 mm of gap, so the next 8 mm fed count nothing.
 
 ## The scenarios
 

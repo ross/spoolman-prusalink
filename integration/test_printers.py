@@ -76,10 +76,10 @@ async def test_x1_spoolman_first_across_printers(world: World, b_first: bool):
 
     # S10 on it: A stays active with nothing assigned. S1 on b: A is staged over E.
     await w.move("A", b.location)
-    it.extrude(50)
+    it.extrude(50)  # 50 * 0.95 = 47.5: the counter reads 1047
     records = await w.poll()
     assert kinds(records) == [(IT, "active_unassigned"), (B, "swap_staged")]
-    assert charged(records, a) == 50
+    assert charged(records, a) == 47
     assert (it.state.active, it.state.assigned) == (a, None)
     assert (b.state.active, b.state.assigned) == (e, a)
 
@@ -102,8 +102,8 @@ async def test_x1_spoolman_first_across_printers(world: World, b_first: bool):
         (B, "swap_committed"),
     ]
     assert it.state.active is None and b.state.active == a
-    assert charged(printer_of(records, IT), a) == 10
-    assert charged(printer_of(records, B), e) == 30
+    assert charged(printer_of(records, IT), a) == 10  # 9.5 more: 1057
+    assert charged(printer_of(records, B), e) == 28  # 30 * 0.95 = 28.5
     assert charged(printer_of(records, B), a) == LOAD_MM
     assert await w.spoolman.location(e) is None  # b evicted E.
     assert await w.spoolman.location(a) == b.location
@@ -114,7 +114,8 @@ async def test_x1_spoolman_first_across_printers(world: World, b_first: bool):
     records = await w.poll()
     assert charges(records) == []
     assert it.state.active is None
-    assert it.state.extruded - it.state.charged == LOAD_MM + 40
+    # The 40 mm extruded go past the load's 8 mm gap: 32 * 0.95 = 30.4.
+    assert it.state.extruded - it.state.charged == LOAD_MM + 30
 
 
 async def test_x2_filament_first_across_printers(world: World):
@@ -125,9 +126,9 @@ async def test_x2_filament_first_across_printers(world: World):
     await baseline(w)
 
     # S2 on both: it unloads A; b unloads E and loads A, with no Spoolman change.
-    it.extrude(30)
+    it.extrude(30)  # 30 * 0.95 = 28.5
     await it.unload()
-    b.extrude(20)
+    b.extrude(20)  # 20 * 0.95 = 19
     await load_a_at_b(w)
     records = await w.poll()
     assert kinds(records) == [
@@ -136,8 +137,8 @@ async def test_x2_filament_first_across_printers(world: World):
         (B, "unload"),
         (B, "swap_unconfirmed"),
     ]
-    assert charged(records, a) == 30
-    assert charged(records, e) == 20 + LOAD_MM  # b keeps charging its assigned spool.
+    assert charged(records, a) == 28
+    assert charged(records, e) == 19 + LOAD_MM  # b keeps charging its assigned spool.
     unconfirmed = "filament was unloaded with no Spoolman change"
     assert f"{it.location}: {unconfirmed}" in (await w.flag("A") or "")
     assert f"{b.location}: {unconfirmed}" in (await w.flag("E") or "")
@@ -150,9 +151,10 @@ async def test_x2_filament_first_across_printers(world: World):
     records = await w.poll()
     assert kinds(records) == [(IT, "swap_unassigned"), (B, "swap_confirmed")]
     assert b.state.active == a and b.state.swap is None
-    # The usage since b's unload, the load, moves from E to A.
+    # The usage since b's unload, the load, moves from E to A. The 100 mm go past the
+    # load's 8 mm gap: 92 * 0.95 = 87.4.
     assert charged(records, e) == -LOAD_MM
-    assert charged(records, a) == LOAD_MM + 100
+    assert charged(records, a) == LOAD_MM + 87
     assert await w.flag("E") is None
     # S3 on it: the swap stays open while LA is empty, and A carries that flag in b.
     assert it.state.active is None and it.state.swap is not None
@@ -170,7 +172,8 @@ async def test_x2_filament_first_across_printers(world: World):
     records = await w.poll()
     assert kinds(records) == [(IT, "swap_confirmed")]
     assert it.state.active == c and it.state.swap is None
-    assert charged(records, c) == LOAD_MM + 60
+    # The 60 mm past the load's 8 mm gap count 52 * 0.95 = 49.4, on top of 1028.5 + 57.
+    assert charged(records, c) == LOAD_MM + 49
     assert await w.flag("A") is None
 
 
@@ -182,10 +185,10 @@ async def test_x3_spool_moved_but_never_loaded_elsewhere(world: World):
     await baseline(w)
 
     await w.move("A", b.location)
-    it.extrude(50)
+    it.extrude(50)  # 50 * 0.95 = 47.5
     records = await w.poll()
     assert kinds(records) == [(IT, "active_unassigned"), (B, "swap_staged")]
-    assert charged(records, a) == 50  # S10 on it: still charged.
+    assert charged(records, a) == 47  # S10 on it: still charged.
     assert (b.state.active, b.state.assigned) == (e, a)
 
     # S9 on b: a print starts with A staged. E is charged for it, and A is flagged.
@@ -219,25 +222,25 @@ async def test_x4_evicted_spool_moves_to_the_other_printer(world: World):
     # S1 on it: C staged, then unload and load. The user takes A to b before the poll.
     await w.move("C", it.location)
     assert kinds(await w.poll()) == [(IT, "swap_staged")]
-    it.extrude(20)
+    it.extrude(20)  # 20 * 0.95 = 19
     await it.unload()
     await it.swap_cycle(source="preset", name=ASA[0])
     await w.move("A", b.location)
     records = await w.poll()
     assert kinds(records) == [(IT, "unload"), (IT, "swap_committed"), (B, "swap_staged")]
-    assert charged(records, a) == 20 and charged(records, c) == LOAD_MM
+    assert charged(records, a) == 19 and charged(records, c) == LOAD_MM
     # The eviction found A already out of LA, so it left it alone and cleared.
     assert await w.spoolman.location(a) == b.location
     assert it.state.evict == ()
     await settle(w)
 
     # S1 on b.
-    b.extrude(15)
+    b.extrude(15)  # 15 * 0.95 = 14.25
     await load_a_at_b(w)
     records = await w.poll()
     assert kinds(records) == [(B, "unload"), (B, "swap_committed")]
     assert b.state.active == a
-    assert charged(records, e) == 15 and charged(records, a) == LOAD_MM
+    assert charged(records, e) == 14 and charged(records, a) == LOAD_MM
     assert await w.spoolman.location(a) == b.location
     assert await w.spoolman.location(e) is None
     assert await w.flag("A") is None
@@ -293,7 +296,7 @@ async def test_x5_claim_on_b_while_a_still_has_the_spool(
     it, b = w.at(IT), w.at(B)
     a, e = w.spools["A"], w.spools["E"]
     await baseline(w)
-    b.extrude(40)
+    b.extrude(40)  # 40 * 0.95 = 38
     await w.poll()
 
     # it is off, so it never sees A leave. In Spoolman A goes into LB, E out, A claimed.
@@ -301,12 +304,12 @@ async def test_x5_claim_on_b_while_a_still_has_the_spool(
     await w.move("E", w.shelf)
     await w.move("A", b.location)
     await w.claim("A")
-    b.extrude(50)
+    b.extrude(50)  # 50 * 0.95 = 47.5: the counter reads 2085
     records = await w.poll()
     assert kinds(records) == [(B, "claimed")]
     # S5 on b: what b charged E since its baseline moves to A, then b charges A.
-    assert charged(records, e) == -40
-    assert charged(records, a) == 40 + 50
+    assert charged(records, e) == -38
+    assert charged(records, a) == 38 + 47
     assert it.state.active == a and b.state.active == a  # Both, until it says otherwise.
     shared = f"spool {a} is active in {it.location} and {b.location} at once"
     assert logged_once(caplog, logging.WARNING, shared)
@@ -362,12 +365,13 @@ async def test_x6_one_spool_active_in_two_tools(world: World, caplog: pytest.Log
     assert await w.spoolman.location(e) is None
     await settle(w)
 
-    # Both printers charge A.
+    # Both printers charge A. it rebooted with no gap: 10 * 0.95 = 9.5. b's 20 mm go past
+    # its load's 8 mm gap: 12 * 0.95 = 11.4.
     it.extrude(10)
     b.extrude(20)
     records = await w.poll()
-    assert charged(printer_of(records, IT), a) == 10
-    assert charged(printer_of(records, B), a) == 20
+    assert charged(printer_of(records, IT), a) == 9
+    assert charged(printer_of(records, B), a) == 11
     assert logged_once(caplog, logging.WARNING, shared)
 
     # A claim on the spool staged in it ends A's time there: what it charged A since the
@@ -376,7 +380,7 @@ async def test_x6_one_spool_active_in_two_tools(world: World, caplog: pytest.Log
     records = await w.poll()
     assert kinds(records) == [(IT, "claimed")]
     assert it.state.active == c and b.state.active == a
-    assert charged(records, a) == -10 and charged(records, c) == 10
+    assert charged(records, a) == -9 and charged(records, c) == 9
     assert await w.flag("A") is None
 
 
@@ -386,8 +390,8 @@ async def test_x7_two_claims_one_per_printer(world: World):
     it, b = w.at(IT), w.at(B)
     a, b_spool, c, e = (w.spools[n] for n in "ABCE")
     await baseline(w)
-    it.extrude(30)
-    b.extrude(40)
+    it.extrude(30)  # 30 * 0.95 = 28.5
+    b.extrude(40)  # 40 * 0.95 = 38
     await w.poll()
 
     await w.move("C", it.location)
@@ -397,8 +401,8 @@ async def test_x7_two_claims_one_per_printer(world: World):
     records = await w.poll()
     assert kinds(records) == [(IT, "claimed"), (B, "claimed")]
     assert (it.state.active, b.state.active) == (c, b_spool)
-    assert charged(printer_of(records, IT), a) == -30 and charged(records, c) == 30
-    assert charged(printer_of(records, B), e) == -40 and charged(records, b_spool) == 40
+    assert charged(printer_of(records, IT), a) == -28 and charged(records, c) == 28
+    assert charged(printer_of(records, B), e) == -38 and charged(records, b_spool) == 38
     assert await w.spoolman.location(a) is None and await w.spoolman.location(e) is None
     assert await w.spoolman.location(c) == it.location
     assert await w.spoolman.location(b_spool) == b.location
@@ -432,10 +436,10 @@ async def test_x8_one_printer_off(world: World, caplog: pytest.LogCaptureFixture
     it.printer.set_power("off")
     await w.move("B", it.location)
     await w.claim("B")
-    b.extrude(70)
+    b.extrude(70)  # 70 * 0.95 = 66.5
     records = await w.poll()
     assert kinds(records) == []
-    assert charged(records, e) == 70
+    assert charged(records, e) == 66
     assert await w.spoolman.location(a) is None  # The eviction pending in it ran.
     assert await w.spoolman.extra(w.spools["B"], CLAIM_FIELD) is True  # The claim waits.
     assert w.bridge.interval() == cfg.poll_idle
@@ -572,7 +576,8 @@ async def test_x9_spoolman_unreachable(world: World, caplog: pytest.LogCaptureFi
     assert kinds(records) == [(B, "reboot")]
     assert charges(records) == []
     queued = [(r.printer, r.spool_id, r.use_length) for r in w.bridge.state.outbox]
-    assert queued == [(IT, a, 10), (B, e, 20)]
+    # it's 10 * 0.95 = 9.5; b rebooted, then 20 * 0.95 = 19.
+    assert queued == [(IT, a, 9), (B, e, 19)]
 
     # Down again with charges queued: the tick stops at the failed flush, before any read.
     faults.cut()
@@ -610,7 +615,7 @@ async def test_x10_firmware_without_the_filament_endpoint(
     b.extrude(100)
     records = await w.poll()
     await w.poll()
-    assert charged(records, e) == 100 and charges(records, a) == []
+    assert charged(records, e) == 95 and charges(records, a) == []  # 100 * 0.95
     unsupported = "printer it: firmware has no /api/v1/filament"
     assert logged_once(caplog, logging.ERROR, unsupported)
     assert logged(caplog, logging.ERROR, "this firmware isn't supported")
@@ -630,7 +635,7 @@ async def test_x10_firmware_without_the_filament_endpoint(
     records = await w.poll()
     assert kinds(records) == [(IT, "baseline")]
     assert logged(caplog, logging.ERROR, "printer it now reports filament; resuming")
-    it.extrude(5)
+    it.extrude(5)  # 4.75 on top of 1408.5: 28.5, then the 400 mm print's 380
     assert charged(await w.poll(), a) == 5
     assert logged_once(caplog, logging.ERROR, unsupported)
 
@@ -656,31 +661,31 @@ async def test_x11_charge_rejected_with_404(world: World, caplog: pytest.LogCapt
 
     faults = w.spoolman_faults
     faults.hook = delete
-    it.extrude(25)
+    it.extrude(25)  # 25 * 0.95 = 23.75
     records = await w.poll()
     faults.hook = None
     failed = [r for r in records if "failed" in r]
     assert [(r["printer"], r["spool_id"], r["failed"], r.get("held")) for r in failed] == [
         (IT, a, "404", True)
     ]
-    assert (it.state.active, it.state.deleted_spool, it.state.held_mm) == (None, a, 25)
+    assert (it.state.active, it.state.deleted_spool, it.state.held_mm) == (None, a, 23)
     assert (b.state.active, b.state.deleted_spool, b.state.held_mm) == (e, None, 0)
     assert logged(caplog, logging.WARNING, f"spool {a} was deleted in Spoolman")
 
     # it keeps holding. b's staging ends with A gone, and b charges E as before.
-    it.extrude(15)
+    it.extrude(15)  # 14.25 more: 1038
     records = await w.poll()
     assert kinds(records) == [(B, "staging_cancelled")]
     assert charges(records) == []
-    assert it.state.held_mm == 40
+    assert it.state.held_mm == 38
 
     # The next spool active in it takes what it held. b gets none of it.
     await w.move("C", it.location)
     records = await w.poll()
     assert kinds(records) == [(IT, "assignment_changed"), (IT, "held_charged")]
-    assert charged(records, c) == 40 and charges(records, e) == []
-    b.extrude(5)
-    assert charged(await w.poll(), e) == 5
+    assert charged(records, c) == 38 and charges(records, e) == []
+    b.extrude(5)  # 5 * 0.95 = 4.75
+    assert charged(await w.poll(), e) == 4
 
     # The same from printer b: E deleted just before b's charge is held for b's tool, found
     # by the record's printer, and it, first in the config, holds none of it.
@@ -690,7 +695,7 @@ async def test_x11_charge_rejected_with_404(world: World, caplog: pytest.LogCapt
             resp.raise_for_status()
 
     faults.hook = delete_e
-    b.extrude(10)
+    b.extrude(10)  # 9.5 more: 2014.25
     records = await w.poll()
     faults.hook = None
     failed = [r for r in records if "failed" in r]

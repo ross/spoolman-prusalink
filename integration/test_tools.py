@@ -12,7 +12,6 @@ import pytest
 
 from integration.conftest import (
     ASA,
-    LOAD_MM,
     World,
     baseline,
     charges,
@@ -39,8 +38,8 @@ def two_tool_print() -> PrintSpec:
 
 
 def counted(w: World, slicer_mm: float) -> float:
-    """What the printer counts for `slicer_mm` of print moves."""
-    return slicer_mm * w.sim.settings.feed_ratio
+    """What the printer counts for `slicer_mm` of moves past the gap."""
+    return slicer_mm * w.printer.feed_ratio
 
 
 async def finish(w: World) -> list[dict]:
@@ -74,12 +73,13 @@ async def test_t1_tool_changes_charge_each_tool(world: World):
     changes = [e.text for e in w.sim.events if e.text.startswith("tool change")]
     assert changes == ["tool change T0 -> T1"]
 
-    # 300 mm of T0 moves count 285 and 100 mm of T1 count 95, at the feed ratio, and the
-    # pickup purges toolchange_purge_mm on T1.
+    # The pickup purges toolchange_purge_mm on T1. At INDX's feed ratio, 550/576, the
+    # 300 mm of T0 moves count 286.46, and T1's purge and 100 mm count 124.13. The
+    # counters read whole millimetres, from 1000 on T0 and 500 on T1.
     purge = w.sim.settings.toolchange_purge_mm
-    assert (counted(w, 300), counted(w, 100), purge) == (285, 95, 30)
-    assert w.charged(records, "A") == 285 == w.counter_at(0) - start0
-    assert w.charged(records, "D") == 95 + 30 == w.counter_at(1) - start1
+    assert (int(counted(w, 300)), int(counted(w, purge + 100)), purge) == (286, 124, 30)
+    assert w.charged(records, "A") == 286 == w.counter_at(0) - start0
+    assert w.charged(records, "D") == 124 == w.counter_at(1) - start1
     assert {r["tool"] for r in charges(records, w.spools["A"])} == {0}
     assert {r["tool"] for r in charges(records, w.spools["D"])} == {1}
 
@@ -117,7 +117,7 @@ async def test_t3_swap_on_one_tool_leaves_the_other(world: World):
     records = await w.poll()
     assert [(e["tool"], e["event"]) for e in events(records)] == [(1, "swap_staged")]
 
-    w.printer.extrude(TOOL1, 20)
+    w.printer.extrude(TOOL1, 20)  # 20 * 550 / 576 = 19.10: the counter reads 519
     await w.unload(TOOL1)
     records = await w.poll()
     assert [(e["tool"], e["event"]) for e in events(records)] == [
@@ -125,12 +125,13 @@ async def test_t3_swap_on_one_tool_leaves_the_other(world: World):
         (1, "swap_committed"),
     ]
     assert event_fields(records, "swap_committed") == [{"from_spool": d, "to_spool": c}]
-    assert w.charged(records, "D") == 20
+    assert w.charged(records, "D") == 19
 
-    # No tag reader on an INDX: the load is from the menu's preset.
+    # No tag reader on an INDX: the load is from the menu's preset. It counts
+    # LOADS["8.10.0"], 36.28, on top of 519.10: 555.38.
     records = await w.swap_cycle(tool=TOOL1, source="preset", name=ASA[0])
     records += await w.poll()
-    assert w.charged(records, "C") == LOAD_MM
+    assert w.charged(records, "C") == 36
     assert charges(records, a) == []
 
     # Tool 0 saw none of it.
@@ -190,7 +191,7 @@ async def test_t5_tool_the_printer_does_not_report(world: World, caplog: pytest.
         w.printer.extrude(0, 10)
         await w.poll()
     records = w.since(mark)
-    assert w.charged(records, "A") == 30
+    assert w.charged(records, "A") == 28  # 3 * 10 * 550 / 576 = 28.65
     assert charges(records, w.spools["D"]) == []
     assert events(records) == []
     assert [r.getMessage() for r in caplog.records].count(note) == 1
@@ -239,10 +240,11 @@ async def test_t7_reboot_restarts_every_tool(world: World):
     """Reboot on a multi-tool printer: each tool's counter restarts, and nothing is charged."""
     w = world
     await baseline(w)
+    # 10 * 550 / 576 = 9.55 and 20 * 550 / 576 = 19.10
     w.printer.extrude(0, 10)
     w.printer.extrude(TOOL1, 20)
     records = await w.poll()
-    assert w.charged(records, "A") == 10 and w.charged(records, "D") == 20
+    assert w.charged(records, "A") == 9 and w.charged(records, "D") == 19
 
     old_boot = w.printer.boot_id
     w.printer.reboot()
