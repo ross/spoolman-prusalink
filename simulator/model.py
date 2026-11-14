@@ -861,6 +861,10 @@ class SimPrinter:
         if source == "preset":
             if uuid or temps is not None:
                 raise Invalid("a preset load has no UUID or temperatures")
+            # The menu lists only the build's presets (`all_filament_types` in
+            # `src/common/filament_list.hpp`), so PPS can't be picked on an MK4S.
+            if name not in self.model.presets:
+                raise Invalid(f"{self.model.name} has no {name} preset")
             temps = self.model.preset_temperatures(name)
             # Picking a color makes the preset ad-hoc, which replaces the ad-hoc slot.
             return Material(name, color, adhoc=color is not None, **temps)

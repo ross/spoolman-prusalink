@@ -90,7 +90,12 @@ def _apply_filament(p: SimPrinter, c: gcode.SetFilament) -> None:
         material.color = c.color or material.color
         _apply_temperatures(material, c.temps)
     elif c.name:
-        # A preset write: the firmware ignores every parameter but the type.
+        # A preset write: the firmware ignores every parameter but the type. A name the
+        # build has no preset for doesn't parse (`FilamentType::from_name` in
+        # `src/common/filament_common.cpp`), so `M865` prints an error and stores nothing.
+        if c.name not in p.model.presets:
+            p._log("gcode", f"M865 L{c.tool} failed: {p.model.name} has no {c.name} preset")
+            return
         material = Material(c.name, adhoc=False, **p.model.preset_temperatures(c.name))
         if c.color or c.temps:
             p._log("gcode", f"M865 L{c.tool}: parameters ignored on preset {c.name}")
