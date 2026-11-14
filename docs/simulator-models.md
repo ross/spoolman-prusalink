@@ -25,7 +25,9 @@ profile's priming, tool-change moves and end park. Workstream 5 is built:
 an MMU3 is a unit whose five slots share one filament path, with its menu
 operations, prints with the stock MMU3 profile, the preview's unload
 question, runout, spool join and power panic, and the tests run the bridge
-against an MK4S and a Core One with one. Workstream 6 isn't started.
+against an MK4S and a Core One with one. Workstream 6 is built:
+printer-behaviors.md lists the behaviors that rest on one build flag or
+firmware function, with what guards each and what depends on it.
 [Open questions](#open-questions) lists what the work still has to settle.
 
 ## Goal and non-goals
@@ -87,9 +89,11 @@ hardware".
 The firmware will move. Tag reader support is planned for INDX, and UUIDs
 are expected to come with it. The plan keeps such facts as per-model data
 the check compares, not as code paths, so a firmware change shows up as a
-failing check with one table to edit. Behaviors can't be checked that way:
-[Workstream 6](#workstreams) lists the assumptions to read again at each
-firmware update.
+failing check with one table to edit. Behaviors can't be compared that
+way: `WATCHED` in `firmware/watch.py` fingerprints the code some of them
+come from, and the list that [Workstream 6](#workstreams) built, in
+printer-behaviors.md, names those that rest on one flag or function, to
+read again at each firmware update.
 
 ## What the simulator has today
 
