@@ -72,7 +72,7 @@ async def test_p2_runout_with_spoolman_updated_during_pause(world: World):
     records = w.since(mark) + await w.poll()
     # Everything after the runout went to B; A got nothing more.
     assert w.charged(records, "A") == 0
-    assert w.charged(records, "B") == w.tool.extruded - at_runout
+    assert w.charged(records, "B") == w.counter - at_runout
     assert {r["spool_id"] for r in charges(w.since(0))} == {a, b}
 
     # Idle with the printer still showing A: the queued write of B runs now.
@@ -301,11 +301,11 @@ async def test_p10_spoolman_changed_mid_print_is_staged(world: World):
     assert w.charged(records, "B") == 0
     w.printer.dismiss()
 
-    w.printer.extrude(0, 10)
+    w.printer.extrude(0, 10)  # 10 * 0.95 = 9.5 on top of 1380: 1000 and the print's 380
     await w.unload()
     records = await w.poll()
     assert event_fields(records, "swap_committed") == [{"from_spool": a, "to_spool": b}]
-    assert w.charged(records, "A") == 10
+    assert w.charged(records, "A") == 9
 
     records = await w.swap_cycle(poll_every=0.3, source="tag", name=PETG[0], color=PETG[1])
     records += await w.poll()
@@ -337,8 +337,9 @@ async def test_p12_power_panic_resume_keeps_the_job(world: World, caplog: pytest
     old_boot = w.printer.boot_id
     w.printer.set_power("on", resume=True)
     # Recovery: BUSY with the nozzle clean's 25 mm purge, PAUSED while unparking, PRINTING.
+    # The purge counts 25 * 0.95 = 23.75 from 0.
     records = await w.run_until(lambda: w.printer.state is not State.BUSY, poll_every=0.5)
-    assert w.printer.state is State.PAUSED and w.counter == 25
+    assert w.printer.state is State.PAUSED and w.counter == 23
     records += await w.run_until(lambda: w.printer.state is State.PRINTING, poll_every=0.5)
     assert w.printer.job.id == job
     # The printing the bridge never saw is lost with the counter, not held.
@@ -571,12 +572,14 @@ async def test_p6_jam_is_an_unconfirmed_swap_and_its_purge_is_charged(world: Wor
     assert len(events(records, "swap_unconfirmed")) == 1
     at_jam = w.tool.extruded_at_unload
 
-    # The reload after a jam purges 60 mm more than a load.
+    # The reload after a jam purges 60 mm more than a load. Past the 40 mm gap: the 20 mm
+    # fast load and the 40 + 60 mm purge, (20 + 100) * 0.95 = 114. The retract, prime and
+    # retract after it, and the resume's feed back to the jam's gap 0, move only within the gap.
     mark = w.mark()
     await reload_and_resume(w)
-    assert w.counter - at_jam == LOAD_MM + 60
+    assert w.counter - at_jam == 114
     records = w.since(mark) + await w.poll()
-    assert w.charged(records, "A") == LOAD_MM + 60
+    assert w.charged(records, "A") == 114
 
     await finish(w)
     records = w.since(0) + await w.poll()

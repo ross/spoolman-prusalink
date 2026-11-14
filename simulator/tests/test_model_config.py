@@ -24,6 +24,11 @@ def test_example_builds():
     assert sim.printers["core-one-l"].tools[0].extruded == 4310
 
 
+def test_high_flow_reaches_the_printer(tmp_path):
+    sim = sim_from(tmp_path, printer("high_flow = true") + printer(name="q"))
+    assert sim.printers["p"].high_flow and not sim.printers["q"].high_flow
+
+
 def test_tool_with_color_and_uuid_is_adhoc(tmp_path):
     text = printer(
         tool(

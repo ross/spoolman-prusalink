@@ -6,8 +6,10 @@ and printers with an MMU3. Today it copies one printer closely, the Core
 One L, and treats the rest as that printer with a different name, tool
 count and retraction gap.
 
-Draft, 2026-11-13. Nothing here is built. [Open questions](#open-questions)
-lists what the work still has to settle.
+Draft, 2026-11-13. Workstream 1 is in progress: each model has its profile
+data and the firmware readers check it, but the simulator's behavior hasn't
+changed yet. [Open questions](#open-questions) lists what the work still has
+to settle.
 
 ## Goal and non-goals
 
@@ -76,17 +78,21 @@ firmware update.
 - `ModelInfo` holds a type code, a name, whether tool 0 keeps UUIDs, the
   retraction gap, the most tools, and whether the build has counters.
   `script/firmware-check` compares those with the source.
-- Every other length and time is one global `Settings`: a load is the gap,
-  then 36 mm counted, then a 40 mm purge, on every model. The feed ratio is
-  0.95 everywhere.
+- Each model has its build's extruder profile. Every filament move counts
+  through the tracker's arithmetic with the model's gap and feed ratio, and
+  a menu load runs the model's slow, fast and purge lengths, with the
+  purge's end per build and the high-flow doubling. The ramming,
+  auto-retract and unload counts aren't modeled yet. Other lengths and
+  times are one global `Settings`, and the feed ratio and load lengths
+  there are overrides.
 - A tool has its own counters, material, gap and sensor. A print is a list
   of (tool, mm) segments with a fixed purge at each tool change. Picking a
   tool can trigger the idle sensor clear. A tool can be disabled.
 - The model check stops a job in `ATTENTION` when `M862.3` names anything
   but the model or its MMU3 name. The job has no ID until the question is
   accepted.
-- It serves `/api/version`, `/api/v1/status`, `/api/v1/job` and
-  `/api/v1/filament`, and not `/api/v1/info`.
+- It serves `/api/version`, `/api/v1/info`, `/api/v1/status`, `/api/v1/job`
+  and `/api/v1/filament`. `/api/v1/info` always reports `mmu` as false.
 - Tests: the unit harness always builds one Core One L with one tool.
   Integration runs T1 to T7 on a two-tool INDX, and a few rows on an MK4,
   an MK3.9 and a MINI.
@@ -102,7 +108,7 @@ Paths are in the firmware at `ff61540d4`.
 | Load lengths | Slow and fast feed, then the purge: Core One and Core One L 40, 20, 40; MK4 and XL 30, 50, 27; iX 40, 45, 40; INDX 15, 25, 25. A high-flow nozzle doubles the purge, except on INDX. | `include/marlin/Configuration_*_adv.h`, `pause.cpp:688-866`, `nozzle_cleaner.cpp:76-92` |
 | The purge's end | Most builds retract 8 mm after the purge. The iX purges in 5 mm steps with no retract. INDX runs `G750 E25` once, then the auto-retract. | `pause.cpp:817-888` |
 | Feed ratio | E steps over calibrated E steps: 380/400 on every build but INDX, which is 550/576. | `planner.cpp:2210-2218`, `Configuration_COREONE.h:476-484` |
-| Auto-retract | After an idle load and at the end of a print, a Nextruder retracts 47 mm, but the tracker's gap stops at 40. The sequence's later feed then counts 15 mm that never left the nozzle, and the next print's first move counts 7 mm more. INDX is exact. Off for flexible filament and when the user turns it off. | `standard_ramming_sequence_nextruder.cpp`, `marlin_server.cpp:763-770, 1045-1080` |
+| Auto-retract | After an idle load and at the end of a print, a Nextruder's sequence leaves the filament 55 mm retracted, but the tracker's gap stops at 40. The sequence first feeds back whatever the tracker says is retracted, so it starts from a gap of 0 and counts 23 mm: its 8 mm feed, which does leave the nozzle, and 15 mm that never does. When the tracker has lost the distance (the gap at its limit), only the 15 mm counts. The next forward move counts 15 mm more that never left the nozzle. INDX is exact. Off for flexible filament and when the user turns it off. | `standard_ramming_sequence_nextruder.cpp`, `ramming_sequence.cpp`, `mapi/motion.cpp`, `marlin_server.cpp:763-770, 1045-1080` |
 | Unload | A menu unload rams first. It counts about 23 mm on a Nextruder that isn't auto-retracted and about 19 mm on INDX, before the unload is recorded. | `pause.cpp` |
 | Power-panic resume | INDX purges 25 mm (`G750 E25`). The MK4 family, Core One, Core One L and iX feed back the 8 mm they retracted at the cut. The XL moves nothing. This reading disagrees with F12, which has the 25 mm on the single-tool Core One L: the F12 trace decides. | `power_panic.cpp:110-116, 480-521` |
 | Nozzle-cleaner sequences | On the iX and INDX, a file under `/usb/macros/nozzle_cleaner/` replaces a built-in sequence, the INDX purges included. The simulator assumes the built-in ones. | `gcode_loader.cpp:24-30, 105-115` |
@@ -381,10 +387,11 @@ Once the printer is an INDX, these can't be recorded again. Sittings A, B
 and C in printer-behaviors.md cover F1 to F13 and F24. This plan adds:
 
 - **The load's split.** F3 at `--interval 0.5`: how much counts before the
-  type appears, and whether about 15 mm counts at the end of the load
+  type appears, and whether about 23 mm counts at the end of the load
   (the auto-retract).
 - **The auto-retract around a print.** F5 with the counters watched during
-  parking and at the next print's first move: about 15 mm, then about 7 mm.
+  parking and at the next print's first move: about 23 mm (15 mm when the
+  gap is already at its limit), then about 15 mm.
 - **An unload that isn't auto-retracted.** Unload after a Move E, to see
   the ramming count.
 - **A preview question.** Upload a file sliced for an MK4S, and one for a
@@ -415,9 +422,9 @@ able to show it once the workstream named is built.
    tool docked. Only a menu unload counts there. (4.)
 5. **A spool join** counts an unload on the old tool in the middle of a
    print, and the rest of the print is charged to the join's tool. (4.)
-6. **The auto-retract charges filament that wasn't used**: about 15 mm per
-   idle load and per print, and 7 mm at the next print, on every Nextruder.
-   (1.)
+6. **The auto-retract charges filament that wasn't used**: 15 mm per idle
+   load and per print, and 15 mm more at the next forward move, on every
+   Nextruder. The 8 mm it also counts is extruded. (1.)
 7. **MMU: swaps are invisible.** `unload_count` doesn't move, so the bridge
    never sees a spool change on a slot. (5.)
 8. **MMU: each tool change over-charges the outgoing slot** by roughly

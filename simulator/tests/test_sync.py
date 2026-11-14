@@ -118,7 +118,8 @@ def test_m865_copy_onto_another_tool_drops_the_uuids():
     tagged = Material("PETG", "#186bb5", TAG, True, material_uuid=TAG, package_uuid=TAG)
     sim, p = make("1.4.1", [loaded(0, tagged)])
     p.tools[1] = SimTool(1, enabled=False)
-    p.model = type(p.model)("x", "X", uuids=True, max_tools=2)  # only tool 0 holds UUIDs
+    # Only tool 0 holds UUIDs.
+    p.model = type(p.model)("x", "X", p.model.extruder, uuids=True, max_tools=2)
     sync.apply(p, gcode.parse("M865 I0 L1"))
     copy = p.tools[1].material
     assert (copy.name, copy.instance_uuid, copy.material_uuid, copy.package_uuid) == (

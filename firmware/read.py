@@ -20,6 +20,24 @@ PRESETS_FILE = "src/common/filament_presets.cpp"
 FILAMENT_FILE = "src/common/filament.hpp"
 ALIASES_FILE = "src/feature/openprinttag/data_utils.cpp"
 TRACKER_FILE = "src/feature/filament_tracker/filament_tracker.hpp"
+RAMMING_CMAKE_FILE = "src/feature/ramming/CMakeLists.txt"
+CLEANER_FILE = "src/feature/nozzle_cleaner/nozzle_cleaner.cpp"
+
+
+def configuration_file(name: str) -> str:
+    """Return the path of `Configuration_<name>.h`, such as `Configuration_MK4.h`."""
+    return f"include/marlin/Configuration_{name}.h"
+
+
+def advanced_file(name: str) -> str:
+    """Return the path of `Configuration_<name>_adv.h`."""
+    return f"include/marlin/Configuration_{name}_adv.h"
+
+
+def ramming_file(variant: str) -> str:
+    """Return the path of the standard ramming sequences for `variant`, such as "indx"."""
+    return f"src/feature/ramming/standard_ramming_sequence_{variant}.cpp"
+
 
 # A macro such as `HAS_LOADCELL` or `PRINTER_IS_PRUSA_MINI`, without the `()`, to its value
 # for one build. Raises KeyError for a macro it doesn't know.
@@ -235,6 +253,244 @@ def tracker_gap(text: str, macros: Macros) -> float | None:
         return float(m.group(1))
     except ValueError as e:
         raise Unreadable(TRACKER_FILE, str(e)) from None
+
+
+# The extruder's steps per mm in `Configuration_<X>.h`: what it runs at, then what feeds
+# exactly the commanded length.
+E_STEPS = ("DEFAULT_AXIS_STEPS_PER_UNIT_E0", "CALIBRATED_AXIS_STEPS_PER_UNIT_E0")
+# The load, unload and purge lengths in `Configuration_<X>_adv.h`, in mm.
+PAUSE_LENGTHS = (
+    "PARK_PAUSE_PRIME_LENGTH",
+    "STANDARD_RETRACT_LENGTH",
+    "FILAMENT_CHANGE_UNLOAD_LENGTH",
+    "FILAMENT_CHANGE_SLOW_LOAD_LENGTH",
+    "FILAMENT_CHANGE_FAST_LOAD_LENGTH",
+    "ADVANCED_PAUSE_PURGE_LENGTH",
+)
+
+
+def e_steps(text: str, macros: Macros, path: str) -> tuple[int, int]:
+    """Return one build's `E_STEPS` from the `Configuration_<X>.h` at `path`."""
+    try:
+        default, calibrated = defines(text, E_STEPS, macros)
+    except ValueError as e:
+        raise Unreadable(path, str(e)) from None
+    return default, calibrated
+
+
+def pause_lengths(text: str, macros: Macros, path: str) -> tuple[int, ...]:
+    """Return one build's `PAUSE_LENGTHS`, in order, from the `_adv.h` file at `path`."""
+    try:
+        return defines(text, PAUSE_LENGTHS, macros)
+    except ValueError as e:
+        raise Unreadable(path, str(e)) from None
+
+
+def defines(text: str, names: Iterable[str], macros: Macros) -> tuple[int, ...]:
+    """Return the integer each of `names` is `#define`d to for one build, in order.
+
+    Only the `#if` branches that enclose a define of one of `names` are evaluated, so the
+    rest of the file may use conditions `evaluate` can't read. Each name has to be defined
+    exactly once among the build's active lines, to a plain integer, and never `#undef`ed.
+    Raises ValueError otherwise.
+    """
+    text = _strip_comments(text).replace("\\\n", " ")
+    # Per open #if, its directive lines so far: the #if and any #elif or #else after it.
+    open_ifs: list[list[str]] = []
+    found: dict[str, list[tuple[list[str], str]]] = {name: [] for name in names}
+    for line in text.splitlines():
+        m = re.match(r"\s*#\s*(\w+)\s*(.*?)\s*$", line)
+        if not m:
+            continue
+        directive, rest = m.groups()
+        if directive in ("if", "ifdef", "ifndef"):
+            open_ifs.append([line])
+        elif directive in ("elif", "else"):
+            if not open_ifs:
+                raise ValueError(f"#{directive} without #if")
+            open_ifs[-1].append(line)
+        elif directive == "endif":
+            if not open_ifs:
+                raise ValueError("#endif without #if")
+            open_ifs.pop()
+        elif directive in ("define", "undef"):
+            name, value = re.match(r"(\w*)(.*)", rest).groups()  # type: ignore[union-attr]
+            if name not in found:
+                continue
+            if directive == "undef":
+                raise ValueError(f"#undef {name}")
+            enclosing = [d for branches in open_ifs for d in branches]
+            found[name].append((enclosing + ["define"] + ["#endif"] * len(open_ifs), value))
+    if open_ifs:
+        raise ValueError("#if without #endif")
+    values = []
+    for name, defined in found.items():
+        if not defined:
+            raise ValueError(f"no #define {name}")
+        # Each define with only its enclosing directives, which `active_lines` evaluates.
+        active = [value for lines, value in defined if active_lines(lines, macros)]
+        if len(active) != 1:
+            raise ValueError(f"{name} is defined {len(active)} times for the build")
+        if not re.fullmatch(r"-?\d+", active[0].strip()):
+            raise ValueError(f"can't read #define {name} {active[0].strip()}")
+        values.append(int(active[0]))
+    return tuple(values)
+
+
+# The `StandardRammingSequence` cases (`standard_ramming_sequence.hpp`).
+RAMMING_CASES = frozenset({"auto_retract", "runout", "unload"})
+Step = tuple[int, int]  # a ramming step: E in mm, feedrate in mm/min
+
+_RAMMING_ARRAY = (
+    r"static\s+constexpr\s+(?:buddy::)?RammingSequenceArray\s+seq\s*\(\s*\{(.*?)\}\s*\)\s*;"
+)
+_RAMMING_CASE = re.compile(r"\s*((?:case\s+StandardRammingSequence::\w+\s*:\s*)+)\{")
+_RAMMING_BODY = re.compile(
+    rf"\s*(?:if\s*\(\s*is_flexible\s*\)\s*\{{\s*{_RAMMING_ARRAY}\s*return\s+seq\s*;\s*\}}\s*)?"
+    rf"{_RAMMING_ARRAY}\s*(?:static_assert\s*\([^;]*\)\s*;\s*)?return\s+seq\s*;\s*",
+    re.S,
+)
+_RAMMING_STEP = re.compile(r"\s*\{\s*(-?\d+)\s*,\s*(\d+)\s*\}\s*(?:,|$)")
+_RAMMING_FUNCTION = re.compile(r"\bstandard_ramming_sequence\s*\([^()]*\)\s*\{")
+# What the files hold around the `switch (seq)`. Anything else, such as a test that returns
+# another sequence before the switch, could change which sequence a build uses.
+_RAMMING_BEFORE_SWITCH = (
+    "",
+    "const bool is_flexible = FilamentType::for_tool_heuristic(virtual_tool)"
+    ".parameters().is_flexible;",
+    "[[maybe_unused]] const bool is_high_flow_nozzle = config_store()"
+    ".get_nozzle_is_high_flow(virtual_tool.to_physical());",
+)
+_RAMMING_AFTER_SWITCH = "bsod_unreachable();"
+
+
+def ramming(text: str, macros: Macros, path: str) -> dict[str, tuple[Step, ...]]:
+    """Return one build's standard ramming sequences, by case name, from the file at `path`.
+
+    Reads the `switch (seq)` in `standard_ramming_sequence(...)`, which may only be preceded
+    by a known declaration and followed by `bsod_unreachable();`. Where a case returns
+    another sequence for flexible filament first, that one is also given as
+    `<name>_flexible`. The cases have to be `runout`, `unload` and, on a build with
+    `HAS_AUTO_RETRACT`, `auto_retract`.
+    """
+    try:
+        text = "\n".join(active_lines(_strip_comments(text).splitlines(), macros))
+        functions = list(_RAMMING_FUNCTION.finditer(text))
+        if len(functions) != 1:
+            raise ValueError(f"{len(functions)} standard_ramming_sequence definitions")
+        function = text[functions[0].end() : _closing_brace(text, functions[0].end() - 1) - 1]
+        switches = list(re.finditer(r"switch\s*\(\s*seq\s*\)\s*\{", function))
+        if len(switches) != 1:
+            raise ValueError(f"{len(switches)} switch (seq) statements")
+        start = switches[0].end()
+        stop = _closing_brace(function, start - 1)
+        before = _tokens(function[: switches[0].start()])
+        if before not in map(_tokens, _RAMMING_BEFORE_SWITCH):
+            raise ValueError("unexpected code before switch (seq)")
+        if _tokens(function[stop:]) != _tokens(_RAMMING_AFTER_SWITCH):
+            raise ValueError("unexpected code after switch (seq)")
+        body = function[start : stop - 1]
+        result: dict[str, tuple[Step, ...]] = {}
+        pos = 0
+        while body[pos:].strip():
+            m = _RAMMING_CASE.match(body, pos)
+            if not m:
+                raise ValueError(f"unexpected {body[pos:].split()[0]!r} in switch (seq)")
+            end = _closing_brace(body, m.end() - 1)
+            arrays = _RAMMING_BODY.fullmatch(body, m.end(), end - 1)
+            if not arrays:
+                raise ValueError(f"can't read the case block {m.group(1).split()[-1]}")
+            flexible, normal = arrays.groups()
+            for name in re.findall(r"::(\w+)", m.group(1)):
+                if name not in RAMMING_CASES:
+                    raise ValueError(f"unknown ramming sequence {name}")
+                if name in result:
+                    raise ValueError(f"ramming sequence {name} appears twice")
+                result[name] = _ramming_steps(normal, name)
+                if flexible is not None:
+                    result[f"{name}_flexible"] = _ramming_steps(flexible, name)
+            pos = end
+        wanted = {"runout", "unload"}
+        if evaluate("HAS_AUTO_RETRACT()", macros):
+            wanted.add("auto_retract")
+        cases = {n for n in result if n in RAMMING_CASES}
+        if cases != wanted:
+            listed, expected = (", ".join(sorted(s)) for s in (cases, wanted))
+            raise ValueError(f"the cases are {listed}, not {expected}")
+    except ValueError as e:
+        raise Unreadable(path, str(e)) from None
+    return result
+
+
+def _ramming_steps(text: str, name: str) -> tuple[Step, ...]:
+    steps = []
+    pos = 0
+    for m in _RAMMING_STEP.finditer(text):
+        if m.start() != pos:
+            break
+        steps.append((int(m.group(1)), int(m.group(2))))
+        pos = m.end()
+    # The firmware aborts the build on a feedrate that isn't positive (`ramming_sequence.hpp`).
+    if not steps or text[pos:].strip() or any(fr <= 0 for _, fr in steps):
+        raise ValueError(f"can't read the steps of ramming sequence {name}")
+    return tuple(steps)
+
+
+def cleaner_purge(text: str, macros: Macros) -> tuple[float, bool]:
+    """Return how far one build's nozzle cleaner `purge_clean` G-code extrudes, and whether
+    it runs `M1705` (auto-retract) after that.
+
+    Only `G750` may move E, and an `M1705` has to come after the last E move.
+    """
+    try:
+        text = "\n".join(active_lines(_strip_comments(text).splitlines(), macros))
+        entry = _one(
+            r"\{\s*Sequence::purge_clean\s*,\s*\{(.*?)\}\s*\}", text, "Sequence::purge_clean"
+        )
+        literals, rest = _one(
+            r'\.default_gcode\s*=\s*((?:"[^"]*"\s*)+)(?=(.*))', entry, ".default_gcode", 2
+        )
+        # Only a trailing comma may follow, so a macro between the literals can't hide G-code.
+        if not re.fullmatch(r",?\s*", rest, re.S):
+            raise ValueError("unexpected code after the .default_gcode literals")
+        gcode = "".join(re.findall(r'"([^"]*)"', literals))
+        if re.search(r"\\(?!n)", gcode):
+            raise ValueError("an escape other than \\n in purge_clean")
+        extruded = 0.0
+        last_move = retract = None
+        for i, line in enumerate(gcode.split("\\n")):
+            words = line.split()
+            if words[:1] == ["M1705"] and retract is None:
+                retract = i
+            moves = [w for w in words if w.startswith("E")]
+            if not moves:
+                continue
+            m = re.fullmatch(r"E(-?\d+(?:\.\d*)?)", moves[0])
+            if words[0] != "G750" or len(moves) != 1 or not m:
+                raise ValueError(f"can't read the E move {line.strip()!r} in purge_clean")
+            extruded += float(m.group(1))
+            last_move = i
+        if retract is not None and (last_move is None or retract < last_move):
+            raise ValueError("M1705 before the last E move in purge_clean")
+    except ValueError as e:
+        raise Unreadable(CLEANER_FILE, str(e)) from None
+    return extruded, retract is not None
+
+
+def _tokens(code: str) -> str:
+    """Return `code`'s words and other characters split by single spaces, so two pieces of
+    code compare equal whatever their spacing."""
+    return " ".join(re.findall(r"\w+|\S", code))
+
+
+def _closing_brace(text: str, start: int) -> int:
+    """Return the index just past the `}` that closes the `{` at `start`."""
+    depth = 0
+    for i in range(start, len(text)):
+        depth += {"{": 1, "}": -1}.get(text[i], 0)
+        if depth == 0:
+            return i + 1
+    raise ValueError("unbalanced braces")
 
 
 # Directives kept as lines when active, for the caller to see or ignore.

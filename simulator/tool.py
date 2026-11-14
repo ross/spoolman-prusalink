@@ -6,7 +6,7 @@ These sit below `model`, so a module that `model` imports can build them too.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 # Nozzle, preheat and bed temperatures of the firmware's preset filaments
@@ -34,6 +34,145 @@ DEFAULT_TEMPERATURES = (215, 170, 60)
 # the `FilamentParametersInfo` constructor in `src/feature/openprinttag/data_utils.cpp`.
 # `script/firmware-check` compares them with the firmware source.
 PRESET_ALIASES = {"TPU": "FLEX"}
+
+Ramming = tuple[tuple[int, int], ...]  # steps of E in mm and feedrate in mm/min
+
+# The standard ramming sequences each build compiles, by `StandardRammingSequence` case,
+# with `<case>_flexible` where flexible filament gets another sequence
+# (`src/feature/ramming/standard_ramming_sequence_<variant>.cpp`). A build without an
+# `auto_retract` case doesn't auto-retract. `script/firmware-check` compares them with
+# the firmware source.
+_NEXTRUDER_AUTO_RETRACT: Ramming = (
+    (8, 995),
+    (-43, 6000),
+    (-8, 3000),
+    (-4, 1800),
+    (20, 600),
+    (-20, 470),
+    (55, 1740),
+    (-55, 6000),
+    (20, 340),
+    (-20, 210),
+)
+_NEXTRUDER_UNLOAD: Ramming = (*_NEXTRUDER_AUTO_RETRACT, (-50, 2000))
+_NEXTRUDER_RUNOUT: Ramming = ((7, 1500), (-50, 2700), (-5, 50), (-50, 1500))
+NEXTRUDER_RAMMING: dict[str, Ramming] = {
+    "auto_retract": _NEXTRUDER_AUTO_RETRACT,
+    "runout": _NEXTRUDER_RUNOUT,
+    "unload": _NEXTRUDER_UNLOAD,
+}
+_INDX_UNLOAD: Ramming = (
+    (8, 1500),
+    (8, 1200),
+    (-20, 2100),
+    (-3, 60),
+    (3, 120),
+    (19, 1800),
+    (2, 600),
+    (-20, 2100),
+    (-3, 120),
+    (3, 120),
+    (-6, 120),
+    (-8, 360),
+)
+INDX_RAMMING: dict[str, Ramming] = {
+    "auto_retract": ((8, 480), (-8, 4800), (1, 1440), (-1, 1440)),
+    "runout": _INDX_UNLOAD,
+    "runout_flexible": ((-50, 600),),
+    "unload": _INDX_UNLOAD,
+    "unload_flexible": ((-50, 600),),
+}
+_MINI_UNLOAD: Ramming = ((20, 1500), (-50, 2700), (-5, 50), (-50, 1500))
+MK3_5_RAMMING: dict[str, Ramming] = {
+    "runout": ((7, 1500), (-50, 2700), (-5, 50), (-50, 1500)),
+    "unload": _MINI_UNLOAD,
+}
+MINI_RAMMING: dict[str, Ramming] = {"runout": _MINI_UNLOAD, "unload": _MINI_UNLOAD}
+
+
+@dataclass(frozen=True)
+class Lengths:
+    """A build's filament change lengths in mm (`include/marlin/Configuration_<X>_adv.h`).
+
+    The fields follow the firmware's order: `PARK_PAUSE_PRIME_LENGTH`,
+    `STANDARD_RETRACT_LENGTH`, then the `FILAMENT_CHANGE_` unload, slow load, fast load
+    and purge lengths. `script/firmware-check` compares them with the firmware source.
+    """
+
+    prime_mm: int
+    retract_mm: int
+    unload_mm: int
+    slow_load_mm: int
+    fast_load_mm: int
+    purge_mm: int
+
+
+@dataclass(frozen=True)
+class Extruder:
+    """A build's extruder: how it feeds, changes filament, rams and cleans the nozzle.
+
+    `script/firmware-check` compares each model's with the firmware source.
+    """
+
+    # Default and calibrated steps per mm (`include/marlin/Configuration_<X>.h`).
+    e_steps: tuple[int, int]
+    lengths: Lengths
+    # Left out of the hash so a `ModelInfo` stays hashable.
+    ramming: dict[str, Ramming] = field(hash=False)
+    # Whether the user can turn auto-retract off: `HAS_SWITCHABLE_AUTO_RETRACT`.
+    auto_retract_switchable: bool = False
+    # What the nozzle cleaner's `purge_clean` G-code extrudes, and whether it then
+    # auto-retracts (`src/feature/nozzle_cleaner/nozzle_cleaner.cpp`). None without a
+    # nozzle cleaner.
+    cleaner_purge_mm: float | None = None
+    cleaner_auto_retract: bool = False
+
+    @property
+    def feed_ratio(self) -> float:
+        """How much filament an E move feeds per mm commanded (`planner.cpp`)."""
+        default, calibrated = self.e_steps
+        return default / calibrated
+
+    @property
+    def auto_retracts(self) -> bool:
+        """Whether the build auto-retracts at all: it has the sequence for it."""
+        return "auto_retract" in self.ramming
+
+
+_NEXTRUDER_STEPS = (380, 400)
+_NEXTRUDER_LENGTHS = Lengths(4, 8, 105, 30, 50, 27)
+_CORE_ONE_LENGTHS = Lengths(4, 8, 105, 40, 20, 40)
+
+# Each build's extruder, shared by the models that run the build. The MK4 and XL builds
+# have the same one, and so do the Core One and Core One L, and the two INDX builds.
+MK4_EXTRUDER = Extruder(
+    _NEXTRUDER_STEPS, _NEXTRUDER_LENGTHS, NEXTRUDER_RAMMING, auto_retract_switchable=True
+)
+# The dev kit build lacks HAS_AUTO_RETRACT, which compiles the auto_retract case out.
+XL_DEV_KIT_EXTRUDER = Extruder(
+    _NEXTRUDER_STEPS,
+    _NEXTRUDER_LENGTHS,
+    {k: v for k, v in NEXTRUDER_RAMMING.items() if k != "auto_retract"},
+)
+IX_EXTRUDER = Extruder(
+    _NEXTRUDER_STEPS,
+    Lengths(4, 8, 110, 40, 45, 40),
+    NEXTRUDER_RAMMING,
+    auto_retract_switchable=True,
+    cleaner_purge_mm=0.0,
+)
+CORE_ONE_EXTRUDER = Extruder(
+    _NEXTRUDER_STEPS, _CORE_ONE_LENGTHS, NEXTRUDER_RAMMING, auto_retract_switchable=True
+)
+INDX_EXTRUDER = Extruder(
+    (550, 576),
+    Lengths(4, 8, 55, 15, 25, 40),
+    INDX_RAMMING,
+    cleaner_purge_mm=25.0,
+    cleaner_auto_retract=True,
+)
+MK3_5_EXTRUDER = Extruder((266, 280), Lengths(4, 8, 105, 30, 50, 21), MK3_5_RAMMING)
+MINI_EXTRUDER = Extruder((325, 325), Lengths(4, 8, 400, 40, 320, 50), MINI_RAMMING)
 
 
 @dataclass
@@ -81,14 +220,38 @@ def preset_temperatures(name: str) -> dict[str, int]:
     return dict(zip(("nozzle", "preheat", "bed"), values, strict=True))
 
 
+TYPE_STEP = "TYPE"  # the step that writes the type; it moves nothing
+
+
+@dataclass
+class LoadStep:
+    """One step of a load: a signed E move in commanded mm, or the type write."""
+
+    phase: str  # SLOW, FAST, TYPE, PURGE, PRIME or RETRACT
+    mm: float = 0.0  # what's left of the move: positive feeds, negative retracts
+
+
 @dataclass
 class LoadProcess:
-    phase: str  # FEED_GAP (not counted), FEED (counted, old material), PURGE (new material)
-    remaining: float  # mm left in this phase
-    feed_mm: float
-    purge_mm: float
-    material: Material | None  # set at the purge; None restores the type the unload left
+    """A load as the steps left to run, the current one first. It ends with its last step."""
+
+    steps: list[LoadStep]
+    material: Material | None  # written at the TYPE step; None restores the unload's type
     kind: str = "load"
+
+    @property
+    def phase(self) -> str:
+        return self.steps[0].phase
+
+    @property
+    def remaining(self) -> float:
+        """The mm left in the current step."""
+        return abs(self.steps[0].mm)
+
+    @property
+    def typed(self) -> bool:
+        """Whether the type has been written."""
+        return all(s.phase != TYPE_STEP for s in self.steps)
 
 
 @dataclass

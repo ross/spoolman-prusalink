@@ -90,8 +90,8 @@ def test_a_load_while_one_is_running_is_refused():
     sim.tick(100)
     p.unload(0)
     sim.tick(100)
-    with pytest.raises(Invalid, match="feed_mm must be a positive number"):
-        p.load(0, source="preset", name="PETG", feed_mm=0)
+    with pytest.raises(Invalid, match="purge_mm must be a positive number"):
+        p.load(0, source="preset", name="PETG", purge_mm=0)
     with pytest.raises(Invalid, match="purge_mm must be a positive number"):
         p.load(0, source="preset", name="PETG", purge_mm=True)
     assert p.state is State.IDLE and tool0(p).process is None

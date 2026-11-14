@@ -267,7 +267,9 @@ async def test_c8_firmware_without_usage_counters(world: World, caplog: pytest.L
     assert len(events(records, "baseline")) == 1 and charges(records) == []
     assert logged_once(caplog, logging.ERROR, "now reports filament; resuming")
     w.printer.extrude(0, 5)
-    assert w.charged(await w.poll(), "A") == 5
+    # The Core One L counts 5 * 0.95 = 4.75 on top of 1057, three times 20 * 0.95; the MINI
+    # feeds 1:1.
+    assert w.charged(await w.poll(), "A") == {"8.1.0": 4, "2.1.0": 5}[w.printer.model.code]
     assert logged_once(caplog, logging.ERROR, "has no usage counters")
 
 
@@ -530,21 +532,21 @@ async def test_m5_spool_with_no_weights_and_no_vendor(
     assert (await w.spoolman.get(a))["filament"].get("vendor") is None
     await baseline(w)
 
-    w.printer.extrude(0, 1000)
+    w.printer.extrude(0, 1000)  # 1000 * 0.95 = 950
     records = await w.poll()
     [charge] = charges(records, a)
-    assert charge["use_length"] == 1000.0
+    assert charge["use_length"] == 950.0
     assert await w.used("A") == pytest.approx(charge["grams"], abs=0.01) and charge["grams"] > 0
     assert (await w.spoolman.get(a)).get("remaining_weight") is None
     name = f"{w.spoolman.prefix} PLA"  # No vendor's name before it.
-    assert logged(caplog, logging.INFO, f"CHARGE spool {a} ({name}): +1000 mm")
+    assert logged(caplog, logging.INFO, f"CHARGE spool {a} ({name}): +950 mm")
 
     # Far past anything the spool could hold: still charged, with no weight to go negative.
     await set_used(w, "A", 5000.0)
     for _ in range(3):
         w.printer.extrude(0, 1000)
         records = await w.poll()
-        assert [r["use_length"] for r in charges(records, a)] == [1000.0]
+        assert [r["use_length"] for r in charges(records, a)] == [950.0]
     assert await w.used("A") > 5000
     assert not logged(caplog, logging.INFO, f"spool {a} shows -")
     assert await w.flag("A") is None

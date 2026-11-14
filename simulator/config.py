@@ -27,7 +27,16 @@ from simulator.model import (
 _NAME_PATTERN = r"[A-Za-z0-9_.-]{1,64}"
 
 _TOP_KEYS = {"host", "control_port", "data_dir", "printers"}
-_PRINTER_KEYS = {"name", "model", "api_key", "port", "firmware", "auto_accept_model_check", "tools"}
+_PRINTER_KEYS = {
+    "name",
+    "model",
+    "api_key",
+    "port",
+    "firmware",
+    "auto_accept_model_check",
+    "high_flow",
+    "tools",
+}
 _TOOL_KEYS = {"index", "enabled", "material", "extruded", "unload_count", "extruded_at_unload"}
 _MATERIAL_KEYS = {"name", "color", "instance_uuid"}
 
@@ -57,6 +66,7 @@ class PrinterConfig:
     firmware: str | None = None
     # None means the global setting.
     auto_accept_model_check: bool | None = None
+    high_flow: bool = False
     tools: tuple[ToolConfig, ...] = (ToolConfig(0),)
 
 
@@ -65,7 +75,8 @@ class SimConfig:
     host: str = "127.0.0.1"
     control_port: int = 8000
     data_dir: str = "simulator/data"
-    # Overrides for the fields of model.Settings, checked by name and type.
+    # Overrides for the fields of model.Settings, checked by name and type. A key that's
+    # absent leaves the field's default, which for the load lengths is the model's.
     settings: dict[str, float | bool] = field(default_factory=dict)
     printers: tuple[PrinterConfig, ...] = ()
 
@@ -230,6 +241,7 @@ def _printer(entry: object, position: int, control_port: int) -> PrinterConfig:
         port=port,
         firmware=firmware,
         auto_accept_model_check=auto_accept,
+        high_flow=_bool(entry.get("high_flow", False), f"{prefix}.high_flow"),
         tools=_tools(entry.get("tools"), prefix, model),
     )
 
@@ -355,6 +367,7 @@ def build(cfg: SimConfig) -> Simulation:
                 model=model,
                 firmware=Firmware(pc.firmware) if pc.firmware else default,
                 auto_accept_model_check=pc.auto_accept_model_check,
+                high_flow=pc.high_flow,
                 tools=tools,
                 selected_tool=enabled[0] if enabled else min(tools),
             )

@@ -41,10 +41,10 @@ async def test_b1_first_start(world: World):
     ]
     assert charges(records) == []
 
-    w.printer.extrude(0, 10)
+    w.printer.extrude(0, 10)  # 10 * 0.95 = 9.5: the counter reads 1009
     records = await w.poll()
-    assert [(r["use_length"], r["reason"]) for r in charges(records)] == [(10, "extruded")]
-    assert w.charged(w.since(0), "A") == 10
+    assert [(r["use_length"], r["reason"]) for r in charges(records)] == [(9, "extruded")]
+    assert w.charged(w.since(0), "A") == 9
 
 
 async def test_b2_restart_mid_print(world: World):
@@ -83,11 +83,11 @@ async def test_b4_database_lost(world: World):
     w = world
     a = w.spools["A"]
     await w.poll()
-    w.printer.extrude(0, 20)
+    w.printer.extrude(0, 20)  # 20 * 0.95 = 19
     await w.unload()
     records = await w.poll()
     assert len(events(records, "swap_unconfirmed")) == 1
-    assert w.charged(records, "A") == 20
+    assert w.charged(records, "A") == 19
     flag = await w.flag("A")
     assert flag is not None and "unloaded" in flag
 
@@ -109,7 +109,7 @@ async def test_b4_database_lost(world: World):
     records = await w.poll()
     assert [e["event"] for e in events(records)] == ["swap_staged"]
     assert charges(records) == []
-    assert w.charged(lost + w.since(0), "A") == 20
+    assert w.charged(lost + w.since(0), "A") == 19
     assert await w.used("B") == 0
     # With the swap forgotten, B's tag on the printer is drift on A, the active spool: its
     # UUID isn't A's. The tag's name and color aren't compared, since it isn't written.
@@ -140,11 +140,11 @@ async def test_b5_fields_registered_on_a_fresh_spoolman(
     assert keys["uuid"] not in fields
 
     # An unconfirmed swap's flag goes in the new field.
-    w.printer.extrude(0, 30)
+    w.printer.extrude(0, 30)  # 30 * 0.95 = 28.5: the counter reads 1028
     await w.unload()
     records = await w.poll()
     assert len(events(records, "swap_unconfirmed")) == 1
-    assert w.charged(records, "A") == 30
+    assert w.charged(records, "A") == 28
     flag = await w.flag("A")
     assert flag is not None and "unloaded with no Spoolman change" in flag
 
@@ -195,11 +195,14 @@ async def test_b5_field_with_the_wrong_type(world: World, caplog: pytest.LogCapt
     assert len(events(records, "swap_unconfirmed")) == 1
     # The same spool reloaded from the menu, still unconfirmed, written back (W11), used.
     await w.swap_cycle(poll_every=0.3, source="preset", name=PLA[0])
+    await w.run_until(lambda: w.printer.job is not None, poll_every=0.3)
     await w.run_until(lambda: w.printer.job is None, poll_every=0.3)
     for _ in range(3):
         w.printer.extrude(0, 10)
         await w.poll()
-    assert w.charged(w.since(0), "A") == w.counter - 1000 == 30 + LOAD_MM + 30
+    # 30 * 0.95 = 28.5, the 57 mm load, then the 30 mm extruded past the load's 8 mm gap:
+    # 28.5 + 57 + 22 * 0.95 = 106.4.
+    assert w.charged(w.since(0), "A") == w.counter - 1000 == 106
     assert await w.used("A") > 0
 
     # The bridge would flag A, but leaves the field alone, and says so once.
@@ -226,11 +229,11 @@ async def test_b5_field_setup_fails_then_recovers(world: World, caplog: pytest.L
 
     records = await w.poll()
     assert len(events(records, "baseline")) == 1
-    w.printer.extrude(0, 30)
+    w.printer.extrude(0, 30)  # 30 * 0.95 = 28.5
     await w.unload()
     records = await w.poll()
     assert len(events(records, "swap_unconfirmed")) == 1
-    assert w.charged(records, "A") == 30
+    assert w.charged(records, "A") == 28
     await w.poll()
     assert key not in await w.spoolman.fields_by_key()
     assert "unloaded with no Spoolman change" in " | ".join(
@@ -259,16 +262,16 @@ async def test_b6_second_bridge_on_one_database_is_refused(world: World):
     with pytest.raises(DatabaseError, match="another bridge is running on the same database"):
         Bridge.from_config(w.cfg)
 
-    w.printer.extrude(0, 20)
+    w.printer.extrude(0, 20)  # 20 * 0.95 = 19: the counter reads 1019
     records = await w.poll()
-    assert w.charged(records, "A") == 20
+    assert w.charged(records, "A") == 19
 
     # Once the first bridge stops, a bridge starts on its database and carries on.
     await w.restart()
-    w.printer.extrude(0, 10)
+    w.printer.extrude(0, 10)  # 9.5 more: 1028.5
     records = await w.poll()
     assert events(records) == []
-    assert w.charged(records, "A") == 10
+    assert w.charged(records, "A") == 9
 
 
 def foreign(path: Path) -> None:

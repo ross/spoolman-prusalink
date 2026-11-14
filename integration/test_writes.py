@@ -27,6 +27,7 @@ from integration.temperatures import TEMPERATURES, WRITTEN
 from simulator import prusalink
 from simulator.model import MODELS, JobPhase, Material, ModelInfo, State
 from simulator.prusalink import DROP, Answer, Reply
+from simulator.tool import MK4_EXTRUDER
 from spoolman_prusalink.printer_sync import PRINTER_MODELS, default_preamble
 
 COREONEL_PREAMBLE = default_preamble(PRINTER_MODELS["8.1.0"])
@@ -81,7 +82,7 @@ async def test_w1_write_after_swap(world: World):
 
     # Idle and different from B: the bridge uploads the sync job.
     records = await w.poll()
-    assert w.charged(records, "B") == 36 + 40
+    assert w.charged(records, "B") == LOAD_MM
     puts = w.requests("PUT")
     assert len(puts) == 1 and SYNC_FILE in puts[0].text
     w.advance(1.5)
@@ -398,20 +399,36 @@ async def test_w9_temperature_drift_is_flagged_unless_sync_drift(
     assert await w.flag("A") is None
 
 
+# The charge for the load and three 10 mm extrudes. The load leaves 8 mm of gap, so the
+# extrudes count 2 + 10 + 10 = 22 mm. The MK4 extruder loads 30 slow + 50 fast, 40 past
+# its 40 mm gap, and purges 27: (40 + 27 + 22) * 0.95 = 84.55. The Core One L's load is
+# LOADS["8.1.0"]: 57 + 22 * 0.95 = 77.9.
 @pytest.mark.parametrize(
-    "model, preamble, problem",
+    "model, preamble, problem, charged",
     [
-        (ModelInfo("99.1.0", "FUTURE"), None, "printer type '99.1.0' isn't one the bridge knows"),
-        (MODELS["3.1.0"], None, "XL isn't supported: multi-tool printers aren't supported yet"),
+        (
+            ModelInfo("99.1.0", "FUTURE", MK4_EXTRUDER),
+            None,
+            "printer type '99.1.0' isn't one the bridge knows",
+            84,
+        ),
+        (
+            MODELS["3.1.0"],
+            None,
+            "XL isn't supported: multi-tool printers aren't supported yet",
+            84,
+        ),
         (
             MODELS["1.4.0"],
             COREONEL_PREAMBLE,
             "gcode_preamble is for COREONEL but the printer is MK4",
+            84,
         ),
         (
             MODELS["8.1.0"],
             ("M862.5 P2 ; level check", 'M862.6 P"Input shaper"'),
             "gcode_preamble has no M862.3 model check; set one for COREONEL",
+            77,
         ),
     ],
     ids=["unknown", "unsupported", "mismatched", "no_model_check"],
@@ -422,6 +439,7 @@ async def test_w10_model_the_bridge_cannot_write(
     model: ModelInfo,
     preamble: tuple[str, ...] | None,
     problem: str,
+    charged: int,
 ):
     """Unknown, unsupported or mismatched model: logged once, spool flagged, still charged."""
     caplog.set_level(logging.INFO, logger="spoolman_prusalink")
@@ -447,7 +465,7 @@ async def test_w10_model_the_bridge_cannot_write(
         w.printer.extrude(0, 10)
         records += await w.poll()
     assert w.requests("PUT") == []
-    assert w.charged(records, "B") == LOAD_MM + 30
+    assert w.charged(records, "B") == charged
     flag = await w.flag("B")
     assert flag == f"{w.tool_location}: can't write to the printer: {problem}"
     assert logged_once(caplog, logging.WARNING, f"] can't write spool {b} to the printer")
@@ -821,11 +839,14 @@ async def test_w10_model_unreadable_until_it_answers(
     await write_due(w)
     records = await w.poll()
     assert w.charged(records, "B") == LOAD_MM
-    for _ in range(3):
+    # The counter reads 1085.5: 1000, the 28.5 before the unload and the load's 57. The
+    # first 10 mm count 2 past the load's 8 mm gap, then 10 each, times 0.95: 1087.4,
+    # 1096.9 and 1106.4.
+    for charged in (2, 9, 10):
         w.advance(1.0)
         w.printer.extrude(0, 10)
         records = await w.poll()
-        assert w.charged(records, "B") == 10
+        assert w.charged(records, "B") == charged
     assert w.requests("PUT") == []
     off = "can't read the printer model ("
     cant = f"] can't write spool {w.spools['B']} to the printer"
@@ -882,13 +903,14 @@ async def test_w6_sync_job_gone_before_its_name_is_read(
     await w.poll()
     assert [e.text for e in w.requests("GET /api/v1/job")] == ["GET /api/v1/job 204"]
     assert not logged(caplog, logging.WARNING, "read failed")
+    # The load leaves 8 mm of gap, so the 10 mm count 2, 1.9 on top of the load's 1057.
     for _ in range(2):
         w.advance(1.0)
         w.printer.extrude(0, 5)
         await w.poll()
     records = w.since(mark)
     assert events(records, "swap_assumed") == []
-    assert w.charged(records, "A") == 10
+    assert w.charged(records, "A") == 1
     flag = await w.flag("A")
     assert flag is not None and "unloaded with no Spoolman change" in flag
 
@@ -915,11 +937,12 @@ async def test_w9_malformed_color_is_drift(world: World, caplog: pytest.LogCaptu
         data["tools"][0]["material"]["color"] = "#7g737b"
         return Answer(200, data)
 
+    # 10 * 0.95 = 9.5 each, from 1000: 1009.5, 1019 and 1028.5.
     w.before_request = bad_color
-    for _ in range(3):
+    for charged in (9, 10, 9):
         w.printer.extrude(0, 10)
         records = await w.poll()
-        assert w.charged(records, "A") == 10
+        assert w.charged(records, "A") == charged
     assert w.requests("PUT") == []
     differs = f"printer differs from spool {a}: color printer=#7g737b spoolman={PLA[1]}"
     assert logged_once(caplog, logging.WARNING, differs)
