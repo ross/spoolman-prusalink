@@ -212,6 +212,18 @@ set_feature_for_printers_master_board(
   "COREONEL"
   "COREONEL_INDX"
   )
+# POWER_PANIC requires SELFTEST and CRASH_DETECTION to work
+set_feature_for_printers_master_board(
+  HAS_POWER_PANIC
+  "MK4"
+  "MK3.5"
+  "iX"
+  "XL"
+  "COREONE"
+  "COREONE_INDX"
+  "COREONEL"
+  "COREONEL_INDX"
+  )
 set_feature_for_printers(HAS_MMU2 "MK4" "MK3.5" "COREONE" "COREONEL")
 set_feature_for_printers(HAS_GCODE_COMPATIBILITY "MK3.5" "MK4" "COREONE" "COREONEL" "XL")
 set_feature_for_printers(

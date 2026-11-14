@@ -117,3 +117,41 @@ def test_an_empty_tool_still_counts(model, counted):
     assert not p.tools[0].path.loaded
     sim.tick(p.settings.recover_seconds + 0.01)
     assert p.state is State.PAUSED and p.tools[0].extruded == pytest.approx(counted)
+
+
+# The MINI and the XL dev kit build no power panic (HAS_POWER_PANIC in
+# `ProjectOptions.cmake`): a cut loses the print, and the printer boots idle.
+NO_POWER_PANIC = ["2.1.0", "5.1.0"]
+
+
+@pytest.mark.parametrize("cold_bed", [False, True])
+@pytest.mark.parametrize("model", NO_POWER_PANIC)
+def test_a_cut_without_power_panic_loses_the_print(model, cold_bed):
+    sim, p = printing(model)
+    _, plain = printing(model)
+    plain.reboot()
+    p.reboot(keep_job=True, cold_bed=cold_bed)
+    t = p.tools[0]
+    assert p.state is State.IDLE and p.job is None
+    assert p.job_counter == plain.job_counter
+    # Nothing retracts at the cut: the tool boots as a plain reboot leaves it.
+    assert t.path == plain.tools[0].path
+    assert (t.extruded, t.unload_count) == (0, 0)
+    assert [e.text for e in sim.events if e.kind == "action"][-1] == (
+        "power loss, print lost: no power panic"
+    )
+    sim.tick(p.settings.recover_seconds + p.settings.unpark_seconds + 10)
+    assert p.state is State.IDLE and p.job is None and t.extruded == 0
+    assert not any(s.startswith(("fed back", "nozzle clean")) for s in job_log(sim))
+
+
+@pytest.mark.parametrize(("model", "cleared"), [("2.1.0", 1), ("5.1.0", 1), ("8.1.0", 0)])
+def test_the_idle_sensor_clear_runs_unless_the_print_resumes(model, cleared):
+    # Without power panic the boot is a plain one, so the clear counts the tool pulled out
+    # while off. A resuming print skips it.
+    sim, p = printing(model)
+    p.set_power("off")
+    p.unload(0)  # pulled out by hand while off
+    p.set_power("on", resume=True)
+    assert p.tools[0].unload_count == cleared
+    assert (p.job is None) == bool(cleared)

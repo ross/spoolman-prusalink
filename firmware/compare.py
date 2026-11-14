@@ -123,6 +123,7 @@ FEATURES = (
     "HAS_NOZZLE_CLEANER",
     "HAS_MMU2",
     "HAS_GCODE_COMPATIBILITY",
+    "HAS_POWER_PANIC",
 )
 
 Ramming = tuple[read.Step, ...]
@@ -584,6 +585,8 @@ def _compare_sim_models(
         if build.gap_mm is not None:
             differ(table, code, None, "gap_mm", build.gap_mm, model.gap_mm)
         differ(table, code, None, "mmu", "HAS_MMU2" in build.features, model.mmu)
+        panic = "HAS_POWER_PANIC" in build.features
+        differ(table, code, None, "power_panic", panic, model.power_panic)
         # The model's own group, as `PrinterModelInfo::current` picks it on every build.
         differ(table, code, None, "group", models[code].group, model.group)
         mode = "HAS_GCODE_COMPATIBILITY" in build.features

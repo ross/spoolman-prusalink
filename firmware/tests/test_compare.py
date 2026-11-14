@@ -143,6 +143,9 @@ def test_load_reads_every_build():
     assert firmware.builds["XL_DEV_KIT"].presets["PA"]["nozzle_temperature"] == 285
     assert "HAS_GCODE_COMPATIBILITY" in mk4.features
     assert "HAS_GCODE_COMPATIBILITY" not in mini.features
+    assert "HAS_POWER_PANIC" in mk4.features and "HAS_POWER_PANIC" in xl.features
+    assert "HAS_POWER_PANIC" not in mini.features
+    assert "HAS_POWER_PANIC" not in firmware.builds["XL_DEV_KIT"].features
     assert mk4.feature_names == {"Input Shaper", "MMU3"}
     assert mini.feature_names == {"Input Shaper"}
     assert firmware.builds["COREONE"].feature_names == {"Input Shaper", "MMU3", "HT Hotend"}
@@ -421,18 +424,19 @@ def synthetic():
             "HAS_CHAMBER_FILTRATION_API",
             "HAS_HT_HOTEND",
             "HAS_GCODE_COMPATIBILITY",
+            "HAS_POWER_PANIC",
         }
     )
     builds = {
         "MK4": build(
             "MK4",
-            frozenset({"HAS_FILAMENT_TRACKER", "HAS_GCODE_COMPATIBILITY"}),
+            frozenset({"HAS_FILAMENT_TRACKER", "HAS_GCODE_COMPATIBILITY", "HAS_POWER_PANIC"}),
             1,
             40.0,
             {"PLA": fw_preset(215, 170, 60), "FLEX": fw_preset(240, 210, 50, flexible=True)},
         ),
         "MINI": build("MINI", frozenset(), 1, None, {"PLA": fw_preset(215, 170, 60)}),
-        "XL": build("XL", frozenset({"HAS_FILAMENT_TRACKER"}), 5, 40.0, {}),
+        "XL": build("XL", frozenset({"HAS_FILAMENT_TRACKER", "HAS_POWER_PANIC"}), 5, 40.0, {}),
         "COREONE": build(
             "COREONE",
             core,
@@ -493,6 +497,7 @@ def synthetic():
                 EXTRUDER,
                 MINI_PRESETS,
                 counters=False,
+                power_panic=False,
                 gap_mm=99.0,
                 group="mini",
                 checks=NO_MODE,
@@ -546,7 +551,9 @@ def test_model_differences():
     bridge["7.1.0"] = PrinterModel("CORE", NO_COUNTERS)  # it has the tracker and UUIDs
     bridge["9.9.9"] = PrinterModel("NEW")
     sim = dict(copies.sim_models)
-    sim["1.4.0"] = replace(sim["1.4.0"], gap_mm=27.0, max_tools=2, counters=False)
+    sim["1.4.0"] = replace(
+        sim["1.4.0"], gap_mm=27.0, max_tools=2, counters=False, power_panic=False
+    )
     sim["2.1.0"] = ModelInfo(
         "2.1.0", "MINI", EXTRUDER, MINI_PRESETS, uuids=True, group="mini", checks=NO_MODE
     )
@@ -564,8 +571,10 @@ def test_model_differences():
         Difference(s, "1.4.0", None, "counters", True, False),
         Difference(s, "1.4.0", None, "max_tools", 1, 2),
         Difference(s, "1.4.0", None, "gap_mm", 40.0, 27.0),
+        Difference(s, "1.4.0", None, "power_panic", True, False),
         Difference(s, "2.1.0", None, "uuids", False, True),
         Difference(s, "2.1.0", None, "counters", False, True),
+        Difference(s, "2.1.0", None, "power_panic", False, True),
         Difference(s, "7.1.0", None, "model", "COREONE", MISSING),
         # The bridge's presets of a model it no longer supports aren't compared, so only
         # the door table notices the Core One's PPS. A model the simulator lacks has no
