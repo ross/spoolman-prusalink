@@ -12,8 +12,7 @@ source. The tracker counts with the model's gap and feed ratio, a load runs
 the model's lengths, the ramming and auto-retract run per build, and the
 tests run the bridge against each family. Workstream 2 is built: an
 uploaded file goes through the preview's checks of its `M862` lines, and a
-print with segments goes through its checks of the tools it uses. The MMU's
-filament-inserted question belongs to Workstream 5. Workstream 3 is built:
+print with segments goes through its checks of the tools it uses. Workstream 3 is built:
 a tool and its filament path are apart, the selected tool can be none, and
 a feed system holds what differs between direct and toolchanger printers.
 Workstream 4 is built: the XL and INDX have their own feed systems, a
@@ -22,9 +21,12 @@ picked tool, and the picked tool rests where the firmware leaves it after a
 print, a pause and a boot. A power cut leaves an idle window before the
 resume. Change all, a filament change on a named tool and a spool join run
 as the firmware runs them, and a toolchanger's print runs the stock slicer
-profile's priming, tool-change moves and end park. Workstreams 5 and 6
-aren't started. [Open questions](#open-questions) lists what the work still
-has to settle.
+profile's priming, tool-change moves and end park. Workstream 5 is built:
+an MMU3 is a unit whose five slots share one filament path, with its menu
+operations, prints with the stock MMU3 profile, the preview's unload
+question, runout, spool join and power panic, and the tests run the bridge
+against an MK4S and a Core One with one. Workstream 6 isn't started.
+[Open questions](#open-questions) lists what the work still has to settle.
 
 ## Goal and non-goals
 
@@ -199,13 +201,13 @@ firmware update.
   that counts E moves (slot 0 while the MMU connects, none after a boot).
   Its idle operations, its prints, the preview's unload question, a
   runout, `M600`, a spool join and power panic run (F40 to F46).
-- Tests: the unit harness and the integration fixtures take a model and a
-  tool count. `tests/test_families.py` runs one story (a print with a tool
-  change, a swap, a reboot) on the Core One L, MK4S, iX, XL, Core One L INDX
-  and MINI, with charges worked by hand from the firmware's numbers.
-  Integration runs T1 to T7 on a two-tool INDX, T1 on a five-tool XL, and a
-  few rows on an MK4, an MK4S, an MK3.9 and a MINI. The MMU families wait
-  for Workstream 5.
+- Tests: the unit harness and the integration fixtures take a model, a
+  tool count and the MMU switch. `tests/test_families.py` runs one story (a
+  print with a tool change, a swap, a reboot) on the Core One L, MK4S, iX,
+  XL, Core One L INDX and MINI, and on an MK4S and a Core One with an MMU3,
+  with charges worked by hand from the firmware's numbers. Integration runs
+  T1 to T7 on a two-tool INDX, T1 on a five-tool XL, T12 on an MK4S with an
+  MMU3, and a few rows on an MK4, an MK4S, an MK3.9 and a MINI.
 
 ## What's missing
 
@@ -328,47 +330,56 @@ anything moves.
 ### MMU3
 
 An MMU3 is a runtime setting on the MK4 family, the Core One and the Core
-One L (and the MK3.5, which has no counters). With it on:
+One L, and on the MK3.5, which has no counters. F38 to F46 in
+[printer-behaviors.md](printer-behaviors.md) give the firmware's behavior
+with its sources, and BF15 to BF20, BF28 and BF29 in
+[bridge-findings.md](bridge-findings.md) what it means for the bridge. In
+short:
 
-- **Five tools appear**, one per slot, each with its own counters and type
-  (`tool_index.cpp:84-102`). Off, the same printer shows one.
+- **Five tools appear** while the setting is on, one per slot, each with its
+  own counters and type; while it's off, slot 0 alone. `M865 L0` to `L4`
+  write any slot either way (F38). The bridge takes the printer for a
+  single-tool model (BF20).
 - **A slot's type means what's loaded in the slot**, not what's in the
-  nozzle (`M70X_mmu.cpp:80-82`).
-- **All slots share one gap**, because there's one nozzle
-  (`filament_tracker.hpp:94`).
-- **Almost nothing counts an unload.** Tool changes, MMU unloads, ejects,
-  cuts, `M600` and spool joins leave `unload_count` alone, and the idle
-  sensor clear is off. The exceptions are turning the MMU off with an empty
-  nozzle, the change-all unload, and a cold pull. Swapping the spool that
-  feeds a slot shows nothing (`store_definition.cpp:258-262`,
-  `filament_sensors_handler.cpp:306`).
-- **The selected slot decides who is credited**, and it's "none" after an
-  unload and after every boot. Extrusion with no slot selected isn't
-  counted (`mmu2_mk4.cpp:175, 674`, `planner.cpp:2207`).
-- **A tool change credits the outgoing slot with feed that isn't its
-  own.** The firmware plans about 190 mm to reach the filament sensor
-  (`mmu2_mk4.cpp:55, 1528, 1590`), then up to 57 mm more: 7 mm past the
-  sensor (`mmu2_mk4.cpp:1583`, `mmu2_config.h:35`) and 50 mm of feed
-  (`mmu2_config.h:69`, `mmu2_mk4.cpp:524-533`), while the old slot is
-  still selected (`mmu2_mk4.cpp:674`). Less the gap, that's roughly
-  200 mm on the old slot per change, and more on a retry. This is
-  inferred from the planner counting at plan time.
-- **An idle load counts 47 mm less the gap** on the new slot. An idle
-  unload counts up to 20 mm (`mmu2_config.h:70-84`,
-  `Configuration_MK4_adv.h:573`).
-- **States**: idle MMU operations read `BUSY`. Tool changes in a print read
-  `PRINTING`. A runout's prompts and an MMU error in a print read
-  `ATTENTION`; an MMU error while idle reads `BUSY`
-  (`printer_state.cpp:152-176, 238-247`).
-- **The tag reader is off**, so slot 0 can keep UUIDs from an earlier tag
-  load but gets no new ones (`request_manager.cpp:263-266`).
-- **Slots 1 to 4 keep no UUIDs.** `M865 L<n>` takes every slot and
-  stores its type (`M865.cpp:194-196`, `store_definition.cpp:243-279`).
-  An ad-hoc write stores the name, temperatures and color for any slot,
-  and the UUIDs for slot 0 only; for another slot it skips them, behind a
-  `debug_assert` that fires on a debug build (`filament.cpp:380-402`).
+  nozzle, and only slot 0 keeps UUIDs. The tag reader is off (F38, BF19).
+- **All slots share one filament path**: one extruder sensor, one gap and
+  one auto-retract distance.
+- **The selected slot decides what a move counts on.** It's none after
+  every boot, `M709 S1`, unload, eject and cut, and only a load or a tool
+  change selects one. With none, a move runs, counts nothing and leaves the
+  gap where it was, and `flow` reads 0. While the MMU connects, every move
+  counts on slot 0 (F39, F45). So a resumed print is charged to slot 0's
+  spool or to none (BF17), and a load after an unload in the same boot
+  counts up to 40 mm less (BF29).
+- **Almost nothing counts an unload**, since only a write of none counts
+  one: turning the MMU off with an empty extruder, on slot 0 (BF28),
+  Preload's unload choice, a cold pull and a stuck unload. Tool changes,
+  Unload Filament, Eject, Cut, `M600` and a spool join write no type, Load
+  To Nozzle writes back the slot's own, and Preload writes the new type
+  over the old. The idle sensor clear is off. So a swap shows the printer
+  nothing but a type change (F41, F44, BF15).
+- **A tool change in a print counts the firmware's feed on the old slot**:
+  80 mm back, then 189.9, 7 and 50 mm that push the new slot's filament,
+  206.9 mm past a full gap. The first change of a print, from no slot,
+  counts nothing (F40, BF16).
+- **Idle operations read `BUSY`** (F41): Load To Nozzle counts 47 mm on its
+  slot, Unload Filament the ramming's 20 mm, and Eject, Cut and Preload
+  nothing.
+- **A print runs the stock MMU3 profile's moves** (F46), from the start's
+  load and purge line to the end's `M702`, which unloads into the MMU. A
+  single-tool file gets the firmware's `T0` and 35 mm load instead. A
+  finished print with the MMU Active skips the auto-retract, and a stopped
+  one unloads (F42).
+- **The preview** checks no slot for filament with the MMU Active, and asks
+  to unload first when FINDA sees filament, which holds the bridge's sync
+  job in `ATTENTION` (F43, BF18).
+- **A runout is FINDA's**, and its `M600` ejects the slot and reloads the
+  same slot with no type written (F44).
 
-The simulator has none of this.
+The simulator models these on the models with a stock MMU3 profile: the
+unit and its constants in `simulator/mmu.py`, its rules in the `Mmu` feed
+system in `simulator/feed.py`. `simulator/README.md` lists what it leaves
+out.
 
 ### What the slicer adds
 
@@ -446,10 +457,12 @@ picked has no physical tool: it can't move E at all, the auto-retract's
 hooks don't run, and the end of a print neither retracts nor auto-retracts
 (`tool_index.cpp:121-137`, `planner.cpp:2194-2197, 2224`,
 `mapi/motion.cpp:88-91`). An MMU with no slot selected still has its one
-physical tool: moves run and deretract but don't count, and the end of a
-print still retracts and skips only the auto-retract
-(`tool_index.cpp:134-151`, `auto_retract.cpp:91-94`). The simulator's none
-is the first case. The MMU's feed system brings the second.
+physical tool: moves run, count nothing and leave the gap where it was
+(F39). The end of a print still retracts, and with the MMU Active skips the
+auto-retract whatever the slot; a stopped print and a finished single-tool
+file unload into the MMU instead (F42; `tool_index.cpp:134-151`,
+`auto_retract.cpp:91-94`, `marlin_server.cpp:1067-1083`). The simulator's
+none is the first case on a toolchanger and the second on an MMU.
 
 A **feed system** owns the rules that differ: which tool is selected and
 when, which tool a move credits, what a tool change moves, and which tool
@@ -515,10 +528,15 @@ XL decides the tower's larger purge.
 ### Tests
 
 The unit harness and the integration fixtures take a model, a tool count
-and the MMU switch, instead of one fixed Core One L. One family matrix runs
-the core accounting scenarios (a load, a print, a swap, a reboot) on each
-of: Core One L, MK4S, XL, Core One L INDX, MK4S with an MMU, Core One with
-an MMU, and a MINI.
+and the MMU switch. One family matrix, `tests/test_families.py`, runs the
+core accounting story (a load, a print, a swap, a reboot) on the Core One
+L, MK4S, iX, XL, Core One L INDX and MINI, and on an MK4S and a Core One
+with an MMU3. On an MMU the prints load their own slots, and the swap is
+Eject, then Preload with the new type: the bridge sees no unload and keeps
+charging the old spool (BF15), and the second print's start counts 40 mm
+less (BF29). Each print's end unloads into the MMU, so no write meets the
+preview's unload question there (BF18). `integration/test_tools.py` runs
+T12, a two-color MMU print, through a real Spoolman.
 
 ## Workstreams
 
@@ -544,7 +562,7 @@ confirm first.
    `M600 T<n>`, change all, and the slicer's priming and purges. The page
    gets the actions. Acceptance: T1 to T7 still pass, and each event has a
    simulator test and a row in printer-behaviors.md.
-5. **MMU.** The MMU feed system, the switch in the config and on the page,
+5. **MMU.** Built. The MMU feed system, the switch in the config and on the page,
    slot operations (preload, load to nozzle, unload, eject), tool changes,
    runout, spool join, boot, and the preview's unload question. The
    snapshot needs printer-level paths, since a flat snapshot per tool can't
@@ -583,10 +601,9 @@ G-code, plus the `M862` lines:
    volume.
 
 Runs 1 to 5 used PrusaSlicer 2.9.7 (flatpak `com.prusa3d.PrusaSlicer`)
-with vendor bundle `PrusaResearch` 2.5.16. The numbers from runs 4 and 5 are
-in "What the slicer adds" and `simulator/slicer.py`, and those from runs 1 to
-3 arrive there with the MMU's slicer profile. The sliced G-code isn't kept in
-the repository.
+with vendor bundle `PrusaResearch` 2.5.16. Their numbers are in "What the
+slicer adds" and `simulator/slicer.py`. The sliced G-code isn't kept in the
+repository.
 
 To repeat a run, make a model with `script/slicer/make3mf.py` and slice it
 with `script/slicer/slice.sh`, which both document their arguments. Each
@@ -656,11 +673,31 @@ Left to the work:
 - The single-tool power-panic resume: the source gives a plain Core One L
   the 8 mm fed back, not a 25 mm purge, and the simulator follows the
   source. The F12 trace confirms it.
-- The MMU3 profile's numbers on the MK4, MK3.9, MK3.9S and Core One L,
-  which the slicer runs didn't slice, and a three-color PETG print, the HF
-  and 0.6 nozzle presets, and layers with no change.
+- The MMU3 profile on the MK4, MK3.9 and MK3.9S, which take the MK4S's
+  numbers unsliced, and on the Core One L, which takes the Core One's from
+  one PLA slice; a three-color PETG print, the HF and 0.6 nozzle presets,
+  and layers with no change.
+- The layer-1 purges of a print with three or more colors. A segment has no
+  layers, so each slot's first pick gets the first layer's purge.
+- How long the MMU takes to connect after a boot or `M709 S1`: 10 s by
+  default, inferred from a comment (`filament_sensors_handler.cpp:179`). It
+  decides how much of a resumed print lands on slot 0 (BF17).
+- A `T` with filament in the nozzle and no slot selected, as after a boot
+  with a slot loaded to the nozzle. The simulator changes from none with no
+  error and credits the feed to nothing; that the MMU unloads the filament
+  cleanly is inferred (F45).
 - Whether the firmware ever plans a second 189.9 mm move at an MMU tool
   change, which a longer bowden would need. The simulator plans one.
+- Where the E-stall feed stops: at the extruder's sensor, between 36 and
+  50 mm, from the last change's `unloadEPosOnFSOff`. The simulator always
+  feeds 50, which BF16's range covers.
+- The firmware's `m600_sent`, which stays set after a runout with no slot
+  selected and may block later runouts. The simulator doesn't keep it.
+- The color question after an MMU reload, `IsColor` in `ATTENTION`, with
+  its Retry and Purge More. The simulator's reload goes on to `PAUSED`.
+- MMU errors, the automatic retries and the error screens, which the
+  simulator doesn't model, and a `jam` with the MMU on, which it refuses:
+  the MMU's own jam handling isn't read.
 - A `T` during the MK4 family's MMU bootloader phase, up to 10 s after a
   boot, which doesn't wait for the MMU: its feed can count on slot 0. The
   simulator has no bootloader phase, and its `T` waits on every model
@@ -687,7 +724,8 @@ Left to the work:
 
 Only hardware could tell, and none is expected:
 
-- How long an MMU's push to the filament sensor takes, which sets the size
-  of BF16 in [bridge-findings.md](bridge-findings.md).
+- How far an MMU's E-stall feed runs before the extruder's sensor sees the
+  filament, which sets BF16's 193 to 207 mm range in
+  [bridge-findings.md](bridge-findings.md).
 - The iX's assisted-insertion length.
 - How the real slow feed compares with the tracker's fixed gap.
