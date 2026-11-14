@@ -28,7 +28,6 @@
 # recover_seconds = 2.0             # BUSY after a power-panic boot
 # unpark_seconds = 1.0              # PAUSED while the head unparks on a power-panic resume
 # panic_purge_mm = 25.0             # the nozzle clean's purge on a power-panic resume
-# auto_accept_model_check = false   # accept a sync job's model check without a tap
 # start_blip = true                 # the brief IDLE between scanning and preheating
 
 # The port defaults to control_port + 1 + the printer's position in this file.
@@ -39,7 +38,7 @@ model = "8.1.0"                     # Core One L: holds an instance UUID on tool
 # api_key = "sim-core-one-l"
 # port = 8001
 # firmware = "full"                 # full, no_counters or no_endpoint; default by model
-# auto_accept_model_check = true    # this printer only; default is the global setting
+# checks = "warn"                   # the print preview: ignore, warn or abort a failed check
 # high_flow = false                 # a high-flow nozzle doubles the load's purge, but not on INDX
 # auto_retract = true               # false turns the auto-retract off where the model can
 

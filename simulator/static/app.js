@@ -260,6 +260,8 @@ function renderPrinter(p) {
     '<label>power <select data-sel="set_power" data-field="power">' + opts(S.options.power, low(p.power)) + '</select></label>' +
     '<label>fault <select data-sel="set_fault" data-field="fault">' + opts(S.options.fault, low(p.fault)) + '</select></label>' +
     '<label>fw <select data-sel="set_firmware" data-field="firmware">' + opts(S.options.firmware, low(p.firmware)) + '</select></label>' +
+    '<label title="how the print preview treats a failed check">checks <select data-sel="set_checks" data-field="value">' +
+    opts(S.options.checks, p.checks) + '</select></label>' +
     '<small class="muted">boot ' + esc(p.boot_id) + '</small>' +
     '<small>' + (p.homed ? 'homed' : '<span class="muted">not homed</span>') + '</small>' +
     '<small>tool <b>' + esc(p.selected_tool) + '</b></small>' +
@@ -269,7 +271,7 @@ function renderPrinter(p) {
 
   h += '<div class="jobline">';
   if (job) {
-    h += '<span>job <b>#' + (job.id == null ? '?' : esc(job.id)) + '</b> ' + esc(job.kind) + ' ' + esc(job.name) +
+    h += '<span>job <b>#' + esc(job.id) + '</b> ' + esc(job.kind) + ' ' + esc(job.name) +
       ' <span class="muted">' + esc(ph) + '</span></span>';
     if (ph === 'HOLD') {
       // the attention text stands in for the bar
@@ -287,7 +289,6 @@ function renderPrinter(p) {
   if (p.message) h += '<div style="margin-top:3px"><span class="pill" title="last M117">' + esc(p.message) + '</span></div>';
 
   const a = p.actions || {};
-  const aa = p.auto_accept_model_check;
   h += '<div class="btns">' +
     btn('Start print', 'toggle', gate(a, 'start_print', { form: 'start', cls: isOpen(p, 'start') ? 'on' : '' })) +
     btn('Pause', 'pause', gate(a, 'pause')) +
@@ -301,7 +302,6 @@ function renderPrinter(p) {
     (getv(p.name, 'cold', false) ? ' checked' : '') + '>cold bed</label>' +
     btn('Tap through', 'tap_through', gate(a, 'tap_through')) +
     btn('Clear jam', 'clear_jam', gate(a, 'clear_jam')) +
-    btn('Auto-accept: ' + (aa == null ? 'default' : aa ? 'on' : 'off'), 'auto_accept', { title: 'model check; cycles default, on, off' }) +
     btn('Counter step back', 'toggle', { form: 'counter', cls: isOpen(p, 'counter') ? 'on' : '' }) +
     btn('Set extruded_at_unload', 'toggle', { form: 'eau', cls: isOpen(p, 'eau') ? 'on' : '' }) +
     '</div>';
@@ -441,10 +441,6 @@ function onClick(e) {
       case 'tap_through': case 'clear_jam':
         return go(act, {});
       case 'power_loss': return go('reboot', { keep_job: true, cold_bed: !!getv(name, 'cold', false) });
-      case 'auto_accept': {
-        const cur = p.auto_accept_model_check;
-        return go('set_auto_accept', { value: cur == null ? true : cur ? false : null });
-      }
       case 'start_submit':
         return go('start_print', startBody(name), () => { pst(name).open.start = false; renderCard(name); });
       case 'load_submit':

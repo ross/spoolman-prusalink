@@ -23,6 +23,14 @@ def make(
     return sim, printer
 
 
+def sliced(printer: SimPrinter, body: str) -> str:
+    """`body` after the checks a slicer writes for `printer`'s model, so the print preview
+    asks nothing about it."""
+    model = printer.model
+    features = "".join(f'M862.6 P"{f}"\n' for f in sorted(model.checks.required))
+    return f'M862.3 P "{model.name}"\nM862.5 P2\n{features}{body}'
+
+
 def run(sim: Simulation, seconds: float, step: float = 0.1) -> None:
     """Tick in small steps, as the server does."""
     t = 0.0

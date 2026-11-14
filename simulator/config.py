@@ -23,6 +23,7 @@ from simulator.model import (
     check_name,
     check_uuid,
 )
+from simulator.preview import Severity
 
 _NAME_PATTERN = r"[A-Za-z0-9_.-]{1,64}"
 
@@ -33,7 +34,7 @@ _PRINTER_KEYS = {
     "api_key",
     "port",
     "firmware",
-    "auto_accept_model_check",
+    "checks",
     "high_flow",
     "auto_retract",
     "tools",
@@ -65,8 +66,8 @@ class PrinterConfig:
     port: int
     # None means the model's default.
     firmware: str | None = None
-    # None means the global setting.
-    auto_accept_model_check: bool | None = None
+    # How the print preview treats a failed check the printer's settings govern.
+    checks: str = Severity.WARN.value
     high_flow: bool = False
     auto_retract: bool = True
     tools: tuple[ToolConfig, ...] = (ToolConfig(0),)
@@ -238,16 +239,17 @@ def _printer(entry: object, position: int, control_port: int) -> PrinterConfig:
         raise ConfigError(
             f"{prefix}.auto_retract can't be false: model {model} has no auto-retract switch"
         )
-    auto_accept = None
-    if "auto_accept_model_check" in entry:
-        auto_accept = _bool(entry["auto_accept_model_check"], f"{prefix}.auto_accept_model_check")
+    checks = _str(entry.get("checks", Severity.WARN.value), f"{prefix}.checks")
+    if checks not in {s.value for s in Severity}:
+        known = ", ".join(s.value for s in Severity)
+        raise ConfigError(f"{prefix}.checks must be one of {known}, got {checks!r}")
     return PrinterConfig(
         name=name,
         model=model,
         api_key=api_key,
         port=port,
         firmware=firmware,
-        auto_accept_model_check=auto_accept,
+        checks=checks,
         high_flow=_bool(entry.get("high_flow", False), f"{prefix}.high_flow"),
         auto_retract=auto_retract,
         tools=_tools(entry.get("tools"), prefix, model),
@@ -381,7 +383,7 @@ def build(cfg: SimConfig) -> Simulation:
                 api_key=pc.api_key,
                 model=model,
                 firmware=Firmware(pc.firmware) if pc.firmware else default,
-                auto_accept_model_check=pc.auto_accept_model_check,
+                checks=Severity(pc.checks),
                 high_flow=pc.high_flow,
                 auto_retract=pc.auto_retract,
                 tools=tools,

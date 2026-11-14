@@ -33,6 +33,23 @@ _TEMPS = {
 
 @dataclass
 class ModelCheck:
+    """`M862.3 P"<name>"`. The name is empty when `P` isn't a quoted string."""
+
+    name: str
+
+
+@dataclass
+class LevelCheck:
+    """`M862.5 P<level>`, the G-code level the file needs."""
+
+    level: int
+
+
+@dataclass
+class FeatureCheck:
+    """`M862.6 P"<name>"`, a firmware feature the file was sliced for. The name is empty
+    when `P` isn't a quoted string."""
+
     name: str
 
 
@@ -68,7 +85,15 @@ class Ignored:
     line: str
 
 
-Command = ModelCheck | Home | SetFilament | SetUuid | Message | Ignored
+Check = ModelCheck | LevelCheck | FeatureCheck
+Command = ModelCheck | LevelCheck | FeatureCheck | Home | SetFilament | SetUuid | Message | Ignored
+
+# The print preview reads a file's checks from its first 200 G-code lines
+# (`search_first_x_gcodes` in `src/common/gcode/gcode_info.hpp`).
+SCAN_LINES = 200
+_LINE_NUMBER = re.compile(r"^N\d[\d\s]*")
+_P = re.compile(r"(?:^|\s)P")
+_DIGITS = re.compile(r"^\s*(\d*)")
 
 
 class GcodeError(ValueError):
@@ -162,11 +187,8 @@ def _command(line: str) -> Command:
     word, rest = m.group(1).upper(), line[m.end() :]
     if word == "M117":
         return Message(rest.strip())
-    if word == "M862.3":
-        name = _params(rest).get("P")
-        if not name:
-            raise ValueError('M862.3 needs P"<model>"')
-        return ModelCheck(name)
+    if word in ("M862.3", "M862.5", "M862.6"):
+        return _check(word, rest)
     if word == "G28":
         return Home()
     if word == "M865":
@@ -174,6 +196,47 @@ def _command(line: str) -> Command:
     if word == "M865.1":
         return _set_uuid(_params(rest))
     return Ignored(line)
+
+
+def _check(word: str, rest: str) -> Check:
+    """An `M862` check as `GCodeInfo::parse_m862` reads it, which never fails: a `P` that
+    isn't a quoted string reads as an empty name (`GcodeBuffer::String::get_string` in
+    `src/common/gcode/gcode_buffer.cpp`), and one that isn't a number as level 0."""
+    m = _P.search(rest)
+    value = rest[m.end() :] if m else ""
+    if word == "M862.5":
+        digits = _DIGITS.match(value).group(1)
+        return LevelCheck(int(digits) if digits else 0)
+    quoted = re.match(r'\s*"([^"]*)"', value)
+    name = quoted.group(1) if quoted else ""
+    if word == "M862.3":
+        return ModelCheck(name)
+    return FeatureCheck(name.lstrip().rstrip(" "))  # `String::trim` cuts spaces only at the end
+
+
+def scan(text: str) -> list[Check]:
+    """The `M862` checks the print preview sees: those in the file's first `SCAN_LINES`
+    G-code lines, as `GCodeInfo::parse_gcode` counts them. A blank line, a comment and
+    `M486` don't count, and a line number is skipped. The match is case-sensitive, as
+    `GcodeBuffer::String::skip_gcode` is. The rest of the file isn't read, so a line the
+    job would stop on doesn't matter here."""
+    checks: list[Check] = []
+    counted = 0
+    for raw in text.splitlines():
+        line = raw.lstrip()
+        if not line or line.startswith(";"):
+            continue
+        if counted >= SCAN_LINES:
+            break
+        counted += 1
+        line = _LINE_NUMBER.sub("", line)
+        m = _WORD.match(line)
+        word = m.group(1) if m else ""
+        if word == "M486":
+            counted -= 1
+        elif word in ("M862.3", "M862.5", "M862.6"):
+            checks.append(_check(word, line[m.end() :]))
+    return checks
 
 
 def parse(text: str) -> list[Command]:

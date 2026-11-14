@@ -12,6 +12,7 @@ from yarl import URL
 
 from simulator import control
 from simulator.model import Fault, PrintSpec, Segment, State
+from simulator.preview import Severity
 from simulator.tests.util import make
 
 
@@ -228,7 +229,7 @@ def test_a_stream_queue_drops_the_oldest():
             {"tool": 0, "value": "x"},
             "set_sensor_fault value must be true or false, got 'x'",
         ),
-        ("set_auto_accept", {"value": 1}, "set_auto_accept value must be true or false, got 1"),
+        ("set_checks", {"value": "off"}, "set_checks value must be one of ignore, warn, abort"),
         ("unload", {"tool": True}, "unload tool must be an integer, got True"),
         ("unload", {"tool": 0.0}, "unload tool must be an integer, got 0.0"),
         (
@@ -304,10 +305,8 @@ async def test_checked_parameters_reach_the_action_as_their_types(setup):
     assert p.job.spec.name == "part.bgcode"
     assert (await client.post("/api/printers/p/set_fault", json={"fault": "error"})).status == 200
     assert p.fault is Fault.ERROR
-    assert (
-        await client.post("/api/printers/p/set_auto_accept", json={"value": None})
-    ).status == 200
-    assert p.auto_accept_model_check is None
+    assert (await client.post("/api/printers/p/set_checks", json={"value": "abort"})).status == 200
+    assert p.checks is Severity.ABORT
 
 
 def test_an_unknown_hint_is_a_bug():

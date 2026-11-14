@@ -6,6 +6,7 @@ from pathlib import Path
 
 from simulator import config, prusalink
 from simulator.model import Firmware, Material, Simulation
+from simulator.preview import Severity
 from simulator.tests.test_config import printer, tool, write
 from simulator.tests.test_model import shown
 
@@ -89,8 +90,8 @@ def test_selected_tool_is_the_first_enabled(tmp_path):
 
 
 def test_settings_and_per_printer_options(tmp_path):
-    text = "unload_seconds = 1.5\n" + printer("auto_accept_model_check = true\nport = 9100")
+    text = "unload_seconds = 1.5\n" + printer('checks = "abort"\nport = 9100')
     sim = sim_from(tmp_path, text)
     assert sim.settings.unload_seconds == 1.5
-    assert sim.printers["p"].auto_accept_model_check is True
+    assert sim.printers["p"].checks is Severity.ABORT
     assert sim.printers["p"].port == 9100

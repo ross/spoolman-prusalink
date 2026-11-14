@@ -13,12 +13,15 @@ from simulator.model import (
     JobPhase,
     Material,
     PrintSpec,
+    Reason,
     Segment,
     SimTool,
     Simulation,
     State,
 )
-from simulator.tests.util import PLA, loaded, make, run
+from simulator.preview import Severity
+from simulator.tests.util import PLA, loaded, make, run, sliced
+from spoolman_prusalink.printer_sync import PRINTER_MODELS, build_job, default_preamble
 
 PETG = Material("PETG", "#186bb5")
 
@@ -585,48 +588,107 @@ def test_upload_refusals():
         p.upload("c.gcode", JOB, print_after=True, overwrite=True)
 
 
-def test_model_check_asks_before_the_job_is_counted():
+def test_the_preview_counts_the_job_then_asks():
     sim, p = make()
-    p.upload("s.gcode", JOB.replace("COREONEL", "MK4S"), print_after=True, overwrite=True)
-    assert p.state is State.ATTENTION and str(p.job.attention) == "model check"
-    assert p.job_counter == 0 and p.job.id is None
-    assert prusalink.job(p) is None and "job" not in prusalink.status(p)
-    assert not p.can_print()
-    sim.tick(100)
-    assert p.state is State.ATTENTION and tool0(p).material == PLA  # nothing applied yet
-    p.tap_through()
-    assert p.job_counter == 1 and p.state is State.PRINTING
+    p.upload("s.gcode", JOB.replace("COREONEL", "MINI"), print_after=True, overwrite=True)
+    # The job is counted at once and reads PRINTING while the file is scanned.
+    assert p.job_counter == 1 and p.job.id == 1 and p.state is State.PRINTING
     assert prusalink.status(p)["job"]["id"] == 1
-    sim.tick(0.8)
-    assert tool0(p).material.name == "PETG"
+    sim.tick(0.5)
+    assert p.state is State.ATTENTION
+    assert str(p.job.attention) == "preview: for printer MINI"
+    assert prusalink.status(p)["job"]["id"] == 1
+    assert prusalink.job(p)["state"] == "PAUSED" and prusalink.job(p)["id"] == 1
+    assert not p.can_print()
+    sim.tick(100)  # nothing times out
+    assert p.state is State.ATTENTION and tool0(p).material == PLA  # nothing applied yet
+    p.tap_through()  # Print
+    assert p.job.phase is JobPhase.BLIP and p.state is State.IDLE and not p.job_visible()
+    sim.tick(0.3)
+    assert p.state is State.PRINTING and tool0(p).material.name == "PETG"
     sim.tick(10)
-    assert p.state is State.FINISHED
+    assert p.state is State.FINISHED and p.job_counter == 1
 
 
-def test_cancel_at_the_model_check_counts_no_job():
+def test_abort_at_the_preview_ends_idle_with_the_id_used():
     sim, p = make()
-    p.upload("s.gcode", JOB.replace("COREONEL", "MK4S"), print_after=True, overwrite=True)
+    p.upload("s.gcode", JOB.replace("COREONEL", "MINI"), print_after=True, overwrite=True)
+    sim.tick(0.5)
+    extruded = tool0(p).extruded
+    p.cancel()  # Abort
+    assert p.job is None and p.state is State.IDLE and p.job_counter == 1
+    assert "s.gcode" in p.files
+    assert tool0(p).extruded == extruded and tool0(p).auto_retracted is None  # nothing moved
+    run_sync(sim, p)
+    assert p.job.id == 2
+
+
+def test_the_preview_takes_a_group_and_asks_in_compatibility_mode():
+    # A Core One L takes a Core One file as its own, and an MMU3 name as its base model.
+    for name in ("COREONE", "COREONELMMU3"):
+        sim, p = make()
+        run_sync(sim, p, JOB.replace("COREONEL", name))
+        assert p.state is State.PRINTING
+    # A Core One takes an MK4S file in compatibility mode, which asks.
+    sim, p = make("7.1.0")
+    run_sync(sim, p, JOB.replace("COREONEL", "MK4S"))
+    assert str(p.job.attention) == "preview: compatibility mode for MK4S"
+
+
+def test_a_fatal_question_offers_only_abort():
+    sim, p = make()
+    p.set_checks(Severity.ABORT)
+    run_sync(sim, p, JOB.replace("COREONEL", "MK4S"))
+    assert p.job.attention.fatal and p.state is State.ATTENTION
+    with pytest.raises(Busy, match="offers only Abort"):
+        p.tap_through()
+    assert p.actions_json()["tap_through"] == "the preview offers only Abort; cancel answers it"
     p.cancel()
-    assert p.job is None and p.state is State.IDLE and p.job_counter == 0
+    assert p.job is None and p.state is State.IDLE
 
 
-def test_model_check_accepts_mmu3_variant_and_auto_accept():
+def test_checks_set_to_ignore_ask_nothing():
     sim, p = make()
-    run_sync(sim, p, JOB.replace("COREONEL", "COREONELMMU3"))
-    assert p.state is State.PRINTING
-    sim, p = make(auto_accept_model_check=True)
+    p.set_checks(Severity.IGNORE)
     run_sync(sim, p, JOB.replace("COREONEL", "MK4S"))
-    assert p.state is State.PRINTING
+    assert p.state is State.PRINTING and tool0(p).material.name == "PETG"
+
+
+def test_indx_asks_about_the_lock_under_any_setting():
+    for severity in Severity:
+        sim, p = make("8.10.0")
+        p.set_checks(severity)
+        run_sync(sim, p, JOB.replace("COREONEL", "COREONEL-INDX"))
+        assert p.job.waits_for(Reason.PREVIEW) and not p.job.attention.fatal
+        assert p.job.attention.detail == "not sliced for the INDX lock"
+        p.tap_through()
+        sim.tick(0.3)
+        assert p.state is State.PRINTING
+
+
+def test_an_upload_during_the_question_is_refused_and_kept():
     sim, p = make()
-    p.set_auto_accept(True)
     run_sync(sim, p, JOB.replace("COREONEL", "MK4S"))
-    assert p.state is State.PRINTING
+    with pytest.raises(Busy, match="Can't print right now"):
+        p.upload("b.gcode", JOB, print_after=True, overwrite=False)
+    assert p.files["b.gcode"] == JOB and p.job.name == "spoolman.gcode"
+
+
+def test_the_bridge_default_job_asks_nothing_on_the_models_it_writes_to():
+    """The bridge's own job, built by its `build_job`, runs as it is on every model it
+    writes to."""
+    writable = [c for c, m in PRINTER_MODELS.items() if m.unsupported is None]
+    assert writable == ["1.3.9", "1.3.10", "1.4.0", "1.4.1", "7.1.0", "7.2.0", "8.1.0"]
+    for code in writable:
+        sim, p = make(code)
+        run_sync(sim, p, build_job(default_preamble(PRINTER_MODELS[code]), []))
+        assert p.state is State.PRINTING and p.job.phase is JobPhase.RUN, code
 
 
 def test_parse_error_holds_and_tap_through_stops():
     sim, p = make()
-    run_sync(sim, p, 'M865 X N"WAYTOOLONG" L0\n')
-    assert p.state is State.ATTENTION and str(p.job.attention).startswith("parse error: line 1")
+    run_sync(sim, p, sliced(p, 'M865 X N"WAYTOOLONG" L0\n'))
+    assert p.state is State.ATTENTION and str(p.job.attention).startswith("parse error: line 4")
     p.tap_through()
     sim.tick(2)
     assert p.state is State.STOPPED
@@ -634,19 +696,19 @@ def test_parse_error_holds_and_tap_through_stops():
 
 def test_m865_on_missing_tool_is_a_parse_error():
     sim, p = make()
-    run_sync(sim, p, 'M865 X R N"PLA" L3\n')
+    run_sync(sim, p, sliced(p, 'M865 X R N"PLA" L3\n'))
     assert str(p.job.attention).startswith("parse error")
 
 
 def test_m865_writes_disabled_and_unconfigured_tools():
     sim, p = make("8.10.0", [loaded(0, PETG), SimTool(1, enabled=False)])
-    run_sync(sim, p, 'M865 X R N"PLA" L1\nM865 X R N"ASA" L5\n')
+    run_sync(sim, p, sliced(p, 'M865 X R N"PLA" L1\nM865 X R N"ASA" L5\n'))
     assert p.job.phase is JobPhase.RUN
     assert p.tools[1].material.name == "PLA" and not p.tools[1].enabled
     assert p.tools[5].material.name == "ASA" and not p.tools[5].enabled
     assert [t["index"] for t in prusalink.filament(p)["tools"]] == [0]
     sim, p = make("8.10.0", [loaded(0, PETG)])
-    run_sync(sim, p, 'M865 X R N"PLA" L8\n')
+    run_sync(sim, p, sliced(p, 'M865 X R N"PLA" L8\n'))
     assert str(p.job.attention).startswith("parse error")
 
 
@@ -719,7 +781,7 @@ def test_events_log_actions_and_state_changes():
 
 def test_idle_sensor_clear_after_a_sync_job_writes_an_empty_tool():
     sim, p = make(tools=[SimTool(0)])
-    run_sync(sim, p, 'M865 X R N"PLA" L0\n')
+    run_sync(sim, p, sliced(p, 'M865 X R N"PLA" L0\n'))
     assert shown(p) == {"name": "PLA"}
     sim.tick(1)
     assert shown(p) == {"name": "PLA"} and tool0(p).unload_count == 0
@@ -935,3 +997,30 @@ def test_a_written_color_reads_back_in_5_bits_a_channel():
     p.load(0, source="preset", name="PLA", color="#73767d")
     run(sim, 20)
     assert tool0(p).material.color == "#73737b"
+
+
+def test_a_snapshot_keeps_the_checks_and_the_question():
+    sim, p = make()
+    p.set_checks(Severity.ABORT)
+    run_sync(sim, p, JOB.replace("COREONEL", "MINI"))
+    data = json.loads(json.dumps(sim.snapshot()))
+    other = Simulation()
+    other.restore(data)
+    copy = other.printers["p"]
+    assert copy.checks is Severity.ABORT and copy.job == p.job
+    assert copy.job.attention.fatal
+    assert p.to_json()["checks"] == "abort"
+    assert p.to_json()["job"]["attention"]["fatal"] is True
+    assert sim.to_json()["options"]["checks"] == ["ignore", "warn", "abort"]
+
+
+def test_a_running_job_logs_its_checks_and_skips_other_lines():
+    sim, p = make()
+    run_sync(sim, p, sliced(p, "G1 X10\nhello\n"))
+    logged = [e.text for e in sim.events if e.kind == "gcode"]
+    assert logged[:3] == [
+        "checked at the preview: ModelCheck(name='COREONEL')",
+        "checked at the preview: LevelCheck(level=2)",
+        "checked at the preview: FeatureCheck(name='Input Shaper')",
+    ]
+    assert logged[3:] == ["ignored: G1 X10", "ignored: hello"]

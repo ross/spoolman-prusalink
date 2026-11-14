@@ -28,6 +28,7 @@ from simulator.compatibility import (
     XL_CHECKS,
     GCodeChecks,
 )
+from simulator.preview import Severity, preview
 from simulator.tool import (
     AUTO_RETRACT_STEP,
     CORE_ONE_EXTRUDER,
@@ -147,7 +148,7 @@ TIMED_PHASES = (
 class Reason(StrEnum):
     """Why a job waits for the user."""
 
-    MODEL_CHECK = "model check"  # the print preview asks about a file for another model
+    PREVIEW = "preview"  # the print preview asks about a file's failed checks
     PARSE_ERROR = "parse error"  # a sync job's G-code can't run
     JAM = "jam"
     RUNOUT = "runout"
@@ -159,7 +160,7 @@ class Reason(StrEnum):
 # The reasons each waiting phase can have. A jam waits in HOLD when it's cleared in place,
 # and in WAIT_LOAD when it unloads the tool.
 PHASE_REASONS = {
-    JobPhase.HOLD: frozenset({Reason.MODEL_CHECK, Reason.PARSE_ERROR, Reason.JAM}),
+    JobPhase.HOLD: frozenset({Reason.PREVIEW, Reason.PARSE_ERROR, Reason.JAM}),
     JobPhase.WAIT_LOAD: frozenset(
         {Reason.RUNOUT, Reason.JAM, Reason.COLOR_CHANGE, Reason.NO_FILAMENT}
     ),
@@ -169,16 +170,18 @@ PHASE_REASONS = {
 
 @dataclass(frozen=True)
 class Attention:
-    """What the screen asks the user, with the tool it names or a parse error's text."""
+    """What the screen asks the user, with the tool it names, or the text of a parse error
+    or of the preview's failed checks. A fatal preview question offers only Abort."""
 
     reason: Reason
     tool: int | None = None
     detail: str | None = None
+    fatal: bool = False
 
     def __str__(self) -> str:
         match self.reason:
-            case Reason.MODEL_CHECK:
-                return "model check"
+            case Reason.PREVIEW:
+                return f"preview{' (abort only)' if self.fatal else ''}: {self.detail}"
             case Reason.PARSE_ERROR:
                 return f"parse error: {self.detail}"
             case Reason.NO_FILAMENT:
@@ -380,7 +383,6 @@ class Settings:
     recover_seconds: float = 2.0  # BUSY after a power-panic boot
     unpark_seconds: float = 1.0  # PAUSED while the head unparks on a power-panic resume
     panic_purge_mm: float = 25.0  # the nozzle clean's purge on a power-panic resume
-    auto_accept_model_check: bool = False
     start_blip: bool = True
 
     def __post_init__(self) -> None:
@@ -437,7 +439,7 @@ class SimJob:
     """What every job has. A job is a `UserJob` or a `SyncJob`."""
 
     kind: ClassVar[str]
-    id: int | None = None  # None while the preview asks its question: the job isn't counted yet
+    id: int = 0  # set when the job is counted, as it starts
     name: str
     phase: JobPhase = JobPhase.SCANNING
     attention: Attention | None = None  # set exactly while the phase waits for the user
@@ -572,7 +574,9 @@ class SimPrinter:
     selected_tool: int = 0
     message: str | None = None
     homed: bool = False
-    auto_accept_model_check: bool | None = None
+    # How the print preview treats a failed check that a setting governs: the firmware has
+    # one setting per kind of check, but they share one screen and the worst decides.
+    checks: Severity = Severity.WARN
     high_flow: bool = False  # a high-flow nozzle, which doubles the load's purge
     # The user's auto-retract switch. It has effect only on a model whose extruder has
     # one; INDX always auto-retracts, and a build without the sequence never does.
@@ -886,7 +890,7 @@ class SimPrinter:
 
     def job_visible(self) -> bool:
         job = self.job
-        return job is not None and job.id is not None and job.phase is not JobPhase.BLIP
+        return job is not None and job.phase is not JobPhase.BLIP
 
     def can_print(self) -> bool:
         # The firmware's rule is state-only: IDLE, READY, STOPPED or FINISHED. A print asked
@@ -907,7 +911,8 @@ class SimPrinter:
             self.print_file(name)
 
     def print_file(self, name: str) -> None:
-        """Print a stored file. A wrong model asks first, before the firmware counts the job."""
+        """Print a stored file. The job is counted at once, and the preview checks the file
+        when the scan ends."""
         if self.job is not None and self.job.phase is JobPhase.BLIP:
             # The firmware's state check passes during PrintInit, but print_start ignores
             # the request there, so the upload succeeds and the print that's starting goes
@@ -916,18 +921,7 @@ class SimPrinter:
             return
         if not self.can_print():
             raise Busy("Can't print right now")
-        body = self.files[name]
-        wrong = sync.wrong_model(self, body)
-        if wrong and not self._auto_accept():
-            job = SyncJob(name=name, gcode=body)
-            job.enter(JobPhase.HOLD, Attention(Reason.MODEL_CHECK))
-            self.job = job
-            self._log("job", f"{name}: the preview asks about model {wrong}")
-            self._show_state()
-            return
-        if wrong:
-            self._log("gcode", f"model check for {wrong} accepted automatically")
-        self._start_job(SyncJob(name=name, gcode=body))
+        self._start_job(SyncJob(name=name, gcode=self.files[name]))
 
     # Actions on tools.
 
@@ -1069,7 +1063,8 @@ class SimPrinter:
         self._start_job(UserJob(name=spec.name, spec=spec, pending_color_changes=changes))
 
     def _start_job(self, job: UserJob | SyncJob) -> None:
-        """Count the job and scan the file: the firmware does this once the preview is confirmed."""
+        """Count the job and scan the file. A print from a file is counted before the preview
+        asks anything (`init` in `src/common/marlin_print_preview.cpp`)."""
         self.homed = True  # a print starts by homing
         self.job_counter += 1
         job.id = self.job_counter
@@ -1116,9 +1111,10 @@ class SimPrinter:
     def cancel(self) -> None:
         self._check_cancel()
         job = self.job
-        if job.id is None:
-            # Declining the preview: no job was counted, so there's nothing to park.
-            self._log("action", f"cancel {job.name} at the preview")
+        if job.waits_for(Reason.PREVIEW):
+            # Abort at the preview: `cleanup_print` in `marlin_server.cpp` goes to IDLE
+            # with nothing parked or moved, and the job's ID stays used.
+            self._log("action", f"cancel job {job.id}: abort at the preview")
             self.job, self.screen = None, State.IDLE
             self._show_state()
             return
@@ -1196,12 +1192,12 @@ class SimPrinter:
         self._show_state()
 
     def tap_through(self) -> None:
-        """Answer the screen's question: accept the model check, or abort on a parse error."""
+        """Answer the screen's question: Print at the preview, or abort on a parse error."""
         self._check_tap_through()
         job = self.job
         self._log("action", f"tap through: {job.attention}")
-        if job.waits_for(Reason.MODEL_CHECK):
-            self._start_job(job)
+        if job.waits_for(Reason.PREVIEW):
+            self._begin(job)
         else:
             self._park(job, State.STOPPED)
 
@@ -1317,9 +1313,9 @@ class SimPrinter:
         t.enabled = value
         self._log("action", f"T{tool} {'enabled' if value else 'disabled'}")
 
-    def set_auto_accept(self, value: bool | None) -> None:
-        self.auto_accept_model_check = value
-        self._log("action", f"auto-accept model check {value}")
+    def set_checks(self, value: Severity) -> None:
+        self.checks = Severity(value)
+        self._log("action", f"preview checks {self.checks}")
 
     def counter_step_back(self, tool: int, mm: float) -> None:
         t = self._tool(tool)
@@ -1431,6 +1427,8 @@ class SimPrinter:
         job = self.job
         if job is None or job.phase is not JobPhase.HOLD or not isinstance(job, SyncJob):
             raise Busy("nothing to tap through")
+        if job.attention.fatal:
+            raise Busy("the preview offers only Abort; cancel answers it")
 
     def actions_json(self) -> dict[str, str | None]:
         """Each printer action, with why it can't run now, or None when it can."""
@@ -1555,12 +1553,10 @@ class SimPrinter:
                 return  # paused or waiting for the user
 
     def _end_phase(self, job: UserJob | SyncJob) -> None:
-        s = self.settings
-        if job.phase is JobPhase.SCANNING and s.start_blip:
-            job.enter(JobPhase.BLIP)
-            job.remaining = s.blip_seconds
-            self._show_state()
-        elif job.phase in (JobPhase.SCANNING, JobPhase.BLIP):
+        if job.phase is JobPhase.SCANNING:
+            if not (isinstance(job, SyncJob) and self._ask(job)):
+                self._begin(job)
+        elif job.phase is JobPhase.BLIP:
             self._after_blip(job)
         elif job.phase is JobPhase.PREHEAT:
             self._begin_feeding(job)
@@ -1578,6 +1574,27 @@ class SimPrinter:
             self.job, self.screen = None, job.end_state
             self._log("job", f"job {job.id} {job.end_state.lower()}")
             self._show_state()
+
+    def _begin(self, job: UserJob | SyncJob) -> None:
+        """Start the job the preview let through: the blip, then the job itself."""
+        if self.settings.start_blip:
+            job.enter(JobPhase.BLIP)
+            job.remaining = self.settings.blip_seconds
+            self._show_state()
+        else:
+            self._after_blip(job)
+
+    def _ask(self, job: SyncJob) -> bool:
+        """Check the file as the preview does; return whether it asks the user."""
+        rows = preview(self.model, job.gcode, self.checks)
+        if not rows:
+            return False
+        fatal = any(r.fatal for r in rows)
+        detail = "; ".join(r.text for r in rows)
+        job.enter(JobPhase.HOLD, Attention(Reason.PREVIEW, detail=detail, fatal=fatal))
+        self._log("job", f"job {job.id} waits: {job.attention}")
+        self._show_state()
+        return True
 
     def _after_blip(self, job: UserJob | SyncJob) -> None:
         if isinstance(job, SyncJob):
@@ -1684,11 +1701,6 @@ class SimPrinter:
 
     # The sync job.
 
-    def _auto_accept(self) -> bool:
-        if self.auto_accept_model_check is not None:
-            return self.auto_accept_model_check
-        return self.settings.auto_accept_model_check
-
     def _run_sync(self, job: SyncJob) -> None:
         try:
             commands = gcode.parse(job.gcode)
@@ -1731,7 +1743,7 @@ class SimPrinter:
                 "total_mm": j.spec.total_mm if user else 0.0,
                 "attention": None
                 if a is None
-                else {"reason": str(a.reason), "tool": a.tool, "text": str(a)},
+                else {"reason": str(a.reason), "tool": a.tool, "text": str(a), "fatal": a.fatal},
                 "time_printing": j.time_printing,
                 "segment": j.segment if user else 0,
             }
@@ -1763,7 +1775,7 @@ class SimPrinter:
             "homed": self.homed,
             "job": job,
             "job_counter": self.job_counter,
-            "auto_accept_model_check": self.auto_accept_model_check,
+            "checks": str(self.checks),
             "actions": self.actions_json(),
             "load_sources": ["tag", "preset"] if m.uuids else ["preset"],
             "tools": [
@@ -1835,7 +1847,7 @@ def _job_from(d: dict | None) -> UserJob | SyncJob | None:
     d["phase"] = JobPhase(d["phase"])
     d["end_state"] = State(d["end_state"])
     if (a := d["attention"]) is not None:
-        d["attention"] = Attention(Reason(a["reason"]), a["tool"], a["detail"])
+        d["attention"] = Attention(Reason(a["reason"]), a["tool"], a["detail"], a["fatal"])
     if kind == "sync":
         return SyncJob(**d)
     if d["paused_from"] is not None:
@@ -1862,6 +1874,7 @@ def _printer_from(d: dict) -> SimPrinter:
     d["power"] = Power(d["power"])
     d["fault"] = Fault(d["fault"])
     d["screen"] = State(d["screen"])
+    d["checks"] = Severity(d["checks"])
     d["tools"] = {t["index"]: _tool_from(t) for t in d["tools"]}
     d["job"] = _job_from(d["job"])
     return SimPrinter(**d)
@@ -1968,6 +1981,7 @@ class Simulation:
                 "power": [str(v) for v in Power],
                 "fault": [str(v) for v in Fault],
                 "firmware": [str(v) for v in Firmware],
+                "checks": [str(v) for v in Severity],
             },
         }
         if events:

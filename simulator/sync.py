@@ -1,8 +1,8 @@
 """The sync job's G-code interpreter: what each parsed command does to a printer.
 
-`gcode` parses the job. The job's lifecycle (holding on a problem, running, the phases) stays
-in `model`, which calls `tool_problem` and `apply` here, and `wrong_model` when a file is
-printed. Material writes go through the `SimTool` methods.
+`gcode` parses the job, and `preview` checks it before it runs. The job's lifecycle (holding
+on a problem, running, the phases) stays in `model`, which calls `tool_problem` and `apply`
+here. Material writes go through the `SimTool` methods.
 """
 
 from __future__ import annotations
@@ -15,20 +15,6 @@ from simulator.tool import DEFAULT_TEMPERATURES, Material, SimTool, describe
 
 if TYPE_CHECKING:
     from simulator.model import SimPrinter
-
-
-def wrong_model(p: SimPrinter, body: str) -> str | None:
-    """The model a file's M862.3 names when it isn't this one. A parse error is left to the
-    job, which stops on it."""
-    try:
-        commands = gcode.parse(body)
-    except gcode.GcodeError:
-        return None
-    names = (p.model.name, f"{p.model.name}MMU3")
-    for c in commands:
-        if isinstance(c, gcode.ModelCheck) and c.name not in names:
-            return c.name
-    return None
 
 
 def tool_problem(p: SimPrinter, commands: list[gcode.Command]) -> str | None:
@@ -55,8 +41,10 @@ def apply(p: SimPrinter, commands: list[gcode.Command]) -> None:
         elif isinstance(c, gcode.Home):
             p.homed = True
             p._log("gcode", "G28: homed")
-        elif isinstance(c, gcode.ModelCheck):
-            p._log("gcode", f"M862.3 model check {c.name}")
+        elif isinstance(c, gcode.ModelCheck | gcode.LevelCheck | gcode.FeatureCheck):
+            # Checked at the preview; a running job ignores them (`M862_3` and `M862_6` in
+            # `src/marlin_stubs`).
+            p._log("gcode", f"checked at the preview: {c}")
         else:
             p._log("gcode", f"ignored: {c.line}")
 

@@ -74,12 +74,14 @@ poll_idle = 3
 
 See [sim.example.toml](sim.example.toml), which shows every setting with its
 default. A printer has a `model` (a PrusaLink type code such as `8.1.0`), an
-`api_key`, a `firmware` mode, `high_flow` for a high-flow nozzle, and
-`[[printers.tools]]` entries that can start loaded with a material and
-counters. The top-level settings are timing and lengths: the time scale, how
-fast loads and prints move filament, the purges of a tool change, a jam and a
-power-panic resume, the preheat and park times, and whether the start blip
-and the model check are on. The feed ratio and a load's slow, fast and purge
+`api_key`, a `firmware` mode, `checks` for the print preview, `high_flow`
+for a high-flow nozzle, and `[[printers.tools]]` entries that can start
+loaded with a material and counters. `checks` is `ignore`, `warn` (the
+default) or `abort`, and it stands for every setting in the printer's menu
+that governs a check of a file's `M862` lines. The top-level settings are
+timing and lengths: the time scale, how fast loads and prints move filament,
+the purges of a tool change, a jam and a power-panic resume, the preheat and
+park times, and whether the start blip is on. The feed ratio and a load's slow, fast and purge
 lengths are overrides: left out, each printer uses its model's value, which
 the page shows on the printer's card. On the page or through
 `/api/settings`, an empty value or `null` unsets an override. The purge
@@ -104,7 +106,7 @@ Actions: `load`, `unload`, `extrude`, `retract`, `select_tool`,
 `start_print`, `pause`, `resume`, `cancel`, `dismiss`, `home`, `runout`, `jam`,
 `clear_jam`, `reboot`, `set_power`, `set_fault`, `set_firmware`,
 `set_sensor_fault`, `set_stuck_write`, `set_tool_enabled`,
-`set_auto_accept`, `counter_step_back`, `set_extruded_at_unload`,
+`set_checks`, `counter_step_back`, `set_extruded_at_unload`,
 `tap_through`. Parameter names are the keyword arguments of the methods with
 those names in `model.py`, and their type hints say what each takes: JSON
 `true` or `false` for a bool, an integer such as `3` (not `3.0`) for an int,
@@ -176,9 +178,19 @@ that trace. The points that matter for the bridge, in short:
   `PRINTING`. `FINISHED` and `STOPPED` persist until dismissed, and the job
   disappears from `/api/v1/status` and `/api/v1/job` as soon as a print ends.
 - The sync job is accepted only when a print could start, runs as a job
-  with the uploaded file's name, applies `M865`, `M865.1` and `M117`, and
-  stops in `ATTENTION` on an `M862.3` for another model until you tap
-  through.
+  with the uploaded file's name, and applies `M865`, `M865.1` and `M117`.
+  The job is counted at once and reads `PRINTING` while the file is
+  scanned. Then the print preview checks the `M862` lines in the file's
+  first 200 G-code lines: the model by compatibility group (`M862.3`), the
+  G-code level (`M862.5`), and the features (`M862.6`): input shaper on
+  every build but the iX, the INDX lock on INDX, an MMU3 file with the MMU
+  off, and a feature the build doesn't know. A failed check that `checks`
+  doesn't ignore holds the job in `ATTENTION`, with its ID in
+  `/api/v1/status` and `PAUSED` in `/api/v1/job`, and one screen lists
+  every failed check. Under `warn`, `tap_through` answers Print: the start
+  blip, then the job runs. Under `abort`, only `cancel` answers, as Abort.
+  Abort ends in `IDLE` with no job, the ID used up and the file kept, and
+  nothing parks or moves. The INDX lock is a warning whatever `checks` is.
 - INDX and XL printers are several tools with their own counters. A tool
   change isn't an unload; the incoming tool gets a purge. Neither stores
   UUIDs, so `M865.1` does nothing there. Disabled tools don't appear in
@@ -237,6 +249,22 @@ Choices made where the firmware was silent or the plan left it open:
   filament in the simulator.
 - A power loss during a filament change drops the gap to restore: the
   resume after the reload doesn't move.
+- One `checks` setting stands for the firmware's settings per kind of check
+  (model, compatibility mode, G-code level, input shaper and firmware). The
+  checks share one screen and the worst severity decides it, so one setting
+  shows the bridge every outcome.
+- The MMU is always off, so a file with `M862.6 P"MMU3"` fails on a build
+  that knows the MMU3. A file that declares the `HT Hotend` is taken as
+  satisfied: whether the hotend is high-temperature is printer state the
+  simulator doesn't hold.
+- The preview checks only uploaded and printed files. A print started from
+  the page has no file, so nothing checks it.
+- The preview doesn't model an uncalibrated INDX nozzle cleaner, which
+  refuses every print, the unfinished-selftest screen, the
+  new-firmware screen (`M115 U`, which continues by itself after 30 s),
+  `M862.4` firmware versions, `M862.1` nozzle checks, `M862.2` numeric model
+  codes, the wastebin, file errors, answering through Connect, or
+  `DELETE /api/v1/job`.
 
 ## Tests
 

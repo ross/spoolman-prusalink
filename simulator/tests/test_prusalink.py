@@ -16,7 +16,8 @@ from simulator.tests.util import KEY, PLA, loaded, make
 
 AUTH = {"X-Api-Key": KEY}
 UPLOAD = {**AUTH, "Print-After-Upload": "?1", "Overwrite": "?1", "Content-Type": "text/x.gcode"}
-JOB = 'M862.3 P "COREONEL"\nM865 X R N"PETG" O"#186bb5" L0\nM117 Spoolman: test\n'
+PREAMBLE = 'M862.3 P "COREONEL"\nM862.5 P2\nM862.6 P"Input shaper"\n'
+JOB = PREAMBLE + 'M865 X R N"PETG" O"#186bb5" L0\nM117 Spoolman: test\n'
 
 
 @pytest.fixture
@@ -166,9 +167,10 @@ async def test_upload_refusals(setup):
     assert resp.status == 403
 
     headers = {**AUTH, "Print-After-Upload": "?1"}
-    assert (await client.put("/api/v1/files/usb/a.gcode", data="x", headers=headers)).status == 201
+    body = PREAMBLE + "M117 x\n"
+    assert (await client.put("/api/v1/files/usb/a.gcode", data=body, headers=headers)).status == 201
     sim.tick(100)
-    resp = await client.put("/api/v1/files/usb/a.gcode", data="x", headers=headers)
+    resp = await client.put("/api/v1/files/usb/a.gcode", data=body, headers=headers)
     assert resp.status == 409
     assert (await resp.json())["message"] == "File already exists"
 
@@ -179,24 +181,66 @@ async def test_upload_refusals(setup):
     assert p.files["b.gcode"] == "y"
 
 
-async def test_model_check_over_http(setup):
+async def get(client, path):
+    resp = await client.get(path, headers=AUTH)
+    return resp.status, await resp.json() if resp.status == 200 else None
+
+
+async def test_the_preview_over_http(setup):
     sim, p, client = setup
-    body = JOB.replace("COREONEL", "MK4S")
-    await client.put("/api/v1/files/usb/s.gcode", data=body, headers=UPLOAD)
-    sim.tick(0.8)
-    status = await (await client.get("/api/v1/status", headers=AUTH)).json()
-    assert status["printer"]["state"] == "ATTENTION" and "job" not in status
-    assert (await client.get("/api/v1/job", headers=AUTH)).status == 204
+    body = JOB.replace("COREONEL", "MINI")
+    resp = await client.put("/api/v1/files/usb/s.gcode", data=body, headers=UPLOAD)
+    assert resp.status == 201
+
+    # The scan: the job is counted and visible at once.
+    _, status = await get(client, "/api/v1/status")
+    assert status["printer"]["state"] == "PRINTING" and status["job"]["id"] == 1
+    _, job = await get(client, "/api/v1/job")
+    assert (job["id"], job["state"]) == (1, "PRINTING")
+
+    # The question: ATTENTION, with the job still there.
+    sim.tick(0.5)
+    _, status = await get(client, "/api/v1/status")
+    assert status["printer"]["state"] == "ATTENTION" and status["job"]["id"] == 1
+    _, job = await get(client, "/api/v1/job")
+    assert (job["id"], job["state"]) == (1, "PAUSED")
+
+    # A second upload is refused, and its file kept.
+    resp = await client.put("/api/v1/files/usb/b.gcode", data=JOB, headers=UPLOAD)
+    assert resp.status == 409 and (await resp.json())["message"] == "Can't print right now"
+    assert p.files["b.gcode"] == JOB
+
+    # Print: the blip, IDLE with no job, then the job runs to FINISHED.
     p.tap_through()
+    _, status = await get(client, "/api/v1/status")
+    assert status["printer"]["state"] == "IDLE" and "job" not in status
+    sim.tick(0.3)
+    _, status = await get(client, "/api/v1/status")
+    assert status["printer"]["state"] == "PRINTING" and status["job"]["id"] == 1
     sim.tick(10)
     assert p.state is State.FINISHED and p.tools[0].material.name == "PETG"
+
+    # Abort: IDLE with no job, and the next job's ID is one higher.
+    resp = await client.put("/api/v1/files/usb/s.gcode", data=body, headers=UPLOAD)
+    assert resp.status == 201
+    sim.tick(0.5)
+    _, status = await get(client, "/api/v1/status")
+    assert status["printer"]["state"] == "ATTENTION" and status["job"]["id"] == 2
+    p.cancel()
+    _, status = await get(client, "/api/v1/status")
+    assert status["printer"]["state"] == "IDLE" and "job" not in status
+    assert await get(client, "/api/v1/job") == (204, None)
+    resp = await client.put("/api/v1/files/usb/b.gcode", data=JOB, headers=UPLOAD)
+    assert resp.status == 201
+    _, status = await get(client, "/api/v1/status")
+    assert status["job"]["id"] == 3
 
 
 async def test_print_existing_file(setup):
     sim, p, client = setup
     assert (await client.post("/api/v1/files/usb/none.gcode", headers=AUTH)).status == 404
     assert (await client.post("/api/v1/files/sd/a.gcode", headers=AUTH)).status == 404
-    await client.put("/api/v1/files/usb/a.gcode", data="M117 a\n", headers=AUTH)
+    await client.put("/api/v1/files/usb/a.gcode", data=PREAMBLE + "M117 a\n", headers=AUTH)
     assert (await client.post("/api/v1/files/usb/a.gcode", headers=AUTH)).status == 204
     assert (await client.post("/api/v1/files/usb/a.gcode", headers=AUTH)).status == 409
     sim.tick(10)

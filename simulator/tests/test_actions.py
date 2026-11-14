@@ -8,8 +8,9 @@ from collections.abc import Callable
 import pytest
 
 from simulator.model import Busy, Invalid, PrintSpec, Segment, SimPrinter, SimTool, Simulation
+from simulator.preview import Severity
 from simulator.tests.test_model import one_segment
-from simulator.tests.util import loaded, make, run
+from simulator.tests.util import loaded, make, run, sliced
 
 PRINTER_CALLS: dict[str, Callable[[SimPrinter], None]] = {
     "start_print": lambda p: p.start_print(one_segment(10)),
@@ -72,15 +73,25 @@ def jam_held():
     return sim, p
 
 
-def model_check():
+def preview_question():
     sim, p = make()
     p.upload("x.gcode", 'M862.3 P "MK4"\n', print_after=True, overwrite=False)
+    run(sim, 1)
+    return sim, p
+
+
+def preview_fatal():
+    sim, p = preview_question()
+    p.cancel()
+    p.set_checks(Severity.ABORT)
+    p.upload("y.gcode", 'M862.3 P "MK4"\n', print_after=True, overwrite=False)
+    run(sim, 1)
     return sim, p
 
 
 def parse_error():
     sim, p = make()
-    p.upload("x.gcode", 'M865 L9 N"PLA"\n', print_after=True, overwrite=False)
+    p.upload("x.gcode", sliced(p, 'M865 L9 N"PLA"\n'), print_after=True, overwrite=False)
     run(sim, 1)
     return sim, p
 
@@ -146,7 +157,8 @@ SITUATIONS = [
     paused,
     runout_wait,
     jam_held,
-    model_check,
+    preview_question,
+    preview_fatal,
     parse_error,
     finished,
     off,

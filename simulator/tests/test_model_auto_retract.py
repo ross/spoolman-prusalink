@@ -22,7 +22,7 @@ from __future__ import annotations
 import pytest
 
 from simulator.model import JobPhase, Material, PrintSpec, Reason, Segment, SimTool, State
-from simulator.tests.util import make
+from simulator.tests.util import make, sliced
 
 INDX_RATIO = 550 / 576
 NEXTRUDER = ("8.1.0", "1.4.1", "4.1.0")  # Core One L, MK4S and iX
@@ -318,11 +318,11 @@ def test_an_indx_print_ends_retracted_without_an_auto_retract():
 def test_a_sync_job_counts_only_on_a_tool_that_fed_since_its_auto_retract():
     sim, p = idle_loaded("8.1.0")
     # Auto-retracted: 55 stored is past the end's 8, and fully retracted.
-    p.upload("a.gcode", "M117 hi\n", print_after=True, overwrite=False)
+    p.upload("a.gcode", sliced(p, "M117 hi\n"), print_after=True, overwrite=False)
     assert counted(p, lambda: sim.advance(10)) == 0
     p.dismiss()
     p.extrude(0, 10)
-    p.upload("b.gcode", "M117 hi\n", print_after=True, overwrite=False)
+    p.upload("b.gcode", sliced(p, "M117 hi\n"), print_after=True, overwrite=False)
     assert counted(p, lambda: sim.advance(10)) == pytest.approx(23)
     assert p.state is State.FINISHED
 

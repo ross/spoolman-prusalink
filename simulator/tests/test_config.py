@@ -38,7 +38,7 @@ def test_defaults(tmp_path):
     cfg = load(write(tmp_path, printer()))
     assert (cfg.host, cfg.control_port, cfg.settings) == ("127.0.0.1", 8000, {})
     p = cfg.printers[0]
-    assert (p.port, p.api_key, p.firmware, p.auto_accept_model_check) == (8001, "sim-p", None, None)
+    assert (p.port, p.api_key, p.firmware, p.checks) == (8001, "sim-p", None, "warn")
     assert not p.high_flow and p.auto_retract
     assert [t.index for t in p.tools] == [0]
     assert p.tools[0].material is None
@@ -106,9 +106,14 @@ BAD = {
     "unknown model": (printer(model="9.9.9"), "printers[0].model must be one of"),
     "model type": ("[[printers]]\nname = 'p'\nmodel = 8\n", "printers[0].model must be a string"),
     "bad firmware": (printer('firmware = "nope"'), "printers[0].firmware must be one of"),
-    "bad auto accept": (
-        printer('auto_accept_model_check = "yes"'),
-        "printers[0].auto_accept_model_check must be true or false",
+    "bad checks": (
+        printer('checks = "maybe"'),
+        "printers[0].checks must be one of ignore, warn, abort, got 'maybe'",
+    ),
+    "checks type": (printer("checks = true"), "printers[0].checks must be a string"),
+    "removed auto accept": (
+        printer("auto_accept_model_check = true"),
+        "printers[0].auto_accept_model_check isn't a known key",
     ),
     "setting type bool": ('start_blip = "no"\n' + printer(), "start_blip must be true or false"),
     "setting type float": ('time_scale = "fast"\n' + printer(), "time_scale must be a number"),
