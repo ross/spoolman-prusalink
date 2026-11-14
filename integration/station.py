@@ -13,7 +13,16 @@ from dataclasses import dataclass
 import httpx
 from aiohttp import web
 
-from simulator.model import Event, PrintSpec, SimPrinter, SimTool, Simulation, State
+from simulator.model import (
+    Event,
+    JobPhase,
+    PrintSpec,
+    Reason,
+    SimPrinter,
+    SimTool,
+    Simulation,
+    State,
+)
 from simulator.prusalink import Hook, Reply, make_app, make_transport
 
 # Short phases keep a scenario to a few hundred ticks. None is zero, so every phase
@@ -138,18 +147,30 @@ class Station:
         self.printer.load(tool, **load)
         await self.run_until(lambda: self.tool_at(tool).process is None, poll_every=poll_every)
 
+    def begin_print(self, spec: PrintSpec) -> None:
+        """Start a print and tick through the scan, to the preview's first question or the
+        start blip."""
+        self.printer.start_print(spec)
+        self.tick_until(lambda: self.printer.job.phase is not JobPhase.SCANNING)
+
     async def start_print(self, spec: PrintSpec) -> None:
         """Start a print and poll until the bridge counts it as started.
 
-        Scan, blip and a 0.5 s preheat take 0.9 s. The bridge sees a print start when the
-        counter moves between two polls of the same job, so this polls twice once the
-        printer is extruding.
+        Scan, blip and a 0.5 s preheat take 0.9 s. On a toolchanger the tools-mapping screen
+        comes up after the scan for every print it applies to; with nothing wrong this
+        answers Print at once, so the timing is the same. A test that wants to see that
+        question uses `begin_print`. The bridge sees a print start when the counter moves
+        between two polls of the same job, so this polls twice once the printer is
+        extruding.
         """
         assert self.poll is not None, "this station has no bridge to poll"
         first = self.tool_at(spec.segments[0].tool)
         start = first.extruded
-        self.printer.start_print(spec)
-        self.advance(1.2)
+        self.begin_print(spec)
+        job = self.printer.job
+        if job.waits_for(Reason.TOOLS_MAPPING) and job.attention.detail is None:
+            self.printer.tap_through()
+        self.advance(1.2 - self.sim.settings.scan_seconds)
         assert self.printer.state is State.PRINTING and first.extruded > start
         await self.poll()
         self.advance(0.3)

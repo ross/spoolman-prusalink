@@ -275,7 +275,9 @@ def test_consecutive_segments_on_one_tool_make_no_tool_change():
 def test_a_tool_change_to_a_loaded_tool_purges():
     sim, p = make("3.1.0", [loaded(0), loaded(1)])
     p.start_print(PrintSpec([Segment(0, 20), Segment(1, 20)], preheat_s=0))
-    sim.advance(0.8 + 100)
+    sim.advance(0.5)
+    p.tap_through()  # Print on the tools-mapping screen
+    sim.advance(0.3 + 100)
     assert p.state is State.FINISHED
     assert "tool change T0 -> T1" in messages(sim, "job")
     assert p.tools[1].extruded > 20 * 0.95

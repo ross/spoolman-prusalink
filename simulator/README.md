@@ -195,8 +195,10 @@ that trace. The points that matter for the bridge, in short:
   stored type isn't the segment's `material`, compared exactly, asks
   again. On the XL and INDX, a print that uses two tools, or any print with
   two tools enabled, asks one tools-mapping question with every per-tool
-  row, the type included, and nothing loads there: the print waits for a
-  load when it reaches an empty tool, as a tool change into one does.
+  row, the type included, and asks it with nothing wrong too. Nothing loads
+  there: the print waits for a load when it reaches an empty tool, as a
+  tool change into one does. While that question is up the printer isn't
+  printing, so the idle sensor clear runs on the picked tool.
   `tap_through` answers Print or Ok, and `cancel` answers Abort or No,
   which ends in `IDLE` with no job and the ID used up. `checks` governs
   none of these: the firmware's severities are fixed.
@@ -290,10 +292,9 @@ Choices made where the firmware was silent or the plan left it open:
   lines, so the preview checks only its tools: no model, level or feature
   check. The simulator judges only the files the bridge uploads that way.
 - The preview screen before Print isn't modeled: `start_print` is the user
-  pressing Print. On the XL and INDX, the firmware shows the tools-mapping
-  screen for every print started at the printer when tool mapping applies,
-  and the simulator asks only when a used tool has a problem. The idle
-  sensor clear that can run while that screen is up isn't modeled.
+  pressing Print, or Continue on the XL. The bed preheat while the
+  tools-mapping screen is up isn't modeled: the simulator reports no
+  temperatures.
 - A tool is used when a segment names it; the firmware reads the file's
   `filament used [g]`. The filament sensor is the tool's `loaded` flag, so a
   sensor fault doesn't raise the filament question.

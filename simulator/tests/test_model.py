@@ -421,7 +421,10 @@ def test_multi_tool_print_attributes_extrusion_and_purges():
     p.cancel()
     spec = PrintSpec([Segment(0, 100), Segment(1, 200), Segment(0, 100)], preheat_s=0)
     p.start_print(spec)
-    sim.tick(0.8 + 20 + 1)  # 105 mm in: the change to T1 and its purge happened
+    sim.tick(0.5)
+    assert str(p.job.attention) == "tools mapping: nothing wrong"
+    p.tap_through()  # Print
+    sim.tick(0.3 + 20 + 1)  # 105 mm in: the change to T1 and its purge happened
     assert p.selected_tool == 1
     # INDX feeds 550/576 of each mm commanded, purges included.
     assert p.tools[1].extruded == pytest.approx((30 + 5) * 550 / 576)
@@ -756,7 +759,9 @@ def test_snapshot_round_trip_mid_print_and_mid_load():
     p.high_flow = True
     p.start_print(PrintSpec([Segment(0, 100), Segment(2, 50)], color_changes_mm=[80]))
     p.upload("x.gcode", "M117 x\n", print_after=False, overwrite=False)
-    sim.tick(0.8 + 5 + 3)
+    sim.tick(0.5)
+    p.tap_through()  # Print on the tools-mapping screen
+    sim.tick(0.3 + 5 + 3)
     p.runout(0)
     p.load(0)
     sim.tick(2)
@@ -832,7 +837,9 @@ def test_idle_sensor_clear_on_a_sensor_fault():
 def test_runout_needs_the_selected_tool():
     sim, p = make("8.10.0", [loaded(0, PETG), loaded(1, PETG)])
     p.start_print(PrintSpec([Segment(0, 100)], preheat_s=0))
-    sim.tick(0.8 + 1)
+    sim.tick(0.5)
+    p.tap_through()  # Print: two tools are enabled, so the tools-mapping screen shows
+    sim.tick(0.3 + 1)
     with pytest.raises(Invalid, match="isn't the selected tool"):
         p.runout(1)
     with pytest.raises(Invalid, match="isn't the selected tool"):

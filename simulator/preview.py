@@ -128,8 +128,9 @@ class ToolView:
 class PrintChecks:
     """What the preview asks about a print, in order.
 
-    `rows` is the "G-code incompatible" screen. On a printer with tool mapping the per-tool
-    rows go to `mapping`, the tools-mapping screen, instead. On one without, `empty` names
+    `rows` is the "G-code incompatible" screen. When tool mapping applies, `mapped` is true
+    and the per-tool rows go to `mapping`, the tools-mapping screen, instead; a print
+    started at the printer shows that screen even with no rows. Otherwise `empty` names
     the used tools with no filament, which the filament-not-inserted screen asks to load.
     The type check comes after that load, so `wrong_types` runs then.
     """
@@ -137,6 +138,7 @@ class PrintChecks:
     rows: list[Failed]
     mapping: list[Failed]
     empty: list[int]
+    mapped: bool = False
 
 
 def tool_mapping(max_tools: int, uses: dict[int, str | None], tools: dict[int, ToolView]) -> bool:
@@ -146,7 +148,9 @@ def tool_mapping(max_tools: int, uses: dict[int, str | None], tools: dict[int, T
 
     The toolchanger builds have tool mapping, and so do MMU builds with the MMU on, which
     the simulator never is. It applies when the print uses more than one tool, or when more
-    than one tool is enabled.
+    than one tool is enabled and the print uses one. A file with no `filament used [g]`,
+    such as the bridge's sync job, uses none (`UsedExtrudersCount` in
+    `src/common/gcode/gcode_info.cpp`), so it never applies there.
     """
     enabled = sum(t.enabled for t in tools.values())
     return max_tools > 1 and (len(uses) > 1 or (enabled > 1 and len(uses) > 0))
@@ -182,7 +186,7 @@ def print_checks(
         if mapped:
             per_tool += wrong_types({index: uses[index]}, tools)
     if mapped:
-        return PrintChecks(rows, per_tool, [])
+        return PrintChecks(rows, per_tool, [], mapped=True)
     empty = [i for i in sorted(uses) if tools[i].enabled and not tools[i].loaded]
     return PrintChecks(rows + per_tool, [], empty)
 

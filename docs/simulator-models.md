@@ -110,7 +110,9 @@ firmware update.
   firmware's fixed severities: a disabled tool refuses, and a tool with no
   filament warns and then waits for a load, which reads `BUSY` with no job.
   A segment can name a filament type, and a tool holding another one asks.
-  On the XL and INDX these rows are one tools-mapping question.
+  On the XL and INDX these rows are one tools-mapping question, which a
+  print it applies to asks with nothing wrong too, and the idle sensor
+  clear runs on the picked tool while it's up.
 - It serves `/api/version`, `/api/v1/info`, `/api/v1/status`, `/api/v1/job`
   and `/api/v1/filament`. `/api/v1/info` always reports `mmu` as false.
 - Tests: the unit harness and the integration fixtures take a model and a

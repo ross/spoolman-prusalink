@@ -223,11 +223,76 @@ def test_a_toolchanger_asks_on_its_mapping_screen_then_waits_at_the_tool(model):
     assert not p.job.previewing
 
 
-def test_a_toolchanger_print_with_nothing_wrong_asks_nothing():
-    sim, p = make("3.1.0", [loaded(0, PLA), loaded(1, PETG)])
+def two_tools(model):
+    sim, p = make(model, [loaded(0, PLA), loaded(1, PETG)])
     p.start_print(PrintSpec([Segment(0, 10, "PLA"), Segment(1, 10, "PETG")], preheat_s=0))
     sim.tick(0.5)
+    return sim, p
+
+
+@pytest.mark.parametrize("model", ["3.1.0", "8.10.0"])
+def test_a_toolchanger_print_with_nothing_wrong_waits_on_the_mapping_screen(model):
+    sim, p = two_tools(model)
+    # The ID was taken when Print or Continue was pressed on the preview, before this
+    # screen, which reads like every other question.
+    assert p.job.waits_for(Reason.TOOLS_MAPPING) and not p.job.attention.fatal
+    assert str(p.job.attention) == "tools mapping: nothing wrong"
+    assert seen(p) == ("ATTENTION", 1, "PAUSED")
+    assert p.actions_json()["tap_through"] is None
+    sim.tick(100)  # nothing times out
+    assert p.job.waits_for(Reason.TOOLS_MAPPING) and p.tools[0].extruded == 0
+    p.tap_through()  # Print
+    assert p.job.phase is JobPhase.BLIP and seen(p) == ("IDLE", None, None)
+    sim.tick(0.3)
+    assert seen(p) == ("PRINTING", 1, "PRINTING")
+    sim.tick(100)
+    assert p.state is State.FINISHED and p.job_counter == 1
+    assert p.tools[0].extruded > 0 and p.tools[1].extruded > 0
+
+
+@pytest.mark.parametrize("model", ["3.1.0", "8.10.0"])
+def test_abort_on_the_mapping_screen_ends_idle_with_the_id_used(model):
+    sim, p = two_tools(model)
+    p.cancel()  # Abort
+    assert p.job is None and seen(p) == ("IDLE", None, None) and p.job_counter == 1
+    assert p.tools[0].extruded == 0 and p.tools[0].auto_retracted is None
+    p.start_print(PrintSpec([Segment(0, 10)]))
+    assert p.job.id == 2
+
+
+@pytest.mark.parametrize(("enabled", "asks"), [(False, False), (True, True)])
+def test_a_one_tool_print_on_an_xl_asks_when_two_tools_are_enabled(enabled, asks):
+    sim, p = make("3.1.0", [loaded(0, PLA), loaded(1, PETG, enabled=enabled)])
+    p.start_print(PrintSpec([Segment(0, 10, "PLA")], preheat_s=0))
+    sim.tick(0.5)
+    assert p.job.waits_for(Reason.TOOLS_MAPPING) is asks
+    assert (p.job.phase is JobPhase.BLIP) is not asks
+
+
+@pytest.mark.parametrize("model", ["8.1.0", "1.4.1", "4.1.0", "2.1.0"])
+def test_a_single_tool_printer_never_shows_the_mapping_screen(model):
+    sim, p = make(model)
+    p.start_print(PrintSpec([Segment(0, 10)], preheat_s=0))
+    sim.tick(0.5)
     assert p.job.phase is JobPhase.BLIP
+
+
+def test_the_idle_sensor_clear_runs_on_the_mapping_screen():
+    # `is_printing()` is false there, so the picked tool's sensor reading empty clears its
+    # type, as it does while idle. On the other questions the printer counts as printing.
+    sim, p = two_tools("3.1.0")
+    p.set_sensor_fault(1, True)  # not the picked tool
+    sim.tick(1)
+    assert p.tools[1].unload_count == 0
+    p.set_sensor_fault(0, True)
+    sim.tick(1)
+    assert p.tools[0].unload_count == 1 and p.tools[0].material is None
+    sim, p = make()
+    p.start_print(PrintSpec([Segment(0, 10, "PETG")]))
+    sim.tick(0.5)
+    p.set_sensor_fault(0, True)
+    sim.tick(1)
+    assert p.job.waits_for(Reason.WRONG_FILAMENT) and p.tools[0].unload_count == 0
 
 
 @pytest.mark.parametrize(
@@ -280,6 +345,23 @@ async def read(c) -> tuple[str, int | None, int, str | None]:
     job = await resp.json() if resp.status == 200 else None
     state = status["printer"]["state"]
     return state, status.get("job", {}).get("id"), resp.status, job and job["state"]
+
+
+async def test_the_mapping_screen_over_http():
+    sim, p = make("8.10.0", [loaded(0, PLA), loaded(1, PETG)])
+    c = TestClient(TestServer(prusalink.make_app(sim, "p")))
+    await c.start_server()
+    try:
+        p.start_print(PrintSpec([Segment(0, 10), Segment(1, 10)], preheat_s=0))
+        assert await read(c) == ("PRINTING", 1, 200, "PRINTING")  # the scan
+        sim.tick(0.5)
+        assert await read(c) == ("ATTENTION", 1, 200, "PAUSED")  # the tools-mapping screen
+        p.tap_through()
+        assert await read(c) == ("IDLE", None, 204, None)  # the start blip
+        sim.tick(0.3)
+        assert await read(c) == ("PRINTING", 1, 200, "PRINTING")
+    finally:
+        await c.close()
 
 
 async def test_the_preview_of_a_print_over_http(client):

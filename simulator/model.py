@@ -197,7 +197,8 @@ PREVIEW_QUESTIONS = frozenset({Reason.PREVIEW, Reason.TOOLS_MAPPING, Reason.WRON
 @dataclass(frozen=True)
 class Attention:
     """What the screen asks the user, with the tool it names, or the text of a parse error
-    or of the preview's failed checks. A fatal preview question offers only Abort."""
+    or of the preview's failed checks. A fatal preview question offers only Abort. The
+    tools-mapping screen can have no failed checks, and then no text."""
 
     reason: Reason
     tool: int | None = None
@@ -207,7 +208,8 @@ class Attention:
     def __str__(self) -> str:
         match self.reason:
             case Reason.PREVIEW | Reason.TOOLS_MAPPING | Reason.WRONG_FILAMENT:
-                return f"{self.reason}{' (abort only)' if self.fatal else ''}: {self.detail}"
+                detail = self.detail or "nothing wrong"
+                return f"{self.reason}{' (abort only)' if self.fatal else ''}: {detail}"
             case Reason.PARSE_ERROR:
                 return f"parse error: {self.detail}"
             case Reason.NO_FILAMENT:
@@ -1560,8 +1562,12 @@ class SimPrinter:
     def _idle_clear_selected(self) -> None:
         # The firmware clears the type whenever it isn't printing and the picked tool's sensor
         # reads empty, so a type written to an empty tool shows only until the job ends.
+        # `is_printing()` is false on the tools-mapping screen too (`marlin_server.cpp`).
         t = self.tools.get(self.selected_tool)
-        if self.job is None and self.state in IDLE_STATES and t is not None and t.process is None:
+        job = self.job
+        idle = job is None and self.state in IDLE_STATES
+        mapping = job is not None and job.waits_for(Reason.TOOLS_MAPPING)
+        if (idle or mapping) and t is not None and t.process is None:
             self._idle_sensor_clear(t, sensor_fault_counts=True)
 
     def _tick_process(self, t: SimTool, dt: float) -> None:
@@ -1691,7 +1697,7 @@ class SimPrinter:
         }
 
     def _preview_question(self, job: UserJob, reason: Reason, rows: list[Failed]) -> None:
-        detail = "; ".join(r.text for r in rows)
+        detail = "; ".join(r.text for r in rows) or None
         job.enter(JobPhase.HOLD, Attention(reason, detail=detail, fatal=any(r.fatal for r in rows)))
         self._log("job", f"job {job.id} waits: {job.attention}")
         self._show_state()
@@ -1706,9 +1712,14 @@ class SimPrinter:
 
     def _after_incompatible(self, job: UserJob) -> None:
         """The tools-mapping screen on a toolchanger, else the filament-not-inserted screen
-        (`stateFromFilamentPresence` and `checks_done`)."""
+        (`stateFromFilamentPresence` and `checks_done`).
+
+        A print started at the printer shows the tools-mapping screen whenever tool mapping
+        applies, with nothing wrong too: only a remote start that is fully compatible skips
+        it (`checks_done` in `src/common/marlin_print_preview.cpp`).
+        """
         checks = print_checks(self.model.max_tools, self._uses(job), self._tool_views())
-        if checks.mapping:
+        if checks.mapped:
             self._preview_question(job, Reason.TOOLS_MAPPING, checks.mapping)
         elif checks.empty:
             job.enter(JobPhase.WAIT_LOAD, Attention(Reason.NO_FILAMENT, checks.empty[0]))

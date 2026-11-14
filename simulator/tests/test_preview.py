@@ -210,6 +210,7 @@ def test_a_toolchanger_asks_about_its_tools_on_the_mapping_screen():
             Failed("T2 is disabled", True),
         ],
         [],
+        mapped=True,
     )
 
 
@@ -221,6 +222,8 @@ def test_tool_mapping_needs_two_used_or_two_enabled_tools():
     assert tool_mapping(5, {0: None}, two)
     assert tool_mapping(5, {0: None, 1: None}, {0: view(), 1: view(enabled=False)})
     assert not tool_mapping(5, {}, two)
+    # With nothing wrong, the screen still shows: it has no rows.
+    assert print_checks(5, {0: None}, two) == PrintChecks([], [], [], mapped=True)
     # Without tool mapping, an XL with one tool enabled checks as a single-tool printer does.
     found = print_checks(5, {1: "PLA"}, {0: view(enabled=False), 1: view(loaded=False)})
     assert found == PrintChecks([Failed("T1 has no filament", False)], [], [1])
