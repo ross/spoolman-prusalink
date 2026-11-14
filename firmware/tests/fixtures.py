@@ -1512,6 +1512,50 @@ std::to_array<WorkflowStep>({
         result = &workflow;
         break;
     }
+
+void Pause::mmu_load_start_process([[maybe_unused]] Response response) {
+    if (load_type == LoadType::load) {
+        if (!MMU2::mmu2.load_filament_to_nozzle(settings.virtual_tool().to_raw())) {
+            // TODO tell user that he has already loaded filament if he really wants to continue
+            // TODO check fsensor .. how should I behave if filament is not detected ???
+            // some error?
+            set(LoadState::load_finalize);
+            return;
+        }
+        mark_filament_as_loaded();
+
+        set(LoadState::color_correct_ask);
+    } else if (load_type == LoadType::filament_change) {
+        setPhase(PhasesLoadUnload::LoadFilamentIntoMMU);
+        set(LoadState::mmu_load_ask);
+    }
+
+    return;
+}
+
+void Pause::mmu_unload_start_process([[maybe_unused]] Response response) {
+    if (load_type == LoadType::unload) {
+        MMU2::mmu2.unload();
+        set(LoadState::_finished);
+
+    } else if (load_type == LoadType::filament_change) {
+        const auto virtual_tool = VirtualToolIndex::currently_selected_opt();
+
+        // No filament loaded in MMU, we can't continue, as we don't know what slot to load
+        if (!virtual_tool.has_value()) {
+            set(LoadState::unload_finish_or_change);
+            return;
+        }
+
+        settings.virtual_tool_ = *virtual_tool;
+
+        MMU2::mmu2.unload();
+        MMU2::mmu2.eject_filament(virtual_tool->to_raw());
+        set(LoadState::unload_finish_or_change);
+    }
+
+    return;
+}
 """
 
 PRINTER_MODEL_CPP = """\
@@ -2923,6 +2967,62 @@ bool MMU2::OnMMUProgressMsgSame(ProgressCode pc) {
         break;
     }
     return false;
+}
+
+bool MMU2::cut_filament(uint8_t slot, bool enableFullScreenMsg /*= true*/) {
+    if (!WaitForMMUReady()) {
+        return false;
+    }
+
+    UpdateCurrentFilamentType(slot);
+    if (enableFullScreenMsg) {
+        FullScreenMsgCut(slot);
+    }
+    {
+        if (FindaDetectsFilament()) {
+            unload();
+        }
+
+        CommandInProgressGuard cipg(CommandInProgress::CutFilament, commandInProgressManager);
+        CutFilamentInner(slot);
+        extruder = MMU2_NO_TOOL;
+        tool_change_extruder = MMU2_NO_TOOL;
+        MakeSound(SoundType::Confirm);
+    }
+    ScreenUpdateEnable();
+    return true;
+}
+
+bool MMU2::eject_filament(uint8_t slot, bool enableFullScreenMsg /* = true */) {
+    if (!WaitForMMUReady()) {
+        return false;
+    }
+
+    UpdateCurrentFilamentType(slot);
+    if (enableFullScreenMsg) {
+        FullScreenMsgEject(slot);
+    }
+    {
+        if (FindaDetectsFilament()) {
+            unload();
+        }
+
+        CommandInProgressGuard cipg(CommandInProgress::EjectFilament, commandInProgressManager);
+        SaveResumePos();
+        for (;;) {
+            Disable_E0();
+            logic.EjectFilament(slot);
+            if (manage_response(false, true)) {
+                break;
+            }
+            IncrementMMUFails();
+        }
+        extruder = MMU2_NO_TOOL;
+        tool_change_extruder = MMU2_NO_TOOL;
+        MakeSound(Confirm);
+    }
+    ScreenUpdateEnable();
+    return true;
 }
 
 bool MMU2::tool_change(uint8_t slot) {

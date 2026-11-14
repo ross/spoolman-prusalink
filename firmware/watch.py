@@ -476,6 +476,42 @@ WATCHED = (
         "203c1dce15628a64",
         UPSTREAM_7D8BF685,
     ),
+    Watched(
+        "the MMU menu's load start",
+        "src/marlin_stubs/pause/pause.cpp",
+        "function",
+        "Pause::mmu_load_start_process",
+        "SimPrinter.load_to_nozzle in simulator/model.py",
+        "c5e0dd0a8e90e05f",
+        UPSTREAM_7D8BF685,
+    ),
+    Watched(
+        "the MMU menu's unload start",
+        "src/marlin_stubs/pause/pause.cpp",
+        "function",
+        "Pause::mmu_unload_start_process",
+        "SimPrinter.unload in simulator/model.py and Mmu.end_unload in simulator/feed.py",
+        "11258212d7c70ba0",
+        UPSTREAM_7D8BF685,
+    ),
+    Watched(
+        "the MMU eject",
+        "lib/Marlin/Marlin/src/feature/prusa/MMU2/mmu2_mk4.cpp",
+        "function",
+        "MMU2::eject_filament",
+        "SimPrinter.eject and _mmu_operation in simulator/model.py",
+        "d31efdaa24c7212a",
+        UPSTREAM_7D8BF685,
+    ),
+    Watched(
+        "the MMU cut",
+        "lib/Marlin/Marlin/src/feature/prusa/MMU2/mmu2_mk4.cpp",
+        "function",
+        "MMU2::cut_filament",
+        "SimPrinter.cut and _mmu_operation in simulator/model.py",
+        "b84fc4701fc2b489",
+        UPSTREAM_7D8BF685,
+    ),
     # A boot starts an MMU whose setting is on. `MMU2::Start` itself, which `_start_mmu`
     # copies, has a stub of the same name in its file's `#else`, so no region can hold it.
     Watched(

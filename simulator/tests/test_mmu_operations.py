@@ -231,25 +231,48 @@ def test_preloads_unload_choice_alone_takes_no_time():
     assert p.tools[0].unload_count == 1 and p.tools[3].unload_count == 0
 
 
-def test_preload_all_writes_every_type_first():
-    sim, p = make_mmu(types={0: PLA, 4: PETG})
+def names(p):
+    return [None if t.material is None else t.material.name for t in p.tools.values()]
+
+
+def test_preload_all_writes_each_type_two_preloads_ahead():
+    # The menu waits while the G-code queue holds more than one command, so slots 0 and 1
+    # are written at once, and slot k when slot k - 2's preload ends.
+    sim, p = make_mmu(types={0: PLA, 4: PLA})
     p.preload_all("PETG")
-    assert all(t.material.name == "PETG" for t in p.tools.values())
-    assert all(t.unload_count == 0 for t in p.tools.values())
+    assert names(p) == ["PETG", "PETG", None, None, "PLA"]
     assert p.state is State.BUSY and [q.tool for q in p.queue] == [1, 2, 3, 4]
+    assert [q.writes for q in p.queue] == [3, 4, None, None]
+    run_checked(sim, p, 3.1)  # slot 0's preload ends: slot 2 is written
+    assert names(p) == ["PETG", "PETG", "PETG", None, "PLA"]
     until_idle(sim, p)
+    assert names(p) == ["PETG"] * 5
+    assert all(t.unload_count == 0 for t in p.tools.values())
     assert messages(sim, "mmu")[-5:] == [f"T{i} preload done" for i in range(5)]
 
 
-def test_a_power_cut_mid_preload_all_keeps_the_types():
-    sim, p = make_mmu()
+def test_a_power_cut_mid_preload_all_keeps_the_types_written():
+    # 4 s in, slot 0's preload has ended, which wrote slot 2; slot 1's runs.
+    sim, p = make_mmu(types={4: PLA})
     p.preload_all("PETG")
     run_checked(sim, p, 4)
     p.reboot()
     check(p)
     assert p.state is State.IDLE and not p.queue
     assert all(t.process is None for t in p.tools.values())
-    assert all(t.material.name == "PETG" for t in p.tools.values())
+    assert names(p) == ["PETG", "PETG", "PETG", None, "PLA"]
+
+
+def test_a_snapshot_keeps_preload_alls_pending_writes():
+    sim, p = make_mmu()
+    p.preload_all("PETG")
+    run_checked(sim, p, 1)
+    saved = json.loads(json.dumps(sim.snapshot()))
+    other = Simulation()
+    other.restore(saved)
+    q = other.printers["p"]
+    assert q.tools[0].process == p.tools[0].process and q.tools[0].process.writes == 2
+    assert q.queue == p.queue
 
 
 def test_a_power_cut_mid_preload_writes_no_type():
@@ -323,6 +346,21 @@ def test_mmu_menu_guards():
     p.set_power("off")
     with pytest.raises(Busy, match="p is off"):
         p.cut(0)
+
+
+def test_load_to_nozzle_refuses_filament_with_no_slot_selected():
+    # After a boot slot 2's filament is still in the extruder with no slot selected, and
+    # the firmware would make no move to free it: Unload Filament on slot 2 first.
+    sim, p = make_mmu(types={0: PLA, 2: PETG}, slot=2, mmu_connect_seconds=0)
+    p.reboot()
+    with pytest.raises(Busy, match="no slot is selected; unload it first"):
+        p.load_to_nozzle(0)
+    assert p.to_json()["tools"][0]["actions"]["load_to_nozzle"] is not None
+    p.unload(2)
+    until_idle(sim, p)
+    p.load_to_nozzle(0)
+    until_idle(sim, p)
+    assert p.selected_tool == 0 and p.mmu.fed == 0
 
 
 def test_mmu_operations_need_an_mmu_switched_on():
