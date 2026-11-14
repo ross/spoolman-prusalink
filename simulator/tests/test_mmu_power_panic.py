@@ -26,7 +26,7 @@ from __future__ import annotations
 import pytest
 
 from simulator import prusalink
-from simulator.model import MODELS, Busy, JobPhase, PrintSpec, Segment, State
+from simulator.model import MODELS, Busy, JobPhase, PrintSpec, Reason, Segment, State
 from simulator.tests.test_mmu_prints import PARK_OUT, START, counts, spec, start
 from simulator.tests.test_model import PETG
 from simulator.tests.test_model_edges import messages
@@ -167,6 +167,21 @@ def test_an_upload_in_the_window_drops_the_resume_on_an_mmu():
     assert p.state is State.FINISHED and p.job is None and not p.mmu.active
     assert p.tools[0].extruded > 0 and p.tools[1].extruded == 0
     assert p.mmu.fed == 1 and p.mmu.path.loaded
+    assert "job 1 resumes after the power panic" not in messages(sim, "job")
+
+
+def test_an_upload_in_the_window_on_an_active_mmu_waits_at_the_unload_question():
+    # BF26 with the MMU Active before the upload: FINDA still sees slot 1's filament, so the
+    # sync job waits at the preview's unload question (F43), and the resume is gone all
+    # the same.
+    sim, p, _ = two_color_cut(50, connect=0.5)
+    sim.advance(1.0)
+    assert p.mmu.active and p.state is State.IDLE and p.resuming is not None
+    p.upload("sync.gcode", sliced(p, "M117 hi\n"), print_after=True, overwrite=False)
+    assert p.resuming is None
+    sim.advance(6)
+    assert p.state is State.ATTENTION and p.job.waits_for(Reason.MMU_LOADED)
+    assert p.job.kind == "sync" and p.mmu.fed == 1
     assert "job 1 resumes after the power panic" not in messages(sim, "job")
 
 

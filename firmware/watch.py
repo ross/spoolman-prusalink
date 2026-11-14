@@ -88,7 +88,8 @@ WATCHED = (
         "src/common/gcode/gcode_info.cpp",
         "function",
         "GCodeInfo::parse_m862",
-        "GCodeChecks.required in simulator/compatibility.py",
+        "GCodeChecks.required in simulator/compatibility.py, and the MMU3 check that only an"
+        " Active MMU passes in preview in simulator/preview.py",
         "7e4c129c699f5571",
         UPSTREAM_7D8BF685,
     ),
@@ -101,8 +102,9 @@ WATCHED = (
         "src/feature/compatibility_checks/gcode_compatibility.cpp",
         "function",
         "CompatibilityReport::generate_toolmapping_only_noclear",
-        "print_checks and wrong_types in simulator/preview.py, and the filament check the"
-        " MMU skips in SimPrinter._tool_views in simulator/model.py",
+        "print_checks and wrong_types in simulator/preview.py, and the filament check an"
+        " Active MMU skips in print_checks' loaded_checked and SimPrinter._loaded_checked in"
+        " simulator/model.py",
         "57407f963fde6b8d",
         UPSTREAM_7D8BF685,
     ),
@@ -595,7 +597,7 @@ WATCHED = (
         "GCodeInfo::is_singletool_gcode",
         "PrintSpec.single_tool_file and SimPrinter._check_single_tool_file in"
         " simulator/model.py, and the single-tool tests in Mmu.prime in simulator/feed.py"
-        " and SimPrinter._end_of_print",
+        " and SimPrinter._end_of_print, and the preview's shortcut in SimPrinter._mmu_shortcut",
         "e37dbf978f89ee82",
         UPSTREAM_7D8BF685,
     ),
@@ -618,6 +620,28 @@ WATCHED = (
         "bool MMU2::tool_change(uint8_t slot)",
         "SimPrinter._mmu_change in simulator/model.py",
         "045f566761af0f0a",
+        UPSTREAM_7D8BF685,
+    ),
+    # The print preview with an MMU: the question to unload first, when FINDA sees filament,
+    # and the single-tool shortcut past it; then its answers. The answers sit in the
+    # preview's whole state machine, so that row also trips on unrelated changes.
+    Watched(
+        "the MMU's preview question",
+        "src/common/marlin_print_preview.cpp",
+        "function",
+        "PrintPreview::stateFromFilamentPresence",
+        "SimPrinter._ask_mmu_unload and _mmu_shortcut in simulator/model.py",
+        "e6e4aab68afb170b",
+        UPSTREAM_7D8BF685,
+    ),
+    Watched(
+        "the MMU's preview answers",
+        "src/common/marlin_print_preview.cpp",
+        "function",
+        "PrintPreview::Loop",
+        "SimPrinter.tap_through, unload_first and _process_done in simulator/model.py: No"
+        " prints with no mapping screen, Yes unloads and then the checks are done",
+        "f19a65b3c6c48c0a",
         UPSTREAM_7D8BF685,
     ),
     # The menu turns the MMU on only with a working extruder sensor.

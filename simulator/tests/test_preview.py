@@ -43,7 +43,7 @@ def test_a_file_sliced_for_the_printer_asks_nothing():
         (OWN.replace("P2", "P3"), "G-code level 3, above 2"),
         (OWN + 'M862.6 P"Tea"\n', "unsupported features: 'Tea'"),
         (OWN + "M862.6 P Tea\n", "unsupported features: ''"),  # not quoted
-        (OWN + 'M862.6 P"MMU3"\n', "sliced for an MMU3, which is off"),
+        (OWN + 'M862.6 P"MMU3"\n', "sliced for an MMU3, which isn't active"),
         ('M862.3 P "COREONEL"\n', "not sliced with input shaper"),
     ],
 )
@@ -60,6 +60,12 @@ def test_no_model_check_without_m862_3():
 def test_each_model_check_line_counts():
     text = OWN + 'M862.3 P "MINI"\nM862.3 P "XL"\n'
     assert texts(text) == ["for printer MINI"]
+
+
+def test_a_file_sliced_for_an_mmu3_passes_only_with_the_mmu_active():
+    text = 'M862.3 P "MK4S"\nM862.6 P"Input shaper"\nM862.6 P"mmu3"\n'
+    assert preview(MODELS["1.4.1"], text, Severity.WARN, mmu_active=True) == []
+    assert texts(text, code="1.4.1") == ["sliced for an MMU3, which isn't active"]
 
 
 def test_feature_names_ignore_case_and_spaces():
@@ -121,7 +127,7 @@ def test_rows_come_in_the_report_order():
         "for printer MINI",
         "G-code level 3, above 2",
         "not sliced with input shaper",
-        "sliced for an MMU3, which is off",
+        "sliced for an MMU3, which isn't active",
         "unsupported features: 'Tea'",
     ]
     text = 'M862.3 P "MK4S"\nM862.6 P"Tea"\n'
@@ -234,3 +240,12 @@ def test_no_setting_governs_a_print_s_checks():
     tools = {0: view(loaded=False), 1: view(enabled=False)}
     found = print_checks(True, {0: "PLA", 1: "PLA"}, tools)
     assert [r.fatal for r in found.mapping] == [False, False, True]
+
+
+def test_with_the_mmu_active_no_tool_is_checked_for_filament():
+    # "With MMU, the filaments are intentionally unloaded at the start of the print."
+    empty = {i: view(loaded=False) for i in range(5)}
+    found = print_checks(True, {0: "PLA", 1: None}, empty, loaded_checked=False)
+    assert found == PrintChecks([], [Failed("T0 holds ---, not PLA", False)], [], mapped=True)
+    found = print_checks(False, {0: "PLA"}, {0: view(loaded=False)}, loaded_checked=False)
+    assert found == PrintChecks([], [], [])

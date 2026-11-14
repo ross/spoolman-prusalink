@@ -248,8 +248,8 @@ follows the firmware source: end to end, except T8 to T11, which unit tests cove
 Each gets traced when the INDX arrives.
 
 An MMU3 is a multi-tool printer too: its five slots are tools 0 to 4, sharing one
-extruder, and the bridge takes it for a single-tool model (W10, BF20). T12 to T15
-and T17 come from F38 to F42 and F44 to F46. Nobody here has an MMU, so they run against the
+extruder, and the bridge takes it for a single-tool model (W10, BF20). T12 to T17
+come from F38 to F46. Nobody here has an MMU, so they run against the
 simulator only, in unit tests (`tests/test_mmu.py`).
 
 | # | Scenario | What the bridge does | Status |
@@ -269,6 +269,7 @@ simulator only, in unit tests (`tests/test_mmu.py`).
 | T13 | A slot swapped on an MMU: Eject, then Preload To MMU with the new type (F41). | Nothing: neither writes none, so the printer counts no unload, and Preload's new type is only a type change. A spool moved into the slot's location stays staged (S13), and the old spool is charged for the next print and flagged for the printer's new type. A swap while a runout waits for its reload is the same, with no flag: the `M600` ejects the slot and reloads it with its type kept (F44). BF15. | Gap (BF15); simulator only; unit |
 | T14 | The MMU turned off in the printer's menu (F38). | With an empty extruder the printer clears slot 0's type, so the bridge records an unload on slot 0's spool, opens an unconfirmed swap there and flags it, whichever slot was used. With another slot's filament in the extruder, slot 0 keeps its type, and the printer counts every move on slot 0, so the bridge charges that filament to slot 0's spool. BF28. | Gap (BF28); simulator only; unit |
 | T15 | A boot or a power-panic resume on an MMU (F45). | No slot is selected after the boot. While the MMU connects, every move counts on slot 0, so the bridge charges slot 0's spool for the resume's 8 mm feed back and a resumed print's first seconds, whichever slot printed. Once the MMU is Active nothing counts until the print's next tool change, which loads the new slot from none: a resumed one-color print is charged nothing more. BF17. | Gap (BF17); simulator only; unit |
+| T16 | A write due on an MMU with a slot's filament at FINDA, as after Load To Nozzle (F43). | Uploads the sync job, which waits at the preview's question to unload the filament first, in `ATTENTION` with its ID. The bridge only waits: no second upload, no time-out and no flag while nobody answers (W1, W5). No runs the job with the filament in place and the write lands; the finished job leaves the filament there, so the next write asks again. Yes unloads it into the MMU first, a move the job didn't need. BF18. | Gap (BF18); simulator only; unit |
 | T17 | Load To Nozzle or a print's start on an MMU after an unload in the same boot (F41, F42). | Charges the slot's spool 7 mm of the 47 mm load: the unload left the tracker's gap at 40, and the tool change's feed, with no slot selected, didn't move it. The first load after a boot is charged all 47. A print's start after an earlier print's end is charged 30 mm of its 70 the same way. BF29. | Gap (BF29); simulator only; unit |
 
 ## Out of scope

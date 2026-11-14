@@ -197,9 +197,8 @@ firmware update.
 - An MMU3 is a unit: the `mmu` printer key, `set_mmu`, five slots sharing
   one filament path, the slots listed by the setting, and the selected slot
   that counts E moves (slot 0 while the MMU connects, none after a boot).
-  Its idle operations, its prints, and a runout, `M600` and a spool join
-  run (F40 to F42, F44, F46); power panic and the preview's unload question
-  are still missing.
+  Its idle operations, its prints, the preview's unload question, a
+  runout, `M600`, a spool join and power panic run (F40 to F46).
 - Tests: the unit harness and the integration fixtures take a model and a
   tool count. `tests/test_families.py` runs one story (a print with a tool
   change, a swap, a reboot) on the Core One L, MK4S, iX, XL, Core One L INDX
@@ -258,26 +257,35 @@ counts, and print-after-upload goes through the same checks
   whose nozzle-cleaner calibration selftest hasn't passed refuses every
   print: `nozzle_cleaner_not_calibrated` is a fixed abort
   (`gcode_compatibility.cpp:143-152, 392-396`).
-- **A file sliced for an MMU3 is refused or asked about when the MMU is
-  off**, under the firmware setting.
+- **A file sliced for an MMU3 is refused or asked about unless the MMU is
+  Active**, under the firmware setting: an MMU that's on but still connecting
+  fails it too (`gcode_info.cpp:350-356`, `mmu2_mk4.h:64`).
 - **The per-tool checks need the file's filament-used metadata**: a tool
   with no filament or another type asks, and a disabled tool refuses.
   Those severities are fixed; only the nozzle checks follow a menu
   setting (`gcode_compatibility.cpp:155-265`). The bridge's sync
   job has no such metadata, so it raises none of them (`gcode_info.hpp:95-98`,
   `gcode_compatibility.cpp:156-205, 420-423`).
-- **With an MMU and filament at the nozzle, the preview asks to unload
-  first**, unless the filament sensors are off, or a single-tool file of
-  the loaded type meets filament at the sensor, which starts at once. Yes
-  unloads. No starts the print as it is
-  (`marlin_print_preview.cpp:228-256, 699-708`).
+- **With the MMU Active, no tool is checked for filament**: "the filaments
+  are intentionally unloaded at the start of the print"
+  (`gcode_compatibility.cpp:505-513`).
+- **With an MMU and filament at FINDA, the preview asks to unload first**:
+  any slot's filament past the selector, not the extruder's sensor. It
+  doesn't ask with the filament sensors off, which turns the MMU off too.
+  A single-tool file of slot 0's type starts at once, with no question and
+  no tools-mapping screen, when the extruder's sensor sees filament. Yes
+  unloads into the MMU, reading `BUSY`, and turns the heaters off; then the
+  tools-mapping screen or the print. No starts the print as it is, with no
+  tools-mapping screen (`marlin_print_preview.cpp:228-257, 698-728`). The
+  bridge's sync job has no metadata, so it stops at the question whenever
+  FINDA sees filament.
 
 The idle sensor clear runs while the preview opens and stops once a question
 shows, except on the tools-mapping screen (`marlin_server.cpp:1448-1460`).
 
-The simulator has the checks of an uploaded file and of a print's tools.
-The MMU's question is still missing. A print raises no model question: it
-has no `M862` lines.
+The simulator has the checks of an uploaded file and of a print's tools,
+and the MMU's question, which `tap_through` answers No and `unload_first`
+Yes. A print raises no model question: it has no `M862` lines.
 
 ### `/api/v1/info`
 

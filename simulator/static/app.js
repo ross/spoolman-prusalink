@@ -300,8 +300,12 @@ function renderPrinter(p) {
       h += '<small>' + Number(job.fed_mm || 0).toFixed(0) + '/' + Number(job.total_mm).toFixed(0) + ' mm</small>';
     }
     if (attn) {
-      // A question that Tap through answers isn't an error: say how to go on.
-      const hint = attn + (canTap ? '. Tap through to go on, or Cancel' : '');
+      // A question that Tap through answers isn't an error: say how to go on. The MMU's
+      // unload question has two answers that go on.
+      const mmuAsks = at.reason === 'filament in the MMU';
+      const hint = attn + (!canTap ? '' : mmuAsks
+        ? ' Unload first unloads it (Yes), Tap through prints with it (No), or Cancel'
+        : '. Tap through to go on, or Cancel');
       h += '<span class="attn' + (canTap ? ' ask' : '') + '" title="' + esc(hint) + '">' + esc(hint) + '</span>';
     }
   } else {
@@ -325,6 +329,9 @@ function renderPrinter(p) {
     '<label title="the bed cools during the outage, so the print waits for Resume"><input type="checkbox" data-k="cold"' +
     (getv(p.name, 'cold', false) ? ' checked' : '') + '>cold bed</label>' +
     btn('Tap through', 'tap_through', gate(a, 'tap_through', { cls: canTap ? 'on' : '' })) +
+    (p.mmu ? btn('Unload first', 'unload_first', gate(a, 'unload_first', {
+      cls: a.unload_first == null ? 'on' : '', title: "Yes at the preview's question: unload the MMU's filament, then go on",
+    })) : '') +
     btn('Clear jam', 'clear_jam', gate(a, 'clear_jam')) +
     btn('Filament sensors', 'sensors', { cls: p.sensors ? 'on' : '', title: 'the menu switch for every filament sensor' }) +
     (p.mmu ? btn('MMU', 'mmu', gate(a, 'set_mmu', { cls: p.mmu.on ? 'on' : '', title: 'the MMU menu switch' })) : '') +
@@ -522,7 +529,7 @@ function onClick(e) {
       case 'toggle': return toggle(b.dataset.form);
       case 'load_form': return toggle('load' + tool);
       case 'pause': case 'resume': case 'cancel': case 'dismiss': case 'reboot': case 'home':
-      case 'tap_through': case 'clear_jam': case 'park_tool':
+      case 'tap_through': case 'unload_first': case 'clear_jam': case 'park_tool':
         return go(act, {});
       case 'sensors': return go('set_sensors', { value: !p.sensors });
       case 'mmu': return go('set_mmu', { value: !p.mmu.on });

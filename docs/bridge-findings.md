@@ -80,7 +80,7 @@ written.
 | 4 | BF28 | MMU: turning the MMU off clears slot 0, whichever slot was loaded |
 | 4 | BF17 | MMU: after a boot, slot 0 is charged while the MMU connects, then nothing until a load or tool change |
 | 4 | BF20 | MMU printers are on the supported list as single-tool models |
-| 4 | BF18 | MMU: the sync job can wait on a question and unload the filament |
+| 4 | BF18 | MMU: the sync job can wait on the unload question and leave the filament |
 | 4 | BF19 | MMU: slots 1 to 4 keep no UUIDs |
 | 5 | BF6 | A failed `M865` is silent |
 | 5 | BF21 | `READY` in `IDLE_STATES` never arrives |
@@ -310,13 +310,15 @@ written.
   comes. `sync_delay` is 0 by default. With an MMU3, while the MMU still
   connects after the boot, the job's end isn't the MMU's: it auto-retracts,
   which counts on slot 0 (F45). Once the MMU is Active, the cut's slot is
-  still at FINDA, so the job waits at the unload question first (BF18).
+  still at FINDA, so the job waits at the unload question first (F43,
+  BF18) and reads `ATTENTION` until someone answers.
 - **Effect**: The user's print is lost: it never resumes, and the printer
   ends the sync job `FINISHED`. If the autostart resumes anyway, the two
   jobs collide in a way the source doesn't define.
 - **Evidence**: Read in the firmware source. Shown in the simulator by
   `test_a_sync_job_in_the_window_drops_the_resume` in
-  `tests/test_power_panic.py`, which pins it on a Core One L. To be
+  `tests/test_power_panic.py`, which pins it on a Core One L, and on an
+  MMU by the window tests in `simulator/tests/test_mmu_power_panic.py`. To be
   confirmed on the printer: whether PrusaLink answers before the
   autostart's first try. The F12 trace shows the window, and has to be
   taken before the INDX upgrade.
@@ -714,9 +716,9 @@ written.
 
 Each MMU finding applies to the MK4 family, the Core One and the Core One
 L with an MMU3 turned on in the printer's settings. The simulator models
-the MMU's switch, its selected slot, its idle operations, its prints, its
-runouts, `M600` and spool joins, and power panic (F38 to F46). The MMU's
-scenario rows are T12 to T15 and T17.
+the MMU's switch, its selected slot, its idle operations, its prints, the
+preview's unload question, its runouts, `M600` and spool joins, and power
+panic (F38 to F46). The MMU's scenario rows are T12 to T17.
 
 ### BF15. MMU: swaps are invisible
 
@@ -834,43 +836,66 @@ scenario rows are T12 to T15 and T17.
   7 mm for the feed back, and spool 3 nothing after the cut.
 - **Status**: Open.
 
-### BF18. MMU: the sync job can wait on a question and unload the filament
+### BF18. MMU: the sync job can wait on the unload question and leave the filament
 
-- **What happens**: With an MMU and filament at the nozzle, the preview
-  asks to unload first, unless the filament sensors are off. The shortcut
-  for a single-tool file of the loaded type doesn't apply: the sync job
-  uses no tool (`gcode_info.cpp:611-615`). Yes unloads; no starts the job
-  as it is (`marlin_print_preview.cpp:228-256, 699-708`). The stock MMU3
-  end G-code unloads after every print, so this needs a printer left
-  loaded by hand.
-- **Effect**: The sync job waits in `ATTENTION` and goes the way of BF5.
-  Answering yes unloads the filament for a job that moves none.
-- **Evidence**: Read in the firmware source.
-- **Scenario rows**: W1, W5.
-- **To reproduce**: Needs workstream 5, which adds the preview's unload
-  question.
+- **What happens**: With the MMU Active and FINDA seeing filament, any
+  slot's filament past the selector, the preview asks to unload it first
+  (F43). That's most often after Load To Nozzle: a stock MMU3 print ends
+  with `M702`, which clears FINDA. The shortcut for a single-tool file
+  doesn't apply, since the sync job has no filament use
+  (`gcode_info.cpp:611-625`). The job waits in `ATTENTION` with its ID.
+  Yes unloads into the MMU, reading `BUSY`, then turns the heaters off and
+  runs the job. No runs it with the filament in place
+  (`marlin_print_preview.cpp:228-257, 698-728`). A finished sync job
+  neither unloads nor auto-retracts with the MMU Active, so the next job
+  asks again; a stopped one unloads while reading `PRINTING` (F42,
+  `marlin_server.cpp:1067-1075`). The bridge uploads once and waits while
+  the printer reads `ATTENTION`.
+- **Effect**: Each write after Load To Nozzle holds the printer at a
+  question until someone answers, with no flag and no time-out: the bridge
+  never uploads again and never tells the user. Answering Yes unloads the
+  filament for a job that moves none. Declining goes the way of BF5.
+- **Evidence**: Read in the firmware source; shown in the simulator by
+  `test_a_sync_job_on_a_loaded_mmu_waits_on_the_unload_question` in
+  `tests/test_mmu.py`.
+- **Scenario rows**: T16, W1, W5.
+- **To reproduce**: That test: after Load To Nozzle on slot 0, a color
+  write uploads one job, which waits at the question through 20 minutes
+  of polls with no second upload and no flag. No then runs it, the color
+  lands, and slot 0's filament stays in the extruder.
 - **Status**: Open.
 
 ### BF19. MMU: slots 1 to 4 keep no UUIDs
 
 - **What happens**: `M865` takes `L` from 0 to 4 on an MMU build, and
-  stores the type for that slot (`M865.cpp:194-196`,
+  stores the type for that slot (`M865.cpp:64, 194-196`,
   `store_definition.cpp:243-279`). An ad-hoc write stores the name,
-  temperatures and color for any slot, but the UUIDs only for slot 0. For
-  another slot it skips them, behind a `debug_assert` that fires on a
-  debug build (`filament.cpp:380-402`). The tag reader is off with an MMU
-  on, so slot 0 can keep UUIDs from an earlier tag load but gets no new
-  ones from a tag (`request_manager.cpp:263-266`). The bridge writes
-  `M865 L<n>` for each configured tool, and `M865.1` on tool 0 of a model
-  that keeps UUIDs.
-- **Effect**: Writes to every slot land, apart from UUIDs, which the
-  bridge writes on tool 0 only. Slot 0 is written, UUID included, but
-  never reports a new tag. What the bridge makes of UUIDs slot 0 kept
-  from an earlier tag load is to be confirmed.
-- **Evidence**: Read in the firmware source. The bridge's side is to be
+  temperatures and color for any slot, but the UUIDs only for slot 0. Any
+  ad-hoc write to slot 1 or higher, not only one with UUIDs, skips them
+  behind a `debug_assert` that fires on a debug build
+  (`filament.cpp:251-275, 379-403`). Only the Core One and Core One L keep
+  UUIDs at all; the MK4 has no tag reader. While the MMU is on, the tag
+  radio is off and no slot has a tag reader, so slot 0 keeps UUIDs from an
+  earlier tag load but gets no new ones
+  (`request_manager.cpp:262-269`, `tool_tag_buddy.cpp:11-18`). `M709 S1`
+  clears every slot's tag link (F38). The bridge writes `M865 L<n>` for
+  each configured tool, and mints and writes `M865.1` on tool 0 alone of a
+  model that keeps UUIDs.
+- **Effect**: None today. Every slot's type and color land, and tool 0's
+  UUID lands on slot 0, so the printer matches every spool after one job
+  and nothing is flagged. Slots 1 to 4 keep no UUID, so a spool there can't
+  be identified by one (Q10), and slot 0 never reports a new tag. What the
+  bridge makes of UUIDs slot 0 kept from an earlier tag load is to be
   confirmed.
+- **Evidence**: Read in the firmware source; shown in the simulator by
+  `test_mmu_writes_land_on_every_slot_and_uuids_on_slot_0` in
+  `tests/test_mmu.py`, on a Core One.
 - **Scenario rows**: W1, W5, Q10, Q11.
-- **To reproduce**: Needs workstream 5.
+- **To reproduce**: That test: five spools with five colors on a Core One
+  with its MMU on. One job writes `L0` to `L4` and `M865.1 I0` with the
+  UUID the bridge minted for slot 0's spool, and no other spool gets one.
+  After it, slot 0 holds that UUID, slots 1 to 4 none, and the next poll
+  uploads nothing.
 - **Status**: Open.
 
 ### BF20. MMU printers are on the supported list as single-tool models

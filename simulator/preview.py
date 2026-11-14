@@ -44,17 +44,21 @@ class Failed:
     fatal: bool
 
 
-def preview(model: ModelInfo, text: str, severity: Severity) -> list[Failed]:
+def preview(
+    model: ModelInfo, text: str, severity: Severity, *, mmu_active: bool = False
+) -> list[Failed]:
     """Return the rows of the screen the preview shows for a file, or no rows when it
     shows none.
 
     `severity` stands for every setting that governs a check: the model, compatibility
     mode, G-code level, input shaper and firmware settings, the last of which covers an
-    MMU3 file with the MMU off and a feature the build doesn't know. The INDX lock is a
-    fixed warning. A check under `ignore` asks nothing, but it is still a row when another
-    check brings up the screen, as `frame_compat_checks.cpp` lists every failed check.
+    MMU3 file on a printer whose MMU isn't Active and a feature the build doesn't know.
+    `mmu_active` says whether an MMU is Active: switched on and done connecting. The INDX
+    lock is a fixed warning. A check under `ignore` asks nothing, but it is still a row
+    when another check brings up the screen, as `frame_compat_checks.cpp` lists every
+    failed check.
     """
-    found = _failed(model, gcode.scan(text), severity)
+    found = _failed(model, gcode.scan(text), severity, mmu_active)
     if all(s is Severity.IGNORE for _, s in found):
         return []
     return [Failed(t, s is Severity.ABORT) for t, s in found]
@@ -69,7 +73,7 @@ def _same(a: str, b: str) -> bool:
 
 
 def _failed(
-    model: ModelInfo, checks: list[gcode.Check], severity: Severity
+    model: ModelInfo, checks: list[gcode.Check], severity: Severity, mmu_active: bool
 ) -> list[tuple[str, Severity]]:
     """The failed checks' texts with their severities, in the report's order: the order of
     `GeneralCheck` in `src/feature/compatibility_checks/gcode_compatibility.hpp`, which
@@ -98,9 +102,11 @@ def _failed(
         found.append(("not sliced for the INDX lock", Severity.WARN))
     features = [c.name for c in checks if isinstance(c, gcode.FeatureCheck)]
     known = model.checks.features
-    # The MMU is never on in the simulator, so a file sliced for one always fails.
-    if MMU3 in known and any(_same(f, MMU3) for f in features):
-        found.append(("sliced for an MMU3, which is off", severity))
+    # A file sliced for an MMU3 fails unless the MMU is Active: an MMU that is switched on
+    # but still connecting fails it too (`MMU2::Enabled()` in `parse_m862`,
+    # `gcode_info.cpp:350-356`; `mmu2_mk4.h:64`).
+    if MMU3 in known and not mmu_active and any(_same(f, MMU3) for f in features):
+        found.append(("sliced for an MMU3, which isn't active", severity))
     # A file sliced for the HT Hotend fails only when the hotend isn't one, which is
     # printer state the simulator doesn't hold, so it's taken as satisfied.
     unknown = [f for f in features if not any(_same(f, k) for k in known)]
@@ -157,11 +163,17 @@ def tool_mapping(mapping: bool, uses: dict[int, str | None], tools: dict[int, To
 
 
 def print_checks(
-    mapping: bool, uses: dict[int, str | None], tools: dict[int, ToolView]
+    mapping: bool,
+    uses: dict[int, str | None],
+    tools: dict[int, ToolView],
+    *,
+    loaded_checked: bool = True,
 ) -> PrintChecks:
     """Return the preview's questions about a print that uses the tools in `uses`, each with
     the filament type its file names or None, on a printer that has tool mapping when
-    `mapping` is true.
+    `mapping` is true. With `loaded_checked` false no tool is asked about for having no
+    filament: with an MMU Active, "the filaments are intentionally unloaded at the start
+    of the print" (`gcode_compatibility.cpp:505-513`).
 
     `generate_without_toolmapping` and `generate_toolmapping_only_noclear` in
     `src/feature/compatibility_checks/gcode_compatibility.cpp`, as
@@ -182,14 +194,14 @@ def print_checks(
         if not t.enabled:  # the firmware checks nothing else on a disabled tool
             per_tool.append(Failed(f"T{index} is disabled", True))
             continue
-        if not t.loaded:
+        if loaded_checked and not t.loaded:
             per_tool.append(Failed(f"T{index} has no filament", False))
         if mapped:
             per_tool += wrong_types({index: uses[index]}, tools)
     if mapped:
         return PrintChecks(rows, per_tool, [], mapped=True)
     empty = [i for i in sorted(uses) if tools[i].enabled and not tools[i].loaded]
-    return PrintChecks(rows + per_tool, [], empty)
+    return PrintChecks(rows + per_tool, [], empty if loaded_checked else [])
 
 
 def wrong_types(uses: dict[int, str | None], tools: dict[int, ToolView]) -> list[Failed]:
