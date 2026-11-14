@@ -286,7 +286,7 @@ new feature across several modules.
   until the firmware adds one.
 - **Needs**: D2, D10, workstream 2, and D4's answer, since a kept
   `gcode_preamble` would need per-model rules. It has to merge before the
-  INDX upgrade, in a few months.
+  INDX upgrade.
 - **User and saved state**: README's model table and "Writing to the
   printer". `WriteState` is already per tool: check that its saved form
   holds more than tool 0.
