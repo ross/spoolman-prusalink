@@ -254,6 +254,8 @@ class Attention:
 
     def __str__(self) -> str:
         match self.reason:
+            case Reason.MMU_LOADED if self.tool is None:
+                return "filament in the MMU: unload it first?"
             case Reason.MMU_LOADED:
                 return f"filament from slot {self.tool} in the MMU: unload it first?"
             case reason if reason in PREVIEW_QUESTIONS:
@@ -2120,6 +2122,10 @@ class SimPrinter:
         after a boot, and no type is written (`MMU2::unload`). It reads BUSY with no job,
         and nothing stops it. `M702 W0` then turns the nozzle, the bed and the fan off,
         which the simulator doesn't model.
+
+        What Yes unloads while the MMU connects isn't read: `SelectorSlot()` assumes the
+        MMU is up (`marlin_print_preview.cpp:709-711`). So the simulator refuses it then,
+        and once the MMU is Active, when FINDA sees no filament.
         """
         self._check_unload_first()
         job = self.job
@@ -2704,6 +2710,10 @@ class SimPrinter:
         job = self.job
         if job is None or not job.waits_for(Reason.MMU_LOADED):
             raise Busy("no question to unload the MMU's filament first")
+        if not self.mmu.active:
+            raise Busy("what Yes unloads while the MMU connects isn't read; answer No or cancel")
+        if self.mmu.fed is None:
+            raise Busy("FINDA sees no filament to unload; answer No or cancel")
 
     def _check_tap_through(self) -> None:
         self._need_power()
@@ -3003,19 +3013,21 @@ class SimPrinter:
         """Ask to unload the MMU's filament first; return whether the preview stops here,
         at the question or at the print's start.
 
-        With an MMU, `stateFromFilamentPresence` asks nothing when the filament sensors are
-        off or FINDA sees no filament: no slot's filament is past the selector, which is
-        `MMUReadyToPrint` (`marlin_print_preview.cpp:228-257`). Turning the sensors off
-        turns the MMU off, so the MMU's own check covers the first. A file on tool 0 alone,
-        by its filament use, prints at once with no question and no tools-mapping screen
-        when the extruder's sensor sees filament and slot 0's type is the one the file
-        names: a single-tool file here, since a sync job uses no tool. Otherwise the question
-        reads ATTENTION with the job (`print_preview_mapper.hpp:17-19`). That it applies
-        only with the MMU Active is inferred: while it connects, FINDA's sensor reads not
-        initialized (`filament_sensor_mmu.cpp:10-24`).
+        With the MMU on, `stateFromFilamentPresence` asks nothing when the filament sensors
+        are off or `MMUReadyToPrint`: FINDA's sensor reads no filament, so no slot's
+        filament is past the selector (`marlin_print_preview.cpp:228-257`,
+        `filament_sensors_handler.cpp:360-363`). Turning the sensors off turns the MMU off,
+        so the MMU's own check covers the first. The MMU is on by its setting, connected or
+        not (`HasMMU`, `filament_sensors_handler.cpp:171-179`), and while it connects
+        FINDA's sensor reads not initialized, not no filament (`filament_sensor_mmu.cpp:
+        10-24`), so the question asks then whatever FINDA sees. A single-tool file, one
+        whose metadata names tool 0 alone, prints at once with no question and no
+        tools-mapping screen when the extruder's sensor sees filament and slot 0's type is
+        the one the file names. Otherwise the question reads ATTENTION with the job
+        (`print_preview_mapper.hpp:17-19`).
         """
         mmu = self.mmu
-        if mmu is None or not mmu.active or mmu.fed is None:
+        if mmu is None or not mmu.on or (mmu.active and mmu.fed is None):
             return False
         if isinstance(job, UserJob) and self._mmu_shortcut(job):
             self._log("job", f"job {job.id}: T0's type is loaded, so the print starts at once")

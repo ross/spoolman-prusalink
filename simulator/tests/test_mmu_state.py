@@ -173,6 +173,9 @@ def test_a_sync_job_while_the_mmu_connects_auto_retracts_on_slot_0():
     sim, p = make_mmu(types={0: PLA, 2: PETG}, slot=2, mmu_connect_seconds=60)
     p.reboot()
     run_sync(sim, p, sliced(p, ""))
+    # The preview asks to unload the MMU's filament first while the MMU connects (F43), and
+    # No runs the job with the MMU still connecting.
+    p.tap_through()
     sim.advance(5)
     assert p.job is None and not p.mmu.active
     # The ramming's feed counts on slot 0, and the sequence's distance is stored.
