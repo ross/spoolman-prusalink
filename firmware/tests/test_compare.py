@@ -16,6 +16,7 @@ from firmware.compare import (
     Difference,
     Expected,
     Firmware,
+    MmuBuild,
     Pause,
 )
 from firmware.source import Unreadable
@@ -29,6 +30,15 @@ from spoolman_prusalink.printer_sync import Preset, PrinterModel
 
 NO_COUNTERS = "no counters"
 MULTI_TOOL = "multi-tool"
+MMU_LENGTHS = {
+    "MMU2_TOOL_CHANGE_LOAD_LENGTH": 5.0,
+    "MMU2_FEED_DISTANCE": 50.0,
+    "MMU2_EXTRUDER_HEATBREAK_LENGTH": 67.0,
+    "MMU2_EXTRUDER_NOZZLE_LENGTH": 20.0,
+    "maximumAllowedExtruderMove": 189.9,
+    "nominalEMotorFSOff": 14.0,
+}
+MMU_RAMMING = ((20, 1500), (-50, 2700), (-5, 50), (-50, 1500))
 
 NEXTRUDER_AUTO_RETRACT = (
     (8, 995),
@@ -215,6 +225,57 @@ def test_load_reads_the_power_panic_purge_on_indx_only(name):
 )
 def test_load_reads_extruders_on_mmu_builds_only(name, extruders):
     assert compare.load(fixtures.FakeSource()).builds[name].extruders == extruders
+
+
+@pytest.mark.parametrize(
+    ("name", "mmu"),
+    [
+        ("MK4", MmuBuild(False, MMU_LENGTHS, MMU_RAMMING)),
+        ("COREONE", MmuBuild(False, MMU_LENGTHS, MMU_RAMMING)),
+        ("COREONEL", MmuBuild(False, MMU_LENGTHS, MMU_RAMMING)),
+        # No load cell: the try-load feed, whose constants aren't read.
+        ("MK3.5", MmuBuild(True, {}, MMU_RAMMING)),
+        ("MINI", None),
+        ("COREONE_INDX", None),
+    ],
+)
+def test_load_reads_the_mmu_on_mmu_builds_only(name, mmu):
+    assert compare.load(fixtures.FakeSource()).builds[name].mmu == mmu
+
+
+def test_the_current_mmu_copies_match_the_firmware():
+    copies = Copies.current()
+    assert copies.sim_mmu == MMU_LENGTHS
+    assert copies.sim_mmu_ramming == MMU_RAMMING
+
+
+def test_mmu_differences():
+    firmware, copies = synthetic()
+    mk4, core = firmware.builds["MK4"], firmware.builds["COREONE"]
+    mmu = frozenset({"HAS_MMU2"})
+    builds = {
+        **firmware.builds,
+        "MK4": replace(
+            mk4,
+            features=mk4.features | mmu,
+            mmu=MmuBuild(False, {**MMU_LENGTHS, "MMU2_FEED_DISTANCE": 40.0}, ((20, 1500),)),
+        ),
+        "COREONE": replace(core, features=core.features | mmu, mmu=MmuBuild(True, {}, MMU_RAMMING)),
+    }
+    sim = dict(copies.sim_models)
+    for code in ("1.4.0", "7.1.0"):
+        sim[code] = replace(sim[code], mmu=True)
+    lengths = {k: v for k, v in MMU_LENGTHS.items() if k != "nominalEMotorFSOff"}
+    copies = replace(copies, sim_models=sim, sim_mmu={**lengths, "extra": 1.0})
+    found = compare.compare(replace(firmware, builds=builds), copies)
+    t = "simulator MMU"
+    assert [d for d in found if d.table == t] == [
+        Difference(t, None, "COREONE", "feed", "try-load", "E-stall"),
+        Difference(t, None, "MK4", "MMU2_FEED_DISTANCE", 40.0, 50.0),
+        Difference(t, None, "MK4", "extra", MISSING, 1.0),
+        Difference(t, None, "MK4", "nominalEMotorFSOff", 14.0, MISSING),
+        Difference(t, None, "MK4", "ramming", ((20, 1500),), MMU_RAMMING),
+    ]
 
 
 def test_feed_ratio():
@@ -448,6 +509,7 @@ def build(name, features, tools, gap_mm, presets):
         unload_purge_mm=0.0,
         feature_names=INPUT_SHAPER,
         extruders=None,
+        mmu=None,
     )
 
 
@@ -577,6 +639,8 @@ def synthetic():
         sim_aliases={"TPU": "FLEX"},
         sim_minimal_purge=1.0,
         main_boards={"MK4": "XBUDDY", "MINI": "BUDDY", "XL": "XLBUDDY", "COREONE": "XBUDDY"},
+        sim_mmu=MMU_LENGTHS,
+        sim_mmu_ramming=MMU_RAMMING,
     )
     return firmware, copies
 

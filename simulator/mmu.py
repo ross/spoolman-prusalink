@@ -22,13 +22,11 @@ from simulator.tool import EPSILON, FilamentPath, Ramming
 # (`include/marlin/Configuration_MK4.h:143-147`, `src/common/tool_index.hpp:29-43`).
 MMU_SLOTS = 5
 
-# In `mmu2_config.h`: the retract a tool change makes first when a slot is selected
-# (`MMU2_RETRY_UNLOAD_FINISH_LENGTH`), the feed past the extruder's sensor before the
-# firmware's +2 (`MMU2_TOOL_CHANGE_LOAD_LENGTH`, the MMU's initial `ExtraLoadDistance`), the
-# E-stall feed (`MMU2_FEED_DISTANCE`), and the two lengths the load to the nozzle runs from:
+# In `mmu2_config.h`: the feed past the extruder's sensor before the firmware's +2
+# (`MMU2_TOOL_CHANGE_LOAD_LENGTH`, the MMU's initial `ExtraLoadDistance`), the E-stall feed
+# (`MMU2_FEED_DISTANCE`), and the two lengths the load to the nozzle runs from:
 # `MMU2_EXTRUDER_HEATBREAK_LENGTH` less the feed, then `MMU2_EXTRUDER_NOZZLE_LENGTH` + 10
 # (`MMU2_LOAD_TO_NOZZLE_SEQUENCE`).
-UNLOAD_FINISH_MM = -80.0
 EXTRA_LOAD_MM = 5.0
 FEED_MM = 50.0
 HEATBREAK_MM = 67.0

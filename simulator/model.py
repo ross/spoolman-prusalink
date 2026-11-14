@@ -1118,8 +1118,8 @@ class SimPrinter:
 
         The feed pushes the new slot's filament into the extruder, but it's planned before
         the switch, so it counts on no slot and leaves the gap where it was. With a slot
-        selected the firmware retracts `UNLOAD_FINISH_MM` on it first; every idle operation
-        unloads that slot before its change, so none reaches that.
+        selected the firmware first retracts `MMU2_RETRY_UNLOAD_FINISH_LENGTH`, -80 mm, on
+        it; every idle operation unloads that slot before its change, so none reaches that.
         """
         return [*(LoadStep("FEED", mm) for mm in change_feed()), LoadStep(SELECT_STEP)]
 

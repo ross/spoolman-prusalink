@@ -186,7 +186,8 @@ purge before an unload, and the power-panic resume's purge. It also keeps its G-
 has a compatibility mode, whether its build has power panic, its feed system (direct, XL or INDX), and the `M862.6` feature names its build knows. The simulator
 also lists the flexible presets, every G-code model name with its group, the shortest
 purge a load runs, and the MMU's slot count, which the check compares with an MMU build's
-`EXTRUDERS`. `firmware/compare.py` itself keeps each build's main board, which its
+`EXTRUDERS`. The simulator also keeps the MMU3's tool-change and load lengths and its
+ramming, which the MK4, Core One and Core One L builds share. `firmware/compare.py` itself keeps each build's main board, which its
 board macros follow.
 `script/firmware-check` rebuilds the tables from the firmware source and lists each
 difference. A weekly workflow runs it.

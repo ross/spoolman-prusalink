@@ -12,7 +12,8 @@ threshold and cold unload, the purge before an unload, and the power-panic resum
 purge) and what its G-code checks know (the compatibility mode and the `M862.6` feature
 names), which the simulator's models copy. The simulator's `GROUPS` copies every name a
 file's `M862.3` can carry, with its compatibility group, and its `MINIMAL_PURGE_MM` copies
-the shortest purge a load runs.
+the shortest purge a load runs. Its `simulator.mmu` copies the MMU3's tool-change and load
+lengths and its ramming, which the MK4, Core One and Core One L builds share.
 This module's `MAIN_BOARDS`, which `BOARD_IS` follows, copies each build's main board.
 """
 
@@ -128,6 +129,19 @@ FEATURES = (
 
 Ramming = tuple[read.Step, ...]
 
+# The MMU3 constants `simulator.mmu` copies, by file. A build feeding with E-stall
+# detection, one with a load cell, declares each once; the try-load build has others.
+MMU_CONSTANTS = {
+    read.MMU_CONFIG_FILE: (
+        "MMU2_TOOL_CHANGE_LOAD_LENGTH",
+        "MMU2_FEED_DISTANCE",
+        "MMU2_EXTRUDER_HEATBREAK_LENGTH",
+        "MMU2_EXTRUDER_NOZZLE_LENGTH",
+    ),
+    read.MMU_FILE: ("maximumAllowedExtruderMove",),
+    read.MMU_HEADER_FILE: ("nominalEMotorFSOff",),
+}
+
 
 def retracted_distance(sequence: Iterable[read.Step]) -> int:
     """Return how far a ramming sequence leaves the filament retracted, in mm.
@@ -174,6 +188,19 @@ class AutoRetract:
 
 
 @dataclass(frozen=True)
+class MmuBuild:
+    """What an MMU3 build's firmware does with the MMU, as `simulator.mmu` copies it."""
+
+    try_load: bool  # `USE_TRY_LOAD`: the feed without a load cell, the MK3.5's
+    constants: Mapping[str, float]  # `MMU_CONSTANTS`; empty on a try-load build
+    ramming: Ramming  # `FILAMENT_MMU2_RAMMING_SEQUENCE`
+
+    @property
+    def feed(self) -> str:
+        return "try-load" if self.try_load else "E-stall"
+
+
+@dataclass(frozen=True)
 class Build:
     name: str
     features: frozenset[str]
@@ -193,6 +220,7 @@ class Build:
     unload_purge_mm: float  # what an unload purges before the ramming
     feature_names: frozenset[str]  # the `M862.6` names it knows
     extruders: int | None  # `EXTRUDERS`, read on HAS_MMU2 builds only
+    mmu: MmuBuild | None  # read on HAS_MMU2 builds only
 
     @property
     def counters(self) -> bool:
@@ -331,9 +359,10 @@ def load(source: Source) -> Firmware:
         retract = None
         if "HAS_AUTO_RETRACT" in has:
             retract = AutoRetract(*read.auto_retract(text(read.AUTO_RETRACT_FILE), values))
-        extruders = None
+        extruders = mmu = None
         if "HAS_MMU2" in has:
             extruders = read.extruders(text(configuration), values, configuration)
+            mmu = _mmu(text, values, advanced)
         builds[name] = Build(
             name=name,
             features=has,
@@ -349,6 +378,7 @@ def load(source: Source) -> Firmware:
             unload_purge_mm=read.unload_purge(text(read.PAUSE_FILE), values),
             feature_names=read.feature_names(gcode_info, values),
             extruders=extruders,
+            mmu=mmu,
         )
     return Firmware(
         commit=source.commit,
@@ -360,6 +390,27 @@ def load(source: Source) -> Firmware:
         minimal_purge_mm=read.minimal_purge(source.read(read.PAUSE_SETTINGS_FILE)),
         main_boards=main_boards(source.read(read.IMAGES_FILE), read.buddy_boards(options)),
     )
+
+
+def _mmu(text: Callable[[str], str], values: read.Macros, advanced: str) -> MmuBuild:
+    """Read one MMU3 build's `MmuBuild`; `advanced` is its `_adv.h` file."""
+
+    def plain(name: str) -> bool:
+        # `UNITTEST` is defined only in the MMU code's own unit tests.
+        return False if name == "UNITTEST" else values(name)
+
+    config = read.MMU_CONFIG_FILE
+    try_load = read.is_defined(text(config), "USE_TRY_LOAD", plain, config)
+
+    def mmu_values(name: str) -> bool:
+        return try_load if name == "USE_TRY_LOAD" else plain(name)
+
+    constants: dict[str, float] = {}
+    if not try_load:
+        for path, names in MMU_CONSTANTS.items():
+            found = read.cpp_constants(text(path), names, mmu_values, path)
+            constants.update(zip(names, found, strict=True))
+    return MmuBuild(try_load, constants, read.mmu_ramming(text(advanced), values, advanced))
 
 
 def main_boards(images: str, buddy_boards: frozenset[str]) -> dict[str, frozenset[str]]:
@@ -391,10 +442,12 @@ class Copies:
     sim_aliases: Mapping[str, str]
     sim_minimal_purge: float
     main_boards: Mapping[str, str]
+    sim_mmu: Mapping[str, float]  # `simulator.mmu`'s lengths, by firmware name
+    sim_mmu_ramming: Ramming
 
     @classmethod
     def current(cls) -> Copies:
-        from simulator import compatibility, model, tool
+        from simulator import compatibility, mmu, model, tool
         from spoolman_prusalink import printer_sync as bridge
 
         preheat = next(f.default for f in fields(bridge.Preset) if f.name == "preheat")
@@ -414,6 +467,15 @@ class Copies:
             sim_aliases=tool.PRESET_ALIASES,
             sim_minimal_purge=model.MINIMAL_PURGE_MM,
             main_boards=MAIN_BOARDS,
+            sim_mmu={
+                "MMU2_TOOL_CHANGE_LOAD_LENGTH": mmu.EXTRA_LOAD_MM,
+                "MMU2_FEED_DISTANCE": mmu.FEED_MM,
+                "MMU2_EXTRUDER_HEATBREAK_LENGTH": mmu.HEATBREAK_MM,
+                "MMU2_EXTRUDER_NOZZLE_LENGTH": mmu.NOZZLE_MM,
+                "maximumAllowedExtruderMove": mmu.MAX_MOVE_MM,
+                "nominalEMotorFSOff": mmu.FS_OFF_MM,
+            },
+            sim_mmu_ramming=mmu.MMU_RAMMING,
         )
 
 
@@ -458,6 +520,7 @@ TABLES = (
     "simulator DEFAULT_TEMPERATURES",
     "simulator PRESET_ALIASES",
     "simulator MINIMAL_PURGE_MM",
+    "simulator MMU",
     "firmware-check MAIN_BOARDS",
 )
 
@@ -531,6 +594,7 @@ def compare(firmware: Firmware, copies: Copies) -> list[Difference]:
             )
     fw, copy = firmware.minimal_purge_mm, copies.sim_minimal_purge
     differ("simulator MINIMAL_PURGE_MM", None, None, "minimal_purge", fw, copy)
+    _compare_sim_mmu(built, copies, differ)
     # A build with no main board or several in its images can't match the one copied.
     for build in sorted(firmware.main_boards.keys() | copies.main_boards.keys()):
         fw = sorted(firmware.main_boards.get(build, ()))
@@ -621,6 +685,25 @@ def _compare_sim_models(
         names = sorted(model.checks.features)
         differ(table, code, None, "feature_names", sorted(build.feature_names), names)
         _compare_extruder(table, code, build, model.extruder, differ)
+
+
+def _compare_sim_mmu(built: Mapping[str, Build], copies: Copies, differ: Differ) -> None:
+    """Compare `simulator.mmu` with each build a simulator MMU model runs, by build name.
+    The simulator models the E-stall feed, so a try-load build differs in its feed and has
+    no constants to compare."""
+    table = "simulator MMU"
+    builds = {
+        build.name: build.mmu
+        for code, build in built.items()
+        if build.mmu is not None and code in copies.sim_models and copies.sim_models[code].mmu
+    }
+    for name, mmu in sorted(builds.items()):
+        differ(table, None, name, "feed", mmu.feed, "E-stall")
+        if not mmu.try_load:
+            for const in sorted(mmu.constants.keys() | copies.sim_mmu.keys()):
+                fw, copy = mmu.constants.get(const, MISSING), copies.sim_mmu.get(const, MISSING)
+                differ(table, None, name, const, fw, copy)
+        differ(table, None, name, "ramming", mmu.ramming, tuple(copies.sim_mmu_ramming))
 
 
 def _compare_extruder(table: str, code: str, build: Build, extruder: Any, differ: Differ) -> None:
@@ -751,6 +834,15 @@ EXPECTED = (
         "permanent: it needs the HT idler-door setting, which M865 can't set",
         PRESENT,
         MISSING,
+    ),
+    Expected(
+        "simulator MMU",
+        None,
+        "MK3.5",
+        "feed",
+        "not yet: the simulator's MK3.5 and MK3.5S run the E-stall builds' MMU lengths",
+        "try-load",
+        "E-stall",
     ),
 )
 

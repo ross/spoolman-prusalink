@@ -31,6 +31,9 @@ PAUSE_FILE = "src/marlin_stubs/pause/pause.cpp"
 PAUSE_SETTINGS_FILE = "src/marlin_stubs/include/pause_settings.hpp"
 CONFIGURATION_FILE = "include/marlin/Configuration.h"
 ADVANCED_FILE = "include/marlin/Configuration_adv.h"
+MMU_CONFIG_FILE = "lib/Marlin/Marlin/src/feature/prusa/MMU2/mmu2_config.h"
+MMU_FILE = "lib/Marlin/Marlin/src/feature/prusa/MMU2/mmu2_mk4.cpp"
+MMU_HEADER_FILE = "lib/Marlin/Marlin/src/feature/prusa/MMU2/mmu2_mk4.h"
 
 
 def configuration_file(name: str) -> str:
@@ -861,6 +864,102 @@ def auto_retract(text: str, macros: Macros) -> tuple[float, bool]:
     except ValueError as e:
         raise Unreadable(AUTO_RETRACT_FILE, str(e)) from None
     return float(found["full_retract_distance"]), found["supports_cold_unload"] == "true"
+
+
+_CONSTANT = re.compile(r"static\s+constexpr\s+[\w:]+\s+(\w+)\s*=\s*(-?\d+(?:\.\d*)?)[fF]?\s*;")
+
+
+def cpp_constants(text: str, names: Iterable[str], macros: Macros, path: str) -> tuple[float, ...]:
+    """Return the value each of `names` is declared with in the C++ file at `path`, in order.
+
+    Each name has to be declared `static constexpr` exactly once among the build's active
+    lines, to a plain number. A declaration with an expression fails the read. `#ifdef X`
+    and `#ifndef X` read `X()` from `macros`, so the caller says which of those the build
+    defines. Only the branches around the declarations are evaluated.
+    """
+    try:
+        found: dict[str, list[str]] = {name: [] for name in names}
+        for line, scope in _scoped(_strip_comments(text).replace("\\\n", " ")):
+            for name in found:
+                if not re.search(rf"\b{name}\s*=(?!=)", line):
+                    continue
+                m = _CONSTANT.fullmatch(line.strip())
+                if not m or m.group(1) != name:
+                    raise ValueError(f"can't read {line.strip()!r}")
+                if active_lines(_defined_as_calls(scope), macros):
+                    found[name].append(m.group(2))
+        values = []
+        for name, declared in found.items():
+            if len(declared) != 1:
+                raise ValueError(f"{name} is declared {len(declared)} times for the build")
+            values.append(float(declared[0]))
+    except ValueError as e:
+        raise Unreadable(path, str(e)) from None
+    return tuple(values)
+
+
+def is_defined(text: str, name: str, macros: Macros, path: str) -> bool:
+    """Return whether the file at `path` `#define`s `name` for one build: some active line
+    defines it, and no line `#undef`s it. `#ifdef X` and `#ifndef X` read `X()` from
+    `macros`."""
+    try:
+        defined = False
+        for line, scope in _scoped(_strip_comments(text).replace("\\\n", " ")):
+            m = re.match(rf"\s*#\s*(define|undef)\s+{name}\b", line)
+            if m and m.group(1) == "undef":
+                raise ValueError(f"#undef {name}")
+            if m and active_lines(_defined_as_calls(scope), macros):
+                defined = True
+    except ValueError as e:
+        raise Unreadable(path, str(e)) from None
+    return defined
+
+
+def _defined_as_calls(scope: list[str]) -> list[str]:
+    """`scope` with each `#ifdef X` as `#if X()` and each `#ifndef X` as `#if !X()`."""
+    return [
+        re.sub(
+            r"^\s*#\s*if(n?)def\s+(\w+)\s*$",
+            lambda m: f"#if {'!' if m.group(1) else ''}{m.group(2)}()",
+            line,
+        )
+        for line in scope
+    ]
+
+
+_MMU_RAMMING_STEP = re.compile(r"\s*\{\s*(-?\d+)\s*,\s*(\d+)\s*/\s*60\.[fF]?\s*\}\s*(?:,|$)")
+
+
+def mmu_ramming(text: str, macros: Macros, path: str) -> tuple[Step, ...]:
+    """Return one build's `FILAMENT_MMU2_RAMMING_SEQUENCE` from the `_adv.h` file at `path`,
+    each step's E in mm and its feedrate in mm/min. The file writes each feedrate as mm/min
+    over `60.F`, which the MMU's `E_Step` takes in mm/s (`mmu2_config.h`)."""
+    name = "FILAMENT_MMU2_RAMMING_SEQUENCE"
+    try:
+        found = []
+        for line, scope in _scoped(_strip_comments(text).replace("\\\n", " ")):
+            m = re.match(rf"\s*#\s*(define|undef)\s+{name}\b(.*)", line)
+            if not m:
+                continue
+            if m.group(1) == "undef":
+                raise ValueError(f"#undef {name}")
+            if active_lines(scope, macros):
+                found.append(m.group(2).strip())
+        if len(found) != 1:
+            raise ValueError(f"{name} is defined {len(found)} times for the build")
+        body = re.fullmatch(r"\{(.*)\}", found[0])
+        steps, pos = [], 0
+        text = body.group(1) if body else ""
+        for m in _MMU_RAMMING_STEP.finditer(text):
+            if m.start() != pos:
+                break
+            steps.append((int(m.group(1)), int(m.group(2))))
+            pos = m.end()
+        if not steps or text[pos:].strip() or any(fr <= 0 for _, fr in steps):
+            raise ValueError(f"can't read #define {name} {found[0]}")
+    except ValueError as e:
+        raise Unreadable(path, str(e)) from None
+    return tuple(steps)
 
 
 # The two bodies of `Pause::unload_wait_temp_process` a build may compile: the unload
