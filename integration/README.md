@@ -72,7 +72,9 @@ script/integration --cov=spoolman_prusalink --cov-fail-under=0
   starts a fresh Spoolman for every run, locally as in CI.
 - **Unique location names.** Location names are what map a spool to a tool, so
   they're the isolation. Each test picks a prefix such as `it-3fa2c1` and uses
-  `<prefix> T` for the tool and `<prefix> shelf` for spare spools. Spool
+  `<prefix>` for the tool, `<prefix> T1`, `<prefix> T2` and on for the tools
+  of a multi-tool printer, as `bridge-config` names them, and `<prefix> shelf`
+  for spare spools. Spool
   comments carry the prefix too, so leftovers can be found after an evicted
   spool loses its location.
 - **Extra fields.** The tests register the `instance_uuid` text field if it's
@@ -88,16 +90,20 @@ script/integration --cov=spoolman_prusalink --cov-fail-under=0
   (`8.1.0`): tool 0 loaded with spool A's PLA and instance UUID, 1000 mm on the
   counter, spool A in the tool's location, and spools B (PETG) and C (ASA) on
   the shelf. Each filament weighs 1000 g, so a runout always leaves plenty.
-  A test that takes `world_tools` at 2
-  (`@pytest.mark.parametrize("world_tools", [2], indirect=True)`) gets a
+  A test that takes `world_tools` above 1, such as 2
+  (`@pytest.mark.parametrize("world_tools", [2], indirect=True)`), gets a
   Core One L INDX (`8.10.0`) instead, with no UUIDs on the printer and tool 1
-  loaded with spool D's green PETG in `<prefix> T1`. The `World` helpers that
-  act on a tool take a `tool` argument, 0 by default.
-- **Another model, or other settings.** A test that takes `world_model`, such
-  as `"1.4.0"` for an MK4, gets that single-tool model instead, with no UUID on
-  spool A or the printer. `world_config` overrides the bridge's `Config`, such
-  as `flag_field=""`, and `world_printer` overrides the printer's
-  `PrinterConfig`, such as `sync_drift=True`. All three are set with
+  loaded with spool D's green PETG in tool 1's location. Tools beyond the
+  second start empty. The `World` helpers that act on a tool take a `tool`
+  argument, 0 by default.
+- **Another model, or other settings.** A test that takes `world_model` gets
+  any model the simulator has, such as `"1.4.0"` for an MK4, with up to that
+  model's most tools in `world_tools`: `@pytest.mark.parametrize("world_model,
+  world_tools", [("3.1.0", 5)], indirect=True)` gets a five-tool XL. Spool A
+  and the printer have a UUID only on a model whose tool 0 keeps one, such as
+  the Core One L. `world_config` overrides the bridge's `Config`, such as
+  `flag_field=""`, and `world_printer` overrides the printer's
+  `PrinterConfig`, such as `sync_drift=True`. All four are set with
   `@pytest.mark.parametrize(..., indirect=True)`.
 - **A second printer, when asked for.** A test that takes `world_printers`
   at 2 (`@pytest.mark.parametrize("world_printers", [2], indirect=True)`)
@@ -137,6 +143,7 @@ end Status.
 <!-- table:begin -->
 | Row | Test | What it checks |
 | --- | --- | --- |
+| S1 | `test_configs.py::test_s1_spoolman_first_swap_on_an_mk4s` | Spoolman first on an MK4S: B is charged the MK4S's load and written with no UUID. |
 | S1 | `test_configs.py::test_s1_tag_uuid_is_not_adopted_without_uuids` | UUIDs off, and the new spool's tag has one: nothing is stored, written or flagged. |
 | S1 | `test_swaps.py::test_s1_matching_tag_writes_nothing` | Spoolman first, and the new spool's tag already matches: nothing is written. |
 | S1 | `test_swaps.py::test_s1_menu_load_with_other_values_is_written` | Spoolman first, and a menu load of another type: Spoolman's spool is written. |
@@ -266,6 +273,7 @@ end Status.
 | X11 | `test_printers.py::test_x11_charge_rejected_with_404` | A 404 on a charge is held for the record's printer and tool, not the other printer's. |
 | X14 | `test_printers.py::test_x14_printer_renamed` | A printer renamed: its old state kept but inert, with a warning; the new name baselines. |
 | X16 | `test_printers.py::test_x16_runout_flag_clears_when_active_elsewhere` | A runout flag set on A clears when the spool becomes active in B after another spool. |
+| T1 | `test_configs.py::test_t1_tool_changes_charge_each_tool_on_an_xl` | Tool change on a five-tool XL: each spool its tool's moves, and Spoolman their weight. |
 | T1 | `test_tools.py::test_t1_tool_changes_charge_each_tool` | Tool change: each tool's spool gets its own moves; the pickup purge goes to the new tool. |
 | T2 | `test_tools.py::test_t2_tool_change_is_not_an_unload` | A tool change isn't an unload: no swap opens on either tool, and nothing is flagged. |
 | T3 | `test_tools.py::test_t3_swap_on_one_tool_leaves_the_other` | Swap on tool 1 between prints: tool 1's spool changes, tool 0's state is untouched. |

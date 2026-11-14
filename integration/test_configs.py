@@ -2,8 +2,8 @@
 
 Each test is named after the row it runs under another setup: a printer with no tag
 reader (MK4, MK3.9), `uuid_field`, `flag_field`, `flag_drift` or `claim_field`
-turned off, firmware with no usage counters, spools Spoolman knows little about, and
-the corners of what the bridge writes.
+turned off, firmware with no usage counters, other families (a five-tool XL, an MK4S),
+spools Spoolman knows little about, and the corners of what the bridge writes.
 """
 
 from __future__ import annotations
@@ -24,6 +24,7 @@ from integration.conftest import (
     World,
     baseline,
     charges,
+    event_fields,
     events,
     logged,
     logged_once,
@@ -32,7 +33,7 @@ from integration.conftest import (
 from integration.faults import set_extra_text
 from integration.temperatures import TEMPERATURES, WRITTEN
 from integration.test_writes import SYNC_FILE, gcode, write_due, wrote_b
-from simulator.model import Material
+from simulator.model import Material, PrintSpec, Segment
 from spoolman_prusalink.printer_sync import PRINTER_MODELS, default_preamble
 
 COREONEL_PREAMBLE = default_preamble(PRINTER_MODELS["8.1.0"])
@@ -272,6 +273,67 @@ async def test_c8_firmware_without_usage_counters(world: World, caplog: pytest.L
     # feeds 1:1.
     assert w.charged(await w.poll(), "A") == {"8.1.0": 4, "2.1.0": 5}[w.printer.model.code]
     assert logged_once(caplog, logging.ERROR, "has no usage counters")
+
+
+# --- Other families (tests/test_families.py runs every family on a fake Spoolman) ---
+@pytest.mark.parametrize("world_model, world_tools", [("3.1.0", 5)], indirect=True)
+async def test_t1_tool_changes_charge_each_tool_on_an_xl(world: World):
+    """Tool change on a five-tool XL: each spool its tool's moves, and Spoolman their weight."""
+    w = world
+    a, d = w.spools["A"], w.spools["D"]
+    await baseline(w)
+
+    spec = PrintSpec([Segment(0, 300), Segment(1, 100)], duration_s=4, preheat_s=0.5)
+    records = await w.start_print(spec)
+    records += await w.finish_print()
+    # T0: 300 * 0.95 = 285, from 1000. T1: the pickup's 30 mm purge and 100, then the
+    # end's 8 mm retract, fed back by the auto-retract, which counts 23 on the picked
+    # tool: 153 * 0.95 = 145.35, from 500.
+    assert w.charged(records, "A") == 285 and w.charged(records, "D") == 145
+    assert {r["tool"] for r in charges(records, a)} == {0}
+    assert {r["tool"] for r in charges(records, d)} == {1}
+    assert events(records) == []
+    for name, spool_id in (("A", a), ("D", d)):
+        grams = sum(r["grams"] for r in charges(records, spool_id))
+        assert await w.used(name) == pytest.approx(grams, abs=0.01) and grams > 0
+    assert w.printer.job_counter == 1 and w.requests("PUT") == []
+
+
+@pytest.mark.parametrize("world_model", ["1.4.1"], indirect=True)
+async def test_s1_spoolman_first_swap_on_an_mk4s(world: World):
+    """Spoolman first on an MK4S: B is charged the MK4S's load and written with no UUID."""
+    w = world
+    a, b = w.spools["A"], w.spools["B"]
+    await baseline(w)
+
+    await w.move("B", w.tool_location)
+    w.printer.extrude(0, 20)  # 20 * 0.95 = 19
+    records = await w.poll()
+    assert len(events(records, "swap_staged")) == 1 and w.charged(records, "A") == 19
+
+    # The unload rams 23 first: 21.85, 1040.85.
+    await w.unload()
+    records = await w.poll()
+    assert event_fields(records, "swap_committed") == [{"from_spool": a, "to_spool": b}]
+    assert w.charged(records, "A") == 1040 - 1019
+
+    # No tag reader, so a menu load. LOADS["1.4.1"], 85.5, on top of 1040.85: 1126.35.
+    # The write's job counts nothing: the load left the filament auto-retracted.
+    records = await w.swap_cycle(poll_every=0.3, source="preset", name=PETG[0])
+    records += await w.poll()
+    await w.run_until(lambda: w.printer.job is None)
+    records += await w.poll()
+    assert w.charged(records, "B") == 1126 - 1040
+    assert "M865.1" not in w.printer.files[SYNC_FILE]
+    assert w.material() == (PETG[0], PETG[1], None)
+    assert await w.spoolman.extra(b, UUID_FIELD) is None
+
+    # The next print: the deretract's 15, 400 printed, the end's 23. 438 * 0.95 = 416.1,
+    # on top of 1126.35: 1542.45.
+    records = await w.start_print(print_spec())
+    records += await w.finish_print()
+    assert w.charged(records, "B") == 1542 - 1126 and w.charged(records, "A") == 0
+    assert await w.flag("A") is None and await w.flag("B") is None
 
 
 # --- What the bridge writes ---
