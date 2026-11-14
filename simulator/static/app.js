@@ -297,6 +297,7 @@ function renderPrinter(p) {
     btn('Dismiss', 'dismiss', gate(a, 'dismiss')) +
     btn('Home', 'home', gate(a, 'home')) +
     btn('Park tool', 'park_tool', gate(a, 'park_tool', { title: 'the Pick/park menu: park the picked tool' })) +
+    btn('Change all', 'toggle', gate(a, 'change_all', { form: 'changeall', cls: isOpen(p, 'changeall') ? 'on' : '' })) +
     btn('Reboot', 'reboot', gate(a, 'reboot')) +
     btn('Power-loss resume', 'power_loss', gate(a, 'reboot', { title: 'reboot, keeping the job' })) +
     '<label title="the bed cools during the outage, so the print waits for Resume"><input type="checkbox" data-k="cold"' +
@@ -323,6 +324,13 @@ function renderPrinter(p) {
     h += '<div class="form"><label>tool' + toolSel('counter.tool') + '</label>' +
       '<label>mm' + inp(p, 'counter.mm', '10', 'type="number" step="any"') + '</label>' +
       btn('Step back', 'counter_submit', {}) + '</div>';
+  }
+  if (isOpen(p, 'changeall')) {
+    h += '<div class="form">' +
+      '<label>tools (a, b)' + inp(p, 'changeall.tools', p.tools.filter((t) => t.enabled).map((t) => t.index).join(', '), 'type="text"') + '</label>' +
+      '<label>preset' + inp(p, 'changeall.name', 'PLA') + '</label>' +
+      '<label>color' + inp(p, 'changeall.color', '', 'type="text" placeholder="#rrggbb"') + '</label>' +
+      btn('Change', 'changeall_submit', {}) + '</div>';
   }
   if (isOpen(p, 'eau')) {
     h += '<div class="form"><label>tool' + toolSel('eau.tool') + '</label>' +
@@ -425,6 +433,16 @@ function loadBody(name, i) {
   return body;
 }
 
+function changeAllBody(name, p) {
+  const all = p.tools.filter((t) => t.enabled).map((t) => t.index).join(', ');
+  const tools = String(getv(name, 'changeall.tools', all)).split(',').map((x) => x.trim()).filter(Boolean).map(Number);
+  if (tools.some((x) => !Number.isInteger(x))) throw new Error('Tools must be whole numbers');
+  const body = { tools, name: String(getv(name, 'changeall.name', 'PLA')).trim() };
+  const color = String(getv(name, 'changeall.color', '')).trim();
+  if (color) body.color = color;
+  return body;
+}
+
 function onClick(e) {
   const b = e.target.closest('button[data-act]');
   if (!b || b.disabled) return;
@@ -448,6 +466,8 @@ function onClick(e) {
       case 'power_loss': return go('reboot', { keep_job: true, cold_bed: !!getv(name, 'cold', false) });
       case 'start_submit':
         return go('start_print', startBody(name), () => { pst(name).open.start = false; renderCard(name); });
+      case 'changeall_submit':
+        return go('change_all', changeAllBody(name, p), () => { pst(name).open.changeall = false; renderCard(name); });
       case 'load_submit':
         return go('load', loadBody(name, tool), () => { pst(name).open['load' + tool] = false; renderCard(name); });
       case 'unload': case 'runout': case 'select_tool':

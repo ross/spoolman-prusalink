@@ -30,6 +30,7 @@ ACTIONS = frozenset(
         "retract",
         "select_tool",
         "park_tool",
+        "change_all",
         "start_print",
         "pause",
         "resume",

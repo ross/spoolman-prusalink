@@ -502,6 +502,16 @@ class PrintSpec:
         return sum(s.slicer_mm for s in self.segments)
 
 
+@dataclass
+class Queued:
+    """One operation a change all has still to run: the unload of the tool's old filament,
+    or the load of `material`."""
+
+    tool: int
+    kind: str  # "unload" or "load"
+    material: Material | None = None
+
+
 @dataclass(kw_only=True)
 class SimJob:
     """What every job has. A job is a `UserJob` or a `SyncJob`."""
@@ -671,6 +681,8 @@ class SimPrinter:
     auto_retract: bool = True
     tools: dict[int, SimTool] = field(default_factory=lambda: {0: SimTool(0)})
     files: dict[str, str] = field(default_factory=dict)
+    # What a change all has still to run after the running load or unload, in order.
+    queue: list[Queued] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         # Not fields, so asdict() and snapshots leave them out.
@@ -1050,8 +1062,7 @@ class SimPrinter:
             if not waiting:
                 self._menu_pick(t)
             steps = self._load_steps(purge_mm, extra, waiting)
-        t.process = LoadProcess(steps, material)
-        self._next_load_step(t, t.process)  # a load with no slow or fast feed types at once
+        self._start_load(t, steps, material)
         if job is None:
             self.screen = State.IDLE  # using the menu dismisses a finished or stopped screen
         self._show_state()
@@ -1110,11 +1121,60 @@ class SimPrinter:
             return
         self._log("action", f"unload T{tool}")
         self._menu_pick(t)
+        self._start_unload(t)
+        self.screen = State.IDLE  # using the menu dismisses a finished or stopped screen
+        self._show_state()
+
+    def _start_load(self, t: SimTool, steps: list[LoadStep], material: Material | None) -> None:
+        t.process = LoadProcess(steps, material)
+        self._next_load_step(t, t.process)  # a load with no slow or fast feed types at once
+
+    def _start_unload(self, t: SimTool) -> None:
         steps = self._unload_steps(t, "unload")
         self._settle(t, steps, None)
         t.process = UnloadProcess(steps, self.settings.unload_seconds)
+
+    def change_all(self, tools: list[int], *, name: str, color: str | None = None) -> None:
+        """Change the filament in the chosen tools to the preset `name`: Change all in the
+        Filament menu, which sends `M9934` (`Config::execute` in
+        `src/common/multi_filament_change.cpp`). The other tools keep theirs.
+
+        One dialog runs the whole change, so the printer reads BUSY throughout. The tools
+        change one at a time in index order. A tool with a stored type changes with
+        `M1600`, whose unload counts; a tool with none only loads, with `M701`. The stored
+        type decides, not the sensor, and the load needs no filament check. Each operation
+        picks its tool inside its dialog (`Pause::tool_change`), so no idle sensor clear
+        runs at the pick. INDX docks each tool after its load, and the XL ends with the
+        last tool picked.
+        """
+        self._check_change_all()
+        chosen = sorted({self._tool(i).index for i in tools})
+        if not chosen:
+            raise Invalid("change all needs at least one tool")
+        queue: list[Queued] = []
+        for i in chosen:
+            t = self.tools[i]
+            material = self._new_material(t, "preset", name, color, None, None)
+            if t.material is not None:
+                queue.append(Queued(i, "unload"))
+            queue.append(Queued(i, "load", material))
+        listed = ", ".join(f"T{i}" for i in chosen)
+        self._log("action", f"change all {listed} to {describe(material)}")
+        self.queue = queue
         self.screen = State.IDLE  # using the menu dismisses a finished or stopped screen
+        self._next_queued()
         self._show_state()
+
+    def _next_queued(self) -> None:
+        """Start the change all's next operation, in the step the last one ended, so the
+        printer never reads IDLE between them."""
+        q = self.queue.pop(0)
+        t = self.tools[q.tool]
+        self._pick(t)
+        if q.kind == "unload":
+            self._start_unload(t)
+        else:
+            self._start_load(t, self._load_steps(None, 0.0, False), q.material)
 
     def _manual_move(self, tool: int, mm: float) -> tuple[SimTool, float]:
         t = self._tool(tool)
@@ -1369,6 +1429,7 @@ class SimPrinter:
             t.extruded, t.unload_count, t.extruded_at_unload = 0.0, 0, 0
             t.process = None
             t.path.boot(self.model.gap_mm)
+        self.queue = []  # a change all doesn't survive the cut
         self.homed, self.message = False, None
         self._log("boot", f"boot id {self.boot_id}")
         selected = self.feed.idle_clear_tool(self)
@@ -1625,8 +1686,18 @@ class SimPrinter:
     def _check_disable(self, t: SimTool) -> None:
         job = self.job or self.resuming
         in_print = isinstance(job, UserJob) and t.index in {s.tool for s in job.spec.segments}
-        if t.index == self.selected_tool or in_print or t.process is not None:
+        queued = any(q.tool == t.index for q in self.queue)
+        if t.index == self.selected_tool or in_print or t.process is not None or queued:
             raise Invalid(f"T{t.index} is in use")
+
+    def _check_change_all(self) -> None:
+        # Change all is in the Filament menu on a toolchanger only
+        # (`src/gui/screen_menu_filament.hpp`), and the menu needs an idle printer.
+        if not self.feed.selectable:
+            raise Invalid(f"{self.model.name} has one tool")
+        self._need_power()
+        if self.job is not None or self.state not in IDLE_STATES:
+            raise Busy(f"can't change all while {self.state}")
 
     def _check_start_print(self) -> None:
         self._need_power()
@@ -1684,6 +1755,7 @@ class SimPrinter:
             "dismiss": self._check_dismiss,
             "home": self._check_home,
             "park_tool": self._check_park,
+            "change_all": self._check_change_all,
             "reboot": self._need_power,
             "clear_jam": self._check_clear_jam,
             "tap_through": self._check_tap_through,
@@ -1765,7 +1837,10 @@ class SimPrinter:
         self._run_steps(t, p.steps)  # what rounding left
         t.process = None
         self._physical_unload(t, "unload")
-        self.feed.rest(self)  # `M702` docks after every unload on INDX
+        # `M702` docks after every unload on INDX. `M1600` docks only after its load, so a
+        # change all's unload keeps the tool for the load that follows.
+        if not (self.queue and self.queue[0].tool == t.index):
+            self.feed.rest(self)
         self._process_done()
 
     def _next_load_step(self, t: SimTool, p: LoadProcess) -> None:
@@ -1789,6 +1864,8 @@ class SimPrinter:
             # The load's result isn't checked and no sensor is read again: the type check
             # follows (`filament_not_inserted_load` in `marlin_print_preview.cpp`).
             self._check_types(job)
+        elif self.queue:
+            self._next_queued()
         self._show_state()
 
     def _tick_job(self, dt: float) -> None:
@@ -2237,6 +2314,7 @@ def _printer_from(d: dict) -> SimPrinter:
     d["tools"] = {t["index"]: _tool_from(t) for t in d["tools"]}
     d["job"] = _job_from(d["job"])
     d["resuming"] = _job_from(d["resuming"])
+    d["queue"] = [Queued(**{**q, "material": _material_from(q["material"])}) for q in d["queue"]]
     return SimPrinter(**d)
 
 

@@ -105,7 +105,7 @@ curl -X POST -H 'Content-Type: application/json' \
 ```
 
 Actions: `load`, `unload`, `extrude`, `retract`, `select_tool`,
-`park_tool`, `start_print`, `pause`, `resume`, `cancel`, `dismiss`, `home`, `runout`, `jam`,
+`park_tool`, `change_all`, `start_print`, `pause`, `resume`, `cancel`, `dismiss`, `home`, `runout`, `jam`,
 `clear_jam`, `reboot`, `set_power`, `set_fault`, `set_firmware`,
 `set_sensor_fault`, `set_stuck_write`, `set_tool_enabled`,
 `set_checks`, `set_sensors`, `counter_step_back`,
@@ -259,6 +259,17 @@ that trace. The points that matter for the bridge, in short:
   the preview waits for picks its tool inside the dialog, with no clear,
   and INDX docks it after too. A reload in a print neither picks nor docks.
   `park_tool` parks the picked tool, as the Pick/park menu does.
+- `change_all` is the Filament menu's Change all on a toolchanger. It takes
+  `tools`, a list of enabled tools, and the preset `name` with an optional
+  `color`, the same for every chosen tool; the other tools keep their
+  filament. The tools change one at a time in index order, and the printer
+  reads `BUSY` from the first to the last. A tool with a stored type
+  unloads first, which counts the unload, then loads; a tool with none only
+  loads. The stored type decides, not the sensor. Each tool is picked
+  inside the dialog, so no idle sensor clear runs at the pick. INDX docks
+  each tool after its load, and the XL ends with the last tool picked. A
+  reboot or power cut drops what's left, and a power-panic resume waits
+  until the last tool is done. The page's **Change all** opens the form.
 - `extrude` and `retract` move only the picked tool, as the menu's Move E
   does. With no tool picked they answer 409, and on another tool 400.
 - The selected tool can be none, which stands for a toolchanger with no

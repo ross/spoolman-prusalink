@@ -29,6 +29,7 @@ PRINTER_CALLS: dict[str, Callable[[SimPrinter], None]] = {
     "dismiss": lambda p: p.dismiss(),
     "home": lambda p: p.home(),
     "park_tool": lambda p: p.park_tool(),
+    "change_all": lambda p: p.change_all([0], name="PLA"),
     "reboot": lambda p: p.reboot(),
     "clear_jam": lambda p: p.clear_jam(),
     "tap_through": lambda p: p.tap_through(),
@@ -153,6 +154,14 @@ def panic_window():
     return sim, p
 
 
+def xl_changing_all():
+    """A change all on T0 and T1 runs on T0, with T1 queued."""
+    sim, p = make("3.1.0", [loaded(0), loaded(1), SimTool(2)])
+    p.change_all([0, 1], name="PETG")
+    assert p.queue
+    return sim, p
+
+
 def multi_tool_unloading():
     """T1 unloads, so the printer reads BUSY for the other tools."""
     sim, p = make("3.1.0", [loaded(0), loaded(1), SimTool(2)])
@@ -258,6 +267,7 @@ SITUATIONS = [
     xl_picked_after_a_load,
     indx_docked,
     indx_unloading,
+    xl_changing_all,
     multi_tool_unloading,
     preheat_empty,
     preview_empty,

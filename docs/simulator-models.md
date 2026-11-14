@@ -112,6 +112,11 @@ firmware update.
   its dialog, with no clear, and INDX docks it after; a reload in a print
   neither picks nor docks. Move E moves only the picked tool, and the Pick/park
   menu's park (`park_tool`) leaves none picked.
+- Change all (`change_all`) changes the chosen tools one at a time in index
+  order, `BUSY` throughout: an unload first where a type is stored, then a
+  load. Each pick is inside the dialog, with no clear. INDX docks after
+  each tool, and the XL ends with the last one picked. A power cut drops
+  the tools not yet reached.
 - The model's feed system, direct, XL or INDX, holds the rules that
   differ between them. `ModelInfo.feed` names it, and
   `script/firmware-check` compares it with `HAS_TOOLCHANGER` and
@@ -245,7 +250,7 @@ builds that can take one and false elsewhere (`basic_gets.cpp:229-253`).
 | Runout with a spool join | Counts an unload on the old tool, and the print goes on with the join's tool. The new tool's type isn't set or copied. Its purge counts on it: 27 mm on the XL, 25 mm on INDX. | `spool_join.cpp:258-342`, `toolchanger_xl.cpp:505-549`, `nozzle_cleaner.cpp:87` |
 | Runout without one | `M600` on the same tool, as on a single-tool printer. | `filament_sensors_handler.cpp:237` |
 | `M600 T<n>` | Picks tool `n`, changes its filament, and goes back. | `M600.cpp:223-241, 319` |
-| Change all, from the XL menu | For each enabled tool: an unload, the new type, a purge. | `multi_filament_change.cpp:186-233` |
+| Change all, on the XL and INDX | For each chosen tool in index order, inside one `BUSY` dialog: `M1600` (an unload that counts, then a load) when a type is stored, else `M701` (a load). Each picks its tool inside its dialog. INDX docks after each tool; the XL ends with the last one picked. | `multi_filament_change.cpp:151-239`, `M701_2.cpp:135-140, 240-343` |
 | A load or unload during a print | Reads `ATTENTION` in every phase, not only while waiting. Idle, it reads `BUSY`. | `printer_state.cpp:178-190, 238-243` |
 
 The simulator has the first three rows and an idle sensor clear that
