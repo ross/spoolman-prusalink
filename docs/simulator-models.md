@@ -538,11 +538,15 @@ G-code confirms the slicer's numbers without a printer. Each run records
 the E moves before the first object move, around each `T`, and in the end
 G-code, plus the `M862` lines:
 
-1. **MK4S MMU3, two colors, PLA.** The ramming, the retract before `T`, the
-   load after it, and the purge per change with the default wiping volume.
-2. **MK4S MMU3, one color.** Whether the start and end differ from run 1.
-3. **Core One MMU3, two colors, PETG.** The same, for the other build and
-   a filament with more cooling moves.
+1. **MK4S MMU3, two colors, PLA.** Done: two 10 x 10 x 1 mm boxes, in
+   slots 0 and 1, slots 1 and 3, and slots 0, 1 and 2 in two orders, plus
+   PETG, and a PLA and PETG mix. The ramming, the retract before `T`, the
+   load after it, and the purge per change, with the wipe tower's purge
+   volume, the minimal purge, and the wiping-volume matrix changed one at
+   a time, and the layer count and per-slot heights changed.
+2. **MK4S MMU3, one color.** Done: one box in slot 0 and one in slot 2.
+3. **Core One MMU3, two colors, PETG.** Done: the same boxes with PETG and
+   PLA, one color, and PLA on the Core One L MMU3.
 4. **XL, two tools and five.** Done: two 10 x 10 x 1 mm boxes, one per tool,
    on the XL 2T and 5T and the XL+ 2T, with tools in either order, three
    tools, one tool, and the wipe tower, the ramming and the purge volume
@@ -551,18 +555,22 @@ G-code, plus the `M862` lines:
    with other tools, one tool, the wipe tower on, and a larger purge
    volume.
 
-Runs 4 and 5 used PrusaSlicer 2.9.7 (flatpak `com.prusa3d.PrusaSlicer`)
+Runs 1 to 5 used PrusaSlicer 2.9.7 (flatpak `com.prusa3d.PrusaSlicer`)
 with vendor bundle `PrusaResearch` 2.5.16, and their numbers are in "What
 the slicer adds" and `simulator/slicer.py`. The sliced G-code isn't kept in
-the repository. Runs 1 to 3 are still to do, before Workstream 5.
+the repository.
 
 To repeat a run, make a model with `script/slicer/make3mf.py` and slice it
 with `script/slicer/slice.sh`, which both document their arguments. Each
-slice uses one printer, print and filament preset, and one filament per
-tool:
+slice uses one printer and print preset. `slice.sh` takes one filament
+preset per tool, separated by `|`, and repeats the last one for the rest, so
+a mixed slice is possible. The MMU3 slices use five filaments, one per slot:
 
 | Run | Printer preset | Print preset | Filament preset |
 | --- | --- | --- | --- |
+| 1 and 2, MK4S MMU3 | `Original Prusa MK4S MMU3 0.4 nozzle` | `0.20mm SPEED @MK4S 0.4` | `Prusament PLA @MK4S`, `Prusament PETG @MK4S` |
+| 3, Core One MMU3 | `Prusa CORE One MMU3 0.4 nozzle` | `0.20mm SPEED @COREONE 0.4` | `Prusament PLA @COREONE`, `Prusament PETG @COREONE` |
+| 3, Core One L MMU3 | `Prusa CORE One L MMU3 0.4 nozzle` | `0.20mm SPEED @COREONEL 0.4` | `Prusament PLA @COREONE` |
 | 4, XL 2T and 5T | `Original Prusa XL - 2T Input Shaper 0.4 nozzle`, `Original Prusa XL - 5T Input Shaper 0.4 nozzle` | `0.20mm SPEED @XLIS 0.4` | `Prusament PLA @XLIS` |
 | 4, XL+ 2T | `Prusa XL+ 2T 0.4 nozzle` | `0.20mm Balanced ★ @XL+ 0.4` | `Prusament PLA @XL+` |
 | 5, INDX 4T and 8T | `Prusa CORE One INDX 4T HF0.4 nozzle`, `Prusa CORE One INDX 8T HF0.4 nozzle` | `0.20mm Balanced ★ @COREONEINDX HF0.4` | `Prusament PLA @COREONEINDX HF0.4` |
