@@ -315,7 +315,9 @@ that trace. The points that matter for the bridge, in short:
   The pick moves nothing and takes no time. The reload writes the type
   the tool had, else the type the file names for it, else the type its
   last unload left; with none of them, the firmware can't heat the tool,
-  and nothing changes. The page's **Change** button sends it.
+  and nothing changes. A power cut during the change resumes on that tool,
+  which prints until the file's next tool change. The page's **Change**
+  button sends it.
 - A load or unload during a print reads `ATTENTION` in every phase, the
   reload's load included; with no print, `BUSY`.
 - A `runout` on a tool with a spool join unloads it at once, which counts
@@ -325,8 +327,8 @@ that trace. The points that matter for the bridge, in short:
   type, and the print goes on with it wherever the file names the old tool,
   through later tool changes too. With no join from the tool, the runout is
   the filament change. A jam never joins, and the join can't be paused. A
-  power cut during the unload resumes on the join's tool without the
-  join's purge.
+  power cut during the unload resumes on the old tool, empty, without the
+  join's change or purge, until the file's next tool change.
 - `extrude` and `retract` move only the picked tool, as the menu's Move E
   does. With no tool picked they answer 409, and on another tool 400.
 - The selected tool can be none, which stands for a toolchanger with no
@@ -370,7 +372,15 @@ that trace. The points that matter for the bridge, in short:
   with no auto-retract after. Every other model that retracted feeds the
   8 mm back at the end of `BUSY`. Both count whether or not the tool holds
   filament. A print that was paused comes back `PAUSED` after the `BUSY`,
-  with no filament moved. The MINI and the XL dev kit build no power panic,
+  with no filament moved. Only `pause` counts as paused. A cut during a
+  filament change dialog, a runout's, a jam's, a color change's, Tune >
+  Change filament's or a spool join's unload, resumes on its own with the
+  dialog gone. The print goes on through what the cut left in the tool,
+  an empty tool included, with no runout. A load cut short leaves its
+  filament in. A color change in the file runs again after the resume. The
+  resume picks the tool the cut found picked, which prints until the
+  file's next tool change, or until the start G-code's when the print
+  hadn't primed yet. The MINI and the XL dev kit build no power panic,
   so there a cut drops the job and the printer boots idle, as a plain
   reboot does. With `cold_bed`, the resume waits in `ATTENTION` for
   `resume` before recovering, for a print that was paused too. The page's **Power-loss resume** sends
@@ -420,8 +430,11 @@ Choices made where the firmware was silent or the plan left it open:
   no ramming, whatever the switch says, and stores that distance for the next feed to feed back.
 - Temperatures, `G12` other than INDX's power-panic purge, the mesh bed
   leveling retract and the MMU don't move filament in the simulator.
-- A power loss during a filament change drops the gap to restore: the
-  resume after the reload doesn't move.
+- A power cut during a runout's or a jam's dialog retracts 8 mm, as any
+  cut in a print does. The firmware skips that retract when the runout or
+  jam interrupted a move, which runs it through the crash recovery
+  (`was_crashed`). The boot leaves the tracker at gap 0 and untrusted
+  either way, so the resume's feed back counts the same.
 - The power-panic resume starts at the autostart's first try, 1.5 s after
   the boot: the firmware tries every 1.5 s until the USB drive, the
   temperatures and the screen are ready, and gives up after 100 s, which the

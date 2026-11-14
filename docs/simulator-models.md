@@ -145,7 +145,8 @@ firmware update.
   join's tool in `PRINTING`, and the print goes on with that tool wherever
   the file names the old one. Joins chain, and at a chain's end the runout
   is the filament change. Snapshots and a power-panic resume keep the
-  joins and the remap.
+  joins and the remap. A power cut during the join's unload resumes on
+  the old tool until the file's next tool change.
 - The model's feed system, direct, XL or INDX, holds the rules that
   differ between them. `ModelInfo.feed` names it, and
   `script/firmware-check` compares it with `HAS_TOOLCHANGER` and
@@ -164,7 +165,11 @@ firmware update.
   resumes at the first try, delays the resume while a menu load or unload
   runs, and drops it when a print starts in the window. A cold bed
   reads `ATTENTION` as soon as the window ends, and a paused print reads
-  `BUSY`, then `PAUSED`, after the cold bed's wait if there is one.
+  `BUSY`, then `PAUSED`, after the cold bed's wait if there is one. A cut
+  during a filament change dialog isn't a cut while paused: the print
+  resumes on its own with the dialog gone, on the tool the cut found
+  picked until the file's next tool change, and a color change in the file
+  runs again.
 - An uploaded file's job is counted at once. When the scan ends, the
   print preview checks the file's `M862` lines: the model by compatibility
   group, the G-code level, input shaper, the INDX lock, the MMU3 feature

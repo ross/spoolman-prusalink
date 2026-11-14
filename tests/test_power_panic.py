@@ -75,6 +75,50 @@ async def test_an_unload_in_the_window_then_printing_on_an_empty_tool(tmp_path, 
     await bridge.aclose()
 
 
+async def test_a_cut_while_a_runout_waits_for_the_reload(tmp_path, caplog):
+    """A runout unloads the tool, and the power fails while the printer waits for the
+    reload. The dialog isn't a pause, so the print resumes on its own and goes on through
+    the empty tool (F12, F29)."""
+    caplog.set_level(logging.WARNING, logger="spoolman_prusalink")
+    bridge, fake, station = make(tmp_path, [spool(19)])
+    printer = station.printer
+    await bridge.poll()  # the baseline
+    job = await start(bridge, station)
+    printer.runout(0)
+    mark = len(ledger(tmp_path))
+    await bridge.poll()  # waiting for the reload
+    assert printer.state is State.ATTENTION
+    assert events(ledger(tmp_path)[mark:]) == ["unload", "swap_unconfirmed"]
+    before = charged(fake, 19)
+    mark = len(ledger(tmp_path))
+    printer.set_power("off")
+    printer.set_power("on", resume=True)
+
+    await bridge.poll()  # in the window
+    assert printer.state is State.IDLE and printer.job is None
+    await station.run_until(lambda: printer.state is State.PRINTING, poll_every=0.5)
+    station.advance(3)
+    await bridge.poll()
+    assert printer.job.id == job and station.material() == (None, None, None)
+    assert station.counter > 0
+
+    # A known fault, pinned as the bridge behaves today; a fix changes these lines. BF24:
+    # the bridge holds the empty tool's usage, the resume's 8 mm feed back included (BF11),
+    # then charges it to the spool reported in the tool at the next load, with the load's
+    # own count, though it never left a spool. The swap the runout opened stays open.
+    assert events(ledger(tmp_path)[mark:]) == ["reboot"]
+    assert charged(fake, 19) == before
+    assert levels(caplog, "holding usage until filament is reported") == ["WARNING"]
+
+    await station.run_until(lambda: printer.job is None, poll_every=0.5, limit=60)
+    held = station.counter
+    await station.swap_cycle(source="preset", name="PLA")
+    await bridge.poll()
+    load = station.counter - held
+    assert load > 0 and charged(fake, 19) == before + held + load
+    await bridge.aclose()
+
+
 async def test_a_sync_job_in_the_window_drops_the_resume(tmp_path):
     """A write waits while the print runs. In the window the printer reads idle, so the
     bridge uploads its sync job, and the firmware gives the resume up (BF26)."""

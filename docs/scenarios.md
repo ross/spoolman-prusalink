@@ -75,7 +75,7 @@ archived active spool (M3, M3a) is logged once when the bridge finds it.
 | P9 | Print restarted after a failure (new job ID). | A new print start. | Seen live (job 126); end to end |
 | P10 | Spoolman change mid-print with no unload (scanning the next spool early). | Staged. The old spool is charged until the next unload. | Tested; end to end |
 | P11 | Pause and resume with no filament change. | Nothing changes. The counter continues. | Implemented; end to end |
-| P12 | Power loss mid-print, then power-panic resume. | A reboot: counters restart, and usage since the last poll (up to 30 s) is lost. The printer reads `IDLE` with no job for at least 1.5 s before the resume starts, and the idle sensor clear can count an unload there (BF24). A sync write waiting for the printer can run in that window, and the print then never resumes (BF26). The job ID is kept across reboots, so a resumed job with the same ID isn't a new print start (see Q5). | Tested; the job ID is unconfirmed on the printer; end to end |
+| P12 | Power loss mid-print, then power-panic resume. | A reboot: counters restart, and usage since the last poll (up to 30 s) is lost. The printer reads `IDLE` with no job for at least 1.5 s before the resume starts, and the idle sensor clear can count an unload there (BF24). A sync write waiting for the printer can run in that window, and the print then never resumes (BF26). A cut while a runout waits for its reload resumes the print through the empty tool, and the bridge holds that usage and charges it at the next load (BF24). The job ID is kept across reboots, so a resumed job with the same ID isn't a new print start (see Q5). | Tested; the job ID is unconfirmed on the printer; end to end |
 
 ## Printer state and the counters
 

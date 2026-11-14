@@ -187,6 +187,77 @@ def test_a_change_on_an_untyped_tool_loads_the_type_the_file_names():
     assert (material.name, material.adhoc, material.nozzle) == ("PETG", False, 230)
 
 
+# A power cut during a change on another tool. `M600_execute` picks tool n before the
+# dialog and changes back only after it (`M600.cpp:222-236, 319`). The dialog isn't a pause,
+# so the print resumes on its own (`printer_paused`, `power_panic.cpp:983`). The resume sets
+# the tool the cut found picked, n: INDX saves it as the active tool, and the XL boots with
+# n's Dwarf on the head (`power_panic.cpp:380-395, 1049-1055`). The resume issues no tool
+# change, and the injected `M600` isn't in the file, so n prints until the file's next tool
+# change. The counters restart at the boot, with every gap at 0 and untrusted, unless a
+# stored auto-retract distance sets it.
+
+
+def cut_during_the_change(sim, p, tool: int, point: str) -> None:
+    """Cut while the change on `tool` waits for the reload, or once the reload has written
+    the type."""
+    p.change_filament(tool)
+    if point == "load":
+        p.load(tool)
+        while not p.tools[tool].process.typed:
+            sim.tick(0.1)
+    p.reboot(keep_job=True)
+
+
+@pytest.mark.parametrize("point", ["wait", "load"])
+def test_a_cut_during_a_change_on_another_xl_tool_prints_on_it_to_the_next_change(point):
+    sim, p = make(XL, [loaded(0), loaded(1, PETG)])
+    start(sim, p, Segment(0, 50), Segment(1, 50))
+    sim.advance(1)
+    fed = p.job.fed_mm
+    cut_during_the_change(sim, p, 1, point)
+    assert p.resuming.resumed_on == 1 and p.selected_tool == 1
+    sim.advance(p.settings.panic_idle_seconds + p.settings.recover_seconds + 0.01)
+    # The XL neither retracts at the cut nor moves filament at the resume.
+    assert p.job.phase is JobPhase.UNPARK and counts(p) == [0, 0]
+    sim.advance(100)
+    assert p.state is State.FINISHED
+    # T1 prints the rest of T0's segment from gap 0, then the file's change to T1 finds it
+    # picked and runs its moves on it: the ramming 4.1575 counts, -20 (gap 20), the first
+    # pick's 20 refill the gap and its 9.238 count. Then T1's segment, and the tower's last
+    # ramming 4.1575; the end's -0.8 counts nothing. T0 never moves again.
+    t1 = 50 - fed + 4.1575 + 9.238 + 50 + 4.1575
+    assert counts(p) == pytest.approx([0, t1])
+    assert "tool change T1 -> T1" in [e.text for e in sim.events]
+    # The reload stopped where it was: T1 holds filament once the type is written.
+    assert p.tools[1].path.loaded == (point == "load")
+    assert p.tools[1].material == (PETG if point == "load" else None)
+
+
+@pytest.mark.parametrize("point", ["wait", "load"])
+def test_a_cut_during_a_change_on_an_unused_indx_tool_prints_on_it_to_the_next_change(point):
+    sim, p = make(INDX, [loaded(0), loaded(1), loaded(2, PETG)])
+    start(sim, p, Segment(0, 50), Segment(1, 50))
+    sim.advance(1)
+    fed = p.job.fed_mm
+    cut_during_the_change(sim, p, 2, point)
+    # A print that used several tools boots with none picked (F32); the resume sets T2.
+    assert p.resuming.resumed_on == 2 and p.selected_tool is None
+    with pytest.raises(Invalid, match="T2 is in use"):
+        p.set_tool_enabled(2, False)
+    sim.advance(p.settings.panic_idle_seconds + p.settings.recover_seconds / 2 + 0.01)
+    # The power-panic purge in the cleaner runs on T2, from gap 0: 25 count. The cut's
+    # retract on T2 counted nothing.
+    assert p.selected_tool == 2 and counts(p) == pytest.approx([0, 0, 25])
+    sim.advance(100)
+    assert p.state is State.FINISHED
+    # T2 prints the rest of T0's segment. The file's change to T1 retracts T2 0.8 + 8. T1
+    # boots at gap 8 from the auto-retract G427 stored, so its first pick feeds the 8 back
+    # uncounted, then counts 1.6 + 4.1596 and its segment's 50. Its -0.8 +0.8 and the
+    # end's -0.8 count nothing.
+    assert counts(p) == pytest.approx([0, 1.6 + 4.1596 + 50, 25 + 50 - fed])
+    assert p.tools[2].path.loaded == (point == "load")
+
+
 # Refusals.
 
 

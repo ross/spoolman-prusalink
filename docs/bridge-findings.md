@@ -486,7 +486,8 @@ written.
   filament sensors off at the filament-not-inserted screen instead of
   loading (F29). Core One INDX, Core One L INDX and XL, at the
   tools-mapping screen. Every model with power panic and counters, after a
-  power cut with the filament pulled out while off.
+  power cut with the filament pulled out while off, or during a filament
+  change.
 - **What happens**: On the tools-mapping screen, Print with a used tool
   empty first asks to turn the filament sensors off, and only that lets
   the print go on. When the file names a type for the empty tool, a type
@@ -499,7 +500,12 @@ written.
   in the window before the resume counts the unload and clears the type,
   and the resumed print goes on through the empty tool, since a runout
   needs the sensor to see the filament go (F12, F29). The resume's feed
-  back or purge counts there too (BF11). The bridge holds that usage because the tool reports no
+  back or purge counts there too (BF11). A power cut during a filament
+  change gets there a third way: the dialog isn't a pause, so a cut while
+  a runout waits for its reload resumes the print on its own, through the
+  tool the runout emptied (F12). A cut during Tune > Change filament on
+  another tool, or during a spool join's unload, does the same on that
+  tool until the file's next tool change (F34, F35). The bridge holds that usage because the tool reports no
   material (C7). When filament is next loaded in that tool, the bridge
   charges the held usage, with the load's own count, to the spool
   reported there.
@@ -515,6 +521,11 @@ written.
   `tests/test_power_panic.py`: the bridge records the unload and
   `swap_unconfirmed` in the window, holds the usage of the resumed print,
   and charges it with the next load's count to the spool reported then.
+  After a cut while a runout waits for its reload, on a Core One L, by
+  `test_a_cut_while_a_runout_waits_for_the_reload` in the same file: the
+  swap the runout opened stays open, the bridge holds the resumed print's
+  usage, and charges it with the next load's count to the spool reported
+  then.
 - **Scenario rows**: C7, T2, P12.
 - **To reproduce**: Those tests, today, on a toolchanger and after a power
   cut. On the Core One L,

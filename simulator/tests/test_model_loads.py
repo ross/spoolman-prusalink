@@ -287,10 +287,12 @@ def test_a_power_loss_after_a_reload_drops_the_restore():
     p.load(0)
     sim.advance(100)
     p.reboot(keep_job=True)  # the counters and gaps restart at 0
-    sim.advance(p.settings.panic_idle_seconds + p.settings.recover_seconds + 0.1)
-    assert p.job.phase is JobPhase.PAUSED
-    p.resume()  # the filament change never got to its restore, so nothing moves
-    assert (p.tools[0].extruded, p.tools[0].path.gap) == (0, 0)
+    sim.advance(p.settings.panic_idle_seconds + p.settings.recover_seconds + 0.01)
+    # The dialog isn't a pause, so the print resumes on its own, and the filament change
+    # never gets to its restore of gap 5. The unpark feeds the cut's 8 mm back into the
+    # boot's gap 0: 8 * 0.95 counted, gap 0.
+    assert p.job.phase is JobPhase.UNPARK and p.job.restore is None
+    assert (p.tools[0].extruded, p.tools[0].path.gap) == (pytest.approx(8 * 0.95), 0)
 
 
 def test_a_plain_pause_and_resume_move_nothing():

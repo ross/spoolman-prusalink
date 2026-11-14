@@ -21,6 +21,7 @@ from simulator.model import (
     Invalid,
     JobPhase,
     PrintSpec,
+    Reason,
     Segment,
     Settings,
     SimPrinter,
@@ -383,3 +384,123 @@ def test_the_idle_sensor_clear_runs_at_every_boot(model):
     p.unload(0)  # pulled out by hand while off
     p.set_power("on", resume=True)
     assert p.tools[0].unload_count == 1 and p.job is None
+
+
+# A cut during a filament change dialog: a runout, a jam or a color change.
+#
+# The firmware's `was_paused` is its pause state, `print_state == Paused` (`printer_paused`
+# in `marlin_server.cpp:1493-1495`, `ac_fault_isr` in `power_panic.cpp:983`). A filament
+# change runs inside `M600` or `M1601` while the print state stays printing, or resuming
+# when a runout or a jam interrupted a move, and never enters it (`Pause::filament_change`
+# in `pause.cpp`). So the cut resumes the print as one cut while printing: through BUSY,
+# with the retract at the cut and the feed back or the purge, then PRINTING with the dialog
+# gone. The tool's type is what the cut left: none after the unload.
+
+
+# What the resume counts on the picked tool, one model per feed system.
+RESUME_COUNTS = pytest.mark.parametrize(
+    ("model", "counted"), [("8.1.0", FED_BACK), ("3.1.0", 0.0), ("8.10.0", PURGED)]
+)
+
+
+def resumed(sim: Simulation, p: SimPrinter) -> None:
+    """Run the window and the recovery to the end of BUSY."""
+    sim.tick(WINDOW)
+    assert p.state is State.BUSY and p.job.phase is JobPhase.RECOVER
+    sim.tick(p.settings.recover_seconds + 0.01)
+    assert p.state is State.PAUSED and p.job.phase is JobPhase.UNPARK
+
+
+@RESUME_COUNTS
+def test_a_cut_while_a_runout_waits_for_the_reload_resumes_on_the_empty_tool(model, counted):
+    sim, p = printing(model)
+    p.runout(0)
+    t = p.tools[0]
+    assert p.job.phase is JobPhase.WAIT_LOAD and t.unload_count == 1 and t.material is None
+    p.reboot(keep_job=True)
+    # The window's clear finds no type to clear on the empty tool.
+    assert in_window(p) and (t.unload_count, t.material, t.path.loaded) == (0, None, False)
+    resumed(sim, p)
+    # The resume's feed back or purge counts from the boot's gap 0: 8 * 0.95 on a Core
+    # One L, 25 * 550/576 on INDX, nothing on the XL.
+    assert t.extruded == pytest.approx(counted)
+    sim.tick(p.settings.unpark_seconds)
+    assert p.state is State.PRINTING and prusalink.job(p)["state"] == "PRINTING"
+    # The print goes on through the empty tool with no runout (F29): a runout needs the
+    # sensor to see the filament go. Only the end of the print stops it.
+    sim.tick(2)
+    assert p.state is State.PRINTING and t.extruded > counted + 9
+    assert (t.unload_count, t.material, t.path.loaded) == (0, None, False)
+    with pytest.raises(Busy, match="can't load during a print"):
+        p.load(0, source="preset", name="PLA")
+    sim.tick(60)
+    assert p.state is State.FINISHED
+
+
+@pytest.mark.parametrize("typed", [False, True])
+@RESUME_COUNTS
+def test_a_cut_during_the_reload_leaves_the_filament_in_and_resumes(model, counted, typed):
+    sim, p = printing(model)
+    p.runout(0)
+    p.load(0)  # the reload keeps the type
+    t = p.tools[0]
+    sim.tick(0.1)
+    while typed and not t.process.typed:
+        sim.tick(0.1)
+    assert t.process.typed == typed
+    p.reboot(keep_job=True)
+    # The load stops where the cut finds it, with the filament in, so the window's clear
+    # finds filament. The type is written at the purge's start: before it the tool has
+    # none, after it the reload's.
+    assert in_window(p) and t.path.loaded and t.unload_count == 0
+    assert (t.material is not None) == typed
+    resumed(sim, p)
+    assert t.extruded == pytest.approx(counted)
+    sim.tick(p.settings.unpark_seconds + 1)
+    assert p.state is State.PRINTING and t.path.loaded and (t.material is not None) == typed
+
+
+@pytest.mark.parametrize("cleared", [False, True])
+@RESUME_COUNTS
+def test_a_cut_at_a_jam_resumes_on_its_own(model, counted, cleared):
+    # A jam cleared in place is the dialog's question, before or after the user answers,
+    # not a pause.
+    sim, p = printing(model)
+    p.jam(0, unload=False)
+    if cleared:
+        p.clear_jam()
+        assert p.state is State.PAUSED
+    else:
+        assert p.state is State.ATTENTION
+    p.reboot(keep_job=True)
+    assert in_window(p) and p.resuming.id == 1
+    resumed(sim, p)
+    assert p.tools[0].extruded == pytest.approx(counted)
+    sim.tick(p.settings.unpark_seconds)
+    assert p.state is State.PRINTING and p.tools[0].material is not None
+
+
+def test_a_cut_during_a_color_change_in_the_file_runs_it_again():
+    # The cut saves the file position of the command running, the `M600` itself, so the
+    # resume replays it (`stop_and_save` in `crash_recovery.cpp`, `get_current_sdpos` in
+    # `queue.h`).
+    sim, p = make()
+    p.start_print(PrintSpec([Segment(0, 100)], preheat_s=0, color_changes_mm=[20]))
+    sim.tick(0.8 + 5)
+    t = p.tools[0]
+    assert p.job.phase is JobPhase.WAIT_LOAD and p.job.waits_for(Reason.COLOR_CHANGE)
+    p.reboot(keep_job=True)
+    resumed(sim, p)
+    assert t.extruded == pytest.approx(FED_BACK)
+    sim.tick(p.settings.unpark_seconds)
+    # Back at the change: the park retracts to 8 (gap 8), the runout ramming feeds the 8
+    # back and counts its 7. The empty tool has no type, so the unload counts nothing.
+    assert p.job.phase is JobPhase.WAIT_LOAD and str(p.job.attention) == "color change tool 0"
+    assert p.job.fed_mm == 20 and t.unload_count == 0
+    assert t.extruded == pytest.approx(FED_BACK + 7 * 0.95)
+    p.load(0)
+    sim.tick(30)
+    p.resume()
+    sim.tick(60)
+    assert p.state is State.FINISHED
+    assert [e.text for e in sim.events].count("color change at 20 mm") == 2

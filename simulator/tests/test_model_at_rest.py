@@ -341,17 +341,21 @@ def test_an_xl_left_with_one_tool_picks_it_at_boot():
     p.extrude(1, 5)  # Move E has its tool again
 
 
-def test_a_jam_cleared_in_place_on_indx_counts_nothing_after_a_cut_either():
-    """The firmware's `was_paused` is the pause state, which a jam's dialog never enters."""
+def test_a_cut_after_a_jam_cleared_in_place_resumes_on_its_own_with_the_purge():
+    """The firmware's `was_paused` is the pause state, which a jam's dialog never enters, so
+    the print resumes as one cut while printing (`ac_fault_isr` in `power_panic.cpp`)."""
     sim, p = make(INDX, [loaded(0), loaded(1)])
     start(sim, p, print_spec((0, 100)))
     p.jam(0, unload=False)
     p.clear_jam()
     p.reboot(keep_job=True)
-    sim.advance(p.settings.panic_idle_seconds + p.settings.recover_seconds + 0.1)
-    assert p.state is State.PAUSED
-    p.resume()
-    assert p.job.phase is JobPhase.PRINTING and counts(p)[0] == 0
+    sim.advance(p.settings.panic_idle_seconds + p.settings.recover_seconds + 0.01)
+    # The cut's 8 mm retract counts nothing, and the boot restarts the counters with T0 at
+    # gap 0, untrusted. The power-panic purge then counts its 25 on T0. The head unparks,
+    # and the print goes on with no resume from the user.
+    assert p.job.phase is JobPhase.UNPARK and counts(p) == pytest.approx([25, 0])
+    sim.advance(p.settings.unpark_seconds)
+    assert p.job.phase is JobPhase.PRINTING and counts(p)[0] > 25
 
 
 def test_a_one_tool_xl_has_no_change_all():

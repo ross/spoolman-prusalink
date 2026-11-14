@@ -605,8 +605,9 @@ class UserJob(SimJob):
     # join restores on the new tool at its end.
     restore: tuple[int, float] | None = None
     # Whether the pause went through the firmware's pause states, whose resume unparks and,
-    # on INDX, purges (`unpark_prime`). A jam cleared in place didn't: it's a filament
-    # change dialog, which parks nothing (`Pause::filament_change`).
+    # on INDX, purges (`unpark_prime`), and which a power cut keeps (`was_paused`). A jam
+    # cleared in place didn't: it's a filament change dialog, which parks nothing
+    # (`Pause::filament_change`).
     parked: bool = False
     previewing: bool = True  # until the preview lets the print begin
     # Whether the start G-code has run its moves, so a resume doesn't run them again.
@@ -614,6 +615,11 @@ class UserJob(SimJob):
     # The tool mapping a spool join changed: a G-code tool to the tool that prints it now.
     # A G-code tool not listed prints on its own tool.
     mapped: dict[int, int] = field(default_factory=dict)
+    # The tool a power-panic resume prints the current segment on when the cut found another
+    # tool picked than the segment's: during a filament change on another tool, or a spool
+    # join's unload. The resume issues no tool change, so that tool prints until the file's
+    # next one, which ends this (`power_panic.cpp:380-395, 1049-1055`).
+    resumed_on: int | None = None
     # The tools-mapping screen and the questions its Print asks, set when the screen opens.
     mapping: list[Attention] = field(default_factory=list)
 
@@ -1420,6 +1426,12 @@ class SimPrinter:
             tool, gap = job.restore
             self._restore_to(self.tools[tool], gap)
             job.restore = None
+            # A color change in the file ends here, with its `M600`. Until then a power-panic
+            # resume runs it again: the cut saves the file position of the command running,
+            # which is the `M600` itself (`stop_and_save` in `crash_recovery.cpp`,
+            # `get_current_sdpos` in `queue.h`).
+            if job.pending_color_changes and job.pending_color_changes[0] <= job.fed_mm:
+                job.pending_color_changes.pop(0)
             # A change on another tool changes back to the print's tool after the dialog,
             # with no E move and no purge (`M600_execute`, `M600.cpp:317-339`).
             self._pick(self._job_tool(job))
@@ -1687,6 +1699,8 @@ class SimPrinter:
         self.boot_id = new_boot_id()
         for t in self.tools.values():
             t.extruded, t.unload_count, t.extruded_at_unload = 0.0, 0, 0
+            if isinstance(t.process, LoadProcess):
+                t.path.loaded = True  # a load cut short leaves its filament in
             t.process = None
             t.path.boot(self.model.gap_mm)
         self.queue = []  # a change all doesn't survive the cut
@@ -1710,8 +1724,10 @@ class SimPrinter:
         and every other model that retracted feeds the retract back at the end. Then PAUSED
         while the head unparks, then PRINTING. With `cold_bed` it waits in ATTENTION for
         `resume()` before recovering. A print that was paused comes back paused after the
-        BUSY, with no filament moved. A model without power panic loses the print and boots
-        idle, as a plain reboot does.
+        BUSY, with no filament moved. A filament change dialog isn't a pause: a cut during
+        one resumes the print on its own, on the tool the cut found picked, and a color
+        change in the file runs again. A model without power panic loses the print and
+        boots idle, as a plain reboot does.
         """
         self._need_power()
         if not keep_job:
@@ -1724,11 +1740,13 @@ class SimPrinter:
 
     def _reboot(self, keep_job: bool, cold_bed: bool = False) -> None:
         job, held = self.job, self.resuming
+        # HOLD past the preview is a jam's question, a filament change dialog.
         resumable = (
             JobPhase.PRINTING,
             JobPhase.PAUSED,
             JobPhase.PREHEAT,
             JobPhase.WAIT_LOAD,
+            JobPhase.HOLD,
             JobPhase.JOIN,
         )
         # A cut during the preview has nothing to resume: the firmware saves power-panic data
@@ -1743,14 +1761,24 @@ class SimPrinter:
         )
         if keep:
             held = job
-            was_paused = job.phase in (JobPhase.PAUSED, JobPhase.WAIT_LOAD)
-            if not was_paused and self.model.extruder.panic_retract:
-                # The cut retracts the picked tool through the planner, which forgets a
-                # stored auto-retract distance (`panic_loop` in `src/common/power_panic.cpp`):
-                # the print's tool, or the old one during a spool join's unload. The
-                # counters restart at the boot.
-                picked = self.tools[self.selected_tool]
-                self._track(picked, -self.model.extruder.lengths.retract_mm)
+            # The firmware's `was_paused` is its pause state, which only `pause()` enters
+            # (`printer_paused` in `marlin_server.cpp`, `ac_fault_isr` in
+            # `power_panic.cpp`). A filament change dialog, a spool join's unload or a jam's
+            # question runs inside a G-code while the print state stays printing or
+            # resuming, so the print resumes on its own and the dialog is gone
+            # (`Pause::filament_change` in `pause.cpp`).
+            was_paused = job.parked
+            if not was_paused:
+                # The resume picks the tool the cut found picked and issues no tool change
+                # (`power_panic.cpp:380-395, 1049-1055`; the XL's Dwarf stays on the head).
+                picked = self.selected_tool
+                if picked != self._job_tool(job).index:
+                    job.resumed_on = picked
+                if self.model.extruder.panic_retract:
+                    # The cut retracts the picked tool through the planner, which forgets a
+                    # stored auto-retract distance (`panic_loop` in `power_panic.cpp`). The
+                    # counters restart at the boot.
+                    self._track(self.tools[picked], -self.model.extruder.lengths.retract_mm)
             job.restore = None  # a power loss ends the filament change before its restore
             job.paused_from = JobPhase.PRINTING if was_paused else None
             if was_paused:
@@ -1853,7 +1881,10 @@ class SimPrinter:
         self._log("job", f"nozzle clean purged {purge:g} mm")
 
     def _job_tool(self, job: UserJob) -> SimTool:
-        """The tool the job's current segment prints with."""
+        """The tool the job's current segment prints with: the one a power-panic resume
+        found picked, else the segment's own."""
+        if job.resumed_on is not None:
+            return self.tools[job.resumed_on]
         return self.tools[self._seg_tool(job, job.segment)]
 
     @staticmethod
@@ -1999,6 +2030,7 @@ class SimPrinter:
         in_print = isinstance(job, UserJob) and t.index in {
             *(s.tool for s in job.spec.segments),
             *(j.to for j in job.spec.spool_join),
+            job.resumed_on,
         }
         queued = any(q.tool == t.index for q in self.queue)
         if t.index == self.selected_tool or in_print or t.process is not None or queued:
@@ -2353,8 +2385,9 @@ class SimPrinter:
     def _begin_feeding(self, job: UserJob) -> None:
         if not job.primed:
             job.primed = True
+            job.resumed_on = None  # the start G-code's tool changes end it
             self._prime(job)
-        self.selected_tool = self._seg_tool(job, job.segment)
+        self.selected_tool = self._job_tool(job).index
         job.enter(JobPhase.PRINTING)
         self._show_state()
 
@@ -2469,7 +2502,7 @@ class SimPrinter:
             dt -= need / rate
             job.time_printing += need / rate
             if change is not None and change <= target:
-                job.pending_color_changes.pop(0)
+                # It stays pending until the change ends (`resume`).
                 self._log("job", f"color change at {change:g} mm")
                 self._filament_change(tool, Reason.COLOR_CHANGE)
                 return 0.0
@@ -2480,16 +2513,20 @@ class SimPrinter:
         return 0.0 if job.phase is not JobPhase.PRINTING else dt
 
     def _next_segment(self, job: UserJob) -> None:
+        """Go on to the next segment, through the file's tool change when its G-code tool
+        differs. The change's moves run when it picks the tool already picked too, as after
+        a resume on another tool: they're the file's."""
         segments = job.spec.segments
-        old = self._seg_tool(job, job.segment)
+        old = self._job_tool(job)
         job.segment += 1
-        new = self._seg_tool(job, job.segment)
-        if new == old:
-            return
-        # A G-code tool's first pick in the print stands for the first layer's tool changes.
         tool = segments[job.segment].tool
+        if tool == segments[job.segment - 1].tool:
+            return
+        job.resumed_on = None
+        new = self.tools[self._seg_tool(job, job.segment)]
+        # A G-code tool's first pick in the print stands for the first layer's tool changes.
         first = all(s.tool != tool for s in segments[: job.segment])
-        self.feed.tool_change(self, self.tools[old], self.tools[new], self._slicer(job), first)
+        self.feed.tool_change(self, old, new, self._slicer(job), first)
 
     # The sync job.
 

@@ -293,22 +293,68 @@ def test_a_snapshot_during_the_join_keeps_it():
 
 
 @pytest.mark.parametrize("model", [XL, INDX])
-def test_a_power_cut_during_the_join_resumes_on_the_join_s_tool(model):
+def test_a_power_cut_during_the_join_resumes_on_the_old_tool(model):
+    # The join maps T0 to T1 before its unload dialog, and changes to T1 only after it
+    # (`do_join`, `spool_join.cpp:256-342`). The cut finds T0 picked: INDX saves it as the
+    # active tool and the resume sets it, and the XL boots with T0's Dwarf on the head
+    # (`power_panic.cpp:380-395, 1049-1055`). The resume issues no tool change and the
+    # dialog is gone, so the join's change and purge never run, and the rest of the
+    # segment prints on the empty T0 with no runout (F29). The mapping stays for the file's
+    # next tool change to T0, which this print doesn't have.
     sim, p = make(model, [loaded(0), loaded(1)])
     start(sim, p, [(0, 100)], [Join(0, 1)])
     sim.advance(1)
     fed = p.job.fed_mm
     p.runout(0)
     p.reboot(keep_job=True)  # the counters restart at 0
-    assert p.resuming.mapped == {0: 1} and p.resuming.restore is None
+    job = p.resuming
+    assert (job.mapped, job.restore, job.resumed_on) == ({0: 1}, None, 0)
     sim.advance(100)
     assert p.state is State.FINISHED
-    # The resume picks T1, which the join mapped the print to, and the join's purge is
-    # lost. INDX's resume purges 25 in the nozzle cleaner on T1, from its untrusted gap 0;
-    # the XL's resume moves no filament. T0 is empty, so INDX's retract at the cut and the
-    # boot's idle clear count nothing on it.
-    assert counts(p) == pytest.approx([0, (25 if model == INDX else 0) + 100 - fed])
+    # INDX's resume purges 25 in the nozzle cleaner on T0, from the boot's gap 0, untrusted;
+    # its retract at the cut counts nothing. The XL's resume moves no filament. The end's
+    # 0.8 retract counts nothing either.
+    assert counts(p) == pytest.approx([(25 if model == INDX else 0) + 100 - fed, 0])
     assert p.tools[0].unload_count == 0 and p.tools[0].material is None
+    assert p.tools[1].material is not None
+
+
+def test_after_a_cut_during_the_join_the_file_s_next_change_ends_the_old_tool():
+    # T0 prints to the file's change to T2, and the join's mapping sends the file's T0 to T1
+    # after it.
+    sim, p = make(XL, [loaded(0), loaded(1), loaded(2)])
+    start(sim, p, [(0, 50), (2, 50), (0, 50)], [Join(0, 1)])
+    sim.advance(1)
+    fed = p.job.fed_mm
+    p.runout(0)
+    p.reboot(keep_job=True)
+    sim.advance(200)
+    assert p.state is State.FINISHED
+    # From the boot's gap 0, untrusted, on each tool. T0: the rest of its segment, then
+    # the ramming 4.1575 and -20 at the change. T2: its first pick's 20 and 9.238, its
+    # segment, the ramming and -20. T1: a later pick of the file's T0, 20 and 7.0076, the
+    # segment, and the tower's last ramming; the end's -0.8 counts nothing.
+    assert counts(p) == pytest.approx(
+        [50 - fed + XL_RAM, 20 + 7.0076 + 50 + XL_RAM, 20 + 9.238 + 50 + XL_RAM]
+    )
+    changes = [e.text for e in sim.events if e.text.startswith("tool change")]
+    assert changes == ["tool change T0 -> T2", "tool change T2 -> T1"]
+
+
+def test_a_power_cut_during_a_join_in_the_preheat_primes_the_join_s_tool():
+    # Inferred: the start G-code's tool changes, which the replay runs after the resume, go
+    # through the join's mapping and end the old tool's turn.
+    sim, p = make(XL, [loaded(0), loaded(1), loaded(2)])
+    start(sim, p, [(0, 10), (1, 10)], [Join(0, 2)], preheat_s=5)
+    p.runout(0)
+    p.reboot(keep_job=True)
+    assert p.resuming.resumed_on == 0
+    sim.advance(100)
+    assert p.state is State.FINISHED
+    # As `test_a_join_in_the_preheat_primes_the_join_s_tool`, with no join purge and the
+    # counters restarted before the start's moves: T2's cleanup -2 from gap 0, then its
+    # prime refills the 2 and counts 37.
+    assert counts(p) == pytest.approx([0, XL_OTHER + 9.238 + 10 + XL_RAM, XL_FIRST + 10 + XL_RAM])
 
 
 def test_a_power_cut_after_the_join_resumes_on_the_join_s_tool():
