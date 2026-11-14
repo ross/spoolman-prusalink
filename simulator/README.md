@@ -377,7 +377,8 @@ that trace. The points that matter for the bridge, in short:
   Change filament's or a spool join's unload, resumes on its own with the
   dialog gone. The print goes on through what the cut left in the tool,
   an empty tool included, with no runout. A load cut short leaves its
-  filament in. A color change in the file runs again after the resume. The
+  filament in, which is inferred: nothing in the cut moves the filament
+  back. A color change in the file runs again after the resume. The
   resume picks the tool the cut found picked, which prints until the
   file's next tool change, or until the start G-code's when the print
   hadn't primed yet. The MINI and the XL dev kit build no power panic,

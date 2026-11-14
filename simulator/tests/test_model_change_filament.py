@@ -258,6 +258,24 @@ def test_a_cut_during_a_change_on_an_unused_indx_tool_prints_on_it_to_the_next_c
     assert p.tools[2].path.loaded == (point == "load")
 
 
+@pytest.mark.parametrize("model", [XL, INDX])
+def test_a_pause_after_such_a_resume_keeps_the_tool_the_cut_found(model):
+    sim, p = make(model, [loaded(0), loaded(1, PETG)])
+    start(sim, p, Segment(0, 200), Segment(1, 50))
+    sim.advance(1)
+    cut_during_the_change(sim, p, 1, "load")
+    while p.job is None or p.job.phase is not JobPhase.PRINTING:
+        sim.tick(0.1)
+    assert p.job.resumed_on == 1
+    p.pause()
+    p.resume()
+    # Still before the file's next tool change: T1 prints on, and T0 counts nothing.
+    assert p.selected_tool == 1 and p.job.resumed_on == 1
+    at_resume = counts(p)[1]
+    sim.advance(1)
+    assert counts(p)[0] == 0 and counts(p)[1] > at_resume
+
+
 def test_the_cut_s_retract_is_on_the_picked_tool():
     """The planner forgets a stored auto-retract distance on the tool it retracts, which is
     the one on the head, not the print's own."""
