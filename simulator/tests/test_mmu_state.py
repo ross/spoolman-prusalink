@@ -74,7 +74,7 @@ def test_a_faulty_extruder_sensor_reads_empty_at_the_switch_off():
 def test_an_mmu_switched_off_lists_slot_0_and_takes_writes_to_every_slot():
     sim, p = make_mmu()
     p.set_mmu(False)
-    run_sync(sim, p, sliced(p, 'M865 N"PETG" L4\n'))
+    run_sync(sim, p, sliced(p, 'M865 S"PETG" L4\n'))
     assert p.tools[4].material.name == "PETG"
     assert listed(p) == [0]
     with pytest.raises(Invalid, match="T4 is an MMU slot, and the MMU is off"):
@@ -186,7 +186,7 @@ def test_a_sync_job_while_the_mmu_connects_auto_retracts_on_slot_0():
 
 def test_a_sync_job_with_nothing_selected_moves_nothing_counted():
     sim, p = make_mmu()
-    run_sync(sim, p, sliced(p, 'M865 N"PETG" L3\n'))
+    run_sync(sim, p, sliced(p, 'M865 S"PETG" L3\n'))
     sim.advance(5)
     assert p.tools[3].material.name == "PETG"
     assert all(t.extruded == 0 for t in p.tools.values())
@@ -290,10 +290,10 @@ def test_an_mmu_switched_off_prints_as_a_single_tool_printer():
 
 
 def test_a_plain_mmu_build_stores_slot_writes_but_lists_tool_0_alone():
-    # An MK4 with no MMU attached: `M865 I2` lands in slot 2's config, but the printer has
+    # An MK4 with no MMU attached: `M865 L2` lands in slot 2's config, but the printer has
     # slot 0 alone while the MMU setting is off, so slot 2 can't be enabled or listed.
     sim, p = make("1.4.0")
-    run_sync(sim, p, sliced(p, 'M865 I2 N"PETG"\n'))
+    run_sync(sim, p, sliced(p, 'M865 S"PETG" L2\n'))
     assert p.tools[2].material.name == "PETG" and not p.tools[2].enabled
     reason = "T2 is an MMU slot, and the MMU is off"
     assert p.to_json()["tools"][1]["actions"]["set_tool_enabled"] == reason

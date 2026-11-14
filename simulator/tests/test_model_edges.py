@@ -483,7 +483,6 @@ def test_each_state_change_is_logged_once():
             Attention(Reason.PREVIEW, detail="for printer MK4", fatal=True),
             "preview (abort only): for printer MK4",
         ),
-        (Attention(Reason.PARSE_ERROR, detail="line 1: bad"), "parse error: line 1: bad"),
         (Attention(Reason.JAM, 1), "jam tool 1"),
         (Attention(Reason.RUNOUT, 0), "runout tool 0"),
         (Attention(Reason.COLOR_CHANGE, 2), "color change tool 2"),

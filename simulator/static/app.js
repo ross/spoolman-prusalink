@@ -285,8 +285,7 @@ function renderPrinter(p) {
     ', purge ' + esc(m.purge_mm) + ' mm' + (p.high_flow ? ' (high-flow)' : '') + '</small></div>';
 
   const a = p.actions || {};
-  // Tap through stops a job held on a parse error; every other question it answers goes on.
-  const canTap = !!attn && at.reason !== 'parse error' && a.tap_through == null;
+  const canTap = !!attn && a.tap_through == null;
   h += '<div class="jobline">';
   if (job) {
     h += '<span title="' + esc(job.kind + ' ' + job.name + ' ' + ph) + '">job <b>#' + esc(job.id) + '</b> ' + esc(job.kind) + ' ' + esc(job.name) +
