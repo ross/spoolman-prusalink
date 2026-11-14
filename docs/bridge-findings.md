@@ -78,7 +78,7 @@ written.
 | 4 | BF29 | MMU: a load or print start after an unload in the same boot counts up to 40 mm less |
 | 4 | BF15 | MMU: swaps are invisible |
 | 4 | BF28 | MMU: turning the MMU off clears slot 0, whichever slot was loaded |
-| 4 | BF17 | MMU: nothing is counted after a boot until a tool change or load |
+| 4 | BF17 | MMU: after a boot, slot 0 is charged while the MMU connects, then nothing until a load or tool change |
 | 4 | BF20 | MMU printers are on the supported list as single-tool models |
 | 4 | BF18 | MMU: the sync job can wait on a question and unload the filament |
 | 4 | BF19 | MMU: slots 1 to 4 keep no UUIDs |
@@ -307,7 +307,10 @@ written.
   `sync_delay` holds the job at the first idle poll after the boot. The
   job then runs at the first later poll after the printer has been idle
   that long, so whether it misses the window depends on when that poll
-  comes. `sync_delay` is 0 by default.
+  comes. `sync_delay` is 0 by default. With an MMU3, while the MMU still
+  connects after the boot, the job's end isn't the MMU's: it auto-retracts,
+  which counts on slot 0 (F45). Once the MMU is Active, the cut's slot is
+  still at FINDA, so the job waits at the unload question first (BF18).
 - **Effect**: The user's print is lost: it never resumes, and the printer
   ends the sync job `FINISHED`. If the autostart resumes anyway, the two
   jobs collide in a way the source doesn't define.
@@ -706,9 +709,9 @@ written.
 
 Each MMU finding applies to the MK4 family, the Core One and the Core One
 L with an MMU3 turned on in the printer's settings. The simulator models
-the MMU's switch, its selected slot, its idle operations and its prints
-(F38 to F42, F46); runouts, `M600` and power panic come later in
-workstream 5. The MMU's scenario rows are T12, T13, T14 and T17.
+the MMU's switch, its selected slot, its idle operations, its prints and
+power panic (F38 to F42, F45, F46); runouts and `M600` come later in
+workstream 5. The MMU's scenario rows are T12 to T15 and T17.
 
 ### BF15. MMU: swaps are invisible
 
@@ -764,18 +767,43 @@ workstream 5. The MMU's scenario rows are T12, T13, T14 and T17.
   start, the loads, the purges and the rammings come to 234.8 and 147.6.
 - **Status**: Open.
 
-### BF17. MMU: nothing is counted after a boot until a tool change or load
+### BF17. MMU: after a boot, slot 0 is charged while the MMU connects, then nothing until a load or tool change
 
-- **What happens**: The selected slot decides which tool is credited, and
-  it's "none" after an unload and after every boot. Extrusion with no slot
-  selected isn't counted (`mmu2_mk4.cpp:175, 674`, `planner.cpp:2207`).
-  A power-panic resume is a boot too.
-- **Effect**: Usage between a boot and the next tool change or load is
-  never charged. A resumed single-color print is charged nothing from the
-  resume on.
-- **Evidence**: Read in the firmware source.
-- **Scenario rows**: C1, P12.
-- **To reproduce**: Needs workstream 5.
+- **What happens**: The planner counts each move on the selected virtual
+  tool. That's slot 0 while the MMU's setting is on but the MMU isn't
+  Active, as while it connects after a boot or `M709 S1`, and then the
+  selected slot, or none (`tool_index.cpp:140-158`,
+  `planner.cpp:2194-2220`). Every boot, `M709 S1`, unload, eject and cut
+  leaves no slot selected, and only a tool change or a load selects one
+  (`mmu2_mk4.cpp:155, 175, 674, 869-871, 913, 1013`). A power-panic resume
+  is a boot, and the power-panic data holds nothing about the slot (F45).
+  The resume's 8 mm feed back, 3.5 s after the boot, counts on slot 0
+  while the MMU still connects, else on none. The resumed print counts on
+  slot 0 until the MMU is Active, whichever slot prints, then on none. Its
+  next tool change runs from no slot: the old slot's wipe-tower unload,
+  before the `T`, counts on slot 0 or on none, the firmware's feed counts
+  on none, and the new slot counts from its load on.
+- **Effect**: Usage from a boot to the next load or tool change is charged
+  to slot 0's spool while the MMU connects, whichever slot printed, and
+  isn't charged at all after. A resumed one-color print is charged nothing
+  after its first seconds. In the simulator, with the MMU connecting for
+  10 s, a print cut in slot 1's segment counts 35.5 mm on slot 0 after the
+  boot, the 8 mm feed back and 27.5 mm of slot 1's filament, and nothing
+  on slot 1 to the print's end.
+- **Evidence**: Read in the firmware source; shown in the simulator by
+  `test_an_mmu_print_resumed_after_a_cut_is_charged_nothing_until_a_tool_change`
+  and `test_the_resume_feed_back_lands_on_slot_0_while_the_mmu_connects`
+  in `tests/test_mmu.py`, and by
+  `simulator/tests/test_mmu_power_panic.py`. How long the MMU takes to
+  connect is inferred, about 10 s from a comment at
+  `filament_sensors_handler.cpp:179`, and it decides how much lands on
+  slot 0.
+- **Scenario rows**: C1, P12, T15.
+- **To reproduce**: Those tests. A print on slots 0 and 1, cut 30 mm into
+  slot 0's 100 mm segment and resumed with the MMU Active, charges spool 1
+  nothing after the cut, and spool 2 211 mm from slot 1's load on. A print
+  on slot 2 resumed while the MMU connects charges spool 1, in slot 0,
+  7 mm for the feed back, and spool 3 nothing after the cut.
 - **Status**: Open.
 
 ### BF18. MMU: the sync job can wait on a question and unload the filament
