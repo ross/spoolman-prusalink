@@ -50,10 +50,7 @@ def preview(model: ModelInfo, text: str, severity: Severity) -> list[Failed]:
     fixed warning. A check under `ignore` asks nothing, but it is still a row when another
     check brings up the screen, as `frame_compat_checks.cpp` lists every failed check.
     """
-    checks = gcode.scan(text)
-    found = [(t, severity) for t in _failed(model, checks)]
-    if INDX_LOCK in model.checks.required and not _declares(checks, INDX_LOCK):
-        found.append(("not sliced for the INDX lock", Severity.WARN))
+    found = _failed(model, gcode.scan(text), severity)
     if all(s is Severity.IGNORE for _, s in found):
         return []
     return [Failed(t, s is Severity.ABORT) for t, s in found]
@@ -67,8 +64,12 @@ def _same(a: str, b: str) -> bool:
     return a.upper() == b.upper()
 
 
-def _failed(model: ModelInfo, checks: list[gcode.Check]) -> list[str]:
-    """The texts of the failed checks a setting governs, in the report's order."""
+def _failed(
+    model: ModelInfo, checks: list[gcode.Check], severity: Severity
+) -> list[tuple[str, Severity]]:
+    """The failed checks' texts with their severities, in the report's order: the order of
+    `GeneralCheck` in `src/feature/compatibility_checks/gcode_compatibility.hpp`, which
+    `visit_set_bits` walks."""
     wrong, older, level = None, None, 0
     for c in checks:
         if isinstance(c, gcode.ModelCheck):
@@ -86,16 +87,19 @@ def _failed(model: ModelInfo, checks: list[gcode.Check]) -> list[str]:
         out.append(f"compatibility mode for {older.name}")
     if level > GCODE_LEVEL:
         out.append(f"G-code level {level}, above {GCODE_LEVEL}")
+    if INPUT_SHAPER in model.checks.required and not _declares(checks, INPUT_SHAPER):
+        out.append("not sliced with input shaper")
+    found = [(t, severity) for t in out]
+    if INDX_LOCK in model.checks.required and not _declares(checks, INDX_LOCK):
+        found.append(("not sliced for the INDX lock", Severity.WARN))
     features = [c.name for c in checks if isinstance(c, gcode.FeatureCheck)]
     known = model.checks.features
     # The MMU is never on in the simulator, so a file sliced for one always fails.
     if MMU3 in known and any(_same(f, MMU3) for f in features):
-        out.append("sliced for an MMU3, which is off")
-    unknown = [f for f in features if not any(_same(f, k) for k in known)]
-    if unknown:
-        out.append("unsupported features: " + ", ".join(repr(f) for f in unknown))
+        found.append(("sliced for an MMU3, which is off", severity))
     # A file sliced for the HT Hotend fails only when the hotend isn't one, which is
     # printer state the simulator doesn't hold, so it's taken as satisfied.
-    if INPUT_SHAPER in model.checks.required and not _declares(checks, INPUT_SHAPER):
-        out.append("not sliced with input shaper")
-    return out
+    unknown = [f for f in features if not any(_same(f, k) for k in known)]
+    if unknown:
+        found.append(("unsupported features: " + ", ".join(repr(f) for f in unknown), severity))
+    return found

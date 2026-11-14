@@ -7,6 +7,7 @@ import pytest
 from simulator.gcode import SCAN_LINES
 from simulator.model import MODELS
 from simulator.preview import Failed, Severity, preview
+from spoolman_prusalink.printer_sync import PRINTER_MODELS, build_job, default_preamble
 
 CORE_ONE_L = MODELS["8.1.0"]
 OWN = 'M862.3 P "COREONEL"\nM862.5 P2\nM862.6 P"Input shaper"\n'
@@ -96,3 +97,32 @@ def test_a_check_past_the_scan_window_is_not_seen():
     assert rows(text) == []
     text = OWN + "G1 X1\n" * (SCAN_LINES - 4) + 'M862.3 P "MINI"\n'
     assert texts(text) == ["for printer MINI"]
+
+
+def test_a_query_line_asks_nothing():
+    preamble = default_preamble(PRINTER_MODELS["8.1.0"])
+    assert rows(build_job([*preamble, "M862.3 Q", "M862.6 Q"], [])) == []
+
+
+def test_rows_come_in_the_report_order():
+    # `GeneralCheck` order: the model, compatibility mode, the level, input shaper, the INDX
+    # lock, the MMU, then unsupported features.
+    text = 'M862.3 P "MINI"\nM862.5 P3\nM862.6 P"Tea"\nM862.6 P"MMU3"\n'
+    assert texts(text) == [
+        "for printer MINI",
+        "G-code level 3, above 2",
+        "not sliced with input shaper",
+        "sliced for an MMU3, which is off",
+        "unsupported features: 'Tea'",
+    ]
+    text = 'M862.3 P "MK4S"\nM862.6 P"Tea"\n'
+    assert texts(text, code="8.10.0") == [
+        "for printer MK4S",
+        "not sliced with input shaper",
+        "not sliced for the INDX lock",
+        "unsupported features: 'Tea'",
+    ]
+    assert texts('M862.3 P "COREONEL"\nM862.6 P"Tea"\n') == [
+        "not sliced with input shaper",
+        "unsupported features: 'Tea'",
+    ]

@@ -1111,9 +1111,10 @@ class SimPrinter:
     def cancel(self) -> None:
         self._check_cancel()
         job = self.job
-        if job.waits_for(Reason.PREVIEW):
-            # Abort at the preview: `cleanup_print` in `marlin_server.cpp` goes to IDLE
-            # with nothing parked or moved, and the job's ID stays used.
+        if job.waits_for(Reason.PREVIEW) or job.phase in (JobPhase.SCANNING, JobPhase.BLIP):
+            # Abort at the preview, or a stop before the print begins, which `print_abort`
+            # sends to `Aborting_Preview`: `cleanup_print` in `marlin_server.cpp` goes to
+            # IDLE with nothing parked or moved, and the job's ID stays used.
             self._log("action", f"cancel job {job.id}: abort at the preview")
             self.job, self.screen = None, State.IDLE
             self._show_state()

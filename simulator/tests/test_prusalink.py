@@ -433,3 +433,19 @@ def test_filament_multi_tool_skips_disabled_and_hides_uuids():
     assert "material" not in data["tools"][2]
     p.set_sensor_fault(2, True)
     assert "material" not in prusalink.filament(p)["tools"][1]
+
+
+async def test_a_cancel_during_the_scan_ends_idle_over_http(setup):
+    sim, p, client = setup
+    resp = await client.put("/api/v1/files/usb/s.gcode", data=JOB, headers=UPLOAD)
+    assert resp.status == 201
+    extruded = p.tools[0].extruded
+    p.cancel()
+    _, status = await get(client, "/api/v1/status")
+    assert status["printer"]["state"] == "IDLE" and "job" not in status
+    assert await get(client, "/api/v1/job") == (204, None)
+    _, filament = await get(client, "/api/v1/filament")
+    assert filament["tools"][0]["extruded"] == int(extruded)
+    p.start_print(PrintSpec([Segment(0, 10)]))
+    _, status = await get(client, "/api/v1/status")
+    assert status["job"]["id"] == 2

@@ -623,6 +623,27 @@ def test_abort_at_the_preview_ends_idle_with_the_id_used():
     assert p.job.id == 2
 
 
+def test_a_cancel_before_the_print_begins_ends_idle_with_nothing_moved():
+    """`print_abort` sends a stop in the scan or the start blip to `Aborting_Preview`, which
+    cleans up to IDLE with no park and no end-of-print moves."""
+    for start, seconds in (("upload", 0), ("print", 0), ("upload", 0.6), ("print", 0.6)):
+        sim, p = make()
+        tool0(p).auto_retracted = None  # so an end-of-print auto-retract would count
+        if start == "upload":
+            p.upload("s.gcode", JOB, print_after=True, overwrite=True)
+        else:
+            p.start_print(one_segment(10))
+        sim.tick(seconds)
+        assert p.job.phase is (JobPhase.SCANNING if seconds == 0 else JobPhase.BLIP)
+        extruded, gap = tool0(p).extruded, tool0(p).gap
+        p.cancel()
+        assert p.job is None and p.state is State.IDLE and p.job_counter == 1
+        assert (tool0(p).extruded, tool0(p).gap) == (extruded, gap)
+        assert tool0(p).auto_retracted is None and tool0(p).material == PLA
+        sim.tick(10)
+        assert p.state is State.IDLE and tool0(p).extruded == extruded
+
+
 def test_the_preview_takes_a_group_and_asks_in_compatibility_mode():
     # A Core One L takes a Core One file as its own, and an MMU3 name as its base model.
     for name in ("COREONE", "COREONELMMU3"):

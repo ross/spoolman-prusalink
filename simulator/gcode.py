@@ -188,7 +188,7 @@ def _command(line: str) -> Command:
     if word == "M117":
         return Message(rest.strip())
     if word in ("M862.3", "M862.5", "M862.6"):
-        return _check(word, rest)
+        return _check(word, rest) or Ignored(line)
     if word == "G28":
         return Home()
     if word == "M865":
@@ -198,12 +198,16 @@ def _command(line: str) -> Command:
     return Ignored(line)
 
 
-def _check(word: str, rest: str) -> Check:
+def _check(word: str, rest: str) -> Check | None:
     """An `M862` check as `GCodeInfo::parse_m862` reads it, which never fails: a `P` that
     isn't a quoted string reads as an empty name (`GcodeBuffer::String::get_string` in
-    `src/common/gcode/gcode_buffer.cpp`), and one that isn't a number as level 0."""
+    `src/common/gcode/gcode_buffer.cpp`), and one that isn't a number as level 0. A line
+    with no `P`, such as the query form `M862.3 Q`, checks nothing: the firmware checks
+    only inside its `P` branch."""
     m = _P.search(rest)
-    value = rest[m.end() :] if m else ""
+    if m is None:
+        return None
+    value = rest[m.end() :]
     if word == "M862.5":
         digits = _DIGITS.match(value).group(1)
         return LevelCheck(int(digits) if digits else 0)
@@ -235,7 +239,9 @@ def scan(text: str) -> list[Check]:
         if word == "M486":
             counted -= 1
         elif word in ("M862.3", "M862.5", "M862.6"):
-            checks.append(_check(word, line[m.end() :]))
+            check = _check(word, line[m.end() :])
+            if check is not None:
+                checks.append(check)
     return checks
 
 

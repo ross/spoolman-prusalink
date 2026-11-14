@@ -191,6 +191,9 @@ that trace. The points that matter for the bridge, in short:
   blip, then the job runs. Under `abort`, only `cancel` answers, as Abort.
   Abort ends in `IDLE` with no job, the ID used up and the file kept, and
   nothing parks or moves. The INDX lock is a warning whatever `checks` is.
+  A `cancel` during the scan or the start blip ends the same way, for a
+  print started from the page too. A line with no `P`, such as the query
+  form `M862.3 Q`, checks nothing.
 - INDX and XL printers are several tools with their own counters. A tool
   change isn't an unload; the incoming tool gets a purge. Neither stores
   UUIDs, so `M865.1` does nothing there. Disabled tools don't appear in
