@@ -104,7 +104,7 @@ Paths are in the firmware at `ff61540d4`.
 | Load lengths | Slow and fast feed, then the purge: Core One and Core One L 40, 20, 40; MK4 and XL 30, 50, 27; iX 40, 45, 40; INDX 15, 25, 25. A high-flow nozzle doubles the purge, except on INDX. | `include/marlin/Configuration_*_adv.h`, `pause.cpp:688-866`, `nozzle_cleaner.cpp:76-92` |
 | The purge's end | Most builds retract 8 mm after the purge. The iX purges in 5 mm steps with no retract. INDX runs `G750 E25` once, then the auto-retract. | `pause.cpp:817-888` |
 | Feed ratio | E steps over calibrated E steps: 380/400 on every build but INDX, which is 550/576. | `planner.cpp:2210-2218`, `Configuration_COREONE.h:476-484` |
-| Auto-retract | After an idle load and at the end of a print, a Nextruder's sequence leaves the filament 55 mm retracted, but the tracker's gap stops at 40. The auto-retract then counts 23 mm that never left the nozzle, or 15 mm when the gap was already at its limit, and the next forward move counts 15 mm more. INDX is exact. Off for flexible filament and when the user turns it off. | `standard_ramming_sequence_nextruder.cpp`, `marlin_server.cpp:763-770, 1045-1080` |
+| Auto-retract | After an idle load and at the end of a print, a Nextruder's sequence leaves the filament 55 mm retracted, but the tracker's gap stops at 40. The sequence first feeds back whatever the tracker says is retracted, so it starts from a gap of 0 and counts 23 mm: its 8 mm feed, which does leave the nozzle, and 15 mm that never does. When the tracker has lost the distance (the gap at its limit), only the 15 mm counts. The next forward move counts 15 mm more that never left the nozzle. INDX is exact. Off for flexible filament and when the user turns it off. | `standard_ramming_sequence_nextruder.cpp`, `ramming_sequence.cpp`, `mapi/motion.cpp`, `marlin_server.cpp:763-770, 1045-1080` |
 | Unload | A menu unload rams first. It counts about 23 mm on a Nextruder that isn't auto-retracted and about 19 mm on INDX, before the unload is recorded. | `pause.cpp` |
 | Power-panic resume | INDX purges 25 mm (`G750 E25`). The MK4 family, Core One, Core One L and iX feed back the 8 mm they retracted at the cut. The XL moves nothing. This reading disagrees with F12, which has the 25 mm on the single-tool Core One L: the F12 trace decides. | `power_panic.cpp:110-116, 480-521` |
 | Nozzle-cleaner sequences | On the iX and INDX, a file under `/usb/macros/nozzle_cleaner/` replaces a built-in sequence, the INDX purges included. The simulator assumes the built-in ones. | `gcode_loader.cpp:24-30, 105-115` |
@@ -418,9 +418,9 @@ able to show it once the workstream named is built.
    tool docked. Only a menu unload counts there. (4.)
 5. **A spool join** counts an unload on the old tool in the middle of a
    print, and the rest of the print is charged to the join's tool. (4.)
-6. **The auto-retract charges filament that wasn't used**: about 23 mm per
-   idle load and per print (15 mm when the gap is already at its limit),
-   and 15 mm more at the next forward move, on every Nextruder. (1.)
+6. **The auto-retract charges filament that wasn't used**: 15 mm per idle
+   load and per print, and 15 mm more at the next forward move, on every
+   Nextruder. The 8 mm it also counts is extruded. (1.)
 7. **MMU: swaps are invisible.** `unload_count` doesn't move, so the bridge
    never sees a spool change on a slot. (5.)
 8. **MMU: each tool change over-charges the outgoing slot** by roughly
