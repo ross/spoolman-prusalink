@@ -9,7 +9,7 @@ a time.
 
 ## Reading an entry
 
-Each finding has an ID from BF1 to BF27, for "bridge finding". The single
+Each finding has an ID from BF1 to BF29, for "bridge finding". The single
 letters are taken by the scenario rows in [scenarios.md](scenarios.md) and
 the printer behaviors (F) in [printer-behaviors.md](printer-behaviors.md).
 An ID stays with its finding when the finding moves stage or is fixed.
@@ -75,7 +75,9 @@ written.
 | 2 | BF7 | An INDX with an uncalibrated nozzle cleaner refuses every print |
 | 3 | | None of its own |
 | 4 | BF16 | MMU: each tool change over-charges the outgoing slot |
+| 4 | BF29 | MMU: a load after an unload in the same boot counts up to 40 mm less |
 | 4 | BF15 | MMU: swaps are invisible |
+| 4 | BF28 | MMU: turning the MMU off clears slot 0, whichever slot was loaded |
 | 4 | BF17 | MMU: nothing is counted after a boot until a tool change or load |
 | 4 | BF20 | MMU printers are on the supported list as single-tool models |
 | 4 | BF18 | MMU: the sync job can wait on a question and unload the filament |
@@ -325,7 +327,8 @@ written.
 
 - **Printers**: Every Nextruder: the MK3.9 and MK4 families, Core One,
   Core One Oak, Core One L, iX and XL. INDX counts its auto-retract
-  exactly.
+  exactly. With an MMU3, Load To Nozzle auto-retracts on the slot it
+  loaded (F41).
 - **What happens**: After an idle load and at the end of every print, the
   sync job included, a Nextruder runs its auto-retract ramming. It first
   feeds back what the tracker says is retracted, then counts 23 mm: an
@@ -702,25 +705,36 @@ written.
 ## MMU3
 
 Each MMU finding applies to the MK4 family, the Core One and the Core One
-L with an MMU3 turned on in the printer's settings. None can be shown
-before workstream 5, and the scenarios have no MMU rows yet.
+L with an MMU3 turned on in the printer's settings. The simulator models
+the MMU's switch, its selected slot and its idle operations (F38, F39,
+F41); its prints come later in workstream 5. The MMU's scenario rows are
+T13, T14 and T17.
 
 ### BF15. MMU: swaps are invisible
 
-- **What happens**: Tool changes, MMU unloads, ejects, cuts, `M600` and
-  spool joins leave `unload_count` alone, and the idle sensor clear is off.
-  Only turning the MMU off with an empty nozzle, the change-all unload and
-  a cold pull count one (`store_definition.cpp:258-262`,
-  `filament_sensors_handler.cpp:306`). A slot's type is what's loaded in
-  the slot (`M70X_mmu.cpp:80-82`), so swapping the spool that feeds a slot
-  shows nothing.
-- **Effect**: The bridge never sees a slot's spool change. A spool moved
-  into the slot's location stays staged (S13, S9), and the old spool is
-  charged for the new one until a claim moves it.
-- **Evidence**: Read in the firmware source; the bridge's side is
-  inferred.
-- **Scenario rows**: S1, S2, S9, S13.
-- **To reproduce**: Needs workstream 5.
+- **What happens**: An unload counts only where a slot's type is written
+  to none (`store_definition.cpp:258-263`). A tool change, Unload
+  Filament, Eject, Cut, `M600` and a spool join write no type. Load To
+  Nozzle writes back the slot's own type. Preload To MMU writes the new
+  type over the old one after its preload, with no none between
+  (`multi_filament_change.cpp:151-239`, F41). The idle sensor clear is off
+  by the MMU's setting, even while it connects
+  (`filament_sensors_handler.cpp:161-182, 303-312`). What does count: `M709
+  S0` with an empty extruder sensor, on slot 0 only (BF28), Preload's
+  unload choice, a cold pull on slot 0, a filament-stuck unload on the
+  selected slot, and `M865 I` with an empty type.
+- **Effect**: The usual swap, Eject and then Preload with the new type,
+  shows the printer only a type change. A spool moved into the slot's
+  location stays staged (S13, S9), and the old spool is charged for the
+  new one, with a drift flag for the new type, until a claim moves it.
+- **Evidence**: Read in the firmware source; shown in the simulator by
+  `test_an_mmu_slot_swap_by_eject_and_preload_counts_no_unload` in
+  `tests/test_mmu.py`.
+- **Scenario rows**: S1, S2, S9, S13, T13.
+- **To reproduce**: That test: with spool 3 moved into slot 0's location,
+  slot 0 is ejected and preloaded with PETG. No unload is recorded, spool 3
+  stays staged, and the next Load To Nozzle's 44 mm goes to spool 1, which
+  is flagged for the printer's PETG.
 - **Status**: Open.
 
 ### BF16. MMU: each tool change over-charges the outgoing slot
@@ -818,6 +832,47 @@ before workstream 5, and the scenarios have no MMU rows yet.
   `tests/test_mmu.py`: an MK4S with its MMU on reads `mmu` as true and lists
   five tools. A drift write uploads one job with `L0` to `L4`, which runs and
   sets every slot's type.
+- **Status**: Open.
+
+### BF28. MMU: turning the MMU off clears slot 0, whichever slot was loaded
+
+- **What happens**: `M709 S0` writes none to slot 0 unless the extruder's
+  sensor surely sees filament (`M70X_mmu.cpp:77-92`, F38). With an empty
+  nozzle that's an unload on slot 0, whichever slot was used last. With
+  another slot's filament in the nozzle, slot 0 keeps its type, and the
+  printer, now a single-tool one, counts every move on slot 0
+  (`tool_index.cpp:140-158`).
+- **Effect**: With an empty nozzle the bridge records an unload on slot
+  0's spool, which never left the MMU, and flags it. With slot 2 loaded,
+  the bridge charges slot 2's filament to slot 0's spool, with no flag
+  while slot 0's type matches it.
+- **Evidence**: Read in the firmware source; shown in the simulator by
+  `test_turning_the_mmu_off_with_an_empty_nozzle_unloads_slot_0` and
+  `test_turning_the_mmu_off_with_slot_2_loaded_charges_slot_0` in
+  `tests/test_mmu.py`. That the loaded slot's filament is then charged to
+  slot 0 is inferred: nothing reads the slot back.
+- **Scenario rows**: T14.
+- **To reproduce**: Those tests. With an empty nozzle, the ledger shows
+  an unload and an unconfirmed swap on slot 0's spool. With slot 2 loaded,
+  a 100 mm move after the switch-off charges 95 mm to slot 0's spool.
+- **Status**: Open.
+
+### BF29. MMU: a load after an unload in the same boot counts up to 40 mm less
+
+- **What happens**: A tool change's feed runs with no slot selected, so it
+  counts nothing and leaves the tracker's gap where it was (F39). After
+  any MMU unload the gap is 40 mm, so the load that follows fills it
+  first: Load To Nozzle counts 7 mm of its 47, where the first load after
+  a boot, from a gap of 0, counts all 47 (F41,
+  `mmu2_mk4.cpp:568-679, 961-987`).
+- **Effect**: About 38 mm, 0.11 g of 1.75 mm PLA, isn't charged to the
+  loaded slot's spool, and how much depends on what ran earlier in the
+  boot. A print's start after an unload counts less the same way.
+- **Evidence**: Read in the firmware source; shown in the simulator by
+  `test_a_load_to_nozzle_after_an_unload_counts_7` in `tests/test_mmu.py`.
+- **Scenario rows**: T17.
+- **To reproduce**: That test: Load To Nozzle, Unload Filament and Load To
+  Nozzle again on slot 0 charge 44, 19 and 7 mm.
 - **Status**: Open.
 
 ## Minor

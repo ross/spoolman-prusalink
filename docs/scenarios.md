@@ -247,6 +247,11 @@ multi-tool printer is at hand, so they run against the simulator only, which
 follows the firmware source: end to end, except T8 to T11, which unit tests cover.
 Each gets traced when the INDX arrives.
 
+An MMU3 is a multi-tool printer too: its five slots are tools 0 to 4, sharing one
+extruder, and the bridge takes it for a single-tool model (W10, BF20). T13, T14 and
+T17 come from F38, F39 and F41. Nobody here has an MMU, so they run against the
+simulator only, in unit tests (`tests/test_mmu.py`).
+
 | # | Scenario | What the bridge does | Status |
 | --- | --- | --- | --- |
 | T1 | A print with tool changes. | Charges each tool's spool the tool's own extrusion. The purge after a pickup counts on the new tool, so it's charged to that tool's spool (F20). | Simulator only; end to end, on a Core One L INDX and a five-tool XL |
@@ -260,6 +265,9 @@ Each gets traced when the INDX arrives.
 | T9 | A runout with a spool join: the old tool runs out mid-print, and the print goes on with the join's tool (F35). | The old tool's unload is a runout during a started print (P3): it opens an unconfirmed swap there and flags the spool, and with more than 5% of its net weight left in Spoolman also flags it as run out mid-print (M5a). The swap stays open after the print. The join's tool counts its purge first, which the bridge takes as that tool's print start, and the purge and the rest of the print are charged to the spool in its location with no event. BF13. | Gap (BF13); simulator only; unit (`tests/test_toolchanger_prints.py`) |
 | T10 | A filament change on another tool mid-print: Tune > Change filament names a tool the print isn't on (`M600 T<n>`, F34). | P2 or P3 on that tool: its unload opens an unconfirmed swap there, and the other tools aren't touched. On a tool the print has already extruded with, a Spoolman change during the pause confirms the swap, and the reload goes to the new spool. On a tool the print hasn't used yet, the change's ramming is that tool's first counted move in the job, so the bridge takes it as the tool's print start in the same poll as the unload and assumes the old spool reloaded: a Spoolman change during the pause is staged, and the reload is charged to the old spool. On the XL that needs the tool not fully auto-retracted, since a cold unload counts nothing; INDX always rams. BF27. | Gap (BF27); simulator only; unit (`tests/test_toolchanger_prints.py`) |
 | T11 | Change all on a toolchanger: several tools swapped in one operation (F37). | Each changed tool is a swap on its own: S1 where its new spool was already moved into the tool's location, S2 where Spoolman changes after. A changed tool with no spool assigned holds its usage, as in S6. The other tools aren't touched. | Simulator only; unit (`tests/test_change_all.py`) |
+| T13 | A slot swapped on an MMU: Eject, then Preload To MMU with the new type (F41). | Nothing: neither writes none, so the printer counts no unload, and Preload's new type is only a type change. A spool moved into the slot's location stays staged (S13), and the old spool is charged for the next load and flagged for the printer's new type. BF15. | Gap (BF15); simulator only; unit |
+| T14 | The MMU turned off in the printer's menu (F38). | With an empty extruder the printer clears slot 0's type, so the bridge records an unload on slot 0's spool, opens an unconfirmed swap there and flags it, whichever slot was used. With another slot's filament in the extruder, slot 0 keeps its type, and the printer counts every move on slot 0, so the bridge charges that filament to slot 0's spool. BF28. | Gap (BF28); simulator only; unit |
+| T17 | Load To Nozzle on an MMU after an unload in the same boot (F41). | Charges the slot's spool 7 mm of the 47 mm load: the unload left the tracker's gap at 40, and the tool change's feed, with no slot selected, didn't move it. The first load after a boot is charged all 47. BF29. | Gap (BF29); simulator only; unit |
 
 ## Out of scope
 
