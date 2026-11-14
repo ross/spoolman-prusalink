@@ -300,8 +300,11 @@ written.
   the printer printing and gives the resume up, unless the USB drive, the
   temperatures and the screen are all ready by then. Then it resumes over
   the running job: its check that the printer is idle is a debug assertion
-  (`print_utils.cpp:75-79`, `power_panic.cpp:269-271`). `sync_delay`, 0 by
-  default, holds the job only when it's longer than the window.
+  (`print_utils.cpp:75-79`, `power_panic.cpp:269-271`). Any positive
+  `sync_delay` holds the job at the first idle poll after the boot. The
+  job then runs at the first later poll after the printer has been idle
+  that long, so whether it misses the window depends on when that poll
+  comes. `sync_delay` is 0 by default.
 - **Effect**: The user's print is lost: it never resumes, and the printer
   ends the sync job `FINISHED`. If the autostart resumes anyway, the two
   jobs collide in a way the source doesn't define.

@@ -131,6 +131,10 @@ BAD = {
     ),
     "negative number": ("purge_mm = -1\n" + printer(), "purge_mm must be a number of at least 0"),
     "time scale zero": ("time_scale = 0\n" + printer(), "time_scale must be greater than 0"),
+    "resume before the firmware's first try": (
+        "panic_idle_seconds = 1\n" + printer(),
+        "panic_idle_seconds must be at least 1.5",
+    ),
     "port as string": (printer('port = "80"'), "printers[0].port must be an integer"),
     "port is control port": (printer("port = 8000"), "printers[0].port 8000 is already used"),
     "duplicate port": (

@@ -421,6 +421,9 @@ LOAD_LENGTHS = ("slow_load_mm", "fast_load_mm", "purge_mm")
 POSITIVE_SETTINGS = frozenset({"time_scale", "load_rate_mm_s", "print_rate_mm_s"})
 
 
+PANIC_RETRY_SECONDS = 1.5  # `rescan_delay` in `src/common/print_utils.cpp`
+
+
 @dataclass
 class Settings:
     """The simulation's settings. A field that defaults to None overrides a value of the
@@ -445,7 +448,7 @@ class Settings:
     sync_job_seconds: float = 3.0
     # IDLE with no job after a power-panic boot, until the autostart resumes the print: it
     # tries every 1.5 s (`rescan_delay` in `print_utils_loop`, `src/common/print_utils.cpp`).
-    panic_idle_seconds: float = 1.5
+    panic_idle_seconds: float = PANIC_RETRY_SECONDS
     recover_seconds: float = 2.0  # BUSY while a power-panic resume heats and homes
     unpark_seconds: float = 1.0  # PAUSED while the head unparks on a power-panic resume
     start_blip: bool = True
@@ -468,6 +471,10 @@ class Settings:
                 raise Invalid(f"{key} must be a number of at least 0")
             elif key in POSITIVE_SETTINGS and value <= 0:
                 raise Invalid(f"{key} must be greater than 0")
+        # The autostart's first try comes `rescan_delay` after the boot, never sooner
+        # (`print_utils_loop` in `src/common/print_utils.cpp`).
+        if self.panic_idle_seconds < PANIC_RETRY_SECONDS:
+            raise Invalid(f"panic_idle_seconds must be at least {PANIC_RETRY_SECONDS:g}")
 
     def update(self, values: dict[str, Any]) -> None:
         """Apply a subset of fields. A bad one raises and changes nothing."""
@@ -1490,12 +1497,14 @@ class SimPrinter:
         self.job, self.resuming, self.screen = None, None, State.IDLE
         self.boot()
         if held is not None:
-            # The bed decides at each boot (`auto_recover` in `resume_print`). A paused print
-            # stays PAUSED.
-            if held.paused_from is None and cold_bed:
+            # The bed decides at each boot, for a paused print too (`auto_recover` in
+            # `resume_print`).
+            if cold_bed:
                 held.enter(JobPhase.AWAIT_RESUME, Attention(Reason.COLD_BED))
             elif held.paused_from is None:
                 held.enter(JobPhase.RECOVER)
+            else:
+                held.enter(JobPhase.PAUSED)
             self.resuming, self.resume_in = held, self.settings.panic_idle_seconds
             self._log("job", f"job {held.id} resumes in {self.resume_in:g} s")
         self._show_state()

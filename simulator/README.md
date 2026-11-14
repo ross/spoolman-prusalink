@@ -298,7 +298,7 @@ that trace. The points that matter for the bridge, in short:
   with no filament moved. The MINI and the XL dev kit build no power panic,
   so there a cut drops the job and the printer boots idle, as a plain
   reboot does. With `cold_bed`, the resume waits in `ATTENTION` for
-  `resume` before recovering. The page's **Power-loss resume** sends
+  `resume` before recovering, for a print that was paused too. The page's **Power-loss resume** sends
   `cold_bed` from its **cold bed** checkbox, and **Resume** continues that
   wait.
 - An upload during the start blip is accepted and dropped: the firmware's

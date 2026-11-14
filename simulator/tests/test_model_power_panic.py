@@ -311,13 +311,41 @@ def test_a_paused_print_moves_nothing_and_comes_back_paused(model):
     assert not any(s.startswith(("fed back", "nozzle clean")) for s in job_log(sim))
 
 
-def test_a_paused_print_stays_paused_through_a_cut_in_the_window():
+def test_a_paused_print_with_a_cold_bed_waits_for_the_user_first():
+    """`auto_recover` doesn't look at whether the print was paused (`resume_print`)."""
     sim, p = printing()
     p.pause()
+    p.reboot(keep_job=True, cold_bed=True)
+    sim.tick(WINDOW)
+    assert p.state is State.ATTENTION and p.job.phase is JobPhase.AWAIT_RESUME
+    p.resume()
+    assert p.state is State.BUSY
+    sim.tick(p.settings.recover_seconds + 0.01)
+    assert p.state is State.PAUSED and p.tools[0].extruded == 0
+    assert not any(s.startswith(("fed back", "nozzle clean")) for s in job_log(sim))
+
+
+@pytest.mark.parametrize("paused", [False, True])
+def test_the_bed_decides_again_at_a_cut_in_the_window(paused):
+    sim, p = printing()
+    if paused:
+        p.pause()
+    # Warm, then cold: the resume waits for the user.
     p.reboot(keep_job=True)
     p.reboot(keep_job=True, cold_bed=True)
-    sim.tick(WINDOW + p.settings.recover_seconds + 0.01)
-    assert p.state is State.PAUSED
+    sim.tick(WINDOW)
+    assert p.state is State.ATTENTION and p.job.phase is JobPhase.AWAIT_RESUME
+
+    sim, p = printing()
+    if paused:
+        p.pause()
+    # Cold, then warm: it resumes on its own.
+    p.reboot(keep_job=True, cold_bed=True)
+    p.reboot(keep_job=True)
+    sim.tick(WINDOW)
+    assert p.state is State.BUSY and p.job.phase is JobPhase.RECOVER
+    sim.tick(p.settings.recover_seconds + 0.01)
+    assert p.job.phase is (JobPhase.PAUSED if paused else JobPhase.UNPARK)
 
 
 # The MINI and the XL dev kit build no power panic (HAS_POWER_PANIC in

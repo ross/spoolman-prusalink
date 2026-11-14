@@ -130,9 +130,9 @@ firmware update.
   that window on the picked tool. The firmware's autostart tries every
   1.5 s and gives up after 100 s (`print_utils.cpp:67-82`); the simulator
   resumes at the first try, delays the resume while a menu load or unload
-  runs, and drops it when a print starts in the window. A paused print
-  reads `BUSY`, then `PAUSED`, and a cold bed reads `ATTENTION` as soon as
-  the window ends.
+  runs, and drops it when a print starts in the window. A cold bed
+  reads `ATTENTION` as soon as the window ends, and a paused print reads
+  `BUSY`, then `PAUSED`, after the cold bed's wait if there is one.
 - An uploaded file's job is counted at once. When the scan ends, the
   print preview checks the file's `M862` lines: the model by compatibility
   group, the G-code level, input shaper, the INDX lock, the MMU3 feature
