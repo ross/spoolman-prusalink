@@ -54,17 +54,22 @@ def spec(*segments: tuple, **kw) -> PrintSpec:
     return PrintSpec([Segment(*s) for s in segments], preheat_s=kw.pop("preheat_s", 0), **kw)
 
 
-def start(sim, p, print_spec: PrintSpec) -> None:
-    """Start the print and answer Print on the tools-mapping screen, which an Active MMU
-    shows for any print that has segments."""
+def start(sim, p, print_spec: PrintSpec, question: Reason | None = Reason.TOOLS_MAPPING) -> None:
+    """Start the print and answer its preview's `question` with `tap_through`: Print on the
+    tools-mapping screen, which an Active MMU shows for any print that has segments when
+    FINDA sees no filament, or No at the MMU's unload question when it does, which prints
+    with no mapping screen. With `question` None the preview asks nothing."""
     p.start_print(print_spec)
     sim.tick(0.5)
-    assert p.job.waits_for(Reason.TOOLS_MAPPING) and p.job.attention.detail is None
+    if question is None:
+        assert p.job.attention is None
+        return
+    assert p.job.waits_for(question)
     p.tap_through()
 
 
-def finish(sim, p, print_spec: PrintSpec) -> None:
-    start(sim, p, print_spec)
+def finish(sim, p, print_spec: PrintSpec, question: Reason | None = Reason.TOOLS_MAPPING) -> None:
+    start(sim, p, print_spec, question)
     sim.advance(100)
     assert p.state is State.FINISHED
 
@@ -168,9 +173,11 @@ def test_a_single_tool_file_is_loaded_and_unloaded_by_the_firmware():
 
 
 def test_a_single_tool_file_prints_on_the_slot_already_selected():
-    # With a slot selected the firmware loads nothing, and the file prints on that slot.
+    # The extruder's sensor sees filament and the file names no type, so the preview asks
+    # nothing and shows no mapping screen. With a slot selected the firmware loads nothing,
+    # and the file prints on that slot.
     sim, p = make_mmu(types={0: PLA, 2: PETG}, slot=2)
-    finish(sim, p, spec((0, 40), single_tool_file=True))
+    finish(sim, p, spec((0, 40), single_tool_file=True), question=None)
     assert counts(p)[0] == 0
     assert counts(p)[2] == pytest.approx(40 + 20)
     assert p.selected_tool is None and not p.mmu.path.loaded
@@ -192,9 +199,19 @@ def test_a_stopped_print_unloads_while_it_reads_printing():
     assert p.state is State.STOPPED and p.tools[0].unload_count == 0
 
 
+def run_sync_past_the_question(sim, p) -> None:
+    """Run a sync job on an MMU whose FINDA sees filament: No at the preview's unload
+    question runs it with the filament in place."""
+    run_sync(sim, p, sliced(p, ""))
+    assert p.job.waits_for(Reason.MMU_LOADED)
+    p.tap_through()
+    sim.tick(0.8)
+    assert p.job.phase is JobPhase.RUN
+
+
 def test_a_stopped_sync_job_on_a_loaded_mmu_unloads():
     sim, p = make_mmu(types={0: PLA, 2: PETG}, slot=2)
-    run_sync(sim, p, sliced(p, ""))
+    run_sync_past_the_question(sim, p)
     p.cancel()
     # The stop retracts 8 on slot 2, then `M702 W2` counts its ramming's 20 and unloads.
     assert p.state is State.PRINTING and not p.mmu.path.loaded and p.selected_tool is None
@@ -206,7 +223,7 @@ def test_a_stopped_sync_job_on_a_loaded_mmu_unloads():
 
 def test_a_finished_sync_job_leaves_the_filament():
     sim, p = make_mmu(types={0: PLA, 2: PETG}, slot=2)
-    run_sync(sim, p, sliced(p, ""))
+    run_sync_past_the_question(sim, p)
     sim.advance(5)
     assert p.state is State.FINISHED
     assert p.selected_tool == 2 and p.mmu.fed == 2 and p.mmu.path.loaded
@@ -264,7 +281,7 @@ def test_a_print_with_a_slot_already_selected_changes_from_it():
     # at gap 40.
     loaded = 47 + 8 + 15
     assert counts(p)[1] == pytest.approx(loaded) and p.selected_tool == 1
-    finish(sim, p, spec((0, 20), (1, 20)))
+    finish(sim, p, spec((0, 20), (1, 20)), question=Reason.MMU_LOADED)
     # The start's -2 counts on slot 1, at gap 40. Its `T0` retracts 80 on slot 1, which
     # forgets the stored 55, and the feed counts 206.9 on slot 1. Slot 0 then prints as in a
     # print from none, and slot 1's first pick, segment and tower unload follow.

@@ -13,6 +13,7 @@ from simulator.model import (
     JobPhase,
     Join,
     PrintSpec,
+    Reason,
     Segment,
     SimPrinter,
     SimTool,
@@ -36,6 +37,7 @@ PRINTER_CALLS: dict[str, Callable[[SimPrinter], None]] = {
     "tap_through": lambda p: p.tap_through(),
     "set_mmu": lambda p: p.set_mmu(not (p.mmu and p.mmu.on)),
     "preload_all": lambda p: p.preload_all("PETG"),
+    "unload_first": lambda p: p.unload_first(),
 }
 TOOL_CALLS: dict[str, Callable[[SimPrinter, int], None]] = {
     "load": lambda p, i: p.load(i, source="preset", name="PLA"),
@@ -333,6 +335,22 @@ def mmu_sync_job():
     return sim, p
 
 
+def mmu_unload_question():
+    """A sync job on an MMU with slot 2 loaded waits on the preview's unload question."""
+    sim, p = mmu_loaded()
+    p.upload("x.gcode", sliced(p, ""), print_after=True, overwrite=False)
+    run(sim, 1)
+    assert p.job.waits_for(Reason.MMU_LOADED)
+    return sim, p
+
+
+def mmu_preview_unloading():
+    """Yes at the unload question: the MMU unloads, BUSY with the job hidden."""
+    sim, p = mmu_unload_question()
+    p.unload_first()
+    return sim, p
+
+
 def mmu_sensors_off():
     sim, p = make_mmu()
     p.set_sensors(False)
@@ -348,6 +366,8 @@ SITUATIONS = [
     mmu_connecting,
     mmu_off,
     mmu_sync_job,
+    mmu_unload_question,
+    mmu_preview_unloading,
     mmu_sensors_off,
     idle,
     loading,

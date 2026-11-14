@@ -3502,6 +3502,504 @@ using ScreenMenuFilamentMMU__ = ScreenMenu<GuiDefaults::MenuFooter, MI_RETURN,
     MI_FILAMENT_MANAGEMENT>;
 """  # noqa: E501 (verbatim firmware lines)
 
+# `marlin_print_preview.cpp`, excerpts: the filament check before a print and the preview's
+# state machine, with the MMU's unload question and its answers.
+MARLIN_PRINT_PREVIEW_CPP = """\
+IPrintPreview::State PrintPreview::stateFromFilamentPresence() const {
+
+#if HAS_MMU2()
+    if (FSensors_instance().HasMMU()) {
+        if (!config_store().fsensor_enabled.get()) {
+            return State::checks_done;
+        }
+
+        buddy::gcode_compatibility::CompatibilityReport report;
+        report.generate_toolmapping_only({});
+
+        // with MMU, its only possible to check that filament is properly unloaded, no check of filaments presence in each "tool"
+        if (FSensors_instance().MMUReadyToPrint()) {
+            return State::checks_done;
+        } else if (GCodeInfo::getInstance().is_singletool_gcode()
+            && FSensors_instance().WhereIsFilament() == MMU2::FilamentState::AT_FSENSOR
+            // only allow this shortcut print start if filament type is matching
+            && !report.failed(buddy::gcode_compatibility::VirtualToolCheck::filament_type) //
+        ) {
+            // beware: State::checks_done shows the toolmapping screen.
+            // We don't want that in MMU mode printing a single material gcode with filament already loaded in the nozzle.
+            // In such a case we want to avoid toolmapping and start the print right away instead -> set State::done and not checks_done
+            return State::done;
+        } else {
+            // Request removal of the inserted filament, esp. when:
+            // - starting a multi-material print
+            // - singlematerial print's material type not matching the inserted filament
+            return State::mmu_filament_inserted_wait_user;
+        }
+    } else
+#endif
+    {
+        if (!config_store().fsensor_enabled.get()) {
+            return stateFromFilamentType();
+        }
+        if (tools_mapping::is_tool_mapping_possible()) {
+            return stateFromFilamentType(); // filament loaded/type checks are handled by the tools_mapping screen
+        }
+
+        // no MMU, do regular check of filament presence in each tool
+        for (auto virtual_tool : VirtualToolIndex::all()) {
+            if (check_extruder_need_filament_load_tools_mapping(virtual_tool)) {
+                return State::filament_not_inserted_wait_user;
+            }
+        }
+        return stateFromFilamentType();
+    }
+}
+
+PrintPreview::Result PrintPreview::Loop() {
+    if (GetState() == State::inactive) {
+        return Result::Inactive;
+    }
+
+    const uint32_t curr_ms = ticks_ms();
+    if (ticks_diff(curr_ms, last_run) < max_run_period_ms) {
+        return stateToResult();
+    }
+    last_run = curr_ms;
+    const Response response = GetResponse();
+
+    auto &gcode_info = GCodeInfo::getInstance();
+
+    switch (GetState()) {
+
+    case State::inactive: // cannot be, but have it defined to enumerate all states
+        return Result::Inactive;
+
+    case State::init:
+        gcode_info_scan::start_scan();
+
+        // Reset print progress to 0. Need to be at this point because Connect is already starting to snitch the info.
+        oProgressData.mInit();
+
+        ChangeState(State::loading);
+        if (skip_if_able > marlin_server::PreviewSkipIfAble::no) {
+            // if skip print confirmation was requested, mark the print as started immediately.
+            // If not, it will be started later when user clicks print
+            return Result::MarkStarted;
+        }
+        break;
+
+    case State::download_wait: {
+        if (response == Response::Quit) {
+            gcode_info_scan::cancel_scan();
+            ChangeState(State::inactive);
+            return Result::Abort;
+        }
+
+        if (gcode_info.has_error()) {
+            ChangeState(State::file_error_wait_user);
+            break;
+
+        } else if (!gcode_info.can_be_printed()) {
+            // Wait till we have downloaded enough
+            break;
+        }
+
+        const auto prefetch_ready = marlin_server::media_prefetch.check_ready_to_start_print();
+        if (prefetch_ready == MediaPrefetchManager::ReadyToStartPrintResult::needs_fetching) {
+            // Make sure we have the prefetch buffer full before start the print
+            // If we got into the "downloading" phase, do the prefetch checking here, because we're waiting for the file to download more
+            marlin_server::media_prefetch.issue_fetch();
+            break;
+
+        } else if (prefetch_ready == MediaPrefetchManager::ReadyToStartPrintResult::error) {
+            // This is a bit hacky way, but the error reporting is done through gcode_info, so we gotta put the error there.
+            gcode_info.set_error(N_("The file is corrupt."));
+            ChangeState(State::file_error_wait_user);
+            break;
+        }
+
+        ChangeState(State::loading);
+        break;
+    }
+
+    case State::loading: {
+        if (gcode_info_scan::scan_start_result() == gcode_info_scan::ScanStartResult::not_started) {
+            // Wait for the gcode scan to start
+            break;
+        }
+
+        if (gcode_info.has_error()) {
+            ChangeState(State::file_error_wait_user);
+            break;
+
+#if HAS_E2EE_SUPPORT()
+        } else if (gcode_info.has_identity_info()) {
+            ChangeState(State::untrusted_identity);
+            break;
+#endif
+        } else if (!gcode_info.can_be_printed()) {
+            // The file is not fully downloaded, wait till we have downloaded enough for printing
+            ChangeState(State::download_wait);
+            break;
+
+        } else if (!gcode_info.is_loaded()) {
+            // Wait for the gcode info to fully load
+            break;
+        }
+        const auto prefetch_ready = marlin_server::media_prefetch.check_ready_to_start_print();
+        if (prefetch_ready == MediaPrefetchManager::ReadyToStartPrintResult::needs_fetching) {
+            // Make sure we have the prefetch buffer full before start the print
+            // If we got into the "downloading" phase, do the prefetch checking here, because we're waiting for the file to download more
+            marlin_server::media_prefetch.issue_fetch();
+            break;
+
+        } else if (prefetch_ready == MediaPrefetchManager::ReadyToStartPrintResult::error) {
+            // This is a bit hacky way, but the error reporting is done through gcode_info, so we gotta put the error there.
+            gcode_info.set_error(N_("The file is corrupt."));
+            ChangeState(State::file_error_wait_user);
+            break;
+        }
+
+#if HAS_SELFTEST()
+        // We're ready to print now
+        ChangeState((skip_if_able > marlin_server::PreviewSkipIfAble::no) ? stateFromSelftestCheck() : State::preview_wait_user);
+#else
+        // #error dead code found by automatic analyses (see BFW-5461)
+        ChangeState(State::preview_wait_user);
+#endif
+        break;
+    }
+
+    case State::preview_wait_user:
+        switch (response) {
+
+        case Response::Continue: // no difference in state machine, some checks will not be run if tools_mapping is possible
+        case Response::Print:
+            ChangeState(stateFromSelftestCheck());
+            if (skip_if_able == marlin_server::PreviewSkipIfAble::no) {
+                // If print wasn't maked as started immediately, mark it now
+                return Result::MarkStarted;
+            }
+            break;
+
+        case Response::Back:
+            ChangeState(State::inactive);
+            return Result::Abort;
+
+        default:
+            break;
+        }
+
+        // Periodically kindly ask the prefetch thread to check if the file is still valid and update GCodeInfo::has_error
+        if (ticks_diff(curr_ms, last_still_valid_check_ms) > 1000 && !still_valid_check_job.is_active()) {
+            last_still_valid_check_ms = curr_ms;
+
+            still_valid_check_job.issue([](AsyncJobExecutionControl &) {
+                GCodeInfo::getInstance().check_still_valid();
+            });
+        }
+
+        // Still check for file validity - file could be downloaded enough for the info to show,
+        // but the transfer might fail and we want to prevent the user from start the print then
+        if (gcode_info.has_error()) {
+            ChangeState(State::file_error_wait_user);
+            break;
+        }
+        break;
+
+    case State::unfinished_selftest_wait_user:
+        switch (response) {
+
+        case Response::Ignore:
+            ChangeState(stateFromUpdateCheck());
+            break;
+
+        case Response::Calibrate:
+            marlin_server::request_calibrations_screen();
+            // There is currently no way to keep the FSM open while GUI screen
+            // such as `Calibrations & Tests` is being shown.
+            // Let's just close the FSM and be done with it.
+            ChangeState(State::inactive);
+            return Result::Abort;
+
+        case Response::_none:
+            break;
+
+        default:
+            bsod_unreachable();
+        }
+        break;
+
+    case State::new_firmware_available_wait_user:
+        switch (response) {
+
+        case Response::Continue:
+            ChangeState(stateFromPrinterCheck());
+            break;
+
+        default:
+            // TODO this should be handled more generally with a possibility to set timeout for specific state, but this should work for now and is MUCH easier
+            if (ticks_ms() >= new_firmware_open_ms + new_firmware_timeout_ms) {
+                ChangeState(stateFromPrinterCheck());
+            }
+            break;
+        }
+        break;
+
+#if HAS_TOOL_MAPPING()
+    case State::tools_mapping_wait_user:
+        switch (response) {
+
+        case Response::Abort:
+            ChangeState(State::inactive);
+            tools_mapping_cleanup();
+            return Result::Abort;
+
+        case Response::Print:
+            tools_mapping_cleanup(true);
+            ChangeState(State::done);
+            break;
+
+        default:
+            break;
+        }
+        break;
+#endif
+
+    case State::gcode_invalid_wait_user:
+    case State::gcode_invalid_wait_user_abort:
+        switch (response) {
+
+        case Response::Print:
+            // Resume the check chain right after the printer check that sent us here.
+#if HAS_WASTEBIN_FILL_TRACKING()
+            ChangeState(stateFromWastebinCheck());
+#else
+            ChangeState(stateFromFilamentPresence());
+#endif
+            break;
+
+        case Response::Abort:
+            ChangeState(State::inactive);
+            return Result::Abort;
+
+        default:
+            break;
+        }
+        break;
+
+#if HAS_WASTEBIN_FILL_TRACKING()
+    case State::wastebin_overfill_wait_user:
+        switch (response) {
+
+        case Response::Print:
+            // Print anyway and keep mid-print monitoring on.
+            ChangeState(stateFromFilamentPresence());
+            break;
+
+        case Response::Ignore:
+            // Print anyway and stop monitoring for this print (e.g. remote user who will empty later).
+            WastebinWatcher::instance().set_ignored_for_print(true);
+            ChangeState(stateFromFilamentPresence());
+            break;
+
+        case Response::Empty:
+            // Outside a print M1986 leaves the head parked; the start gcode homes anyway.
+            marlin_server::enqueue_gcode("M1986");
+            ChangeState(State::wastebin_emptying);
+            break;
+
+        case Response::_none:
+            break;
+
+        default:
+            bsod_unreachable();
+        }
+        break;
+
+    case State::wastebin_emptying:
+        // M1986 runs as a gcode; wait for the gcode queue to drain before continuing.
+        if (marlin_server::is_processing()) {
+            break;
+        }
+        ChangeState(stateFromFilamentPresence());
+        break;
+#endif
+
+    case State::filament_not_inserted_wait_user:
+        switch (response) {
+
+        case Response::FS_disable:
+            FSensors_instance().set_enabled_global(false);
+            ChangeState(State::checks_done);
+            break;
+
+        case Response::No:
+            ChangeState(State::inactive);
+            return Result::Abort;
+
+        case Response::Yes:
+            if (!queue_filament_gcodes(QueueFilamentGCodesMode::load)) {
+                // The function changed the FSM state, reassert
+                ChangeState(State::filament_not_inserted_wait_user);
+                break;
+            }
+            ChangeState(State::filament_not_inserted_load);
+            break;
+
+        default:
+            break;
+        }
+        break;
+
+    case State::filament_not_inserted_load:
+        if (!filament_gcodes::InProgress::Active()) {
+            ChangeState(stateFromFilamentType());
+        }
+        break;
+
+#if HAS_MMU2()
+    case State::mmu_filament_inserted_wait_user:
+        switch (response) {
+
+        case Response::No:
+            ChangeState(State::inactive);
+            return Result::Inactive;
+
+        case Response::Yes: {
+
+            ChangeState(State::mmu_filament_inserted_unload);
+            // If filament is really loaded, MMU knows exactly the physical slot index.
+            // Silently assume, that the MMU is up and running -> therefore it's Set_Get_Selector_Slot register has already been read upon comm start
+            const uint8_t physical_slot_index = MMU2::mmu2.SelectorSlot();
+            // M702 translates given tool index through toolmapping -> need to hack around it (invert it).
+            // The tool_mapper should either return the same index in case of a freshly booted printer (or no mapping changes)
+            // or a valid mapping from the last print (which is also correct in this case).
+            const uint8_t gcode_slot_index = tool_mapper.to_gcode(physical_slot_index);
+            marlin_server::enqueue_gcode_printf("M702 W0 T%" PRIu8, gcode_slot_index); // unload, no return or cooldown
+        } break;
+
+        default:
+            break;
+        }
+        break;
+
+    case State::mmu_filament_inserted_unload:
+        if (!filament_gcodes::InProgress::Active()) {
+            ChangeState(State::checks_done);
+        }
+        break;
+#endif
+
+    case State::wrong_filament_wait_user: // change / ignore / abort
+        switch (response) {
+
+        case Response::Change:
+            if (!queue_filament_gcodes(QueueFilamentGCodesMode::change)) {
+                // The function changed the FSM state, reassert
+                ChangeState(State::wrong_filament_wait_user);
+                break;
+            }
+            ChangeState(State::wrong_filament_change);
+            break;
+
+        case Response::Ok:
+            ChangeState(State::checks_done);
+            break;
+
+        case Response::Abort:
+            ChangeState(State::inactive);
+            return Result::Abort;
+
+        default:
+            break;
+        }
+        break;
+
+    case State::wrong_filament_change:
+        if (!filament_gcodes::InProgress::Active()) {
+            PreheatStatus::Result res = PreheatStatus::ConsumeResult();
+            if (res == PreheatStatus::Result::Aborted || res == PreheatStatus::Result::DidNotFinish) {
+                ChangeState(State::wrong_filament_wait_user); // Return back to wrong filament type dialog
+            } else {
+                ChangeState(State::checks_done);
+            }
+        }
+        break;
+
+#if HAS_E2EE_SUPPORT()
+    case State::untrusted_identity:
+        if (response == Response::Abort) {
+            ChangeState(State::inactive);
+            return Result::Abort;
+        } else if (response == Response::Yes) {
+            const auto &info = gcode_info.get_identity_info();
+            if (info.one_time) {
+                e2ee::save_identity_key_temporary(info);
+            } else {
+                e2ee::save_identity_key(info);
+            }
+            ChangeState(State::preview_wait_user);
+            break;
+        } else if (response == Response::No) {
+            e2ee::save_identity_key_temporary(gcode_info.get_identity_info());
+            ChangeState(State::preview_wait_user);
+            break;
+        }
+        break;
+#endif
+
+    case State::file_error_wait_user:
+        // Only one possible response -> abort
+        if (response == Response::Abort) {
+            ChangeState(State::inactive);
+            return Result::Abort;
+        }
+        break;
+
+    case State::checks_done:
+#if PRINTER_IS_PRUSA_iX()
+        // We've removed reset_bounding_rect at the end of the print for the iX (in marlin_server.cpp::finalize_print).
+        // So now, just to make sure, we reset the bounding rect at the start if we don't see it being set in the gcode.
+        // BFW-5085
+        if (!GCodeInfo::getInstance().get_bed_preheat_area().has_value()) {
+            PrintArea::reset_bounding_rect();
+        }
+#endif
+
+        if (tools_mapping::is_tool_mapping_possible()) {
+#if HAS_SPOOL_JOIN() && HAS_TOOL_MAPPING()
+            buddy::gcode_compatibility::CompatibilityReport compatibility;
+            compatibility.generate_toolmapping_only({});
+
+            // we can skip tools mapping if there is not warning/error in global tools mapping
+            if ((skip_if_able >= marlin_server::PreviewSkipIfAble::tool_mapping) && compatibility.compatibility_level() == buddy::compatibility_checks::CompatibilityLevel::fully_compatible) {
+                ChangeState(State::done);
+            } else {
+                ChangeState(State::tools_mapping_wait_user);
+            }
+
+            // start preheating bed to save time in absorbing heat
+            if (GCodeInfo::getInstance().get_bed_preheat_temp().has_value()) {
+                if (GCodeInfo::getInstance().get_bed_preheat_area().has_value()) {
+                    PrintArea::set_bounding_rect(GCodeInfo::getInstance().get_bed_preheat_area().value());
+                }
+
+                marlin_server::set_target_bed(GCodeInfo::getInstance().get_bed_preheat_temp().value());
+            }
+            break;
+#endif
+        }
+        // else go to print, checks are done
+        ChangeState(State::done);
+        break;
+    case State::done:
+        ChangeState(State::inactive);
+        return Result::Print;
+    }
+    return stateToResult();
+}
+"""  # noqa: E501 (verbatim firmware lines)
+
 FILES = {
     read.MODELS_FILE: MODELS_HPP,
     read.GCODE_INFO_FILE: GCODE_INFO_HPP,
@@ -3553,6 +4051,7 @@ FILES = {
     "src/common/appmain.cpp": APPMAIN_CPP,
     "src/feature/filament_sensor/filament_sensors_handler.cpp": FILAMENT_SENSORS_HANDLER_CPP,
     "src/common/marlin_server.cpp": MARLIN_SERVER_CPP,
+    "src/common/marlin_print_preview.cpp": MARLIN_PRINT_PREVIEW_CPP,
     "src/gui/MItem_mmu.cpp": MITEM_MMU_CPP,
     "src/feature/openprinttag/request_manager.cpp": REQUEST_MANAGER_CPP,
     "src/feature/openprinttag/tool_tag_buddy.cpp": TOOL_TAG_BUDDY_CPP,

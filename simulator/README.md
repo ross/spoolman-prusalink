@@ -116,7 +116,7 @@ Actions: `load`, `unload`, `load_to_nozzle`, `eject`, `cut`, `extrude`, `retract
 `change_filament`, `clear_jam`, `reboot`, `set_power`, `set_fault`, `set_firmware`,
 `set_sensor_fault`, `set_stuck_write`, `set_tool_enabled`,
 `set_checks`, `set_sensors`, `set_mmu`, `counter_step_back`,
-`set_extruded_at_unload`, `tap_through`. Parameter names are the keyword arguments of the methods with
+`set_extruded_at_unload`, `tap_through`, `unload_first`. Parameter names are the keyword arguments of the methods with
 those names in `model.py`, and their type hints say what each takes: JSON
 `true` or `false` for a bool, an integer such as `3` (not `3.0`) for an int,
 any finite number for a float, and a listed value for an enum. An action the

@@ -69,6 +69,7 @@ ACTIONS = frozenset(
         "counter_step_back",
         "set_extruded_at_unload",
         "tap_through",
+        "unload_first",
     }
 )
 

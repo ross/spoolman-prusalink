@@ -162,6 +162,7 @@ def test_a_sync_job_on_an_active_mmu_skips_the_auto_retract():
     # auto-retract while the MMU is Active (`pre_finalize_print`).
     sim, p = make_mmu(types={0: PLA, 2: PETG}, slot=2)
     run_sync(sim, p, sliced(p, ""))
+    p.tap_through()  # No at the preview's unload question: FINDA sees slot 2
     sim.advance(5)
     assert p.job is None and p.state is State.FINISHED
     assert p.mmu.path.auto_retracted == 8 and p.mmu.path.gap == 8

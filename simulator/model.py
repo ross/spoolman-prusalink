@@ -40,6 +40,7 @@ from simulator.mmu import (
 )
 from simulator.preview import (
     Failed,
+    PrintChecks,
     Severity,
     ToolView,
     preview,
@@ -149,6 +150,7 @@ class JobPhase(StrEnum):
     AWAIT_RESUME = "AWAIT_RESUME"  # ATTENTION: the bed went cold during the outage
     UNPARK = "UNPARK"  # PAUSED briefly while the head unparks after a power-panic resume
     PREVIEW_LOAD = "PREVIEW_LOAD"  # BUSY with no job: the preview's filament-not-inserted load
+    PREVIEW_UNLOAD = "PREVIEW_UNLOAD"  # BUSY with no job: the preview's unload into the MMU
     JOIN = "JOIN"  # ATTENTION while a spool join unloads the old tool, then back to PRINTING
 
 
@@ -171,6 +173,11 @@ PHASE_STATES = {
     # The load's own screen covers the preview, and with no print running yet it reads BUSY
     # (`get_state` in `src/state/printer_state.cpp`), which has no job.
     JobPhase.PREVIEW_LOAD: State.BUSY,
+    # The unload's `Load_unload` screen outranks the preview's, and with no print running yet
+    # it reads BUSY (`fsm_states.cpp:20-58, 108-123`, `printer_state.cpp:152-177`). Before
+    # and after it the preview's question may read ATTENTION for a moment, which the
+    # simulator leaves out.
+    JobPhase.PREVIEW_UNLOAD: State.BUSY,
     # The join's unload runs in a `Load_unload` dialog while printing, which reads ATTENTION
     # (`get_state` in `src/state/printer_state.cpp:238-243`).
     JobPhase.JOIN: State.ATTENTION,
@@ -202,6 +209,7 @@ class Reason(StrEnum):
     RUNOUT = "runout"
     COLOR_CHANGE = "color change"
     NO_FILAMENT = "no filament"  # the preview's filament-not-inserted screen
+    MMU_LOADED = "filament in the MMU"  # the preview asks to unload the MMU's filament first
     COLD_BED = "cold bed"  # the bed went cold during a power panic
 
 
@@ -215,6 +223,7 @@ PHASE_REASONS = {
             Reason.WRONG_FILAMENT,
             Reason.SENSORS_OFF,
             Reason.MAPPING_TYPE,
+            Reason.MMU_LOADED,
             Reason.PARSE_ERROR,
             Reason.JAM,
         }
@@ -226,9 +235,10 @@ PHASE_REASONS = {
 }
 # The questions of the firmware's tools-mapping phase, while it isn't printing.
 MAPPING_QUESTIONS = frozenset({Reason.TOOLS_MAPPING, Reason.SENSORS_OFF, Reason.MAPPING_TYPE})
-# The questions the print preview asks with Abort and Print or Ok, which `tap_through` and
-# `cancel` answer.
-PREVIEW_QUESTIONS = MAPPING_QUESTIONS | {Reason.PREVIEW, Reason.WRONG_FILAMENT}
+# The questions the print preview asks, which `tap_through` and `cancel` answer: Print or Ok
+# and Abort, or for the MMU's question No, which prints, and a stop. `unload_first` answers
+# the MMU's Yes.
+PREVIEW_QUESTIONS = MAPPING_QUESTIONS | {Reason.PREVIEW, Reason.WRONG_FILAMENT, Reason.MMU_LOADED}
 
 
 @dataclass(frozen=True)
@@ -244,6 +254,8 @@ class Attention:
 
     def __str__(self) -> str:
         match self.reason:
+            case Reason.MMU_LOADED:
+                return f"filament from slot {self.tool} in the MMU: unload it first?"
             case reason if reason in PREVIEW_QUESTIONS:
                 detail = self.detail or "nothing wrong"
                 return f"{self.reason}{' (abort only)' if self.fatal else ''}: {detail}"
@@ -1240,7 +1252,8 @@ class SimPrinter:
 
     def job_visible(self) -> bool:
         job = self.job
-        return job is not None and job.phase not in (JobPhase.BLIP, JobPhase.PREVIEW_LOAD)
+        hidden = (JobPhase.BLIP, JobPhase.PREVIEW_LOAD, JobPhase.PREVIEW_UNLOAD)
+        return job is not None and job.phase not in hidden
 
     def can_print(self) -> bool:
         # The firmware's rule is state-only: IDLE, READY, STOPPED or FINISHED. A print asked
@@ -1982,13 +1995,15 @@ class SimPrinter:
         self._show_state()
 
     def tap_through(self) -> None:
-        """Answer the screen's question: Print or Ok at the preview, or abort on a parse
-        error."""
+        """Answer the screen's question: Print or Ok at the preview, No at the MMU's unload
+        question, which prints with the filament where it is, or abort on a parse error."""
         self._check_tap_through()
         job = self.job
         self._log("action", f"tap through: {job.attention}")
         if isinstance(job, UserJob) and job.waits_for(Reason.PREVIEW):
             self._after_incompatible(job)
+        elif job.waits_for(Reason.PREVIEW):
+            self._after_sync_preview(job)
         elif isinstance(job, UserJob) and job.attention in job.mapping:
             if job.waits_for(Reason.SENSORS_OFF):
                 self.set_sensors(False)  # it stays off after the print
@@ -2001,6 +2016,24 @@ class SimPrinter:
             self._begin(job)
         else:
             self._park(job, State.STOPPED)
+
+    def unload_first(self) -> None:
+        """Answer Yes at the MMU's unload question: `M702 W0`, which unloads into the MMU,
+        then the preview goes on to its tools-mapping screen, or prints
+        (`marlin_print_preview.cpp:698-728`).
+
+        The unload is the MMU's own, on the selected slot: the moves count on it, or on none
+        after a boot, and no type is written (`MMU2::unload`). It reads BUSY with no job,
+        and nothing stops it. `M702 W0` then turns the nozzle, the bed and the fan off,
+        which the simulator doesn't model.
+        """
+        self._check_unload_first()
+        job = self.job
+        t = self.tools[self.mmu.fed]
+        self._log("action", f"unload first: T{t.index} into the MMU")
+        job.enter(JobPhase.PREVIEW_UNLOAD)
+        self._start_unload(t, self._mmu_unload_steps())
+        self._show_state()
 
     # Power and faults.
 
@@ -2533,6 +2566,8 @@ class SimPrinter:
             raise Busy("nothing to cancel")
         if self.job.phase is JobPhase.PREVIEW_LOAD:
             raise Busy("the preview's load is running")
+        if self.job.phase is JobPhase.PREVIEW_UNLOAD:
+            raise Busy("the preview's unload is running")
 
     def _check_dismiss(self) -> None:
         self._need_power()
@@ -2549,6 +2584,12 @@ class SimPrinter:
         job = self.job
         if job is None or job.phase is not JobPhase.HOLD or not job.waits_for(Reason.JAM):
             raise Busy("no jam to clear")
+
+    def _check_unload_first(self) -> None:
+        self._need_power()
+        job = self.job
+        if job is None or not job.waits_for(Reason.MMU_LOADED):
+            raise Busy("no question to unload the MMU's filament first")
 
     def _check_tap_through(self) -> None:
         self._need_power()
@@ -2572,6 +2613,7 @@ class SimPrinter:
             "reboot": self._need_power,
             "clear_jam": self._check_clear_jam,
             "tap_through": self._check_tap_through,
+            "unload_first": self._check_unload_first,
             "set_mmu": lambda: self._check_mmu(not (self.mmu and self.mmu.on)),
             "preload_all": self._check_mmu_menu,
         }
@@ -2701,6 +2743,10 @@ class SimPrinter:
             # The load's result isn't checked and no sensor is read again: the type check
             # follows (`filament_not_inserted_load` in `marlin_print_preview.cpp`).
             self._check_types(job)
+        elif job is not None and job.phase is JobPhase.PREVIEW_UNLOAD:
+            # The unload's result isn't checked either: the checks are done
+            # (`mmu_filament_inserted_unload` in `marlin_print_preview.cpp:724-728`).
+            self._checks_done(job)
         elif self.queue:
             self._next_queued()
         self._show_state()
@@ -2733,7 +2779,7 @@ class SimPrinter:
             if isinstance(job, UserJob):
                 self._ask_print(job)
             elif not self._ask(job):
-                self._begin(job)
+                self._after_sync_preview(job)
         elif job.phase is JobPhase.BLIP:
             self._after_blip(job)
         elif job.phase is JobPhase.PREHEAT:
@@ -2768,7 +2814,8 @@ class SimPrinter:
 
     def _ask(self, job: SyncJob) -> bool:
         """Check the file as the preview does; return whether it asks the user."""
-        rows = preview(self.model, job.gcode, self.checks)
+        active = self.mmu is not None and self.mmu.active
+        rows = preview(self.model, job.gcode, self.checks, mmu_active=active)
         if not rows:
             return False
         fatal = any(r.fatal for r in rows)
@@ -2785,15 +2832,27 @@ class SimPrinter:
         return {s.tool: s.material for s in job.spec.segments}
 
     def _tool_views(self) -> dict[int, ToolView]:
-        # A sensor that's off reads neither filament nor none, so no check fails on it. With
-        # the MMU Active the preview doesn't check for filament: "the filaments are
-        # intentionally unloaded at the start of the print" (`gcode_compatibility.cpp:505-513`).
-        unchecked = not self.sensors or (self.mmu is not None and self.mmu.active)
-        seen = {i: t.path.loaded or unchecked for i, t in self.tools.items()}
+        # A sensor that's off reads neither filament nor none, so no check fails on it.
+        seen = {i: t.path.loaded or not self.sensors for i, t in self.tools.items()}
         return {
             i: ToolView(self.listed(t), seen[i], t.material.name if t.material else None)
             for i, t in self.tools.items()
         }
+
+    @property
+    def _loaded_checked(self) -> bool:
+        """Whether the preview asks about a used tool with no filament: not with the MMU
+        Active, as "the filaments are intentionally unloaded at the start of the print"
+        (`generate_toolmapping_only_noclear`, `gcode_compatibility.cpp:505-513`)."""
+        return not (self.mmu is not None and self.mmu.active)
+
+    def _print_checks(self, job: UserJob) -> PrintChecks:
+        return print_checks(
+            self.feed.maps_tools(self),
+            self._uses(job),
+            self._tool_views(),
+            loaded_checked=self._loaded_checked,
+        )
 
     def _preview_question(self, job: UserJob, reason: Reason, rows: list[Failed]) -> None:
         self._wait(job, _question(reason, rows))
@@ -2805,21 +2864,73 @@ class SimPrinter:
 
     def _ask_print(self, job: UserJob) -> None:
         """The "G-code incompatible" screen (`stateFromPrinterCheck`), then the rest."""
-        rows = print_checks(self.feed.maps_tools(self), self._uses(job), self._tool_views()).rows
+        rows = self._print_checks(job).rows
         if rows:
             self._preview_question(job, Reason.PREVIEW, rows)
         else:
             self._after_incompatible(job)
 
     def _after_incompatible(self, job: UserJob) -> None:
-        """The tools-mapping screen on a toolchanger, else the filament-not-inserted screen
-        (`stateFromFilamentPresence` and `checks_done`).
+        """The MMU's unload question, else the tools-mapping screen on a toolchanger or an
+        MMU, else the filament-not-inserted screen (`stateFromFilamentPresence` and
+        `checks_done`)."""
+        if not self._ask_mmu_unload(job):
+            self._checks_done(job)
+
+    def _after_sync_preview(self, job: SyncJob) -> None:
+        """A sync job past its file's checks: the MMU's unload question, else the job.
+        The job has no `filament used [g]`, so no tool check or mapping applies to it."""
+        if not self._ask_mmu_unload(job):
+            self._begin(job)
+
+    def _ask_mmu_unload(self, job: UserJob | SyncJob) -> bool:
+        """Ask to unload the MMU's filament first; return whether the preview stops here,
+        at the question or at the print's start.
+
+        With an MMU, `stateFromFilamentPresence` asks nothing when the filament sensors are
+        off or FINDA sees no filament: no slot's filament is past the selector, which is
+        `MMUReadyToPrint` (`marlin_print_preview.cpp:228-257`). Turning the sensors off
+        turns the MMU off, so the MMU's own check covers the first. A file on tool 0 alone,
+        by its filament use, prints at once with no question and no tools-mapping screen
+        when the extruder's sensor sees filament and slot 0's type is the one the file
+        names: a single-tool file here, since a sync job uses no tool. Otherwise the question
+        reads ATTENTION with the job (`print_preview_mapper.hpp:17-19`). That it applies
+        only with the MMU Active is inferred: while it connects, FINDA's sensor reads not
+        initialized (`filament_sensor_mmu.cpp:10-24`).
+        """
+        mmu = self.mmu
+        if mmu is None or not mmu.active or mmu.fed is None:
+            return False
+        if isinstance(job, UserJob) and self._mmu_shortcut(job):
+            self._log("job", f"job {job.id}: T0's type is loaded, so the print starts at once")
+            self._begin(job)
+            return True
+        self._wait(job, Attention(Reason.MMU_LOADED, mmu.fed))
+        return True
+
+    def _mmu_shortcut(self, job: UserJob) -> bool:
+        """Whether a print skips the MMU's question: it's a single-tool file, whose metadata
+        lists tool 0 alone (`is_singletool_gcode`, `gcode_info.cpp:611-625`; a file from the
+        MMU3 profile lists all five), the extruder's sensor, not FINDA, sees filament, and
+        slot 0's type isn't another than the file names (`generate_toolmapping_only`)."""
+        if not job.spec.single_tool_file or not self.mmu.path.loaded:
+            return False
+        uses = self._uses(job)
+        return not wrong_types(uses, self._tool_views())
+
+    def _checks_done(self, job: UserJob | SyncJob) -> None:
+        """The preview's checks are done: the tools-mapping screen when tool mapping
+        applies, else the filament-not-inserted screen for an empty used tool, else the
+        type check (`checks_done` and `stateFromFilamentPresence`). A sync job starts.
 
         A print started at the printer shows the tools-mapping screen whenever tool mapping
         applies, with nothing wrong too: only a remote start that is fully compatible skips
         it (`checks_done` in `src/common/marlin_print_preview.cpp`).
         """
-        checks = print_checks(self.feed.maps_tools(self), self._uses(job), self._tool_views())
+        if isinstance(job, SyncJob):
+            self._begin(job)
+            return
+        checks = self._print_checks(job)
         if checks.mapped:
             job.mapping = self._mapping_report(job, checks.mapping)
             self._wait(job, job.mapping[0])
@@ -2847,7 +2958,7 @@ class SimPrinter:
         `gui_confirm_incompatibility` in `gcode_compatibility.cpp`.)
         """
         uses, views = self._uses(job), self._tool_views()
-        empty = [i for i in sorted(uses) if not views[i].loaded]
+        empty = [i for i in sorted(uses) if self._loaded_checked and not views[i].loaded]
         asks = [
             (Reason.SENSORS_OFF, [Failed(f"T{i} has no filament", False) for i in empty]),
             (Reason.MAPPING_TYPE, wrong_types(uses, views)),
