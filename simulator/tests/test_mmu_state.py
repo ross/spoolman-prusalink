@@ -301,3 +301,22 @@ def test_a_plain_mmu_build_stores_slot_writes_but_lists_tool_0_alone():
     with pytest.raises(Invalid, match=reason):
         p.set_tool_enabled(2, True)
     assert listed(p) == [0]
+
+
+def test_switching_an_mmu_off_again_with_the_sensors_off_clears_slot_0():
+    # `M709 S0` runs `mmu_off` with the MMU already off, and the switched-off sensors,
+    # no longer forced on by the MMU, never surely see filament.
+    sim, p = make_mmu(types={0: PETG, 2: PLA}, slot=2)
+    p.set_mmu(False)
+    p.set_sensors(False)
+    assert p.tools[0].material.name == "PETG" and p.tools[0].unload_count == 0
+    p.set_mmu(False)
+    assert p.tools[0].material is None and p.tools[0].unload_count == 1
+    assert p.to_json()["actions"]["set_mmu"] == "the MMU needs the filament sensors on"
+
+
+def test_turning_the_sensors_off_with_filament_in_the_extruder_keeps_slot_0():
+    # The MMU forced the sensors on, so they still read when `mmu_off` looks.
+    sim, p = make_mmu(types={0: PETG, 2: PLA}, slot=2)
+    p.set_sensors(False)
+    assert p.tools[0].material.name == "PETG" and p.tools[0].unload_count == 0

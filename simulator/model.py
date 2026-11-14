@@ -2063,10 +2063,14 @@ class SimPrinter:
 
     def _mmu_off(self) -> None:
         """`mmu_off`: the setting goes off, then slot 0 is cleared unless the extruder
-        sensor surely sees filament."""
-        path = self.mmu.path
+        sensor surely sees filament. `M709 S0` runs it with the MMU already off too
+        (`M707-9_parse.cpp:91-93`). A disabled sensor is never sure
+        (`filament_sensors_handler.hpp:80-84`), and the sensors are disabled when they're
+        switched off, unless the MMU was on and forced them on (`should_enable`,
+        `filament_sensors_handler.cpp:391-402`)."""
+        path, was_on = self.mmu.path, self.mmu.on
         self.mmu.on, self.mmu.connecting = False, 0.0
-        if not path.loaded or path.sensor_fault:
+        if not path.loaded or path.sensor_fault or not (self.sensors or was_on):
             self._count_unload(self.tools[0], "MMU off")
         self.selected_tool = 0
 
