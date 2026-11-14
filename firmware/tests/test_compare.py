@@ -22,6 +22,7 @@ from firmware.source import Unreadable
 from firmware.tests import fixtures
 from simulator import tool
 from simulator.compatibility import GCodeChecks
+from simulator.feed import Feed
 from simulator.model import MODELS, ModelInfo
 from simulator.tool import Extruder, Lengths
 from spoolman_prusalink.printer_sync import Preset, PrinterModel
@@ -135,6 +136,9 @@ def test_load_reads_every_build():
     assert xl.tools == 5
     indx = firmware.builds["COREONEL_INDX"]
     assert (indx.tools, indx.gap_mm) == (8, 27.0)
+    feeds = {b: compare.feed_of(build.features) for b, build in firmware.builds.items()}
+    assert {b for b, f in feeds.items() if f == "xl"} == {"XL", "XL_DEV_KIT"}
+    assert {b for b, f in feeds.items() if f == "indx"} == {"COREONE_INDX", "COREONEL_INDX"}
     assert firmware.builds["COREONE"].uuids
     assert firmware.builds["COREONEL"].presets["PPS"]["chamber_min_temperature"] == 55
     assert "PPS" not in mk4.presets
@@ -228,6 +232,16 @@ def test_load_fails_on_a_model_without_a_build():
         compare.load(fixtures.FakeSource(files))
 
 
+def test_load_fails_on_an_indx_build_that_isnt_a_toolchanger():
+    """`tools` and `feed_of` would still call it an INDX toolchanger."""
+    old = 'HAS_TOOLCHANGER "XL" "XL_DEV_KIT" "COREONE_INDX" "COREONEL_INDX"'
+    options = fixtures.OPTIONS_CMAKE.replace(old, old.removesuffix(' "COREONEL_INDX"'))
+    assert options != fixtures.OPTIONS_CMAKE
+    files = {**fixtures.FILES, read.OPTIONS_FILE: options}
+    with pytest.raises(Unreadable, match="HAS_INDX without HAS_TOOLCHANGER on COREONEL_INDX"):
+        compare.load(fixtures.FakeSource(files))
+
+
 def test_load_fails_on_a_build_printer_cant_name():
     options = fixtures.OPTIONS_CMAKE.replace('    "XL_DEV_KIT"\n    "NONE"', '    "NONE"')
     files = {**fixtures.FILES, read.OPTIONS_FILE: options}
@@ -275,6 +289,18 @@ def test_every_build_has_its_printer_is_macro():
 )
 def test_tools(features, tools):
     assert compare.tools(frozenset(features)) == tools
+
+
+@pytest.mark.parametrize(
+    ("features", "feed"),
+    [
+        ({"HAS_INDX", "HAS_TOOLCHANGER"}, "indx"),
+        ({"HAS_TOOLCHANGER"}, "xl"),
+        ({"HAS_LOADCELL"}, "direct"),
+    ],
+)
+def test_feed_of(features, feed):
+    assert compare.feed_of(frozenset(features)) == feed
 
 
 def test_macros():
@@ -436,7 +462,13 @@ def synthetic():
             {"PLA": fw_preset(215, 170, 60), "FLEX": fw_preset(240, 210, 50, flexible=True)},
         ),
         "MINI": build("MINI", frozenset(), 1, None, {"PLA": fw_preset(215, 170, 60)}),
-        "XL": build("XL", frozenset({"HAS_FILAMENT_TRACKER", "HAS_POWER_PANIC"}), 5, 40.0, {}),
+        "XL": build(
+            "XL",
+            frozenset({"HAS_FILAMENT_TRACKER", "HAS_POWER_PANIC", "HAS_TOOLCHANGER"}),
+            5,
+            40.0,
+            {},
+        ),
         "COREONE": build(
             "COREONE",
             core,
@@ -503,7 +535,7 @@ def synthetic():
                 checks=NO_MODE,
             ),
             "3.1.0": ModelInfo(
-                "3.1.0", "XL", EXTRUDER, {}, max_tools=5, group="xl", checks=NO_MODE
+                "3.1.0", "XL", EXTRUDER, {}, max_tools=5, group="xl", checks=NO_MODE, feed=Feed.XL
             ),
             "7.1.0": ModelInfo(
                 "7.1.0",
@@ -557,6 +589,7 @@ def test_model_differences():
     sim["2.1.0"] = ModelInfo(
         "2.1.0", "MINI", EXTRUDER, MINI_PRESETS, uuids=True, group="mini", checks=NO_MODE
     )
+    sim["3.1.0"] = replace(sim["3.1.0"], feed=Feed.INDX)
     del sim["7.1.0"]
     copies = replace(copies, bridge_models=bridge, sim_models=sim)
     b, s = "bridge PRINTER_MODELS", "simulator MODELS"
@@ -575,6 +608,7 @@ def test_model_differences():
         Difference(s, "2.1.0", None, "uuids", False, True),
         Difference(s, "2.1.0", None, "counters", False, True),
         Difference(s, "2.1.0", None, "power_panic", False, True),
+        Difference(s, "3.1.0", None, "feed", "xl", "indx"),
         Difference(s, "7.1.0", None, "model", "COREONE", MISSING),
         # The bridge's presets of a model it no longer supports aren't compared, so only
         # the door table notices the Core One's PPS. A model the simulator lacks has no

@@ -15,6 +15,10 @@ INDX's stops at 27 mm and counts times 550/576. The sequences:
 - INDX unload and runout: +8 +8 -20 -3 +3 +19 +2 -20 -3 +3 -6 -8. From gap 0: 8 and 8
   count; -20 gap 20; -3 gap 23; +3 gap 20; +19 gap 1; +2 refills 1 and counts 1; -20 gap
   20; -3 gap 23; +3 gap 20; -6 gap 26; -8 gap 27 (invalid). 17 counted.
+
+An INDX print's start G-code first purges the tool in the nozzle cleaner, 25 mm and the
+auto-retract, then primes it: +1.6 +5.4907 -0.8 +0.8 (`simulator.slicer`). Its last two
+moves forget the stored distance, so a print leaves none stored.
 """
 
 from __future__ import annotations
@@ -106,18 +110,25 @@ def test_the_first_extrude_after_a_nextruder_load_counts_15_more(model):
 
 def test_the_first_extrude_after_an_indx_load_counts_nothing_more():
     sim, p = idle_loaded("8.10.0")
+    p.select_tool(0)  # the load docked it
     # The 8 mm deretract refills the 8 mm gap (gap 0); then the 10 mm extrude counts.
     assert counted(p, lambda: p.extrude(0, 10)) == pytest.approx(10)
     assert tracker(p) == (0, True, 0)
 
 
-@pytest.mark.parametrize(("model", "first"), [("8.1.0", 15 + 5), ("8.10.0", 5)])
-def test_a_prints_first_mm_deretract(model, first):
+# 5 mm printed: the deretract first, 15 counted on the Core One L. On INDX the start
+# G-code's purge deretracts the 8 (gap 0) and counts 25, the auto-retract 8 (gap 8, 8
+# stored), the prime deretracts the 8 again and counts 1.6 + 5.4907, the retract and its
+# restore count nothing, and then the 5 count.
+@pytest.mark.parametrize(
+    ("model", "first", "stored"),
+    [("8.1.0", 15 + 5, 0), ("8.10.0", 25 + 8 + 1.6 + 5.4907 + 5, None)],
+)
+def test_a_prints_first_mm_deretract(model, first, stored):
     sim, p = idle_loaded(model)
     p.start_print(PrintSpec([Segment(0, 100)], preheat_s=0))
-    # 5 mm printed: the deretract first, 15 counted on the Core One L, 0 on INDX.
     assert counted(p, lambda: sim.tick(0.8 + 1)) == pytest.approx(first)
-    assert tracker(p) == (0, True, 0)
+    assert tracker(p) == (0, True, stored)
 
 
 # The menu unload.
@@ -160,12 +171,14 @@ def test_an_indx_unload_purges_then_rams():
 
 def test_an_indx_unload_after_an_extrude():
     sim, p = idle_loaded("8.10.0")
+    p.select_tool(0)  # the load docked it
     p.extrude(0, 10)  # gap 0, 0 stored
     assert counted(p, lambda: unload(sim, p)) == pytest.approx(2 + 17)
 
 
 def test_an_indx_unload_with_the_tracker_lost_counts_nothing():
     sim, p = idle_loaded("8.10.0")
+    p.select_tool(0)  # the load docked it
     p.retract(0, 30)  # gap 27, invalid, nothing stored
     # The purge: gap 25. The ramming feeds back nothing first: +8 gap 17; +8 gap 9; -20
     # gap 27; -3 27; +3 24; +19 5; +2 3; -20 23; -3 26; +3 23; -6 27; -8 27. Nothing
@@ -193,11 +206,12 @@ def test_the_unload_moves_over_its_duration_and_records_at_the_end():
 
 
 def printing(model: str):
-    """An idle-loaded tool 0 printing 10 mm, past the first move's deretract."""
+    """An idle-loaded tool 0 printing 10 mm, past the first move's deretract. INDX's start
+    G-code leaves no distance stored."""
     sim, p = idle_loaded(model)
     p.start_print(PrintSpec([Segment(0, 100)], preheat_s=0))
     sim.tick(0.8 + 2)
-    assert tracker(p) == (0, True, 0)
+    assert tracker(p) == (0, True, None if model == "8.10.0" else 0)
     return sim, p
 
 
@@ -209,7 +223,7 @@ def test_a_runout_parks_and_rams(model, ram):
     # counts 17.
     assert counted(p, lambda: p.runout(0)) == pytest.approx(ram)
     assert p.tools[0].unload_count == 1
-    assert p.job.restore_gap == 0
+    assert p.job.restore == (0, 0)
 
 
 def test_a_jam_and_a_color_change_ram_too():
@@ -230,7 +244,7 @@ def test_a_runout_in_the_preheat_unloads_an_auto_retracted_nextruder_cold():
     # 55 stored is past the park's 8, so the park doesn't move; 55 is fully retracted, so
     # the unload is cold: nothing counts, and the tracker's invalid gap records as 0.
     assert counted(p, lambda: p.runout(0)) == 0
-    assert p.job.restore_gap == 0
+    assert p.job.restore == (0, 0)
 
 
 @pytest.mark.parametrize("lost", ["retract", "boot"])
@@ -246,7 +260,7 @@ def test_a_change_with_the_tracker_lost_resumes_at_gap_0(lost):
     sim.tick(0.8 + 1)
     assert p.job.phase is JobPhase.PREHEAT
     p.runout(0)
-    assert p.job.restore_gap == 0  # `get_retracted_distance(...).value_or(0)`
+    assert p.job.restore == (0, 0)  # `get_retracted_distance(...).value_or(0)`
     p.load(0)
     sim.advance(100)
     # MK4S reload from gap 40: 30 slow (gap 10), 50 fast (gap 0), the 27 mm purge, the
@@ -263,7 +277,7 @@ def test_an_indx_change_in_the_preheat_resumes_at_its_8_mm():
     # The 8 stored meets the park's 8, so the park doesn't move. The 2 mm purge feeds
     # the 8 back (gap 0) and counts 2, the ramming 17.
     assert counted(p, lambda: p.runout(0)) == pytest.approx(2 + 17)
-    assert p.job.restore_gap == 8
+    assert p.job.restore == (0, 8)
     p.load(0)
     sim.advance(100)
     assert tracker(p) == (8, True, None)
@@ -344,6 +358,8 @@ def test_a_boot_hands_the_stored_distance_to_the_tracker(model, boot, extrude):
     sim, p = idle_loaded(model)
     p.reboot()
     assert tracker(p) == boot
+    if p.selected_tool is None:
+        p.select_tool(0)  # INDX docked it after the load
     assert counted(p, lambda: p.extrude(0, 10)) == pytest.approx(extrude)
 
 
@@ -438,6 +454,7 @@ def test_a_cancel_after_a_flexible_runout_doesnt_auto_retract():
 
 def test_indx_unloads_a_cleared_flexible_tool_with_its_flexible_sequence():
     sim, p = idle_loaded("8.10.0", name="FLEX")  # gap 0, nothing stored
+    p.select_tool(0)  # the load docked it, and the idle clear reads only the picked tool
     p.set_sensor_fault(0, True)
     sim.tick(1)
     sim.tick(1)

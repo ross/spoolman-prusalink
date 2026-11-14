@@ -375,14 +375,15 @@ def fold(steps: list[Step]) -> Step:
     )
 
 
-def _states_after(sim: list[Step], k: int) -> set[str]:
-    """The states the printer passes through from event `k` until its next event."""
-    states = {sim[k].state}
+def _seen_after(sim: list[Step], k: int) -> set[tuple[str, str]]:
+    """The states, each with its job sighting, that the printer shows from event `k` until
+    its next event."""
+    seen = {(sim[k].state, sim[k].job)}
     for st in sim[k + 1 :]:
         if st.is_event():
             break
-        states.add(st.state)
-    return states
+        seen.add((st.state, st.job))
+    return seen
 
 
 def _match_event(
@@ -395,17 +396,24 @@ def _match_event(
     fold may take them alone, or with the events from `j` on; runs between the folded
     events are allowed while together they last less than `window`, one poll gap. The
     live sample's state may be any state the printer reached after the last folded event
-    and before the next, since the sample can come later within the same poll. Returns
-    the index after the last simulator event consumed, or None if nothing fits.
+    and before the next, since the sample can come later within the same poll. Its job
+    may be the folded one, or the job sighting that came with that state: a job that
+    comes back with its old ID after a power-panic boot isn't an event. Returns the index
+    after the last simulator event consumed, or None if nothing fits.
     """
     folded = [sim[p] for p in pending]
     last = pending[-1] if pending else None
 
     def fits() -> bool:
+        merged = fold(folded)
+        seen = _seen_after(sim, last)
         return (
             len(folded) <= FOLD_WINDOW
-            and fold(folded).shape()[1:] == step.shape()[1:]
-            and step.state in _states_after(sim, last)
+            and merged.shape()[2:] == step.shape()[2:]
+            and (
+                (merged.job == step.job and step.state in {state for state, _ in seen})
+                or (merged.job != "new" and (step.state, step.job) in seen)
+            )
         )
 
     if folded and fits():

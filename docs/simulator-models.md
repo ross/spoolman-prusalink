@@ -16,8 +16,15 @@ print with segments goes through its checks of the tools it uses. The MMU's
 filament-inserted question belongs to Workstream 5. Workstream 3 is built:
 a tool and its filament path are apart, the selected tool can be none, and
 a feed system holds what differs between direct and toolchanger printers.
-Workstreams 4 to 6 aren't started. [Open questions](#open-questions)
-lists what the work still has to settle.
+Workstream 4 is built: the XL and INDX have their own feed systems, a
+menu load or unload picks its tool and INDX docks it after, Move E needs a
+picked tool, and the picked tool rests where the firmware leaves it after a
+print, a pause and a boot. A power cut leaves an idle window before the
+resume. Change all, a filament change on a named tool and a spool join run
+as the firmware runs them, and a toolchanger's print runs the stock slicer
+profile's priming, tool-change moves and end park. Workstreams 5 and 6
+aren't started. [Open questions](#open-questions) lists what the work still
+has to settle.
 
 ## Goal and non-goals
 
@@ -102,13 +109,69 @@ firmware update.
 - A tool has its counters and its stored type. Its filament path has the
   filament, the tracker's gap, the stored auto-retract distance and the
   sensor; each tool has its own path. A print is a list of (tool, mm)
-  segments with a fixed purge at each tool change. Picking a tool can
+  segments, and on a toolchanger the stock slicer profile's moves around
+  them (see below). Picking a tool can
   trigger the idle sensor clear. A tool can be disabled.
-- The model's feed system, direct or toolchanger, holds the rules that
-  differ between the two. The printer's selected tool can be none, which
+- On the XL and INDX, a menu load or unload picks its tool first, and the
+  idle sensor clear runs on it at the pick. INDX docks the tool when the
+  operation ends, and the XL leaves it picked. The preview's load picks in
+  its dialog, with no clear, and INDX docks it after; a reload in a print
+  neither picks nor docks. Move E moves only the picked tool, and the Pick/park
+  menu's park (`park_tool`) leaves none picked.
+- A print on INDX, or on an XL with more than one enabled tool, runs the
+  stock PrusaSlicer profile's moves outside the model (`simulator/slicer.py`,
+  "What the slicer adds"), each counted on the tool picked when it runs:
+  the start's priming of each used tool, the old tool's ramming and
+  retracts and the new tool's purge at each change, and the last tool's
+  moves before the end G-code parks it. So the firmware's end retracts and
+  auto-retracts nothing. A tool's first pick in the print stands for the
+  first layer. A print can override the prime and the tool-change purge.
+  A stopped XL print keeps its tool, and INDX docks at a job's end and at
+  a pause, whose resume picks the tool again and purges it in the nozzle
+  cleaner. A boot keeps the picked tool, except an
+  INDX cut during a print that used several tools, which boots with none.
+  A toolchanger starts with none picked unless the config's `picked_tool`
+  names one.
+- Change all (`change_all`) changes the chosen tools one at a time in index
+  order, `BUSY` throughout: an unload first where a type is stored, then a
+  load. Each pick is inside the dialog, with no clear. INDX docks after
+  each tool, and the XL ends with the last one picked. A power cut drops
+  the tools not yet reached.
+- Tune > Change filament (`change_filament`) runs the filament change on
+  any tool during a print: on another tool it picks that tool, and the
+  resume changes back with no purge. The counts land on that tool only. A
+  runout and a color change on INDX follow the firmware's INDX flow, and a
+  load or unload in a print reads `ATTENTION` in every phase.
+- A print can carry spool joins (`PrintSpec.spool_join`). A runout on a
+  tool with a join unloads it in `ATTENTION`, then picks and purges the
+  join's tool in `PRINTING`, and the print goes on with that tool wherever
+  the file names the old one. Joins chain, and at a chain's end the runout
+  is the filament change. Snapshots and a power-panic resume keep the
+  joins and the remap. A power cut during the join's unload resumes on
+  the old tool until the file's next tool change.
+- The model's feed system, direct, XL or INDX, holds the rules that
+  differ between them. `ModelInfo.feed` names it, and
+  `script/firmware-check` compares it with `HAS_TOOLCHANGER` and
+  `HAS_INDX`. The printer's selected tool can be none, which
   stands for a toolchanger with no tool picked: then no filament moves or
   counts, the idle sensor clear doesn't run, and the end of a print neither
-  retracts nor auto-retracts. Nothing leaves it none yet.
+  retracts nor auto-retracts. An idle INDX after a menu load or unload has
+  none, and so does an INDX or an XL with several tools after a finished
+  print, and either after `park_tool`. An XL with one tool enabled isn't a toolchanger here: its
+  tool stays picked, as the firmware keeps it on the head, and it prints
+  as a direct printer does, with no profile moves.
+- A power cut on a build with power panic boots the printer `IDLE` with no
+  job for 1.5 s before the resume starts, and the idle sensor clear runs in
+  that window on the picked tool, if one is. The firmware's autostart tries every
+  1.5 s and gives up after 100 s (`print_utils.cpp:67-82`); the simulator
+  resumes at the first try, delays the resume while a menu load or unload
+  runs, and drops it when a print starts in the window. A cold bed
+  reads `ATTENTION` as soon as the window ends, and a paused print reads
+  `BUSY`, then `PAUSED`, after the cold bed's wait if there is one. A cut
+  during a filament change dialog isn't a cut while paused: the print
+  resumes on its own with the dialog gone, on the tool the cut found
+  picked until the file's next tool change, and a color change in the file
+  runs again.
 - An uploaded file's job is counted at once. When the scan ends, the
   print preview checks the file's `M862` lines: the model by compatibility
   group, the G-code level, input shaper, the INDX lock, the MMU3 feature
@@ -125,8 +188,9 @@ firmware update.
   clear runs on the picked tool while it's up. Print there asks once for
   each kind of failed row: a tool with no filament asks to turn every
   filament sensor off, then a tool holding another type asks. The print
-  then counts on the empty tool with no material. A printer's `sensors` switch turns off the
-  runout, the idle sensor clear and the preview's filament question.
+  then counts on the empty tool with no material. A printer's `sensors`
+  switch turns off the runout, the idle sensor clear and the preview's
+  filament question.
 - It serves `/api/version`, `/api/v1/info`, `/api/v1/status`, `/api/v1/job`
   and `/api/v1/filament`. `/api/v1/info` always reports `mmu` as false.
 - Tests: the unit harness and the integration fixtures take a model and a
@@ -218,26 +282,32 @@ builds that can take one and false elsewhere (`basic_gets.cpp:229-253`).
 
 | Event | What the firmware does | Source |
 | --- | --- | --- |
-| Tool change in a print | No unload and no firmware E move on the XL. The INDX head-lock moves are excluded from counting. The slicer's ramming counts on whichever tool is picked. | `toolchanger_indx.cpp:365-376`, `planner.cpp:2194` |
-| Menu load or unload of another tool | Picks that tool first. INDX docks it again afterwards; the XL leaves it picked. | `M701_2.cpp:136-139` |
-| No tool picked | Extrusion isn't counted and the idle sensor clear doesn't run. | `planner.cpp:2207` |
-| The picked tool at rest | INDX docks its tool after a load, an unload, a pause and a print, so an idle INDX has none picked. At boot it has one only if a tool is physically on the head. An XL has whichever tool is physically on the head, which after a print depends on the end G-code; the stock profile parks it. | `M701_2.cpp:135-140, 194-197, 339-342`, `pause.cpp:1395-1402`, `marlin_server.cpp:1098, 2561`, `toolchanger_indx.cpp:222-262`, `toolchanger_xl.cpp:582-597` |
-| Idle sensor clear | Only the picked tool. So it never runs on an idle INDX, and rarely on an XL. A tool emptied by hand while docked keeps its type. Nothing sweeps the tools at boot or at a print start. | `filament_sensors_handler.cpp:294-312` |
-| Runout with a spool join | Counts an unload on the old tool, and the print goes on with the join's tool. The new tool's type isn't set or copied. Its purge counts on it: 27 mm on the XL, 25 mm on INDX. | `spool_join.cpp:258-342`, `toolchanger_xl.cpp:505-549`, `nozzle_cleaner.cpp:87` |
-| Runout without one | `M600` on the same tool, as on a single-tool printer. | `filament_sensors_handler.cpp:237` |
-| `M600 T<n>` | Picks tool `n`, changes its filament, and goes back. | `M600.cpp:223-241, 319` |
-| Change all, from the XL menu | For each enabled tool: an unload, the new type, a purge. | `multi_filament_change.cpp:186-233` |
-| A load or unload during a print | Reads `ATTENTION` in every phase, not only while waiting. Idle, it reads `BUSY`. | `printer_state.cpp:178-190, 238-243` |
+| Tool change in a print | No unload and no firmware E move on the XL. The INDX head-lock moves are excluded from counting. The INDX stock tool-change G-code's `G27 ... R8` makes the firmware retract the outgoing tool 8 mm in ordinary planner moves as it parks. The slicer's moves count on whichever tool is picked. | `toolchanger_indx.cpp:364-376`, `planner.cpp:2194`, `mapi/parking.cpp:262, 282-301` |
+| Menu load or unload of another tool | Picks that tool first with `T<n> S1 L0 D0`, outside any dialog: it reads `IDLE`, and the idle sensor clear can run on the new tool before the operation starts. INDX docks it again afterwards; the XL leaves it picked. A preheat cancel or a failed pickup leaves an INDX tool picked. The preview's load picks inside its dialog. | `MItem_filament.cpp:41-104`, `M701_2.cpp:84-88, 112-114, 135-140, 162-166, 179-181, 194-197, 339-342`, `pause.cpp:1447-1468` |
+| No tool picked | A non-service E move is a `bsod`, so callers pick first and Move E sends no E. The idle sensor clear doesn't run. | `planner.cpp:2194-2198`, `screen_menu_move.cpp:166-171, 206-211`, `filament_sensors_handler.cpp:306` |
+| The picked tool at rest | INDX docks its tool after a load, an unload, a pause and a print, so an idle INDX has none picked. The pause docks in `Pausing_ParkHead`, and the resume picks the tool again and purges it in the nozzle cleaner, 25 mm then `M1705 N`, while `PAUSED`. A finished print's stock end G-code parks the tool on INDX and on an XL with several tools (`P0 S1` in `[printer:*C1_INDX_8T_common*]` and `[printer:*XLMULTI*]`, profile bundle PrusaResearch 2.5.16), so the firmware's end retract and auto-retract find no tool. An XL with one tool has its toolchanger off and keeps that tool on the head, and its profile, `*commonXL*`, has no park (`toolchanger_utils_xl.cpp:62-93`, `toolchanger_xl.cpp:236-241`). A stopped XL print keeps its tool and gets the end's retract and auto-retract; a stopped INDX print docks after its auto-retract. A sync job leaves the XL's tool as it was; INDX docks it. At boot the XL picks the Dwarf on its head. INDX restores the EEPROM's last picked tool, checked against its nozzle sensor; parking a tool while printing invalidates it unless a single-tool print froze it, so a multi-tool print cut short boots with none. | `M701_2.cpp:135-140, 194-197, 339-342`, `marlin_server.cpp:1077-1100, 2549-2563, 2662-2674, 2789-2817, 3298-3307, 3423-3434`, `P.cpp:35-48`, `toolchanger_utils_indx.cpp:50-57`, `toolchanger_indx.cpp:213-261, 926-939`, `toolchanger_utils_xl.cpp:54-58`, `toolchanger_xl.cpp:589-597` |
+| Idle sensor clear | Only the picked tool, and only while not printing and with no load or unload dialog open: the XL reads the Dwarf's extruder sensor, INDX the tool's side sensor. It doesn't run on an idle INDX with none picked. The XL keeps a tool picked after a menu operation, a stop and a boot, so it runs there often. A tool emptied by hand while docked keeps its type until something picks it while idle, the menu's pick before a load or unload included. Nothing sweeps the tools at boot or at a print start. | `filament_sensors_handler.cpp:120-131, 197-212, 303-312`, `filament_sensors_handler_XL.cpp:17-61`, `filament_sensors_handler_INDX.cpp:20-23` |
+| Runout with a spool join | Set per print and reset at its end. The old tool gets INDX's 2 mm unload purge and the `runout` ramming, with no park retract, and its unload counts while the status reads `ATTENTION`. The change and the purge read `PRINTING`: the XL parks, picks the new tool, purges 27 mm, never doubled, retracts 8 mm and stores it as the auto-retracted distance; INDX changes tools and purges 25 mm with the `M1705 N` auto-retract. Then the old tool's gap is restored on the new tool, whose type isn't set or copied, and the print goes on with it wherever the file names the old tool. With no next tool in the chain, the runout is a manual `M600` on the old tool. | `spool_join.cpp:71-105, 239-365`, `toolchanger_xl.cpp:505-571`, `nozzle_cleaner.cpp:87`, `M600.cpp:125-153`, `pause.cpp:1233-1288, 1820-1849`, `marlin_server.cpp:1122` |
+| Runout without one | `M600` on the same tool. On INDX it isn't the single-tool flow: it parks over the wastebin, purges 2 mm before the INDX ramming, cleans the nozzle after the unload, purges 25 mm with `purge_clean` and its `M1705 N` auto-retract at the reload, then primes 4 mm, retracts 8 mm and cleans again. The reload writes the old type back, so `unload_count` +1 with the same `material`. | `filament_sensors_handler.cpp:237`, `M600.cpp:223, 282-290`, `pause.cpp:1233-1297, 1054-1096`, `mapi/parking.cpp:101-110` |
+| `M600 T<n>` | Tune > Change filament sends it for a chosen tool. Picks tool `n` outside any dialog, so it reads `PRINTING`, with the resume point at `n`'s dock and `n` heated for its type. Changes `n`'s filament in the dialog (`ATTENTION`), then changes back to the print's tool with no E move; INDX reheats over the purge position. With no type found for `n`, nothing changes. | `M600.cpp:204-340`, `screen_m600.cpp` |
+| Change all, on the XL and INDX | For each chosen tool in index order, inside one `BUSY` dialog: `M1600` (an unload that counts, then a load) when a type is stored, else `M701` (a load). Each picks its tool inside its dialog. INDX docks after each tool; the XL ends with the last one picked. | `multi_filament_change.cpp:151-239`, `M701_2.cpp:135-140, 240-343` |
+| A load or unload during a print | Reads `ATTENTION` in every phase, `ChangingTool` included, not only while waiting. Idle, it reads `BUSY`. A preheat in a print reads `PRINTING`, not `ATTENTION`. | `printer_state.cpp:152-190, 238-246` |
 
-The simulator has the first row, and an idle sensor clear that follows the
-picked tool. Its selected tool can be none, but nothing makes it none, so
-T4 (the idle clear on a picked tool) describes something an INDX does only
-with a tool left on the head.
+The simulator has every row in the table. An INDX docks after a menu load or
+unload, a pause and a job's end, so its selected tool becomes none, and the
+Pick/park menu picks or parks a tool on INDX and on an XL with several
+tools. The end G-code's park is part of the slicer profile ("What the slicer
+adds"). The printer config's `picked_tool` sets the tool picked at start,
+none by default on INDX and on an XL with several tools.
 
-One correction applies to every build. After a power cut, the firmware sits
-in `IDLE` for at least 1.5 s before the resume starts, and the idle sensor
-clear runs in that window. The simulator skips it for the whole resume
-(`print_utils.cpp:69-82`).
+After a power cut, the idle sensor clear in the window before the resume
+reads the picked tool too. On the XL that's the tool on the head. On INDX
+it's the EEPROM's last picked tool, which a pickup during a print
+invalidates unless a single-tool print's `G427` froze it, so a multi-tool
+INDX print boots with no tool picked and gets no clear
+(`toolchanger_indx.cpp:926-939`, `tool_offset_calibration.cpp:719-729`).
+The simulator does the same, and its resume picks the print's tool before
+anything moves.
 
 ### MMU3
 
@@ -286,19 +356,35 @@ The simulator has none of this.
 
 ### What the slicer adds
 
-These are the stock profiles' E moves, which the firmware runs as any other
-print move. The tool-change numbers are worked out from the profile values
-and PrusaSlicer's wipe tower code, not from sliced G-code.
+These are the stock profiles' E moves, measured in G-code that PrusaSlicer
+2.9.7 sliced with the stock profiles (vendor bundle 2.5.16). The MMU3 row
+is still worked out from the profile values, until its slicer runs.
 
 | Printer | At the start | At a tool change | At the end |
 | --- | --- | --- | --- |
 | MMU3 | `T<first>`, a 17 mm load, then about 53 mm of priming | On the old slot: about 21 mm of ramming, then a net 84 mm retract. `T<n>`. On the new slot: a 32 mm load, then the wipe tower's purge, at least 6 mm for PLA and 15 mm for PETG | `M702`: the firmware unloads, for every print |
-| XL | About 19 mm of priming per tool the print uses, 39 mm for a filament with multi-tool ramming | A 1.2 mm retract, about 4 mm of ramming, the wipe tower's purge | Parks the tool. No E move |
-| INDX | About 5 mm on the first tool | About 4 mm at the purge station or on the wipe tower | Parks the tool. No E move |
+| XL | 39 mm of priming (30 + 9) per tool the print uses, the first tool last. Before it, the first tool retracts 2 mm for the nozzle cleanup. After it, the first tool retracts 0.8 mm and each other tool 20 mm, which comes back at its first pick. Unused tools aren't primed | On the old tool: 4.16 mm of ramming, then a 20 mm retract (the filament's `filament_retract_length_toolchange`, not the printer's 1.2). `P0 S1 L2 D0`, `T<n> S1 L0 D0`. On the new tool: a 20 mm deretract, then the tower purge: 9.24 mm on the first layer, 7.01 mm after it | The tower rams the last tool once more (4.16 mm) and retracts 0.8 mm. Then the end G-code parks it (`P0 S1`), with no E move. A one-tool print has no tower, so no ramming |
+| INDX | `G427` purges every used tool in the firmware: 25 mm (`G750 E25`), then an auto-retract. Then the slicer primes the first tool: 1.6 mm, a 5.49 mm flush (1.1 times 12 mm³), then a 0.8 mm retract | At the purge station, since the stock profile has no wipe tower. On the old tool: a 0.8 mm retract, then the firmware's 8 mm retract in `G27 R8`, and `P0`. On the new tool: on its first pick 1.6 mm, then a 4.16 mm purge, then a 0.8 mm retract. On later picks, 1.6 mm (lock), 8 mm, and 0.8 mm before the 4.16 mm purge and the 0.8 mm retract | Retracts 0.8 mm, then parks (`P0 S1`). No other E move |
 
-The purge per color change isn't in the profiles: it's PrusaSlicer's
-built-in wiping volume. The MMU3 profiles name the base model in `M862.3`
-and add `M862.6 P "MMU3"`. The INDX profiles add `M862.6 P"INDX lock"`.
+The purge per tool change is the incoming filament's
+`filament_minimal_purge_on_wipe_tower`: 15 mm³ for PLA on the XL, 10 mm³ on
+INDX, 35 mm³ for PETG on the XL. PrusaSlicer zeroes the wiping-volume
+matrix for printers without single-extruder multi-material, and the INDX
+tool-change G-code uses the same setting at its purge station. On the XL
+the tower's purge isn't exactly that volume: it's tower line geometry, so
+the simulator keeps the measured lengths. The MMU3 profiles name the base
+model in `M862.3` and add `M862.6 P "MMU3"`. The INDX profiles add
+`M862.6 P"INDX lock"`.
+
+The simulator holds these as profile data (`simulator/slicer.py`), on
+`ModelInfo.slicer` for the XL and INDX models. `script/firmware-check`
+doesn't compare it, since it isn't firmware. The bundle has no Core One L
+INDX, so both INDX models use the Core One INDX numbers. A one-tool XL
+turns its toolchanger off and keeps Dwarf 0 picked
+(`toolchanger_utils_xl.cpp:62-93`), and the single-tool XL profiles
+inherit `*commonXL*`, whose end G-code doesn't park, so it gets no profile.
+The travel retract and its restore around the XL's tower are the model's
+own moves and cancel in the tracker, so they're left out.
 
 ## Approach
 
@@ -314,7 +400,8 @@ hand-copied data that `script/firmware-check` compares with the source:
 - The preset table for its build.
 - The G-code names it accepts as its own and in compatibility mode, and the
   features a file must declare.
-- Its feed system (below), and whether it can take an MMU.
+- Its feed system (below): direct, XL or INDX. And whether it can take an
+  MMU.
 
 `Settings` keeps times and rates. Its load lengths become overrides: unset
 means the model's value. The `firmware` package gains readers for the new
@@ -333,8 +420,8 @@ A single-tool printer has one of each. A toolchanger has one path per
 tool. An MMU printer has five tools and one path. The printer has a
 selected tool, which can be none. A move names the tool whose path moves,
 and the feed system decides which tool it credits. A toolchanger's menu
-load on an unpicked tool counts on that tool until Workstream 4 has a menu
-load pick the tool first. A load or unload in progress stays on its tool.
+load or unload picks its tool first, as the firmware's menu does. A load or
+unload in progress stays on its tool.
 
 "None selected" is two cases in the firmware. A toolchanger with no tool
 picked has no physical tool: it can't move E at all, the auto-retract's
@@ -351,8 +438,8 @@ when, which tool a move credits, what a tool change moves, and which tool
 the idle sensor clear reads, if any. What counts an unload isn't one of
 them: the firmware counts any write of "none" over a stored type
 (`store_definition.cpp:258-262`). An MMU counts fewer only because its
-operations don't write "none". There are three: direct, toolchanger and
-MMU. The model's profile names its system, and a printer's config turns the
+operations don't write "none". There are four: direct, the XL and INDX
+toolchangers, and MMU. The model's profile names its system, and a printer's config turns the
 MMU on.
 
 ### The preview
@@ -382,13 +469,21 @@ waiting until it's answered.
 A print stays a list of (tool, mm) segments. What a tool change costs comes
 from the feed system and the profile, not one global purge:
 
-- Toolchanger: the slicer's purge on the incoming tool.
+- Toolchanger: the slicer's ramming and retract on the outgoing tool, then
+  its deretract and purge on the incoming one. On INDX the firmware's
+  `G27 R8` retracts the outgoing tool too, and a later pick feeds it back.
 - MMU: the firmware's feed on the outgoing slot, then the slicer's load and
   purge on the incoming one.
 
 The slicer's part (priming, ramming, the load after a change, the wipe
-tower, the end G-code's unload) is profile data with the stock profiles'
-values, and a print can override it.
+tower, the end G-code's park or unload) is profile data with the stock
+profiles' values, and a print can override its prime and its tool-change
+purge (`PrintSpec.prime_mm`, `toolchange_purge_mm`). The toolchangers' is
+built; the MMU's waits for Workstream 5. The priming runs once, when the
+print first starts feeding (`UserJob.primed`), so a pause, a power-panic
+resume or a filament change doesn't run it again. Segments have no layers:
+a tool's first pick in the print stands for the first layer, which on the
+XL decides the tower's larger purge.
 
 ### Tests
 
@@ -448,11 +543,34 @@ G-code, plus the `M862` lines:
 2. **MK4S MMU3, one color.** Whether the start and end differ from run 1.
 3. **Core One MMU3, two colors, PETG.** The same, for the other build and
    a filament with more cooling moves.
-4. **XL, two tools and five.** Priming per tool, and the purge per change.
-5. **Core One INDX, two tools.** The purge station against the wipe tower,
-   and whether the retract before a tool change is emitted.
+4. **XL, two tools and five.** Done: two 10 x 10 x 1 mm boxes, one per tool,
+   on the XL 2T and 5T and the XL+ 2T, with tools in either order, three
+   tools, one tool, and the wipe tower, the ramming and the purge volume
+   changed one at a time.
+5. **Core One INDX, two tools.** Done: the same boxes on the 4T and 8T,
+   with other tools, one tool, the wipe tower on, and a larger purge
+   volume.
 
-Runs 1 and 3 go in before Workstream 5, runs 4 and 5 before Workstream 4.
+Runs 4 and 5 used PrusaSlicer 2.9.7 (flatpak `com.prusa3d.PrusaSlicer`)
+with vendor bundle `PrusaResearch` 2.5.16, and their numbers are in "What
+the slicer adds" and `simulator/slicer.py`. The sliced G-code isn't kept in
+the repository. Runs 1 to 3 are still to do, before Workstream 5.
+
+To repeat a run, make a model with `script/slicer/make3mf.py` and slice it
+with `script/slicer/slice.sh`, which both document their arguments. Each
+slice uses one printer, print and filament preset, and one filament per
+tool:
+
+| Run | Printer preset | Print preset | Filament preset |
+| --- | --- | --- | --- |
+| 4, XL 2T and 5T | `Original Prusa XL - 2T Input Shaper 0.4 nozzle`, `Original Prusa XL - 5T Input Shaper 0.4 nozzle` | `0.20mm SPEED @XLIS 0.4` | `Prusament PLA @XLIS` |
+| 4, XL+ 2T | `Prusa XL+ 2T 0.4 nozzle` | `0.20mm Balanced ★ @XL+ 0.4` | `Prusament PLA @XL+` |
+| 5, INDX 4T and 8T | `Prusa CORE One INDX 4T HF0.4 nozzle`, `Prusa CORE One INDX 8T HF0.4 nozzle` | `0.20mm Balanced ★ @COREONEINDX HF0.4` | `Prusament PLA @COREONEINDX HF0.4` |
+
+The model is one 10 x 10 x 1 mm box per tool, side by side, which makes five
+layers at 0.2 mm and one tool change per extra tool on each layer. The slices that vary one setting change
+the wipe tower, the XL's multi-tool ramming, or the filament's
+`filament_minimal_purge_on_wipe_tower`.
 
 ## Before the INDX upgrade
 
@@ -473,8 +591,9 @@ six below are what this plan adds; the last two are sitting D's:
   expect `ATTENTION`, a `job` with a new ID, and `/api/v1/job` reading
   `PAUSED`. Decline one and expect `IDLE`.
 - **The power-panic resume's purge.** F12 confirms the 8 mm fed back on a
-  single-tool Core One L, which the simulator follows from the source, and
-  shows whether the idle clear can run before the resume.
+  single-tool Core One L, which the simulator follows from the source. It
+  also shows the idle window, and whether PrusaLink answers before the
+  firmware's first resume attempt, which decides BF26.
 - **Everything with a tag**: F4 and F24's tag rows. The INDX has no tag
   reader until the firmware adds one.
 - **A load at the preview, then Abort.** `F28-load-then-decline`, steps 1
@@ -497,9 +616,27 @@ Left to the work:
 - The single-tool power-panic resume: the source gives a plain Core One L
   the 8 mm fed back, not a 25 mm purge, and the simulator follows the
   source. The F12 trace confirms it.
-- PrusaSlicer's default wiping volume, from [slicer run](#slicer-runs) 1.
-- Whether an INDX profile's retract before a tool change is emitted, from
-  slicer run 5.
+- PrusaSlicer's purge per change on an MMU3, from [slicer run](#slicer-runs)
+  1. On the toolchangers it's `filament_minimal_purge_on_wipe_tower`.
+- Whether INDX's `G1 E1.6` lock move after a pickup reaches the nozzle or
+  only seats the lock. The firmware counts it as any move, and so does the
+  simulator; a trace of a tool change would settle it.
+- The XL tower's purge after the first layer, 7.01 mm rather than the
+  6.24 mm its 15 mm³ gives, follows from the tower's line geometry, which
+  depends on the tower's width and the layer height. The simulator keeps
+  the stock print settings' lengths.
+- Why INDX's wipe-tower purge, off by default, is 1.67 mm, below the
+  10 mm³ minimum. The simulator models the default purge station only.
+- Both INDX models use the Core One INDX numbers, since bundle 2.5.16 has
+  no Core One L INDX profile.
+- A tool first used above layer 1 gets the first layer's larger purge on the
+  XL, since a segment has no layers.
+- The tools-mapping screen's checks of a spool join's chain, which
+  `simulator/README.md` lists.
+- Change filament while a print is paused, which the firmware offers (F34).
+- The iX's resume purge after a pause (F6).
+- The single-tool XL profiles' start and end moves, which the slices
+  didn't cover. A one-tool XL prints with no profile moves.
 
 Only hardware could tell, and none is expected:
 

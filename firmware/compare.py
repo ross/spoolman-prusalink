@@ -255,6 +255,19 @@ def tools(features: frozenset[str]) -> int:
     return 1
 
 
+def feed_of(features: frozenset[str]) -> str:
+    """Return a build's feed system, as `simulator.feed.Feed` names it.
+
+    `HAS_INDX` builds pick tools from docks onto one head, and the other `HAS_TOOLCHANGER`
+    builds are the XL's (`ProjectOptions.cmake`). Every other build feeds one tool directly.
+    """
+    if "HAS_INDX" in features:
+        return "indx"
+    if "HAS_TOOLCHANGER" in features:
+        return "xl"
+    return "direct"
+
+
 def macros(build: str, features: Mapping[str, frozenset[str]]) -> read.Macros:
     """Return the macro values for `build`; an unknown macro raises KeyError."""
 
@@ -282,6 +295,11 @@ def load(source: Source) -> Firmware:
     unknown = sorted({b for b in MODEL_BUILDS.values() if b} - read.printers(options))
     if unknown:
         raise Unreadable(read.OPTIONS_FILE, f"PRINTER_VALID_OPTS doesn't list {', '.join(unknown)}")
+    # `tools` and `feed_of` take an INDX build for a toolchanger.
+    unknown = sorted(features["HAS_INDX"] - features["HAS_TOOLCHANGER"])
+    if unknown:
+        listed = ", ".join(unknown)
+        raise Unreadable(read.OPTIONS_FILE, f"HAS_INDX without HAS_TOOLCHANGER on {listed}")
     presets_text = source.read(read.PRESETS_FILE)
     tracker_text = source.read(read.TRACKER_FILE)
     configurations = source.read(read.CONFIGURATION_FILE)
@@ -582,6 +600,7 @@ def _compare_sim_models(
         differ(table, code, None, "uuids", build.uuids, model.uuids)
         differ(table, code, None, "counters", build.counters, model.counters)
         differ(table, code, None, "max_tools", build.tools, model.max_tools)
+        differ(table, code, None, "feed", feed_of(build.features), str(model.feed))
         if build.gap_mm is not None:
             differ(table, code, None, "gap_mm", build.gap_mm, model.gap_mm)
         differ(table, code, None, "mmu", "HAS_MMU2" in build.features, model.mmu)

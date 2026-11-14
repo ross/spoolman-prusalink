@@ -4,27 +4,43 @@ from __future__ import annotations
 
 import pytest
 
-from simulator.feed import FEED_SYSTEMS, Direct, Feed, Toolchanger
+from simulator.feed import (
+    FEED_SYSTEMS,
+    Direct,
+    Feed,
+    IndxToolchanger,
+    Toolchanger,
+    XlToolchanger,
+)
 from simulator.model import MODELS, Invalid
 from simulator.tests.util import make
 
-# The XL, XLP, XL dev kit, Core One INDX and Core One L INDX.
-TOOLCHANGERS = {"3.1.0", "3.1.1", "5.1.0", "7.10.0", "8.10.0"}
+# The XL, XLP and XL dev kit; the Core One INDX and Core One L INDX.
+XL_FEED = {"3.1.0", "3.1.1", "5.1.0"}
+INDX_FEED = {"7.10.0", "8.10.0"}
 
 
 @pytest.mark.parametrize("code", sorted(MODELS))
 def test_model_feed(code):
-    expected = Feed.TOOLCHANGER if code in TOOLCHANGERS else Feed.DIRECT
+    expected = Feed.XL if code in XL_FEED else Feed.INDX if code in INDX_FEED else Feed.DIRECT
     assert MODELS[code].feed is expected
+    # Only the toolchangers have more than one tool.
+    assert (MODELS[code].max_tools > 1) == (expected is not Feed.DIRECT)
 
 
-def test_printer_feed_is_the_models_system():
-    _, direct = make("8.1.0")
-    _, xl = make("3.1.0")
-    assert direct.feed is FEED_SYSTEMS[Feed.DIRECT]
-    assert isinstance(direct.feed, Direct)
-    assert xl.feed is FEED_SYSTEMS[Feed.TOOLCHANGER]
-    assert isinstance(xl.feed, Toolchanger)
+@pytest.mark.parametrize(
+    ("code", "feed", "system"),
+    [
+        ("8.1.0", Feed.DIRECT, Direct),
+        ("3.1.0", Feed.XL, XlToolchanger),
+        ("8.10.0", Feed.INDX, IndxToolchanger),
+    ],
+)
+def test_printer_feed_is_the_models_system(code, feed, system):
+    _, p = make(code)
+    assert p.feed is FEED_SYSTEMS[feed]
+    assert type(p.feed) is system
+    assert isinstance(p.feed, Toolchanger) == (feed is not Feed.DIRECT)
 
 
 def test_direct_refuses_select_tool():

@@ -9,7 +9,7 @@ a time.
 
 ## Reading an entry
 
-Each finding has an ID from BF1 to BF25, for "bridge finding". The single
+Each finding has an ID from BF1 to BF27, for "bridge finding". The single
 letters are taken by the scenario rows in [scenarios.md](scenarios.md) and
 the printer behaviors (F) in [printer-behaviors.md](printer-behaviors.md).
 An ID stays with its finding when the finding moves stage or is fixed.
@@ -61,10 +61,12 @@ written.
 | 1 | BF23 | A print declined after the preview's load can count as started |
 | 1 | BF24 | Usage counted on an empty tool lands on the next spool |
 | 1 | BF25 | Printing past an empty tool leaves the filament sensors off |
+| 1 | BF27 | A filament change before a tool's first extrusion in a print looks like its print start |
 | 1 | BF3 | A custom preamble without the input-shaper check makes every sync job wait |
 | 1 | BF2 | The bridge refuses a preamble the printer accepts |
 | 1 | BF4 | The printer's check settings change what a failed check does |
 | 1 | BF5 | A declined or refused sync job uses up a job ID and never finishes |
+| 1 | BF26 | A sync job in the power-panic window drops the resume |
 | 2 | BF12 | Hand swaps on a toolchanger can be missed |
 | 2 | BF13 | A spool join counts an unload in the middle of a print |
 | 2 | BF14 | Writes are refused on multi-tool models |
@@ -283,6 +285,40 @@ written.
   the simulator reports a 230 preheat. The write needs BF14.
 - **Status**: Open.
 
+### BF26. A sync job in the power-panic window drops the resume
+
+- **Printers**: Every model with power panic that the bridge writes to:
+  MK3.9, MK3.9S, MK4, MK4S, Core One, Core One Oak, Core One L. INDX and
+  the XL once BF14 is built.
+- **What happens**: After a power cut the printer boots and reads `IDLE`
+  with no job for at least 1.5 s, until the firmware's autostart resumes
+  the print (F12; `print_utils.cpp:67-82`, `printer_state.cpp:376-384`).
+  A write that waited for the print (W2), such as a Spoolman edit of the
+  loaded spool (W14), is still due. The bridge's first poll after the boot
+  sees an idle printer, reads the status again right before the upload,
+  finds `IDLE` again, and uploads its sync job (`sync_printer` in
+  `app.py`). The job starts a print. At its next try the autostart finds
+  the printer printing and gives the resume up, unless the USB drive, the
+  temperatures and the screen are all ready by then. Then it resumes over
+  the running job: its check that the printer is idle is a debug assertion
+  (`print_utils.cpp:75-79`, `power_panic.cpp:269-271`). Any positive
+  `sync_delay` holds the job at the first idle poll after the boot. The
+  job then runs at the first later poll after the printer has been idle
+  that long, so whether it misses the window depends on when that poll
+  comes. `sync_delay` is 0 by default.
+- **Effect**: The user's print is lost: it never resumes, and the printer
+  ends the sync job `FINISHED`. If the autostart resumes anyway, the two
+  jobs collide in a way the source doesn't define.
+- **Evidence**: Read in the firmware source. Shown in the simulator by
+  `test_a_sync_job_in_the_window_drops_the_resume` in
+  `tests/test_power_panic.py`, which pins it on a Core One L. To be
+  confirmed on the printer: whether PrusaLink answers before the
+  autostart's first try. The F12 trace shows the window, and has to be
+  taken before the INDX upgrade.
+- **Scenario rows**: P12, W2, W14.
+- **To reproduce**: That test, today.
+- **Status**: Open.
+
 ## Charging
 
 ### BF9. The auto-retract charges filament that wasn't used
@@ -362,7 +398,10 @@ written.
   builds set (`ProjectOptions.cmake:755-756`), and the iX's plain `G12`
   wipes without a purge (`power_panic.cpp:489-491`,
   `nozzle_cleaner.cpp:157-190`). The bridge charges whatever counts to
-  the spool active after the boot.
+  the spool active after the boot. When the filament was pulled out while
+  the power was off, the idle sensor clear in the window before the resume
+  counts an unload first (F12), and the purge or feed counts on the empty
+  tool: that's BF24.
 - **Effect**: Up to one poll interval of printing, 30 s by default, is
   never charged. The purge or feed is charged to the active spool, which
   is right if it leaves the nozzle; on a plain Core One L the source says
@@ -374,7 +413,9 @@ written.
 - **To reproduce**: `test_p12_power_panic_resume_keeps_the_job` in
   `integration/test_prints.py` shows the loss and the 8 mm fed back on a
   Core One L, 7.6 mm counted. `simulator/tests/test_model_power_panic.py`
-  shows the amount per model.
+  shows the amount per model. With the filament pulled out while off,
+  `test_an_unload_in_the_window_then_printing_on_an_empty_tool` in
+  `tests/test_power_panic.py`.
 - **Status**: Open. A candidate for Accepted: printer-behaviors.md, under
   "Bridge follow-ups found here", calls both parts fine.
 
@@ -444,28 +485,50 @@ written.
 - **Printers**: Single-tool models with counters, when the user turns the
   filament sensors off at the filament-not-inserted screen instead of
   loading (F29). Core One INDX, Core One L INDX and XL, at the
-  tools-mapping screen.
+  tools-mapping screen. Every model with power panic and counters, after a
+  power cut with the filament pulled out while off, or during a filament
+  change.
 - **What happens**: On the tools-mapping screen, Print with a used tool
   empty first asks to turn the filament sensors off, and only that lets
   the print go on. When the file names a type for the empty tool, a type
   question follows, which Ignore answers (F28, F29). A single-tool printer's
   filament-not-inserted screen offers the same, and the print goes on
   alike (F29). The print then runs through the empty tool, and the tracker
-  counts every move on that tool with no material, a toolchanger's pickup
-  purge included. The bridge holds that usage because the tool reports no
+  counts every move on that tool with no material, a toolchanger's
+  priming and purges included. A power-panic resume gets there a second
+  way: when the filament was pulled out while the power was off, the idle sensor clear
+  in the window before the resume counts the unload and clears the type,
+  and the resumed print goes on through the empty tool, since a runout
+  needs the sensor to see the filament go (F12, F29). The resume's feed
+  back or purge counts there too (BF11). A power cut during a filament
+  change gets there a third way: the dialog isn't a pause, so a cut while
+  a runout waits for its reload resumes the print on its own, through the
+  tool the runout emptied (F12). A cut during Tune > Change filament on
+  another tool, or during a spool join's unload, does the same on that
+  tool until the file's next tool change (F34, F35). The bridge holds that usage because the tool reports no
   material (C7). When filament is next loaded in that tool, the bridge
   charges the held usage, with the load's own count, to the spool
   reported there.
 - **Effect**: The new spool is charged for filament that came from no
-  spool: in the test, the held 76 mm on top of the load's own count.
+  spool: in the test, the held 84 mm on top of the load's own count.
 - **Evidence**: On a toolchanger, shown in the simulator by
   `test_a_print_through_an_empty_tool_holds_its_usage` in
   `tests/test_toolchanger_prints.py`, on an INDX, which pins the charge:
-  the held 76 mm plus the load's 70. On a single-tool
+  the held 84 mm plus the load's 70. On a single-tool
   printer, read in the firmware source (F29): the simulator doesn't model
-  that path.
-- **Scenario rows**: C7, T2.
-- **To reproduce**: That test, today, on a toolchanger. On the Core One L,
+  that path. After a power cut, shown in the simulator on a Core One L by
+  `test_an_unload_in_the_window_then_printing_on_an_empty_tool` in
+  `tests/test_power_panic.py`: the bridge records the unload and
+  `swap_unconfirmed` in the window, holds the usage of the resumed print,
+  and charges it with the next load's count to the spool reported then.
+  After a cut while a runout waits for its reload, on a Core One L, by
+  `test_a_cut_while_a_runout_waits_for_the_reload` in the same file: the
+  swap the runout opened stays open, the bridge holds the resumed print's
+  usage, and charges it with the next load's count to the spool reported
+  then.
+- **Scenario rows**: C7, T2, P12.
+- **To reproduce**: Those tests, today, on a toolchanger and after a power
+  cut. On the Core One L,
   the live check `F29-sensors-off-print` confirms it with the production
   bridge: sitting D in printer-behaviors.md, under "Capture plan".
 - **Status**: Open.
@@ -499,6 +562,52 @@ written.
   counts one. No bridge test covers it.
 - **Status**: Open.
 
+### BF27. A filament change before a tool's first extrusion in a print looks like its print start
+
+- **Printers**: Core One INDX and Core One L INDX always, through Tune >
+  Change filament on a tool the print hasn't used yet. The XL the same
+  way, and every single-tool model with counters through a runout during
+  a print's preheat, but only when the tool isn't fully auto-retracted.
+- **What happens**: Tune > Change filament on a toolchanger asks for a
+  tool and sends `M600 P T<n>`, which picks that tool, changes its
+  filament and changes back (F34, `src/marlin_stubs/pause/M600.cpp:204-340`,
+  `src/gui/screen/screen_m600.cpp`). The change counts an unload on the
+  tool, and its ramming counts too. `accounting.print_start` takes a
+  tool's first counter rise in a new job as that tool's print start (Q4).
+  On a tool that hasn't extruded in the running job, the ramming is that
+  rise, so the bridge sees the unload and the tool's print start in the
+  same poll: it records `unload` and `swap_unconfirmed`, then at once
+  `swap_assumed` with a provisional charge, and flags the spool as assumed
+  reloaded. On a tool the print has already extruded with, the swap stays
+  open as P2 and P3 say. A runout during a print's preheat, before any
+  extrusion, takes the same path on a single-tool printer. It needs the
+  unload to count something. A Nextruder that is fully auto-retracted, as
+  it is after a menu load or a finished print, unloads cold with no
+  ramming (`can_cold_unload`, `pause.cpp:1249-1255`), so nothing counts
+  and the swap stays open as P2 says. A Nextruder rams when auto-retract
+  is off, with flexible filament, and on an XL tool that an earlier print
+  used but didn't end on. INDX never unloads cold, so it always rams.
+- **Effect**: A Spoolman change made while the printer waits for the
+  reload, which P2 promises confirms the swap, is staged instead (S13),
+  and the reload and the rest of the print go to the old spool until a
+  claim moves them. With no Spoolman change, the old spool carries an
+  "assumed reloaded" flag where P3 would leave the swap open.
+- **Evidence**: Shown in the simulator on an INDX by
+  `test_a_change_on_a_tool_the_print_has_not_used_looks_like_its_print_start`
+  in `tests/test_toolchanger_prints.py`. Reproduced, no test kept: the
+  same change on a tool the print used earlier follows P2, and a runout in
+  the preheat of a Core One L print gives `unload`, `swap_unconfirmed` and
+  `swap_assumed` in one poll when the tool isn't auto-retracted, and
+  nothing more than P2 when it is. That a real runout can come before the
+  print's first extrusion is inferred: the start G-code's heat waits come
+  before its purge line.
+- **Scenario rows**: T10, P2, P3, P8, Q4, S13.
+- **To reproduce**: That test, today. For the single-tool path, start a
+  print with a preheat on a Core One L through the unit harness, with the
+  tool not auto-retracted (the harness's starting state, or `auto_retract`
+  off), poll during the preheat, `runout(0)`, and poll.
+- **Status**: Open.
+
 ## Multi-tool
 
 ### BF12. Hand swaps on a toolchanger can be missed
@@ -507,44 +616,64 @@ written.
 - **What happens**: The idle sensor clear runs only on the picked tool
   (`filament_sensors_handler.cpp:294-312`). An INDX docks its tool after a
   load, an unload, a pause and a print, so an idle INDX has none picked
-  (`M701_2.cpp:135-140, 194-197, 339-342`, `pause.cpp:1395-1402`,
-  `marlin_server.cpp:1098, 2561`). An XL
-  has whichever tool is on the head. A docked tool emptied by hand keeps
-  its type and counts no unload, and nothing sweeps the tools at boot or at
-  a print start. On an idle INDX only a menu unload counts. At a print
-  start the tools-mapping screen shows a hand-emptied used tool as having
-  no filament, but that counts no unload either, and the idle sensor clear
-  it allows runs on the picked tool only (F28). Printing past it is BF24
-  and BF25.
+  (`M701_2.cpp:135-140, 194-197, 339-342`,
+  `marlin_server.cpp:1098, 2561`). A finished print's end G-code parks the
+  tool on an XL with several tools too (`P0 S1` in the stock profile), and
+  that XL otherwise
+  has whichever tool is on the head (F32). A docked or parked tool emptied
+  by hand keeps its type and counts no unload, and nothing sweeps the
+  tools at boot or at a print start. On an idle INDX only a menu load,
+  unload or Pick/park of that tool counts it: each picks the tool first,
+  with no dialog open, and the clear then counts the unload (F23, F30). At
+  a print start the tools-mapping screen shows a hand-emptied used tool as
+  having no filament, but that counts no unload either, and the idle
+  sensor clear it allows runs on the picked tool only (F28). Printing past
+  it is BF24 and BF25.
 - **Effect**: The bridge sees no unload, so a hand swap opens no swap. A
   spool moved into the tool's location in Spoolman stays staged (S13, S9),
-  and the old spool is charged for the new one until a claim moves it.
-- **Evidence**: Read in the firmware source; the bridge's side is
-  inferred.
-- **Scenario rows**: T3, T4, S9, S13.
-- **To reproduce**: Needs workstream 4. The simulator always has a tool
-  picked today, so T4 shows only the picked-tool case.
+  and the old spool is charged for the new one until a claim moves it, or
+  until the user next loads, unloads or picks that tool from the menu. The
+  menu's pick runs the idle clear first, which counts the unload, so a menu
+  load commits the staged swap before the load counts. A print's preview
+  load picks inside its dialog and counts no unload.
+- **Evidence**: Read in the firmware source. Shown in the simulator:
+  `test_a_tool_emptied_by_hand_while_docked_counts_no_unload` in
+  `tests/test_toolchanger_prints.py`.
+- **Scenario rows**: T3, T4, T8, S9, S13.
+- **To reproduce**: `test_a_tool_emptied_by_hand_while_docked_counts_no_unload`:
+  an INDX finishes a print, so no tool is picked; T1 is emptied by hand
+  while off and its spool swapped in Spoolman. The bridge sees no unload
+  and the new spool stays staged. A menu load of T1 then counts the unload
+  and commits the swap. T4 shows the picked-tool case.
 - **Status**: Open.
 
 ### BF13. A spool join counts an unload in the middle of a print
 
 - **Printers**: Core One INDX, Core One L INDX, XL.
 - **What happens**: A runout with a spool join counts an unload on the old
-  tool, and the print goes on with the join's tool. The new tool's type
-  isn't set or copied, and its purge counts on it: 27 mm on the XL, 25 mm
-  on INDX (`spool_join.cpp:258-342`, `toolchanger_xl.cpp:505-549`,
-  `nozzle_cleaner.cpp:87`). No
-  scenario row covers a join. The bridge takes the old tool's unload as a
-  runout during a started print: it opens an unconfirmed swap there (P3)
-  and may raise the runout flag (M5a). The rest of the print is charged to
-  the spool in the join tool's location.
+  tool mid-print, while the job reads `ATTENTION`, and the print goes on
+  with the join's tool (F35). The join's tool's type isn't set or copied,
+  and its purge counts on it: 27 mm and an 8 mm retract on the XL, the
+  nozzle cleaner's 25 mm and its auto-retract on INDX
+  (`spool_join.cpp:239-365`, `toolchanger_xl.cpp:505-571`,
+  `nozzle_cleaner.cpp:87`). The bridge takes the old tool's unload as a
+  runout during a started print: it records `unload` and
+  `swap_unconfirmed` there and flags the old spool (`unload` in
+  `accounting.py`), and with more than 5% of its net weight left in
+  Spoolman flags it as run out mid-print too (M5a; `_check_runout` and
+  `RUNOUT_LEFT` in `app.py`). The swap stays open after the print (P3). The join's tool's first
+  count in the job is its purge, which the bridge takes as that tool's
+  print start (`print_start` in `accounting.py`), and the rest of the print is charged to the spool in its
+  location, with no event.
 - **Effect**: Not settled. The charges follow the filament when each tool's
   location holds its spool. The old tool's swap and flags follow rules
-  written for a reload of the same tool.
-- **Evidence**: Read in the firmware source; the bridge's side is
-  inferred.
-- **Scenario rows**: P2, P3, P4, M5a, T2.
-- **To reproduce**: Needs workstream 4.
+  written for a reload of the same tool: they ask for a spool to be moved
+  into a tool the print has left empty.
+- **Evidence**: Read in the firmware source. Shown in the simulator on an
+  INDX by `test_a_spool_join_counts_an_unload_on_the_old_tool_mid_print`
+  in `tests/test_toolchanger_prints.py`.
+- **Scenario rows**: T9, P2, P3, P4, M5a, T2.
+- **To reproduce**: That test, today.
 - **Status**: Open.
 
 ### BF14. Writes are refused on multi-tool models

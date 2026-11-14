@@ -79,14 +79,20 @@ def test_firmware_defaults_by_model(tmp_path):
     assert prusalink.filament(forced) is None
 
 
-def test_selected_tool_is_the_first_enabled(tmp_path):
+def test_a_toolchanger_starts_with_no_tool_picked_and_a_direct_printer_with_tool_0(tmp_path):
     tools = tool("index = 0\nenabled = false") + tool("index = 2") + tool("index = 1")
     p = sim_from(tmp_path, printer(tools, model="3.1.0")).printers["p"]
-    assert p.selected_tool == 1
+    assert p.selected_tool is None
     assert p.tools[0].enabled is False and p.tools[1].enabled is True
-    none = tool("index = 3\nenabled = false") + tool("index = 1\nenabled = false")
-    p = sim_from(tmp_path, printer(none, model="3.1.0")).printers["p"]
-    assert p.selected_tool == 1
+    assert sim_from(tmp_path, printer(model="8.10.0")).printers["p"].selected_tool is None
+    assert sim_from(tmp_path, printer(model="8.1.0")).printers["p"].selected_tool == 0
+
+
+def test_picked_tool_names_the_tool_picked_at_start(tmp_path):
+    tools = tool("index = 0") + tool("index = 1")
+    text = printer("picked_tool = 1\n" + tools, model="8.10.0")
+    assert sim_from(tmp_path, text).printers["p"].selected_tool == 1
+    assert sim_from(tmp_path, printer("picked_tool = 0")).printers["p"].selected_tool == 0
 
 
 def test_settings_and_per_printer_options(tmp_path):

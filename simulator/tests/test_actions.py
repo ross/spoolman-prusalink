@@ -11,6 +11,7 @@ from simulator.model import (
     Busy,
     Invalid,
     JobPhase,
+    Join,
     PrintSpec,
     Segment,
     SimPrinter,
@@ -28,6 +29,8 @@ PRINTER_CALLS: dict[str, Callable[[SimPrinter], None]] = {
     "cancel": lambda p: p.cancel(),
     "dismiss": lambda p: p.dismiss(),
     "home": lambda p: p.home(),
+    "park_tool": lambda p: p.park_tool(),
+    "change_all": lambda p: p.change_all([0], name="PLA"),
     "reboot": lambda p: p.reboot(),
     "clear_jam": lambda p: p.clear_jam(),
     "tap_through": lambda p: p.tap_through(),
@@ -40,6 +43,7 @@ TOOL_CALLS: dict[str, Callable[[SimPrinter, int], None]] = {
     "retract": lambda p, i: p.retract(i, 1),
     "runout": lambda p, i: p.runout(i),
     "jam": lambda p, i: p.jam(i),
+    "change_filament": lambda p, i: p.change_filament(i),
     "select_tool": lambda p, i: p.select_tool(i),
     "set_sensor_fault": lambda p, i: p.set_sensor_fault(i, True),
     "set_stuck_write": lambda p, i: p.set_stuck_write(i, True),
@@ -144,6 +148,44 @@ def multi_tool_print():
     return sim, p
 
 
+def xl_changing_another_tool():
+    """The XL's two-tool print on T0 waits for T1's reload after Tune > Change filament
+    on T1, with T1 picked."""
+    sim, p = multi_tool_print()
+    p.change_filament(1)
+    assert p.job.phase is JobPhase.WAIT_LOAD and p.selected_tool == 1
+    return sim, p
+
+
+def xl_joining():
+    """The XL's print on T0 with joins to T1, then T2: T0 ran out, and the join unloads it."""
+    sim, p = make("3.1.0", [loaded(0), loaded(1), loaded(2), SimTool(3)])
+    spec = PrintSpec([Segment(0, 100)], preheat_s=0, spool_join=[Join(0, 1), Join(1, 2)])
+    p.start_print(spec)
+    run(sim, 1)
+    p.tap_through()  # Print
+    run(sim, 1.8)
+    p.runout(0)
+    assert p.job.phase is JobPhase.JOIN
+    return sim, p
+
+
+def panic_window():
+    """The XL's two-tool print cut mid-print: IDLE with no job until the resume."""
+    sim, p = multi_tool_print()
+    p.reboot(keep_job=True)
+    assert p.job is None and p.resuming is not None
+    return sim, p
+
+
+def xl_changing_all():
+    """A change all on T0 and T1 runs on T0, with T1 queued."""
+    sim, p = make("3.1.0", [loaded(0), loaded(1), SimTool(2)])
+    p.change_all([0, 1], name="PETG")
+    assert p.queue
+    return sim, p
+
+
 def multi_tool_unloading():
     """T1 unloads, so the printer reads BUSY for the other tools."""
     sim, p = make("3.1.0", [loaded(0), loaded(1), SimTool(2)])
@@ -203,6 +245,32 @@ def multi_tool_idle():
     return make("3.1.0", [loaded(0), loaded(1), SimTool(2), loaded(3, enabled=False)])
 
 
+def xl_picked_after_a_load():
+    """An XL leaves the tool a menu load picked: T1, not T0."""
+    sim, p = make("3.1.0", [loaded(0), SimTool(1), loaded(2)])
+    p.load(1, source="preset", name="PLA")
+    sim.advance(60)
+    assert p.selected_tool == 1 and p.tools[1].process is None
+    return sim, p
+
+
+def indx_docked():
+    """An idle INDX docks the tool after a menu load, so none is picked."""
+    sim, p = make("8.10.0", [loaded(0), SimTool(1)])
+    p.load(1, source="preset", name="PLA")
+    sim.advance(60)
+    assert p.selected_tool is None and p.tools[1].process is None
+    return sim, p
+
+
+def indx_unloading():
+    """An INDX unload picks T1 first and holds it until the unload ends."""
+    sim, p = make("8.10.0", [loaded(0), loaded(1)])
+    p.unload(1)
+    assert p.selected_tool == 1
+    return sim, p
+
+
 SITUATIONS = [
     idle,
     loading,
@@ -218,7 +286,14 @@ SITUATIONS = [
     off_mid_print,
     cold_bed,
     multi_tool_print,
+    xl_changing_another_tool,
+    xl_joining,
+    panic_window,
     multi_tool_idle,
+    xl_picked_after_a_load,
+    indx_docked,
+    indx_unloading,
+    xl_changing_all,
     multi_tool_unloading,
     preheat_empty,
     preview_empty,

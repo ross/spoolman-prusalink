@@ -92,6 +92,21 @@ BAD = {
     "removed setting": ("load_feed_mm = 36\n" + printer(), "load_feed_mm isn't a known key"),
     "bad high flow": (printer("high_flow = 1"), "printers[0].high_flow must be true or false"),
     "bad sensors": (printer("sensors = 1"), "printers[0].sensors must be true or false"),
+    "picked tool not configured": (
+        printer("picked_tool = 2\n" + tool("index = 0") + tool("index = 1"), model="3.1.0"),
+        "printers[0].picked_tool must name an enabled tool, got 2",
+    ),
+    "picked tool disabled": (
+        printer(
+            "picked_tool = 1\n" + tool("index = 0") + tool("index = 1\nenabled = false"),
+            model="3.1.0",
+        ),
+        "printers[0].picked_tool must name an enabled tool, got 1",
+    ),
+    "bad picked tool": (
+        printer('picked_tool = "T0"'),
+        "printers[0].picked_tool must be an integer",
+    ),
     "bad auto-retract": (printer("auto_retract = 0"), "printers[0].auto_retract must be true"),
     "auto-retract off on INDX": (
         printer("auto_retract = false", model="8.10.0"),
@@ -131,6 +146,10 @@ BAD = {
     ),
     "negative number": ("purge_mm = -1\n" + printer(), "purge_mm must be a number of at least 0"),
     "time scale zero": ("time_scale = 0\n" + printer(), "time_scale must be greater than 0"),
+    "resume before the firmware's first try": (
+        "panic_idle_seconds = 1\n" + printer(),
+        "panic_idle_seconds must be at least 1.5",
+    ),
     "port as string": (printer('port = "80"'), "printers[0].port must be an integer"),
     "port is control port": (printer("port = 8000"), "printers[0].port 8000 is already used"),
     "duplicate port": (

@@ -174,8 +174,8 @@ when its dock is calibrated. The XL has up to five heads, enabled per dwarf.
 - A tool change is not an unload, and the state stays `PRINTING` through it.
   Slicer ramming or retract before `T<n>` counts on the old tool (retract
   only grows its gap); the purge after pickup counts on the new tool. The
-  change itself moves no filament. The simulator applies a `toolchange_purge_mm`
-  to the incoming tool at each change.
+  change itself moves no filament. The simulator runs the stock slicer
+  profile's moves at each change (`simulator/slicer.py`).
 - No UUIDs. INDX and XL builds have no ANFC, so `material` is `{name,
   color?}` and `M865.1` is a no-op for UUIDs. The UUID correction (S12) and
   UUID drift can't happen there, and the per-tool write job can't carry a
@@ -279,7 +279,7 @@ A parse error fails the job in `ATTENTION` with the offending line.
   and `enabled`, so a run can start with filament loaded and usage on the
   clock (B1). Global: `time_scale`, `print_rate_mm_s`, `feed_ratio`,
   `sync_job_seconds`, `preheat_seconds`, `load_feed_mm`, `purge_mm`,
-  `toolchange_purge_mm`, `start_blip_seconds`, `host`.
+  `start_blip_seconds`, `host`.
 - **Bridge config output.** `python -m simulator bridge-config` prints a
   `[[printers]]` block for the bridge with every URL and key, and one
   location per tool named `<printer> T<n+1>` (or `<printer>` for one tool),

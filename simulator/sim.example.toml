@@ -18,14 +18,15 @@
 # fast_load_mm = 20.0               # default: the model's
 # purge_mm = 40.0                   # the whole purge, at least 1; default: the model's
 #                                   # the iX rounds up to 5 mm steps; INDX ignores it
-# toolchange_purge_mm = 30.0
 # jam_purge_mm = 60.0               # extra purge on the reload after a jam
 # preheat_seconds = 5.0
 # scan_seconds = 0.5
 # blip_seconds = 0.3
 # park_seconds = 1.0
 # sync_job_seconds = 3.0            # how long a sync job holds PRINTING after the blip
-# recover_seconds = 2.0             # BUSY after a power-panic boot
+# panic_idle_seconds = 1.5          # IDLE with no job after a power-panic boot, until
+#                                   # the resume starts; a menu load or unload delays it
+# recover_seconds = 2.0             # BUSY while a power-panic resume heats and homes
 # unpark_seconds = 1.0              # PAUSED while the head unparks on a power-panic resume
 # start_blip = true                 # the brief IDLE between scanning and preheating
 
@@ -41,6 +42,7 @@ model = "8.1.0"                     # Core One L: holds an instance UUID on tool
 # high_flow = false                 # a high-flow nozzle doubles the load's purge, but not on INDX
 # auto_retract = true               # false turns the auto-retract off where the model can
 # sensors = true                    # false turns every filament sensor off, as the menu does
+# picked_tool = 0                   # the tool picked at start: 0 here, none on a toolchanger
 
 [[printers.tools]]
 index = 0
@@ -60,6 +62,7 @@ index = 0
 [[printers]]
 name = "indx"
 model = "8.10.0"                    # INDX: up to 8 tools, no UUIDs
+# picked_tool = 1                   # an enabled tool on the head; left out, every tool is docked
 
 [[printers.tools]]
 index = 0

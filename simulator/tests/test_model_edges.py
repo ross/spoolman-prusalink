@@ -298,6 +298,8 @@ def test_a_print_paused_while_preheating_resumes_preheating():
 def test_power_panic_resume_runs_through_recover_and_unpark():
     sim, p = printing()
     p.reboot(keep_job=True)
+    assert p.state is State.IDLE and p.job is None
+    sim.tick(p.settings.panic_idle_seconds)
     assert p.state is State.BUSY and p.job.phase is JobPhase.RECOVER
     sim.tick(p.settings.recover_seconds + 0.01)
     assert p.state is State.PAUSED and p.job.phase is JobPhase.UNPARK
@@ -308,7 +310,7 @@ def test_power_panic_resume_runs_through_recover_and_unpark():
 def test_power_panic_with_a_cold_bed_waits_for_resume():
     sim, p = printing()
     p.reboot(keep_job=True, cold_bed=True)
-    sim.tick(p.settings.recover_seconds + 0.01)
+    sim.tick(p.settings.panic_idle_seconds)
     assert p.state is State.ATTENTION and p.job.phase is JobPhase.AWAIT_RESUME
     p.resume()
     assert p.state is State.BUSY and p.job.phase is JobPhase.RECOVER

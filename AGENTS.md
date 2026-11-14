@@ -47,6 +47,7 @@ Before you finish a change, run `script/test` and `script/lint`. CI also runs
 | `simulator/` | A stand-in for Prusa printers. It serves the PrusaLink endpoints the bridge calls, over a physical model of tools, counters, and jobs. The bridge never imports it. |
 | `integration/` | The end-to-end tests. The bridge and the simulator run in the test process, against a real Spoolman. |
 | `firmware/` | The code behind `script/firmware-check`. |
+| `script/slicer/` | Developer helpers that slice test models in PrusaSlicer, to measure the E moves a stock profile adds. They aren't part of any test suite. |
 | `tests/`, `simulator/tests/`, `firmware/tests/` | The unit suite. |
 | `docs/` | The scenario list, the printer behaviors, the bridge findings, and plans. |
 
@@ -182,7 +183,7 @@ table for every model. Each simulator model keeps its build's presets and extrud
 numbers: steps per mm, filament change lengths, ramming sequences, the nozzle cleaner's
 purge, the auto-retract's fully-retracted threshold, whether it can unload cold, the
 purge before an unload, and the power-panic resume's purge. It also keeps its G-code compatibility group, whether its build
-has a compatibility mode, whether its build has power panic, and the `M862.6` feature names its build knows. The simulator
+has a compatibility mode, whether its build has power panic, its feed system (direct, XL or INDX), and the `M862.6` feature names its build knows. The simulator
 also lists the flexible presets, every G-code model name with its group, and the shortest
 purge a load runs. `firmware/compare.py` itself keeps each build's main board, which its
 board macros follow.

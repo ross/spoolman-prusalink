@@ -412,7 +412,7 @@ def test_color_change_in_one_large_tick():
 
 def test_multi_tool_print_attributes_extrusion_and_purges():
     tools = [loaded(0, PETG), loaded(1, PETG), SimTool(2), loaded(3, PETG, enabled=False)]
-    sim, p = make("8.10.0", tools, toolchange_purge_mm=30)
+    sim, p = make("8.10.0", tools)
     with pytest.raises(Invalid, match="has no tool 5"):
         p.start_print(PrintSpec([Segment(5, 10)]))
     p.start_print(PrintSpec([Segment(3, 10)]))  # disabled: the preview refuses it
@@ -426,20 +426,35 @@ def test_multi_tool_print_attributes_extrusion_and_purges():
     p.tap_through()  # Print
     sim.tick(0.3 + 20 + 1)  # 105 mm in: the change to T1 and its purge happened
     assert p.selected_tool == 1
-    # INDX feeds 550/576 of each mm commanded, purges included.
-    assert p.tools[1].extruded == pytest.approx((30 + 5) * 550 / 576)
+    # INDX feeds 550/576 of each mm commanded, the profile's moves included
+    # (`simulator.slicer`). The start purges both used tools, 25 mm and the auto-retract's
+    # 8 (gap 8, 8 stored). T1's first pick deretracts the 8, then counts 1.6 and the
+    # 4.1596 mm purge; its retract and restore cancel. Then 5 printed.
+    start, first = 25 + 8, 1.6 + 4.1596
+    assert p.tools[1].extruded == pytest.approx((start + first + 5) * 550 / 576)
     sim.tick(1000)
     assert p.state is State.FINISHED
-    assert p.tools[0].extruded == pytest.approx((200 + 30) * 550 / 576)
-    assert p.tools[1].extruded == pytest.approx((200 + 30) * 550 / 576)
+    # T0 primes 1.6 + 5.4907 after its deretract. Its park at the change to T1 retracts
+    # 0.8 + 8 (gap 8.8); its later pick feeds 1.6 + 8 + 0.8 back, 1.6 past the gap, then
+    # purges 4.1596.
+    prime = 1.6 + 5.4907
+    assert p.tools[0].extruded == pytest.approx((start + prime + 200 + first) * 550 / 576)
+    assert p.tools[1].extruded == pytest.approx((start + first + 200) * 550 / 576)
     assert p.tools[2].extruded == 0
     assert all(t.unload_count == 0 for t in p.tools.values())
 
 
-# T1's count: the pickup's 30 mm purge and 10 printed, and on the XL the end's
-# auto-retract, 23. INDX's end retract already counts as fully retracted.
+# T1's count: the profile's moves (`simulator.slicer`) and 10 printed. On the XL its 39 mm
+# prime, its first pick's 9.238 mm purge after the 20 mm fed back, and the end's 4.1575 mm
+# ramming. On INDX the start's 25 mm purge and the auto-retract's 8, then its first pick's
+# 1.6 and 4.1596 mm purge. The end G-code parks T1, so the firmware's end retracts and
+# auto-retracts nothing.
 @pytest.mark.parametrize(
-    ("model", "counted"), [("3.1.0", (30 + 10 + 23) * 0.95), ("8.10.0", 40 * 550 / 576)]
+    ("model", "counted"),
+    [
+        ("3.1.0", (39 + 9.238 + 10 + 4.1575) * 0.95),
+        ("8.10.0", (25 + 8 + 1.6 + 4.1596 + 10) * 550 / 576),
+    ],
 )
 def test_a_print_goes_on_through_an_empty_tool_with_the_sensors_off(model, counted):
     sim, p = make(model, [loaded(0, PETG), SimTool(1)])
@@ -453,7 +468,7 @@ def test_a_print_goes_on_through_an_empty_tool_with_the_sensors_off(model, count
     assert not p.sensors and p.job.phase is JobPhase.BLIP
     sim.tick(0.3 + 3)
     # Nothing checks a picked tool for filament, so T1 prints with none: its counter counts
-    # the pickup's 30 mm purge and what it feeds, and no type appears.
+    # the profile's moves and what it feeds, and no type appears.
     assert "tool change T0 -> T1" in [e.text for e in sim.events if e.kind == "job"]
     assert p.state is State.PRINTING and p.tools[1].extruded > 0
     assert "material" not in prusalink.filament(p)["tools"][1]
@@ -522,6 +537,9 @@ def test_power_loss_resume_keeps_the_job():
     p.start_print(one_segment(100, preheat_s=0))
     sim.tick(0.8 + 2)
     p.reboot(keep_job=True)
+    # IDLE with no job until the autostart resumes the print.
+    assert p.job is None and p.state is State.IDLE and tool0(p).extruded == 0
+    sim.tick(1.5)
     assert p.job.id == 1 and p.state is State.BUSY and tool0(p).extruded == 0
     sim.tick(1)
     assert p.state is State.BUSY and tool0(p).extruded == 0
@@ -963,9 +981,9 @@ def test_power_loss_with_a_cold_bed_waits_for_the_user():
     p.set_power("off")
     sim.tick(600)
     p.set_power("on", resume=True, cold_bed=True)
-    assert p.job.id == 1 and p.state is State.BUSY
-    sim.tick(2)
-    assert p.state is State.ATTENTION and prusalink.job(p)["state"] == "PAUSED"
+    assert p.job is None and p.state is State.IDLE
+    sim.tick(1.5)  # the resume waits for the user at once
+    assert p.job.id == 1 and p.state is State.ATTENTION and prusalink.job(p)["state"] == "PAUSED"
     assert tool0(p).extruded == 0  # nothing fed back before the user answers
     sim.tick(60)
     assert p.state is State.ATTENTION  # nothing happens until the user resumes
@@ -982,6 +1000,7 @@ def test_cancel_during_the_power_panic_recovery_feeds_nothing_back():
     p.start_print(one_segment(100, preheat_s=0))
     sim.tick(0.8 + 2)
     p.reboot(keep_job=True)
+    sim.tick(1.5)
     assert p.state is State.BUSY and tool0(p).extruded == 0
     p.cancel()
     sim.tick(5)
@@ -992,20 +1011,21 @@ def test_cancel_during_the_power_panic_recovery_feeds_nothing_back():
     assert p.job is None and p.state is State.STOPPED and tool0(p).extruded == 14.25
 
 
-def test_power_loss_resume_skips_the_idle_sensor_clear():
+def test_power_loss_resume_runs_the_idle_sensor_clear_first():
     sim, p = make()
     p.start_print(one_segment(100, preheat_s=0))
     sim.tick(0.8 + 2)
     p.set_power("off")
     p.unload(0)  # pulled out by hand while off
     p.set_power("on", resume=True)
-    assert p.job.id == 1 and p.state is State.BUSY
-    assert tool0(p).unload_count == 0 and tool0(p).material == PLA
-    # Recovered and unparked. The sensor never saw the filament go, so nothing stops the
-    # print: it counts on with no filament, and the type stays.
-    sim.tick(2 + 1 + 1)
+    # IDLE with no job before the resume, so the clear counts the unload.
+    assert p.job is None and p.state is State.IDLE
+    assert tool0(p).unload_count == 1 and tool0(p).material is None
+    # Resumed, recovered and unparked. The sensor never saw the filament go, so nothing
+    # stops the print: it counts on with no filament.
+    sim.tick(1.5 + 2 + 1 + 1)
     assert p.state is State.PRINTING and tool0(p).extruded > 0
-    assert tool0(p).unload_count == 0 and tool0(p).material == PLA
+    assert tool0(p).unload_count == 1 and tool0(p).material is None
 
 
 def test_power_loss_while_paused_comes_back_paused():
@@ -1014,6 +1034,7 @@ def test_power_loss_while_paused_comes_back_paused():
     sim.tick(0.8 + 2)
     p.pause()
     p.reboot(keep_job=True)
+    sim.tick(1.5 + 2)  # the window, then BUSY while the head parks
     assert p.job.id == 1 and p.state is State.PAUSED and tool0(p).extruded == 0
     p.resume()
     assert p.state is State.PRINTING

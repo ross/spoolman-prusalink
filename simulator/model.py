@@ -38,6 +38,7 @@ from simulator.preview import (
     tool_mapping,
     wrong_types,
 )
+from simulator.slicer import INDX_SLICER, XL_SLICER, Moves, Slicer
 from simulator.tool import (
     AUTO_RETRACT_STEP,
     CORE_ONE_EXTRUDER,
@@ -124,10 +125,11 @@ class JobPhase(StrEnum):
     HOLD = "HOLD"  # ATTENTION until the user taps through or clears a jam
     RUN = "RUN"  # a sync job applying its G-code
     PARKING = "PARKING"
-    RECOVER = "RECOVER"  # BUSY after a power-panic boot, before the resume
+    RECOVER = "RECOVER"  # BUSY while a power-panic resume heats and homes
     AWAIT_RESUME = "AWAIT_RESUME"  # ATTENTION: the bed went cold during the outage
     UNPARK = "UNPARK"  # PAUSED briefly while the head unparks after a power-panic resume
     PREVIEW_LOAD = "PREVIEW_LOAD"  # BUSY with no job: the preview's filament-not-inserted load
+    JOIN = "JOIN"  # ATTENTION while a spool join unloads the old tool, then back to PRINTING
 
 
 IDLE_STATES = (State.IDLE, State.FINISHED, State.STOPPED)
@@ -149,6 +151,9 @@ PHASE_STATES = {
     # The load's own screen covers the preview, and with no print running yet it reads BUSY
     # (`get_state` in `src/state/printer_state.cpp`), which has no job.
     JobPhase.PREVIEW_LOAD: State.BUSY,
+    # The join's unload runs in a `Load_unload` dialog while printing, which reads ATTENTION
+    # (`get_state` in `src/state/printer_state.cpp:238-243`).
+    JobPhase.JOIN: State.ATTENTION,
 }
 TIMED_PHASES = (
     JobPhase.SCANNING,
@@ -158,6 +163,7 @@ TIMED_PHASES = (
     JobPhase.PARKING,
     JobPhase.RECOVER,
     JobPhase.UNPARK,
+    JobPhase.JOIN,
 )
 
 
@@ -251,6 +257,21 @@ class ModelInfo:
     # (`PrinterModelInfo::current`), so each model has its own entry's group.
     group: str = field(kw_only=True)
     checks: GCodeChecks = field(kw_only=True)  # its build's
+    # Its feed system: XL on HAS_TOOLCHANGER builds, INDX on HAS_INDX ones, else direct.
+    feed: Feed = field(default=Feed.DIRECT, kw_only=True)
+    # The stock PrusaSlicer profile's moves outside the model on a toolchanger, which a
+    # print can override; None on a direct printer. Not firmware, so `script/firmware-check`
+    # doesn't compare it.
+    slicer: Slicer | None = field(default=None, kw_only=True)
+
+    def first_tool(self, enabled: int) -> int | None:
+        """The tool picked when the config names none, on a printer with `enabled` tools
+        enabled: none on a toolchanger, whose tools wait docked or parked, and tool 0
+        elsewhere. An XL with one tool isn't one: its toolchanger is off and the tool stays
+        on the head (`autodetect_toolchanger_enabled` in
+        `src/module/prusa/toolchanger_utils_xl.cpp`)."""
+        changes = self.feed is Feed.INDX or (self.feed is Feed.XL and enabled > 1)
+        return None if changes else 0
 
     def holds_uuid(self, tool: int) -> bool:
         """Whether `tool` keeps tag UUIDs: tool 0 of a model with a tag reader (F21).
@@ -259,13 +280,6 @@ class ModelInfo:
         Core One L build `M865.1` and the tag reader.
         """
         return self.uuids and tool == UUID_TOOL
-
-    @property
-    def feed(self) -> Feed:
-        """The build's feed system. The `HAS_TOOLCHANGER` builds, XL and INDX, are exactly
-        the ones with more than one tool (`ProjectOptions.cmake`), and `script/firmware-check`
-        compares `max_tools`, so it covers this too."""
-        return Feed.TOOLCHANGER if self.max_tools > 1 else Feed.DIRECT
 
     def preset_temperatures(self, name: str) -> dict[str, int]:
         """Return the temperatures a material named `name` starts from, as `Material`
@@ -334,10 +348,26 @@ MODELS = _models(
         checks=PLAIN_CHECKS,
     ),
     ModelInfo(
-        "3.1.0", "XL", XL_EXTRUDER, LOAD_CELL_PRESETS, max_tools=5, group="xl", checks=XL_CHECKS
+        "3.1.0",
+        "XL",
+        XL_EXTRUDER,
+        LOAD_CELL_PRESETS,
+        max_tools=5,
+        group="xl",
+        checks=XL_CHECKS,
+        feed=Feed.XL,
+        slicer=XL_SLICER,
     ),
     ModelInfo(
-        "3.1.1", "XLP", XL_EXTRUDER, LOAD_CELL_PRESETS, max_tools=5, group="xls", checks=XL_CHECKS
+        "3.1.1",
+        "XLP",
+        XL_EXTRUDER,
+        LOAD_CELL_PRESETS,
+        max_tools=5,
+        group="xls",
+        checks=XL_CHECKS,
+        feed=Feed.XL,
+        slicer=XL_SLICER,
     ),
     ModelInfo(
         "5.1.0",
@@ -349,6 +379,8 @@ MODELS = _models(
         power_panic=False,
         group="xl",
         checks=PLAIN_CHECKS,
+        feed=Feed.XL,
+        slicer=XL_SLICER,
     ),
     ModelInfo("4.1.0", "iX", IX_EXTRUDER, LOAD_CELL_PRESETS, group="ix", checks=IX_CHECKS),
     ModelInfo(
@@ -390,6 +422,8 @@ MODELS = _models(
         max_tools=8,
         group="coreone_indx",
         checks=INDX_CHECKS,
+        feed=Feed.INDX,
+        slicer=INDX_SLICER,
     ),
     ModelInfo(
         "8.10.0",
@@ -400,6 +434,8 @@ MODELS = _models(
         max_tools=8,
         group="coreonel_indx",
         checks=INDX_CHECKS,
+        feed=Feed.INDX,
+        slicer=INDX_SLICER,
     ),
 )
 
@@ -407,6 +443,9 @@ MODELS = _models(
 # The load's lengths a setting can override, in the order `_load_lengths` returns them.
 LOAD_LENGTHS = ("slow_load_mm", "fast_load_mm", "purge_mm")
 POSITIVE_SETTINGS = frozenset({"time_scale", "load_rate_mm_s", "print_rate_mm_s"})
+
+
+PANIC_RETRY_SECONDS = 1.5  # `rescan_delay` in `src/common/print_utils.cpp`
 
 
 @dataclass
@@ -424,14 +463,16 @@ class Settings:
     # The whole purge, not doubled for a high-flow nozzle. At least 1 mm, in 5 mm steps on
     # the iX, and INDX ignores it: its cleaner purges a fixed length.
     purge_mm: float | None = None
-    toolchange_purge_mm: float = 30.0
     jam_purge_mm: float = 60.0
     preheat_seconds: float = 5.0
     scan_seconds: float = 0.5
     blip_seconds: float = 0.3
     park_seconds: float = 1.0
     sync_job_seconds: float = 3.0
-    recover_seconds: float = 2.0  # BUSY after a power-panic boot
+    # IDLE with no job after a power-panic boot, until the autostart resumes the print: it
+    # tries every 1.5 s (`rescan_delay` in `print_utils_loop`, `src/common/print_utils.cpp`).
+    panic_idle_seconds: float = PANIC_RETRY_SECONDS
+    recover_seconds: float = 2.0  # BUSY while a power-panic resume heats and homes
     unpark_seconds: float = 1.0  # PAUSED while the head unparks on a power-panic resume
     start_blip: bool = True
 
@@ -453,6 +494,10 @@ class Settings:
                 raise Invalid(f"{key} must be a number of at least 0")
             elif key in POSITIVE_SETTINGS and value <= 0:
                 raise Invalid(f"{key} must be greater than 0")
+        # The autostart's first try comes `rescan_delay` after the boot, never sooner
+        # (`print_utils_loop` in `src/common/print_utils.cpp`).
+        if self.panic_idle_seconds < PANIC_RETRY_SECONDS:
+            raise Invalid(f"panic_idle_seconds must be at least {PANIC_RETRY_SECONDS:g}")
 
     def update(self, values: dict[str, Any]) -> None:
         """Apply a subset of fields. A bad one raises and changes nothing."""
@@ -475,16 +520,41 @@ class Segment:
 
 
 @dataclass
+class Join:
+    """A spool join: when `tool` runs out, the print goes on with `to`."""
+
+    tool: int
+    to: int
+
+
+@dataclass
 class PrintSpec:
     segments: list[Segment]
     duration_s: float | None = None
     preheat_s: float | None = None
     color_changes_mm: list[float] = field(default_factory=list)
     name: str = "part.bgcode"
+    # A toolchanger print's own prime and tool-change purge, in place of the stock
+    # profile's (`Slicer.overridden`); None keeps the profile's.
+    prime_mm: float | None = None
+    toolchange_purge_mm: float | None = None
+    # The print's spool joins, set at the tools-mapping screen, by Connect or by `M864` and
+    # reset when the print ends (`marlin_server.cpp:1122`), so a print carries them.
+    spool_join: list[Join] = field(default_factory=list)
 
     @property
     def total_mm(self) -> float:
         return sum(s.slicer_mm for s in self.segments)
+
+
+@dataclass
+class Queued:
+    """One operation a change all has still to run: the unload of the tool's old filament,
+    or the load of `material`."""
+
+    tool: int
+    kind: str  # "unload" or "load"
+    material: Material | None = None
 
 
 @dataclass(kw_only=True)
@@ -529,10 +599,27 @@ class UserJob(SimJob):
     segment: int = 0
     pending_color_changes: list[float] = field(default_factory=list)
     paused_from: JobPhase | None = None  # where resume goes back to
-    cold_bed: bool = False  # a power-panic resume waits for the user when the bed went cold
     clean_at: float | None = None  # RECOVER time left when the nozzle clean purges
-    restore_gap: float | None = None  # the tool's gap when a filament change began
+    # The tool of a filament change and its gap when the change began, which the resume
+    # restores. A spool join keeps the join's tool and the old tool's gap here, which the
+    # join restores on the new tool at its end.
+    restore: tuple[int, float] | None = None
+    # Whether the pause went through the firmware's pause states, whose resume unparks and,
+    # on INDX, purges (`unpark_prime`), and which a power cut keeps (`was_paused`). A jam
+    # cleared in place didn't: it's a filament change dialog, which parks nothing
+    # (`Pause::filament_change`).
+    parked: bool = False
     previewing: bool = True  # until the preview lets the print begin
+    # Whether the start G-code has run its moves, so a resume doesn't run them again.
+    primed: bool = False
+    # The tool mapping a spool join changed: a G-code tool to the tool that prints it now.
+    # A G-code tool not listed prints on its own tool.
+    mapped: dict[int, int] = field(default_factory=dict)
+    # The tool a power-panic resume prints the current segment on when the cut found another
+    # tool picked than the segment's: during a filament change on another tool, or a spool
+    # join's unload. The resume issues no tool change, so that tool prints until the file's
+    # next one, which ends this (`power_panic.cpp:380-395, 1049-1055`).
+    resumed_on: int | None = None
     # The tools-mapping screen and the questions its Print asks, set when the screen opens.
     mapping: list[Attention] = field(default_factory=list)
 
@@ -633,9 +720,15 @@ class SimPrinter:
     # The screen with no job and no load running: IDLE, or FINISHED or STOPPED until dismissed.
     screen: State = State.IDLE
     job: UserJob | SyncJob | None = None
+    # The print a power cut stopped, held with no job until the autostart resumes it
+    # `resume_in` seconds from now. Its phase says how it comes back: RECOVER, PAUSED, or
+    # AWAIT_RESUME for a cold bed.
+    resuming: UserJob | None = None
+    resume_in: float = 0.0
     job_counter: int = 0
     # The picked tool, or None for a toolchanger with no tool picked: then no filament moves
-    # and the idle sensor clear doesn't run (`SimPrinter.feed`).
+    # and the idle sensor clear doesn't run (`SimPrinter.feed`). INDX docks its tool after a
+    # menu load or unload, and `park_tool` parks it on either toolchanger.
     selected_tool: int | None = 0
     message: str | None = None
     homed: bool = False
@@ -651,6 +744,8 @@ class SimPrinter:
     auto_retract: bool = True
     tools: dict[int, SimTool] = field(default_factory=lambda: {0: SimTool(0)})
     files: dict[str, str] = field(default_factory=dict)
+    # What a change all has still to run after the running load or unload, in order.
+    queue: list[Queued] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         # Not fields, so asdict() and snapshots leave them out.
@@ -665,6 +760,16 @@ class SimPrinter:
         if any(t.process is not None for t in self.tools.values()):
             return State.BUSY
         return self.screen
+
+    @property
+    def toolchanger(self) -> bool:
+        """Whether the printer changes tools. An XL with one tool enabled doesn't: the
+        firmware turns its toolchanger off, keeps that tool on the head and refuses a
+        change to any other, and its stock profile's end G-code has no park
+        (`autodetect_toolchanger_enabled` in `toolchanger_utils_xl.cpp`, `tool_change` in
+        `toolchanger_xl.cpp`). INDX always docks."""
+        enabled = sum(t.enabled for t in self.tools.values())
+        return self.feed.selectable and (self.feed.docks or enabled > 1)
 
     @property
     def feed(self) -> FeedSystem:
@@ -683,41 +788,47 @@ class SimPrinter:
         ratio = self.settings.feed_ratio
         return self.model.extruder.feed_ratio if ratio is None else ratio
 
-    def _track(self, tool: SimTool, mm: float) -> None:
+    def _track(self, tool: SimTool, mm: float, *, printing: bool = False) -> None:
         """Move `tool`'s filament by `mm` commanded, signed, as the firmware's planner does.
 
         A feed first feeds back an auto-retracted distance, and a retract forgets it: the
         auto-retract hook in `Planner::buffer_segment`
-        (`lib/Marlin/Marlin/src/module/planner.cpp`). Every move the simulator makes goes
-        through here.
+        (`lib/Marlin/Marlin/src/module/planner.cpp:2223-2240`). A `printing` move, a print
+        file's `G0` or `G1`, that retracts while a distance is stored doesn't move the
+        filament and keeps the distance, though the tracker has counted it. Every move the
+        simulator makes goes through here.
 
-        With no tool picked nothing moves: a toolchanger can't move E without a tool, and
-        the hook needs one too (`bsod("E move without tool")` and `currently_selected()` in
-        the same function).
+        Every caller picks `tool` first, as the firmware does: a toolchanger's E move with
+        no tool picked is a `bsod("E move without tool")` in the same function.
         """
-        if self.feed.credited(self, tool) is None:
-            return
         if mm > 0:
             self._deretract(tool)
-        elif mm < 0:
+        elif mm < 0 and not (printing and tool.path.auto_retracted):
             tool.path.auto_retracted = None
         self._count(tool, mm)
+
+    def _print_moves(self, tool: SimTool, moves: Moves) -> None:
+        """Run a slicer profile's moves on `tool`, the picked tool, as the print's own."""
+        for mm in moves:
+            self._track(tool, mm, printing=True)
 
     def _count(self, tool: SimTool, mm: float) -> None:
         """Count a move as the firmware's filament tracker does: only what goes past the
         model's gap counts, times the feed ratio (`FilamentPath.move`). The feed system says
         which tool it counts on."""
         credited = self.feed.credited(self, tool)
+        # Every caller picks the tool first: the firmware's planner stops on this.
+        assert credited is not None, "E move without tool"
         credited.extruded += tool.path.move(mm, self.model.gap_mm) * self.feed_ratio
 
     def _deretract(self, tool: SimTool) -> None:
         """Feed back an auto-retracted distance (`maybe_deretract_to_nozzle`).
 
         On a Nextruder that's 55 mm into a gap that stops at 40, so 15 mm count that never
-        left the nozzle. It needs a picked tool (`auto_retract.cpp`).
+        left the nozzle.
         """
         stored = tool.path.auto_retracted
-        if stored and self.feed.credited(self, tool) is not None:
+        if stored:
             tool.path.auto_retracted = 0.0
             self._count(tool, stored)
             self._log("load", f"T{tool.index} deretracted {stored:g} mm")
@@ -1020,16 +1131,20 @@ class SimPrinter:
             purge_mm = _positive(purge_mm, "purge_mm")
         extra = self.settings.jam_purge_mm if waiting and job.waits_for(Reason.JAM) else 0.0
         if waiting and isinstance(job, UserJob) and job.previewing:
-            # The preview's Yes runs `M701` (`queue_filament_gcodes` in
+            # The preview's Yes runs `M701 T<n>` (`queue_filament_gcodes` in
             # `src/common/marlin_print_preview.cpp`): a plain load, with no prime, and no
             # auto-retract because `is_printing()` is already true there
-            # (`load_finalize_process` in `src/marlin_stubs/pause/pause.cpp`).
+            # (`load_finalize_process` in `src/marlin_stubs/pause/pause.cpp`). It picks
+            # the tool inside its dialog (`Pause::tool_change`, `pause.cpp:1447-1468`), so
+            # no idle sensor clear runs at the pick.
+            self._pick(t)
             steps = self._load_steps(purge_mm, extra, False, auto_retract=False)
             job.enter(JobPhase.PREVIEW_LOAD)
         else:
+            if not waiting:
+                self._menu_pick(t)
             steps = self._load_steps(purge_mm, extra, waiting)
-        t.process = LoadProcess(steps, material)
-        self._next_load_step(t, t.process)  # a load with no slow or fast feed types at once
+        self._start_load(t, steps, material)
         if job is None:
             self.screen = State.IDLE  # using the menu dismisses a finished or stopped screen
         self._show_state()
@@ -1087,11 +1202,61 @@ class SimPrinter:
             t.path.loaded, t.path.gap = False, self.model.gap_mm
             return
         self._log("action", f"unload T{tool}")
+        self._menu_pick(t)
+        self._start_unload(t)
+        self.screen = State.IDLE  # using the menu dismisses a finished or stopped screen
+        self._show_state()
+
+    def _start_load(self, t: SimTool, steps: list[LoadStep], material: Material | None) -> None:
+        t.process = LoadProcess(steps, material)
+        self._next_load_step(t, t.process)  # a load with no slow or fast feed types at once
+
+    def _start_unload(self, t: SimTool) -> None:
         steps = self._unload_steps(t, "unload")
         self._settle(t, steps, None)
         t.process = UnloadProcess(steps, self.settings.unload_seconds)
+
+    def change_all(self, tools: list[int], *, name: str, color: str | None = None) -> None:
+        """Change the filament in the chosen tools to the preset `name`: Change all in the
+        Filament menu, which sends `M9934` (`Config::execute` in
+        `src/common/multi_filament_change.cpp`). The other tools keep theirs.
+
+        One dialog runs the whole change, so the printer reads BUSY throughout. The tools
+        change one at a time in index order. A tool with a stored type changes with
+        `M1600`, whose unload counts; a tool with none only loads, with `M701`. The stored
+        type decides, not the sensor, and the load needs no filament check. Each operation
+        picks its tool inside its dialog (`Pause::tool_change`), so no idle sensor clear
+        runs at the pick. INDX docks each tool after its load, and the XL ends with the
+        last tool picked.
+        """
+        self._check_change_all()
+        chosen = sorted({self._tool(i).index for i in tools})
+        if not chosen:
+            raise Invalid("change all needs at least one tool")
+        queue: list[Queued] = []
+        for i in chosen:
+            t = self.tools[i]
+            material = self._new_material(t, "preset", name, color, None, None)
+            if t.material is not None:
+                queue.append(Queued(i, "unload"))
+            queue.append(Queued(i, "load", material))
+        listed = ", ".join(f"T{i}" for i in chosen)
+        self._log("action", f"change all {listed} to {describe(material)}")
+        self.queue = queue
         self.screen = State.IDLE  # using the menu dismisses a finished or stopped screen
+        self._next_queued()
         self._show_state()
+
+    def _next_queued(self) -> None:
+        """Start the change all's next operation, in the step the last one ended, so the
+        printer never reads IDLE between them."""
+        q = self.queue.pop(0)
+        t = self.tools[q.tool]
+        self._pick(t)
+        if q.kind == "unload":
+            self._start_unload(t)
+        else:
+            self._start_load(t, self._load_steps(None, 0.0, False), q.material)
 
     def _manual_move(self, tool: int, mm: float) -> tuple[SimTool, float]:
         t = self._tool(tool)
@@ -1111,12 +1276,37 @@ class SimPrinter:
 
     def select_tool(self, tool: int) -> None:
         t = self._tool(tool)
-        self._check_select(t)
-        self.selected_tool = tool
+        self._check_select()
         self._log("action", f"select T{tool}")
+        self._pick(t)
         cleared = self.feed.idle_clear_tool(self)
         if self.power is not Power.OFF and cleared is not None:
             self._idle_sensor_clear(cleared, sensor_fault_counts=True)
+
+    def park_tool(self) -> None:
+        """Park the picked tool from the Pick/park menu (`P0 S1 L0` in
+        `src/gui/screen/screen_tool_pick_park.cpp`), leaving none picked."""
+        self._check_park()
+        self._log("action", f"park T{self.selected_tool}")
+        self.selected_tool = None
+
+    def _pick(self, t: SimTool) -> None:
+        """Pick `t` up unless it's picked already. A pick moves no counted filament: the
+        XL's moves no E, and INDX's head-lock moves are service moves, which the planner
+        never counts (`toolchanger_xl.cpp`, `toolchanger_indx.cpp`, `planner.cpp:2194-2198`)."""
+        if self.selected_tool != t.index:
+            self.feed.pick(self, t)
+
+    def _menu_pick(self, t: SimTool) -> None:
+        """The pick before a menu load or unload: `T<n> S1 L0 D0`, sent before `M701` or
+        `M702` with no dialog open (`show_tool_selector_dialog` in
+        `src/gui/MItem_filament.cpp`). So the idle sensor clear runs on the newly picked
+        tool before the operation starts, as it does after `select_tool`. On a tool that's
+        already picked nothing changes."""
+        if self.selected_tool == t.index:
+            return
+        self._pick(t)
+        self._idle_sensor_clear(t, sensor_fault_counts=True)
 
     # Actions on prints.
 
@@ -1136,13 +1326,62 @@ class SimPrinter:
             _positive(spec.duration_s, "duration_s")
         if spec.preheat_s is not None and spec.preheat_s < 0:
             raise Invalid("preheat_s can't be negative")
+        for key in ("prime_mm", "toolchange_purge_mm"):
+            value = getattr(spec, key)
+            if value is None:
+                continue
+            if self.profile is None:
+                raise Invalid(f"{key} needs a multi-tool slicer profile, which this printer lacks")
+            if isinstance(value, bool) or not isinstance(value, int | float) or value < 0:
+                raise Invalid(f"{key} must be a number of at least 0, got {value!r}")
+        self._check_joins(spec)
         total = spec.total_mm
         changes = sorted(x for x in spec.color_changes_mm if 0 < x < total)
         self._start_job(UserJob(name=spec.name, spec=spec, pending_color_changes=changes))
 
+    def _check_joins(self, spec: PrintSpec) -> None:
+        """Refuse spool joins the firmware wouldn't set (`SpoolJoin::add_join` in
+        `lib/Marlin/Marlin/src/module/prusa/spool_join.cpp:71-105`).
+
+        A join needs a toolchanger that changes tools and two enabled tools. A tool is
+        joined to once, and no chain loops. A second join from one tool is refused here,
+        which is the simulator's simplification: the firmware appends it to the end of
+        that tool's chain (`:76-79`). The tools-mapping screen takes a
+        join's tool off any G-code tool first (`disconnect_virtual_tool` in
+        `src/gui/screen/print/frame_tool_mapping.cpp`), and the simulator maps each G-code
+        tool to its own tool, so a join's tool can't be one the print uses.
+        """
+        joins = spec.spool_join
+        if joins and not self.toolchanger:
+            raise Invalid(f"a spool join needs a toolchanger, which {self.name} isn't")
+        used = {s.tool for s in spec.segments}
+        nexts: dict[int, int] = {}
+        for j in joins:
+            old, new = self._tool(j.tool), self._tool(j.to)
+            if old is new:
+                raise Invalid(f"T{old.index} can't join itself")
+            if new.index in used:
+                raise Invalid(f"T{new.index} prints in this file, so it can't be joined to")
+            if old.index in nexts:
+                raise Invalid(f"T{old.index} joins on twice")
+            if new.index in nexts.values():
+                raise Invalid(f"T{new.index} is joined to twice")
+            nexts[old.index] = new.index
+        for start in nexts:
+            tool = nexts[start]
+            while tool in nexts:
+                if tool == start:
+                    raise Invalid(f"the joins from T{start} loop back to it")
+                tool = nexts[tool]
+
     def _start_job(self, job: UserJob | SyncJob) -> None:
         """Count the job and scan the file. A print from a file is counted before the preview
         asks anything (`init` in `src/common/marlin_print_preview.cpp`)."""
+        if self.resuming is not None:
+            # The printer is no longer idle, so the autostart gives the resume up
+            # (`print_utils_loop` in `src/common/print_utils.cpp`).
+            self._log("job", f"job {self.resuming.id}: resume dropped by the new job")
+            self.resuming = None
         self.homed = True  # a print starts by homing
         self.job_counter += 1
         job.id = self.job_counter
@@ -1161,6 +1400,14 @@ class SimPrinter:
         job = self.job
         self._log("action", "pause")
         job.paused_from = job.phase
+        job.parked = True
+        if self._primes_at_resume():
+            # The pause retracts to 8 mm (`retract_and_lift` in `Pausing_WaitIdle`), and the
+            # resume never feeds it back: its purge refills the gap instead.
+            t = self._job_tool(job)
+            self._retract_to(t, self.model.extruder.lengths.retract_mm)
+        # INDX docks the tool once the head is parked; the XL keeps it.
+        self.feed.rest(self)
         job.enter(JobPhase.PAUSED)
         self._show_state()
 
@@ -1169,16 +1416,28 @@ class SimPrinter:
         job = self.job
         if job.phase is JobPhase.AWAIT_RESUME:
             self._log("action", "resume after the power panic")
-            job.cold_bed = False
-            self._recover(job, clean=True)
+            self._recover(job)
             return
         self._log("action", "resume")
-        if job.restore_gap is not None:
+        if job.restore is not None:
             # The unpark's feed and `restore_retracted_distance` put the filament back at
             # the gap it had when the change began (`Pause::filament_change` in
             # `src/marlin_stubs/pause/pause.cpp`).
-            self._restore_to(self.tools[self.selected_tool], job.restore_gap)
-            job.restore_gap = None
+            tool, gap = job.restore
+            self._restore_to(self.tools[tool], gap)
+            job.restore = None
+            # A color change in the file ends here, with its `M600`. Until then a power-panic
+            # resume runs it again: the cut saves the file position of the command running,
+            # which is the `M600` itself (`stop_and_save` in `crash_recovery.cpp`,
+            # `get_current_sdpos` in `queue.h`).
+            if job.pending_color_changes and job.pending_color_changes[0] <= job.fed_mm:
+                job.pending_color_changes.pop(0)
+            # A change on another tool changes back to the print's tool after the dialog,
+            # with no E move and no purge (`M600_execute`, `M600.cpp:317-339`).
+            self._pick(self._job_tool(job))
+        elif job.parked:
+            self._unpark_prime(job)
+        job.parked = False
         if job.paused_from is JobPhase.PREHEAT:
             job.enter(JobPhase.PREHEAT)
             self._show_state()
@@ -1205,6 +1464,30 @@ class SimPrinter:
         for t in self.tools.values():
             self._abort_process(t)
         self._park(job, State.STOPPED)
+
+    def _primes_at_resume(self) -> bool:
+        """Whether resuming a pause purges in the nozzle cleaner: INDX's `purge_clean`.
+        The iX's cleaner G-code isn't modeled here."""
+        return bool(self.model.extruder.cleaner_purge_mm)
+
+    def _unpark_prime(self, job: UserJob) -> None:
+        """Resume from a pause: INDX picks the tool it docked at the pause, then purges it
+        in the nozzle cleaner, still `PAUSED` (`resuming_begin` and `unpark_prime` in
+        `src/common/marlin_server.cpp:3298-3307, 2662-2674, 3423-3434`). The unpark then
+        feeds nothing back: the purge syncs E to the position the pause saved."""
+        t = self._job_tool(job)
+        self._pick(t)
+        if self._primes_at_resume():
+            self._purge_clean(t)
+            purge = self.model.extruder.cleaner_purge_mm
+            self._log("job", f"T{t.index} purged {purge:g} mm at the resume")
+
+    def _purge_clean(self, t: SimTool) -> None:
+        """The nozzle cleaner's `purge_clean` on the picked tool: `G750 E25`, then the
+        `M1705 N` auto-retract (`src/feature/nozzle_cleaner/nozzle_cleaner.cpp:76-94`,
+        `src/marlin_stubs/M1705.cpp:28-46`)."""
+        purge = self.model.extruder.cleaner_purge_mm
+        self._run_steps(t, [LoadStep("PURGE", purge), LoadStep(AUTO_RETRACT_STEP)])
 
     @staticmethod
     def _at_preview(job: UserJob | SyncJob) -> bool:
@@ -1246,7 +1529,65 @@ class SimPrinter:
         t = self._tool(tool)
         self._check_sensor_runout(t)
         self._log("action", f"runout T{tool}")
-        self._runout(t, Reason.RUNOUT)
+        # The runout sends `M600 A`, which joins when the print has a join from the tool
+        # and is otherwise a filament change on it (`M600.cpp:125-148`). A jam sends
+        # `M1601`, which never joins.
+        job = self.job
+        join = next((j for j in job.spec.spool_join if j.tool == t.index), None)
+        if join is None:
+            self._filament_change(t, Reason.RUNOUT)
+        else:
+            self._spool_join(job, t, self.tools[join.to])
+
+    def _spool_join(self, job: UserJob, old: SimTool, new: SimTool) -> None:
+        """Start a spool join from the picked tool `old` to `new` (`SpoolJoin::do_join` in
+        `lib/Marlin/Marlin/src/module/prusa/spool_join.cpp:239-365`).
+
+        It maps the G-code tool that prints on `old` to `new` for the rest of the print,
+        then unloads `old` in a dialog that reads ATTENTION: no park retract, INDX's 2 mm
+        unload purge, the `runout` ramming and the rest of the unload, and the unload
+        counts (`unload_spool_join` in `pause.cpp`). No nozzle clean or question follows.
+        The JOIN phase stands for the dialog; `_finish_join` changes tools at its end. The
+        old tool's gap is kept for the new one.
+        """
+        g = job.spec.segments[job.segment].tool
+        job.mapped[g] = new.index
+        job.restore = (new.index, old.path.tracked())
+        self._log("job", f"spool join T{old.index} -> T{new.index}")
+        self._run_steps(old, self._unload_steps(old, "runout"))
+        self._physical_unload(old, "spool join")
+        job.enter(JobPhase.JOIN)
+        job.remaining = self.settings.unload_seconds
+        self._show_state()
+
+    def _finish_join(self, job: UserJob) -> None:
+        """End a spool join: change to the new tool and purge it, outside any dialog, so it
+        reads PRINTING (`spool_join.cpp:311-355`).
+
+        The XL parks the old tool, picks the new one and runs `purge_tool`: the build's
+        purge length, never doubled, then where the build auto-retracts a retract of 8 mm
+        stored as the auto-retracted distance (`toolchanger_xl.cpp:505-571`). INDX changes
+        tools and runs the nozzle cleaner's `purge_clean`. Then the move puts the old tool's
+        gap back on the new tool (`mapi::restore_retracted_distance`). The new tool's type
+        isn't touched. A join during the preheat goes straight to printing: the join has
+        waited for the new tool to heat.
+        """
+        tool, gap = job.restore
+        job.restore = None
+        new = self.tools[tool]
+        self._pick(new)
+        ex = self.model.extruder
+        if ex.cleaner_purge_mm:
+            self._purge_clean(new)
+        else:
+            steps = [LoadStep("PURGE", ex.lengths.purge_mm)]
+            if ex.auto_retracts:
+                retract = ex.lengths.retract_mm
+                steps += [LoadStep("RETRACT", -retract), LoadStep(RETRACTED_STEP, retract)]
+            self._run_steps(new, steps)
+        self._restore_to(new, gap)
+        self._log("job", f"T{new.index} purged after the spool join")
+        self._begin_feeding(job)
 
     def jam(self, tool: int, unload: bool = True) -> None:
         """A jam either unloads like a runout (and purges more on reload) or is cleared in place."""
@@ -1254,24 +1595,67 @@ class SimPrinter:
         self._check_runout(t)
         self._log("action", f"jam T{tool}" + ("" if unload else " without unloading"))
         if unload:
-            self._runout(t, Reason.JAM)
+            self._filament_change(t, Reason.JAM)
             return
         job = self.job
         job.paused_from = job.phase
         job.enter(JobPhase.HOLD, Attention(Reason.JAM, tool))
         self._show_state()
 
-    def _runout(self, t: SimTool, reason: Reason) -> None:
+    def change_filament(self, tool: int) -> None:
+        """Change the filament in `tool` during a print: Tune > Change filament, which on a
+        toolchanger asks for the tool and sends `M600 P T<n>`, and on a direct printer names
+        the picked tool (`src/gui/screen/screen_m600.cpp`).
+
+        On the picked tool it's the filament change a runout runs. On another tool, `M600`
+        picks that tool with no dialog open, so it reads `PRINTING`, runs the same change
+        on it, and changes back to the print's tool when the change ends, with no E move
+        (`M600_execute` in `src/marlin_stubs/pause/M600.cpp:204-340`). The simulator
+        changes back at the resume. Picking the other tool heats it for the type
+        `_type_to_load` finds; with none found its target is 0, so `Pause::filament_change`
+        returns at once as too cold, and `M600` changes back with nothing changed.
+        """
+        t = self._tool(tool)
+        self._check_change_filament()
         job = self.job
-        # Only a print in progress runs out, so the phase is PRINTING or PREHEAT here.
+        self._log("action", f"change filament T{tool}")
+        if t.index != self.selected_tool:
+            if self._type_to_load(t, job) is None:
+                self._log("job", f"T{tool} has no type to heat for: nothing changes")
+                return
+            self._pick(t)
+        self._filament_change(t, Reason.COLOR_CHANGE)
+
+    def _type_to_load(self, t: SimTool, job: UserJob) -> Material | None:
+        """The type a filament change on `t` loads back, read before its unload:
+        `FilamentType::for_tool_heuristic` (`M600.cpp:282-290`,
+        `src/common/filament_tools.cpp:15-45`). The stored type; else the type the print's
+        file names for the tool, when it's a preset of the build; else the type the last
+        unload left, or the ad-hoc slot. The file's tools go through the tool mapping, so
+        after a spool join the file's type belongs to the join's tool."""
+        if t.material is not None:
+            return t.material
+        named = {job.mapped.get(s.tool, s.tool): s.material for s in job.spec.segments}.get(t.index)
+        if named in self.model.presets:
+            return self._new_material(t, "preset", named, None, None, None)
+        return t.kept()
+
+    def _filament_change(self, t: SimTool, reason: Reason) -> None:
+        """The filament change on the picked tool `t` that every `M600` runs: a runout, a
+        jam that unloads, a color change in the file, and Tune > Change filament."""
+        job = self.job
+        # Only a print in progress changes filament, so the phase is PRINTING or PREHEAT.
         job.paused_from = job.phase
+        loads = self._type_to_load(t, job)
         # The filament change records the tracker's distance, parks with a retract, then
         # rams and unloads (`Pause::filament_change` and `park_nozzle_and_notify` in
         # `src/marlin_stubs/pause/pause.cpp`).
-        job.restore_gap = t.path.tracked()
+        job.restore = (t.index, t.path.tracked())
         self._retract_to(t, self.model.extruder.lengths.retract_mm)
         self._run_steps(t, self._unload_steps(t, "runout"))
         self._physical_unload(t, str(reason))
+        if loads is not None:
+            t.kept_type = loads  # what the reload writes (`filament::set_type_to_load`)
         job.enter(JobPhase.WAIT_LOAD, Attention(reason, t.index))
         self._show_state()
 
@@ -1305,33 +1689,45 @@ class SimPrinter:
 
     # Power and faults.
 
-    def boot(self, *, idle_clear: bool = True) -> None:
+    def boot(self) -> None:
         """Start the firmware: counters restart, types and the job counter survive.
 
-        The idle sensor clear runs at boot unless a print is resuming: the firmware skips it
-        while printing, and a power-panic resume counts as printing.
+        The idle sensor clear runs at boot, a power-panic boot too: the print it resumes
+        isn't running yet, so the printer isn't printing (`print_utils_loop` in
+        `src/common/print_utils.cpp`).
         """
         self.boot_id = new_boot_id()
         for t in self.tools.values():
             t.extruded, t.unload_count, t.extruded_at_unload = 0.0, 0, 0
+            if isinstance(t.process, LoadProcess):
+                t.path.loaded = True  # a load cut short leaves its filament in
             t.process = None
             t.path.boot(self.model.gap_mm)
+        self.queue = []  # a change all doesn't survive the cut
         self.homed, self.message = False, None
         self._log("boot", f"boot id {self.boot_id}")
+        enabled = [t.index for t in self.tools.values() if t.enabled]
+        if self.feed.selectable and not self.toolchanger and enabled:
+            # An XL that finds one Dwarf turns its toolchanger off and picks that tool
+            # (`autodetect_active_tool` in `toolchanger_utils_xl.cpp`).
+            self.selected_tool = enabled[0]
         selected = self.feed.idle_clear_tool(self)
-        if idle_clear and selected is not None:
+        if selected is not None:
             self._idle_sensor_clear(selected, sensor_fault_counts=False)
 
     def reboot(self, *, keep_job: bool = False, cold_bed: bool = False) -> None:
         """Reboot. With keep_job a print in progress resumes with the same ID (power panic).
 
-        A print that wasn't paused retracts at the cut, except on the XL. The resume is BUSY
-        while the firmware recovers: INDX purges in its nozzle cleaner halfway through, and
-        every other model that retracted feeds the retract back at the end. Then PAUSED
+        A print that wasn't paused retracts at the cut, except on the XL. The printer boots
+        IDLE with no job, and the print resumes `panic_idle_seconds` later. The resume is
+        BUSY while the firmware recovers: INDX purges in its nozzle cleaner halfway through,
+        and every other model that retracted feeds the retract back at the end. Then PAUSED
         while the head unparks, then PRINTING. With `cold_bed` it waits in ATTENTION for
-        `resume()` before recovering. A print that was paused comes back paused, with no
-        filament moved. A model without power panic loses the print and boots idle, as a
-        plain reboot does.
+        `resume()` before recovering. A print that was paused comes back paused after the
+        BUSY, with no filament moved. A filament change dialog isn't a pause: a cut during
+        one resumes the print on its own, on the tool the cut found picked, and a color
+        change in the file runs again. A model without power panic loses the print and
+        boots idle, as a plain reboot does.
         """
         self._need_power()
         if not keep_job:
@@ -1343,8 +1739,16 @@ class SimPrinter:
         self._reboot(keep_job, cold_bed)
 
     def _reboot(self, keep_job: bool, cold_bed: bool = False) -> None:
-        job = self.job
-        resumable = (JobPhase.PRINTING, JobPhase.PAUSED, JobPhase.PREHEAT, JobPhase.WAIT_LOAD)
+        job, held = self.job, self.resuming
+        # HOLD past the preview is a jam's question, a filament change dialog.
+        resumable = (
+            JobPhase.PRINTING,
+            JobPhase.PAUSED,
+            JobPhase.PREHEAT,
+            JobPhase.WAIT_LOAD,
+            JobPhase.HOLD,
+            JobPhase.JOIN,
+        )
         # A cut during the preview has nothing to resume: the firmware saves power-panic data
         # only once the print has begun (`power_panic::prepare` in
         # `src/common/power_panic.cpp`). A build without power panic resumes nothing.
@@ -1355,33 +1759,104 @@ class SimPrinter:
             and not job.previewing
             and job.phase in resumable
         )
-        was_paused = keep and job.phase in (JobPhase.PAUSED, JobPhase.WAIT_LOAD)
-        if keep and not was_paused and self.model.extruder.panic_retract:
-            # The cut retracts through the planner, which forgets a stored auto-retract
-            # distance (`panic_loop` in `src/common/power_panic.cpp`). The counters restart
-            # at the boot.
-            self._track(self._job_tool(job), -self.model.extruder.lengths.retract_mm)
-        self.boot(idle_clear=not keep)
-        if not keep:
-            self.job, self.screen = None, State.IDLE
-            self._show_state()
-            return
-        job.restore_gap = None  # a power loss ends the filament change before its restore
-        if was_paused:
-            job.paused_from = JobPhase.PRINTING
-            job.enter(JobPhase.PAUSED)
-            self._show_state()
-            return
-        job.paused_from = None
-        job.cold_bed = cold_bed
-        self._recover(job, clean=not cold_bed)
+        if keep:
+            held = job
+            # The firmware's `was_paused` is its pause state, which only `pause()` enters
+            # (`printer_paused` in `marlin_server.cpp`, `ac_fault_isr` in
+            # `power_panic.cpp`). A filament change dialog, a spool join's unload or a jam's
+            # question runs inside a G-code while the print state stays printing or
+            # resuming, so the print resumes on its own and the dialog is gone
+            # (`Pause::filament_change` in `pause.cpp`).
+            was_paused = job.parked
+            if not was_paused:
+                # The resume picks the tool the cut found picked and issues no tool change
+                # (`power_panic.cpp:380-395, 1049-1055`; the XL's Dwarf stays on the head).
+                picked = self.selected_tool
+                if picked != self._job_tool(job).index:
+                    job.resumed_on = picked
+                if self.model.extruder.panic_retract:
+                    # The cut retracts the picked tool through the planner, which forgets a
+                    # stored auto-retract distance (`panic_loop` in `power_panic.cpp`). The
+                    # counters restart at the boot.
+                    self._track(self.tools[picked], -self.model.extruder.lengths.retract_mm)
+            job.restore = None  # a power loss ends the filament change before its restore
+            job.paused_from = JobPhase.PRINTING if was_paused else None
+            if was_paused:
+                job.enter(JobPhase.PAUSED)
+        elif held is not None and not keep_job:
+            self._log("job", f"job {held.id}: resume dropped by the reboot")
+            held = None
+        self._forget_pick(job)
+        # A cut while the resume waits finds the printer idle, so it saves nothing new and
+        # the saved print waits again (`ac_fault_isr` in `src/common/power_panic.cpp`).
+        self.job, self.resuming, self.screen = None, None, State.IDLE
+        self.boot()
+        if held is not None:
+            # The bed decides at each boot, for a paused print too (`auto_recover` in
+            # `resume_print`).
+            if cold_bed:
+                held.enter(JobPhase.AWAIT_RESUME, Attention(Reason.COLD_BED))
+            elif held.paused_from is None:
+                held.enter(JobPhase.RECOVER)
+            else:
+                held.enter(JobPhase.PAUSED)
+            self.resuming, self.resume_in = held, self.settings.panic_idle_seconds
+            self._log("job", f"job {held.id} resumes in {self.resume_in:g} s")
+        self._show_state()
 
-    def _recover(self, job: UserJob, *, clean: bool) -> None:
-        """BUSY while the firmware heats and homes. With `clean`, a model whose resume
-        purges does so halfway through."""
+    def _forget_pick(self, job: UserJob | SyncJob | None) -> None:
+        """Leave none picked after a cut during a print on INDX that uses several tools.
+
+        INDX boots with the last picked tool its EEPROM holds, and parking a tool while
+        printing marks that invalid, unless a one-tool print froze it at its start
+        (`restore_last_picked_tool` in `toolchanger_utils_indx.cpp:50-57`,
+        `persist_last_picked_tool` in `toolchanger_indx.cpp:926-939`). That this follows
+        from the print's tools is inferred. Every other boot keeps the picked tool: the XL's is the
+        Dwarf on its head (`toolchanger_xl.cpp`).
+        """
+        printing = isinstance(job, UserJob) and not job.previewing
+        if self.feed.docks and printing and len({s.tool for s in job.spec.segments}) > 1:
+            self._log("boot", "no tool restored: the print used several tools")
+            self.selected_tool = None
+
+    def _tick_resume(self, dt: float) -> float:
+        """Count down to the power-panic resume; return the time left once it starts.
+
+        The firmware's autostart tries every 1.5 s and resumes once the USB drive, the
+        temperatures and the screen are ready, which the simulator takes as at the first
+        try (`print_utils_loop` in `src/common/print_utils.cpp`). A menu load or unload
+        still running then makes it try again 1.5 s later: the firmware doesn't check for
+        one, and the resume's own moves wait for the queue to empty.
+        """
+        used = min(self.resume_in, dt)
+        self.resume_in -= used
+        if self.resume_in > EPSILON:
+            return 0.0
+        if self.state is not State.IDLE:
+            self.resume_in = self.settings.panic_idle_seconds
+            self._log("job", f"resume waits {self.resume_in:g} s: the printer is {self.state}")
+            return 0.0
+        job, self.resuming = self.resuming, None
+        self.job = job
+        self._log("job", f"job {job.id} resumes after the power panic")
+        if job.phase is JobPhase.AWAIT_RESUME:
+            # A cold bed waits for the user at once (`powerpanic_resume` in
+            # `src/common/marlin_server.cpp`).
+            self._show_state()
+        else:
+            self._recover(job)
+        return dt - used
+
+    def _recover(self, job: UserJob) -> None:
+        """BUSY while the firmware heats and homes. A model whose resume purges does so
+        halfway through, unless the print was paused: that resume only parks the head
+        (`ResumeState::ParkForPause` in `src/common/power_panic.cpp`)."""
+        # The resume sets the tool the print had picked before anything moves
+        # (`power_panic.cpp:380-395`).
+        self._pick(self._job_tool(job))
         job.enter(JobPhase.RECOVER)
         job.remaining = self.settings.recover_seconds
-        purges = clean and self.model.extruder.panic_purge_mm is not None
+        purges = job.paused_from is None and self.model.extruder.panic_purge_mm is not None
         job.clean_at = self.settings.recover_seconds / 2 if purges else None
         self._show_state()
 
@@ -1406,8 +1881,18 @@ class SimPrinter:
         self._log("job", f"nozzle clean purged {purge:g} mm")
 
     def _job_tool(self, job: UserJob) -> SimTool:
-        """The tool the job's current segment prints with."""
-        return self.tools[job.spec.segments[job.segment].tool]
+        """The tool the job's current segment prints with: the one a power-panic resume
+        found picked, else the segment's own."""
+        if job.resumed_on is not None:
+            return self.tools[job.resumed_on]
+        return self.tools[self._seg_tool(job, job.segment)]
+
+    @staticmethod
+    def _seg_tool(job: UserJob, index: int) -> int:
+        """The tool segment `index` prints on: its G-code tool, unless a spool join has
+        mapped that to another (`tool_mapper.set_mapping`, `spool_join.cpp:258-265`)."""
+        tool = job.spec.segments[index].tool
+        return job.mapped.get(tool, tool)
 
     def set_power(self, power: Power, *, resume: bool = False, cold_bed: bool = False) -> None:
         """Off freezes the printer; leaving off boots it, which drops any job unless `resume`
@@ -1492,14 +1977,26 @@ class SimPrinter:
         self._need_power()
         if self.job is not None or self.state not in IDLE_STATES:
             raise Busy(f"manual moves need an idle printer, not {self.state}")
+        # Move E moves only the picked tool, and with none picked it shows "No tool" and
+        # sends no E (`ScreenMenuMove::loop` and `plan_moves` in
+        # `src/gui/screen_menu_move.cpp`).
+        if self.selected_tool is None:
+            raise Busy("no tool picked")
+        if t.index != self.selected_tool:
+            raise Invalid(f"T{t.index} isn't the picked tool")
         if not t.path.loaded:
             raise Invalid(f"T{t.index} has no filament")
 
-    def _check_select(self, t: SimTool) -> None:
-        if not self.feed.selectable:
+    def _check_select(self) -> None:
+        if not self.toolchanger:
             raise Invalid(f"{self.model.name} has one tool")
         if self.job is not None or self.state is State.BUSY:
             raise Busy(f"can't pick a tool while {self.state}")
+
+    def _check_park(self) -> None:
+        self._check_select()
+        if self.selected_tool is None:
+            raise Busy("no tool picked")
 
     def _check_runout(self, t: SimTool) -> None:
         self._need_power()
@@ -1512,6 +2009,16 @@ class SimPrinter:
         if not t.path.loaded:
             raise Busy(f"T{t.index} has no filament")
 
+    def _check_change_filament(self) -> None:
+        self._need_power()
+        job = self.job
+        # Tune > Change filament is enabled once the print has printed something
+        # (`max_printed_z > 0` in `MI_M600::Loop`, `src/gui/screen/screen_m600.cpp`), so
+        # not during the preheat. The firmware offers it while paused too
+        # (`screen_printing.cpp`), which the simulator doesn't model.
+        if not (isinstance(job, UserJob) and job.phase is JobPhase.PRINTING):
+            raise Busy("a filament change needs a print in progress")
+
     def _check_sensor_runout(self, t: SimTool) -> None:
         # A runout is the sensor seeing the filament go. A jam is found another way.
         self._check_runout(t)
@@ -1519,10 +2026,24 @@ class SimPrinter:
             raise Busy("the filament sensors are off")
 
     def _check_disable(self, t: SimTool) -> None:
-        job = self.job
-        in_print = isinstance(job, UserJob) and t.index in {s.tool for s in job.spec.segments}
-        if t.index == self.selected_tool or in_print or t.process is not None:
+        job = self.job or self.resuming
+        in_print = isinstance(job, UserJob) and t.index in {
+            *(s.tool for s in job.spec.segments),
+            *(j.to for j in job.spec.spool_join),
+            job.resumed_on,
+        }
+        queued = any(q.tool == t.index for q in self.queue)
+        if t.index == self.selected_tool or in_print or t.process is not None or queued:
             raise Invalid(f"T{t.index} is in use")
+
+    def _check_change_all(self) -> None:
+        # Change all is in the Filament menu on a toolchanger only
+        # (`src/gui/screen_menu_filament.hpp`), and the menu needs an idle printer.
+        if not self.toolchanger:
+            raise Invalid(f"{self.model.name} has one tool")
+        self._need_power()
+        if self.job is not None or self.state not in IDLE_STATES:
+            raise Busy(f"can't change all while {self.state}")
 
     def _check_start_print(self) -> None:
         self._need_power()
@@ -1579,6 +2100,8 @@ class SimPrinter:
             "cancel": self._check_cancel,
             "dismiss": self._check_dismiss,
             "home": self._check_home,
+            "park_tool": self._check_park,
+            "change_all": self._check_change_all,
             "reboot": self._need_power,
             "clear_jam": self._check_clear_jam,
             "tap_through": self._check_tap_through,
@@ -1595,7 +2118,8 @@ class SimPrinter:
             "retract": lambda: self._check_move(t),
             "runout": lambda: self._check_sensor_runout(t),
             "jam": lambda: self._check_runout(t),
-            "select_tool": lambda: self._check_select(t),
+            "change_filament": self._check_change_filament,
+            "select_tool": self._check_select,
             # The fault switches take any enabled tool, in any state.
             "set_sensor_fault": lambda: None,
             "set_stuck_write": lambda: None,
@@ -1617,6 +2141,9 @@ class SimPrinter:
             if t.process is not None:
                 active = True
                 self._tick_process(t, dt)
+        if self.resuming is not None:
+            active = True
+            dt = self._tick_resume(dt)
         if self.job is not None:
             active = True
             self._tick_job(dt)
@@ -1657,6 +2184,10 @@ class SimPrinter:
         self._run_steps(t, p.steps)  # what rounding left
         t.process = None
         self._physical_unload(t, "unload")
+        # `M702` docks after every unload on INDX. `M1600` docks only after its load, so a
+        # change all's unload keeps the tool for the load that follows.
+        if not (self.queue and self.queue[0].tool == t.index):
+            self.feed.rest(self)
         self._process_done()
 
     def _next_load_step(self, t: SimTool, p: LoadProcess) -> None:
@@ -1665,6 +2196,11 @@ class SimPrinter:
         if not p.steps:
             t.path.loaded, t.process = True, None
             self._log("load", f"T{t.index} loaded: extruded {int(t.extruded)}")
+            # `M701` docks on INDX unless it resumes a print, so a menu load and the
+            # preview's load do and a reload in a print doesn't (`M701_2.cpp:135-140`).
+            job = self.job
+            if job is None or job.phase is JobPhase.PREVIEW_LOAD:
+                self.feed.rest(self)
             self._process_done()
 
     def _process_done(self) -> None:
@@ -1675,6 +2211,8 @@ class SimPrinter:
             # The load's result isn't checked and no sensor is read again: the type check
             # follows (`filament_not_inserted_load` in `marlin_print_preview.cpp`).
             self._check_types(job)
+        elif self.queue:
+            self._next_queued()
         self._show_state()
 
     def _tick_job(self, dt: float) -> None:
@@ -1713,13 +2251,15 @@ class SimPrinter:
         elif job.phase is JobPhase.RUN:
             self._park(job, State.FINISHED)
         elif job.phase is JobPhase.RECOVER:
-            if job.cold_bed:
-                job.enter(JobPhase.AWAIT_RESUME, Attention(Reason.COLD_BED))
+            if job.paused_from is not None:
+                job.enter(JobPhase.PAUSED)  # `powerpanic_finish_pause`
                 self._show_state()
             else:
                 self._unpark(job)
         elif job.phase is JobPhase.UNPARK:
             self._begin_feeding(job)
+        elif job.phase is JobPhase.JOIN:
+            self._finish_join(job)
         else:  # PARKING, the last of the timed phases
             self.job, self.screen = None, job.end_state
             self._log("job", f"job {job.id} {job.end_state.lower()}")
@@ -1839,16 +2379,76 @@ class SimPrinter:
         spec = job.spec
         job.enter(JobPhase.PREHEAT)
         job.remaining = self.settings.preheat_seconds if spec.preheat_s is None else spec.preheat_s
-        self.selected_tool = spec.segments[0].tool
+        self.selected_tool = self._seg_tool(job, 0)
         self._show_state()
 
     def _begin_feeding(self, job: UserJob) -> None:
-        self.selected_tool = job.spec.segments[job.segment].tool
+        if not job.primed:
+            job.primed = True
+            job.resumed_on = None  # the start G-code's tool changes end it
+            self._prime(job)
+        self.selected_tool = self._job_tool(job).index
         job.enter(JobPhase.PRINTING)
         self._show_state()
 
+    @property
+    def profile(self) -> Slicer | None:
+        """The multi-tool slicer profile the printer prints with, on a toolchanger only. An
+        XL with one tool isn't one (`toolchanger`), and its single-tool profiles inherit
+        `*commonXL*`, whose end G-code doesn't park, so it prints as a direct printer does."""
+        return self.model.slicer if self.toolchanger else None
+
+    def _slicer(self, job: UserJob) -> Slicer | None:
+        """The print's slicer profile, with the print's overrides."""
+        slicer, spec = self.profile, job.spec
+        return slicer and slicer.overridden(spec.prime_mm, spec.toolchange_purge_mm)
+
+    def _prime(self, job: UserJob) -> None:
+        """The start G-code's moves outside the model, on a toolchanger (`Slicer`).
+
+        `G427` picks each used tool in ascending order and purges it in the nozzle cleaner
+        (`run` and `prepare_tool` in
+        `src/feature/tool_offset_calibration/tool_offset_calibration.cpp:186-233, 663-850`).
+        """
+        slicer = self._slicer(job)
+        if slicer is None:
+            return
+        # The start G-code's tools go through the tool mapping too.
+        tools = {self._seg_tool(job, i) for i in range(len(job.spec.segments))}
+        first = self.tools[self._seg_tool(job, 0)]
+        used = [self.tools[i] for i in sorted(tools)]
+        self._pick(first)
+        self._print_moves(first, slicer.cleanup)
+        if slicer.calibrates:
+            for t in used:
+                self._pick(t)
+                self._purge_clean(t)
+        if slicer.prime_others is not None:
+            for t in used:
+                if t is not first:
+                    self._pick(t)
+                    self._print_moves(t, slicer.prime_others.moves())
+        self._pick(first)
+        self._print_moves(first, slicer.prime.moves())
+        self._log("job", f"start G-code primed {', '.join(f'T{t.index}' for t in used)}")
+
     def _park(self, job: UserJob | SyncJob, end: State) -> None:
+        """End a job: a finished print's end G-code on a toolchanger runs the profile's last
+        moves and parks the tool (`P0 S1`, `src/marlin_stubs/P.cpp:35-48`), then the
+        firmware's own end runs, and INDX docks what's still picked (`pre_finalize_print`).
+        A stopped print and a sync job keep the tool to the firmware's end."""
+        slicer = None
+        if isinstance(job, UserJob) and end is State.FINISHED:
+            slicer = self._slicer(job)
+        if slicer is not None:
+            t = self.tools[self.selected_tool]
+            if len({s.tool for s in job.spec.segments}) > 1:
+                self._print_moves(t, slicer.tower_end)
+            self._print_moves(t, slicer.end)
+            self._log("job", f"end G-code parks T{t.index}")
+            self.selected_tool = None
         self._end_of_print()
+        self.feed.rest(self)
         job.enter(JobPhase.PARKING)
         job.remaining, job.end_state = self.settings.park_seconds, end
         if isinstance(job, UserJob):
@@ -1888,7 +2488,7 @@ class SimPrinter:
         rate = total / spec.duration_s if spec.duration_s else self.settings.print_rate_mm_s
         ends = [sum(s.slicer_mm for s in spec.segments[: i + 1]) for i in range(len(spec.segments))]
         while dt > EPSILON and job.phase is JobPhase.PRINTING:
-            tool = self.tools[spec.segments[job.segment].tool]
+            tool = self._job_tool(job)
             change = job.pending_color_changes[0] if job.pending_color_changes else None
             target = ends[job.segment] if change is None else min(change, ends[job.segment])
             need = max(0.0, target - job.fed_mm)
@@ -1902,9 +2502,9 @@ class SimPrinter:
             dt -= need / rate
             job.time_printing += need / rate
             if change is not None and change <= target:
-                job.pending_color_changes.pop(0)
+                # It stays pending until the change ends (`resume`).
                 self._log("job", f"color change at {change:g} mm")
-                self._runout(tool, Reason.COLOR_CHANGE)
+                self._filament_change(tool, Reason.COLOR_CHANGE)
                 return 0.0
             if job.segment == len(spec.segments) - 1:
                 self._park(job, State.FINISHED)
@@ -1913,13 +2513,20 @@ class SimPrinter:
         return 0.0 if job.phase is not JobPhase.PRINTING else dt
 
     def _next_segment(self, job: UserJob) -> None:
+        """Go on to the next segment, through the file's tool change when its G-code tool
+        differs. The change's moves run when it picks the tool already picked too, as after
+        a resume on another tool: they're the file's."""
         segments = job.spec.segments
-        old = segments[job.segment].tool
+        old = self._job_tool(job)
         job.segment += 1
-        new = segments[job.segment].tool
-        if new == old:
+        tool = segments[job.segment].tool
+        if tool == segments[job.segment - 1].tool:
             return
-        self.feed.tool_change(self, self.tools[old], self.tools[new])
+        job.resumed_on = None
+        new = self.tools[self._seg_tool(job, job.segment)]
+        # A G-code tool's first pick in the print stands for the first layer's tool changes.
+        first = all(s.tool != tool for s in segments[: job.segment])
+        self.feed.tool_change(self, old, new, self._slicer(job), first)
 
     # The sync job.
 
@@ -1993,6 +2600,7 @@ class SimPrinter:
             "boot_id": self.boot_id,
             "state": str(self.state),
             "selected_tool": self.selected_tool,
+            "toolchanger": self.toolchanger,
             "message": self.message,
             "homed": self.homed,
             "job": job,
@@ -2095,8 +2703,13 @@ def _job_from(d: dict | None) -> UserJob | SyncJob | None:
     d["mapping"] = [_attention_from(a) for a in d["mapping"]]
     if d["paused_from"] is not None:
         d["paused_from"] = JobPhase(d["paused_from"])
+    if d["restore"] is not None:
+        d["restore"] = tuple(d["restore"])
+    # JSON keeps a dict's keys as strings.
+    d["mapped"] = {int(k): v for k, v in d["mapped"].items()}
     spec = dict(d["spec"])
     spec["segments"] = [Segment(**s) for s in spec["segments"]]
+    spec["spool_join"] = [Join(**j) for j in spec["spool_join"]]
     d["spec"] = PrintSpec(**spec)
     return UserJob(**d)
 
@@ -2107,6 +2720,8 @@ def _printer_dict(p: SimPrinter) -> dict:
     d["tools"] = [_tool_dict(p.tools[i]) for i in sorted(p.tools)]
     if p.job is not None:
         d["job"]["kind"] = p.job.kind
+    if p.resuming is not None:
+        d["resuming"]["kind"] = p.resuming.kind
     return d
 
 
@@ -2120,6 +2735,8 @@ def _printer_from(d: dict) -> SimPrinter:
     d["checks"] = Severity(d["checks"])
     d["tools"] = {t["index"]: _tool_from(t) for t in d["tools"]}
     d["job"] = _job_from(d["job"])
+    d["resuming"] = _job_from(d["resuming"])
+    d["queue"] = [Queued(**{**q, "material": _material_from(q["material"])}) for q in d["queue"]]
     return SimPrinter(**d)
 
 

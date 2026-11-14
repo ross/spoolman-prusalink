@@ -214,6 +214,7 @@ function renderTool(p, t) {
     btn('Jam', 'jam', gate(a, 'jam', { tool: i })) +
     '<label title="unload on jam"><input type="checkbox" data-k="jam' + i + '"' +
     (getv(p.name, 'jam' + i, true) ? ' checked' : '') + '>unload</label>' +
+    btn('Change', 'change_filament', gate(a, 'change_filament', { tool: i, title: 'Tune > Change filament: M600 T' + i })) +
     btn('Select', 'select_tool', gate(a, 'select_tool', { tool: i })) +
     btn('Sensor fault', 'sensor_fault', gate(a, 'set_sensor_fault', { tool: i, cls: t.sensor_fault ? 'on' : '' })) +
     btn('Stuck write', 'stuck_write', gate(a, 'set_stuck_write', { tool: i, cls: t.stuck_write ? 'on' : '' })) +
@@ -296,6 +297,8 @@ function renderPrinter(p) {
     btn('Cancel', 'cancel', gate(a, 'cancel', { cls: 'danger' })) +
     btn('Dismiss', 'dismiss', gate(a, 'dismiss')) +
     btn('Home', 'home', gate(a, 'home')) +
+    btn('Park tool', 'park_tool', gate(a, 'park_tool', { title: 'the Pick/park menu: park the picked tool' })) +
+    btn('Change all', 'toggle', gate(a, 'change_all', { form: 'changeall', cls: isOpen(p, 'changeall') ? 'on' : '' })) +
     btn('Reboot', 'reboot', gate(a, 'reboot')) +
     btn('Power-loss resume', 'power_loss', gate(a, 'reboot', { title: 'reboot, keeping the job' })) +
     '<label title="the bed cools during the outage, so the print waits for Resume"><input type="checkbox" data-k="cold"' +
@@ -313,6 +316,11 @@ function renderPrinter(p) {
       '<label>duration s' + inp(p, 'start.duration', '', 'type="number" step="any"') + '</label>' +
       '<label>preheat s' + inp(p, 'start.preheat', '', 'type="number" step="any"') + '</label>' +
       '<label>color changes mm (a, b)' + inp(p, 'start.cc', '', 'type="text"') + '</label>' +
+      (p.toolchanger
+        ? '<label title="the slicer profile\'s prime; empty for the stock one">prime mm' + inp(p, 'start.prime', '', 'type="number" step="any"') + '</label>' +
+          '<label title="the slicer profile\'s tool-change purge; empty for the stock one">tool-change purge mm' + inp(p, 'start.tcpurge', '', 'type="number" step="any"') + '</label>' +
+          '<label title="when tool a runs out, the print goes on with tool b">spool joins (a&gt;b, c&gt;d)' + inp(p, 'start.joins', '', 'type="text"') + '</label>'
+        : '') +
       '<label>file name' + inp(p, 'start.name', 'part.bgcode', 'type="text"') + '</label>' +
       btn('Start', 'start_submit', {}) + '</div>';
   }
@@ -322,6 +330,13 @@ function renderPrinter(p) {
     h += '<div class="form"><label>tool' + toolSel('counter.tool') + '</label>' +
       '<label>mm' + inp(p, 'counter.mm', '10', 'type="number" step="any"') + '</label>' +
       btn('Step back', 'counter_submit', {}) + '</div>';
+  }
+  if (isOpen(p, 'changeall')) {
+    h += '<div class="form">' +
+      '<label>tools (a, b)' + inp(p, 'changeall.tools', p.tools.filter((t) => t.enabled).map((t) => t.index).join(', '), 'type="text"') + '</label>' +
+      '<label>preset' + inp(p, 'changeall.name', 'PLA') + '</label>' +
+      '<label>color' + inp(p, 'changeall.color', '', 'type="text" placeholder="#rrggbb"') + '</label>' +
+      btn('Change', 'changeall_submit', {}) + '</div>';
   }
   if (isOpen(p, 'eau')) {
     h += '<div class="form"><label>tool' + toolSel('eau.tool') + '</label>' +
@@ -401,6 +416,19 @@ function startBody(name) {
   if (Number.isNaN(dur) || Number.isNaN(pre)) throw new Error('Duration and preheat must be numbers');
   if (dur != null) body.duration_s = dur;
   if (pre != null) body.preheat_s = pre;
+  const prime = numOrNull(getv(name, 'start.prime', ''));
+  const tcpurge = numOrNull(getv(name, 'start.tcpurge', ''));
+  if (Number.isNaN(prime) || Number.isNaN(tcpurge)) throw new Error('Prime and purge must be numbers');
+  if (prime != null) body.prime_mm = prime;
+  if (tcpurge != null) body.toolchange_purge_mm = tcpurge;
+  const joins = [];
+  for (const part of String(getv(name, 'start.joins', '')).split(',')) {
+    if (!part.trim()) continue;
+    const m = /^\s*(\d+)\s*>\s*(\d+)\s*$/.exec(part);
+    if (!m) throw new Error('Bad spool join: ' + part.trim());
+    joins.push({ tool: Number(m[1]), to: Number(m[2]) });
+  }
+  if (joins.length) body.spool_join = joins;
   const cc = String(getv(name, 'start.cc', '')).split(',').map((x) => x.trim()).filter(Boolean).map(Number);
   if (cc.some((x) => !Number.isFinite(x))) throw new Error('Color changes must be numbers');
   if (cc.length) body.color_changes_mm = cc;
@@ -424,6 +452,16 @@ function loadBody(name, i) {
   return body;
 }
 
+function changeAllBody(name, p) {
+  const all = p.tools.filter((t) => t.enabled).map((t) => t.index).join(', ');
+  const tools = String(getv(name, 'changeall.tools', all)).split(',').map((x) => x.trim()).filter(Boolean).map(Number);
+  if (tools.some((x) => !Number.isInteger(x))) throw new Error('Tools must be whole numbers');
+  const body = { tools, name: String(getv(name, 'changeall.name', 'PLA')).trim() };
+  const color = String(getv(name, 'changeall.color', '')).trim();
+  if (color) body.color = color;
+  return body;
+}
+
 function onClick(e) {
   const b = e.target.closest('button[data-act]');
   if (!b || b.disabled) return;
@@ -441,15 +479,17 @@ function onClick(e) {
       case 'toggle': return toggle(b.dataset.form);
       case 'load_form': return toggle('load' + tool);
       case 'pause': case 'resume': case 'cancel': case 'dismiss': case 'reboot': case 'home':
-      case 'tap_through': case 'clear_jam':
+      case 'tap_through': case 'clear_jam': case 'park_tool':
         return go(act, {});
       case 'sensors': return go('set_sensors', { value: !p.sensors });
       case 'power_loss': return go('reboot', { keep_job: true, cold_bed: !!getv(name, 'cold', false) });
       case 'start_submit':
         return go('start_print', startBody(name), () => { pst(name).open.start = false; renderCard(name); });
+      case 'changeall_submit':
+        return go('change_all', changeAllBody(name, p), () => { pst(name).open.changeall = false; renderCard(name); });
       case 'load_submit':
         return go('load', loadBody(name, tool), () => { pst(name).open['load' + tool] = false; renderCard(name); });
-      case 'unload': case 'runout': case 'select_tool':
+      case 'unload': case 'runout': case 'select_tool': case 'change_filament':
         return go(act, { tool });
       case 'extrude': case 'retract': {
         const mm = numOrNull(getv(name, 'mm', '10'));

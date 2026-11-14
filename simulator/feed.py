@@ -1,6 +1,7 @@
-"""Feed systems: the rules that differ between a direct-drive printer and a toolchanger.
+"""Feed systems: the rules that differ between a direct-drive printer and the toolchangers.
 
-A model's feed system follows from its build. Each system is a stateless singleton in
+A model's feed system follows from its build: `ModelInfo.feed`, which `script/firmware-check`
+compares with `HAS_TOOLCHANGER` and `HAS_INDX`. Each system is a stateless singleton in
 `FEED_SYSTEMS`, so snapshots and `asdict` never see it. `model` holds the state the rules
 act on, and `SimPrinter.feed` picks the printer's system.
 """
@@ -12,35 +13,46 @@ from typing import TYPE_CHECKING, ClassVar
 
 if TYPE_CHECKING:
     from simulator.model import SimPrinter
+    from simulator.slicer import Slicer
     from simulator.tool import SimTool
 
 
 class Feed(StrEnum):
     DIRECT = "direct"
-    TOOLCHANGER = "toolchanger"
+    XL = "xl"  # HAS_TOOLCHANGER without HAS_INDX: the XL's Dwarf heads
+    INDX = "indx"  # HAS_INDX: the Core One INDX and Core One L INDX
 
 
 class FeedSystem:
     selectable: ClassVar[bool]  # the user can pick a tool (select_tool)
     tool_mapping: ClassVar[bool]  # the preview's tools-mapping screen applies (HAS_TOOL_MAPPING)
+    docks: ClassVar[bool] = False  # whether the picked tool goes back to a dock (INDX)
 
-    def tool_change(self, p: SimPrinter, old: SimTool, new: SimTool) -> None:
-        """A print's change from `old` to `new`: pick `new` and count what the change moves."""
+    def tool_change(
+        self, p: SimPrinter, old: SimTool, new: SimTool, slicer: Slicer, first: bool
+    ) -> None:
+        """A print's change from `old` to `new`: the profile's moves on `old` before and
+        during its park, the pick of `new`, then the profile's moves on `new`, those of its
+        first pick in the print when `first` is set.
+
+        The pick and the park move no counted filament (`_pick`). Nothing checks for
+        filament at a pickup, and a runout needs the sensor to go from filament to none, so
+        an empty tool prints on and counts what it would have fed (`check_runout` in
+        `src/feature/filament_sensor/filament_sensors_handler.cpp`, `check_for_events` in
+        `filament_sensor.cpp`).
+        """
+        p._print_moves(old, slicer.park_out)
         p.selected_tool = new.index
         p._log("job", f"tool change T{old.index} -> T{new.index}")
-        # Nothing checks for filament at a pickup, and a runout needs the sensor to go from
-        # filament to none, so an empty tool prints on and counts what it would have fed
-        # (`check_runout` in `src/feature/filament_sensor/filament_sensors_handler.cpp`,
-        # `check_for_events` in `filament_sensor.cpp`).
-        p._track(new, p.settings.toolchange_purge_mm)
+        p._print_moves(new, (slicer.first_pick if first else slicer.later_pick).moves())
 
     def credited(self, p: SimPrinter, tool: SimTool) -> SimTool | None:
         """The tool a move on `tool`'s path counts on; None when the move can't be made.
 
         A toolchanger with no tool picked can't move E at all (`bsod("E move without tool")`
         in `Planner::buffer_segment`, `lib/Marlin/Marlin/src/module/planner.cpp`). The
-        caller names the tool whose path moves, so a menu load on a toolchanger's unpicked
-        tool counts on that tool.
+        caller names the tool whose path moves. Every caller picks that tool first, as the
+        firmware does, so on a toolchanger it's the picked tool.
         """
         return None if p.selected_tool is None else tool
 
@@ -52,6 +64,14 @@ class FeedSystem:
         isn't a configured tool has no sensor to read.
         """
         return None if p.selected_tool is None else p.tools.get(p.selected_tool)
+
+    def pick(self, p: SimPrinter, tool: SimTool) -> None:
+        """Pick `tool` up. A direct printer's one tool is always picked."""
+
+    def rest(self, p: SimPrinter) -> None:
+        """Put the picked tool where it rests after a menu load or unload, a pause, and a
+        print's end. A direct printer and the XL leave it picked: the XL has no dock step
+        (`HAS_INDX` only, `M701_2.cpp`, `marlin_server.cpp`)."""
 
 
 class Direct(FeedSystem):
@@ -67,5 +87,35 @@ class Toolchanger(FeedSystem):
     selectable = True
     tool_mapping = True
 
+    def pick(self, p: SimPrinter, tool: SimTool) -> None:
+        """Pick `tool` up, parking the picked one first. Neither moves counted filament."""
+        p.selected_tool = tool.index
+        p._log("load", f"pick T{tool.index}")
 
-FEED_SYSTEMS: dict[Feed, FeedSystem] = {Feed.DIRECT: Direct(), Feed.TOOLCHANGER: Toolchanger()}
+
+class XlToolchanger(Toolchanger):
+    """The XL: a Dwarf head per tool (`toolchanger_xl.cpp`)."""
+
+
+class IndxToolchanger(Toolchanger):
+    """INDX: tools picked from docks onto one head (`toolchanger_indx.cpp`)."""
+
+    docks = True
+
+    def rest(self, p: SimPrinter) -> None:
+        """Dock the picked tool, if one is picked: `tool_change(NoTool {}, dock_backoff)`
+        after `M701`, unless it resumes a print, and after every `M702`
+        (`M701_2.cpp:135-140, 194-197`); `tool_change(NoTool {})` at a pause, in
+        `Pausing_ParkHead`, and at a print's end, in `pre_finalize_print`
+        (`marlin_server.cpp:2557-2563, 1095-1100`). The dock moves no E."""
+        if p.selected_tool is None:
+            return
+        p._log("load", f"dock T{p.selected_tool}")
+        p.selected_tool = None
+
+
+FEED_SYSTEMS: dict[Feed, FeedSystem] = {
+    Feed.DIRECT: Direct(),
+    Feed.XL: XlToolchanger(),
+    Feed.INDX: IndxToolchanger(),
+}

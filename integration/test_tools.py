@@ -64,7 +64,7 @@ async def test_t1_tool_changes_charge_each_tool(world: World):
     start0, start1 = w.counter_at(0), w.counter_at(1)
 
     # One tool change, T0 to T1, so only T1 is picked up: the purge must land on D, and
-    # a purge counted on the tool put down would show up as 30 mm more on A.
+    # a purge counted on the tool put down would show up as about 4 mm more on A.
     mark = w.mark()
     await w.start_print(PrintSpec([Segment(0, 300), Segment(1, 100)], duration_s=4, preheat_s=0.5))
     await finish(w)
@@ -73,13 +73,17 @@ async def test_t1_tool_changes_charge_each_tool(world: World):
     changes = [e.text for e in w.sim.events if e.text.startswith("tool change")]
     assert changes == ["tool change T0 -> T1"]
 
-    # The pickup purges toolchange_purge_mm on T1. At INDX's feed ratio, 550/576, the
-    # 300 mm of T0 moves count 286.46, and T1's purge and 100 mm count 124.13. The
+    # The stock profile's moves count too (`simulator.slicer`). The start purges each
+    # used tool 25 mm in the nozzle cleaner, and its auto-retract counts 8. T0 then primes
+    # 1.6 + 5.4907 mm; T1's pickup counts 1.6, then purges 4.1596 mm. At INDX's feed ratio,
+    # 550/576, T0's 340.0907 mm count 324.74, and T1's 138.7596 mm count 132.50. The
     # counters read whole millimetres, from 1000 on T0 and 500 on T1.
-    purge = w.sim.settings.toolchange_purge_mm
-    assert (int(counted(w, 300)), int(counted(w, purge + 100)), purge) == (286, 124, 30)
-    assert w.charged(records, "A") == 286 == w.counter_at(0) - start0
-    assert w.charged(records, "D") == 124 == w.counter_at(1) - start1
+    slicer = w.printer.model.slicer
+    prime, purge = slicer.prime.mm, slicer.first_pick.mm
+    t0, t1 = 25 + 8 + 1.6 + prime + 300, 25 + 8 + 1.6 + purge + 100
+    assert (int(counted(w, t0)), int(counted(w, t1)), purge) == (324, 132, 4.1596)
+    assert w.charged(records, "A") == 324 == w.counter_at(0) - start0
+    assert w.charged(records, "D") == 132 == w.counter_at(1) - start1
     assert {r["tool"] for r in charges(records, w.spools["A"])} == {0}
     assert {r["tool"] for r in charges(records, w.spools["D"])} == {1}
 
@@ -117,6 +121,7 @@ async def test_t3_swap_on_one_tool_leaves_the_other(world: World):
     records = await w.poll()
     assert [(e["tool"], e["event"]) for e in events(records)] == [(1, "swap_staged")]
 
+    w.printer.select_tool(TOOL1)  # Move E moves only the picked tool
     w.printer.extrude(TOOL1, 20)  # 20 * 550 / 576 = 19.10: the counter reads 519
     # The unload purges 2 and rams 17 first: 19 * 550 / 576 = 18.14, so 537.24.
     await w.unload(TOOL1)
@@ -156,7 +161,8 @@ async def test_t4_idle_sensor_clear_on_a_picked_tool(world: World):
     await baseline(w)
 
     # Tool 1's filament is pulled out while the printer is off, so its type stays stored.
-    # The boot's idle clear runs on the selected tool, 0, which still has filament.
+    # The INDX starts with no tool picked, and a boot keeps that, so the boot's idle clear
+    # reads no tool. Picking T1 from the Pick/park menu then runs the clear on it.
     w.printer.set_power("off")
     w.printer.unload(TOOL1)
     w.printer.set_power("on")
@@ -187,6 +193,7 @@ async def test_t5_tool_the_printer_does_not_report(world: World, caplog: pytest.
     # Disabled, or its dock not calibrated: tool 1 drops out of /api/v1/filament.
     w.printer.set_tool_enabled(TOOL1, False)
     assert [t["index"] for t in prusalink.filament(w.printer)["tools"]] == [0]
+    w.printer.select_tool(0)  # Move E moves only the picked tool
     mark = w.mark()
     for _ in range(3):
         w.printer.extrude(0, 10)
@@ -241,8 +248,10 @@ async def test_t7_reboot_restarts_every_tool(world: World):
     """Reboot on a multi-tool printer: each tool's counter restarts, and nothing is charged."""
     w = world
     await baseline(w)
-    # 10 * 550 / 576 = 9.55 and 20 * 550 / 576 = 19.10
+    # 10 * 550 / 576 = 9.55 and 20 * 550 / 576 = 19.10. Move E moves only the picked tool.
+    w.printer.select_tool(0)
     w.printer.extrude(0, 10)
+    w.printer.select_tool(TOOL1)
     w.printer.extrude(TOOL1, 20)
     records = await w.poll()
     assert w.charged(records, "A") == 9 and w.charged(records, "D") == 19

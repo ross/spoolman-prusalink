@@ -11,7 +11,7 @@ from aiohttp.test_utils import TestClient, TestServer
 from yarl import URL
 
 from simulator import control
-from simulator.model import Fault, PrintSpec, Segment, State
+from simulator.model import Fault, Join, PrintSpec, Segment, State
 from simulator.preview import Severity
 from simulator.tests.util import make
 
@@ -305,8 +305,39 @@ def test_a_stream_queue_drops_the_oldest():
         ),
         (
             "start_print",
+            {"segments": [{"tool": 0, "slicer_mm": 1}], "prime_mm": "9"},
+            "start_print prime_mm must be a finite number, got '9'",
+        ),
+        (
+            "start_print",
+            {"segments": [{"tool": 0, "slicer_mm": 1}], "toolchange_purge_mm": 5},
+            "toolchange_purge_mm needs a multi-tool slicer profile, which this printer lacks",
+        ),
+        (
+            "start_print",
+            {"segments": [{"tool": 0, "slicer_mm": 1}], "spool_join": [{"tool": 0}]},
+            'start_print spool_join must be a list of {"tool": A, "to": B}, got [{\'tool\': 0}]',
+        ),
+        (
+            "start_print",
+            {"segments": [{"tool": 0, "slicer_mm": 1}], "spool_join": {"tool": 0, "to": 1}},
+            "start_print spool_join must be a list of",
+        ),
+        (
+            "start_print",
+            {"segments": [{"tool": 0, "slicer_mm": 1}], "spool_join": [{"tool": 0, "to": "1"}]},
+            "start_print spool_join[0] to must be an integer, got '1'",
+        ),
+        (
+            "start_print",
+            {"segments": [{"tool": 0, "slicer_mm": 1}], "spool_join": [{"tool": 0, "to": 1}]},
+            "a spool join needs a toolchanger, which p isn't",
+        ),
+        (
+            "start_print",
             {"segments": [], "speed": 2},
-            "start_print takes color_changes_mm, duration_s, name, preheat_s, segments, not speed",
+            "start_print takes color_changes_mm, duration_s, name, preheat_s, prime_mm, segments,"
+            " spool_join, toolchange_purge_mm, not speed",
         ),
     ],
 )
@@ -330,10 +361,16 @@ async def test_checked_parameters_reach_the_action_as_their_types(setup):
     )
     assert p.job.spec == spec
     assert p.job.spec.name == "part.bgcode"
+    assert p.job.spec.spool_join == []
     assert (await client.post("/api/printers/p/set_fault", json={"fault": "error"})).status == 200
     assert p.fault is Fault.ERROR
     assert (await client.post("/api/printers/p/set_checks", json={"value": "abort"})).status == 200
     assert p.checks is Severity.ABORT
+
+
+def test_a_print_s_spool_joins_reach_its_spec():
+    body = {"segments": [{"tool": 0, "slicer_mm": 1}], "spool_join": [{"tool": 0, "to": 1}]}
+    assert control._print_spec(body).spool_join == [Join(0, 1)]
 
 
 def test_an_unknown_hint_is_a_bug():

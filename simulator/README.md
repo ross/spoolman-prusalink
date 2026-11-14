@@ -76,13 +76,16 @@ See [sim.example.toml](sim.example.toml), which shows every setting with its
 default. A printer has a `model` (a PrusaLink type code such as `8.1.0`), an
 `api_key`, a `firmware` mode, `checks` for the print preview, `high_flow`
 for a high-flow nozzle, `sensors` for the menu's switch of every filament
-sensor, and `[[printers.tools]]` entries that can start
-loaded with a material and counters. `checks` is `ignore`, `warn` (the
+sensor, `picked_tool` for the tool picked at start, and `[[printers.tools]]`
+entries that can start loaded with a material and counters. `picked_tool`
+names an enabled tool; left out, a direct printer has tool 0 picked and a
+toolchanger has none. `checks` is `ignore`, `warn` (the
 default) or `abort`, and it stands for every setting in the printer's menu
 that governs a check of a file's `M862` lines. The top-level settings are
 timing and lengths: the time scale, how fast loads and prints move filament,
-the purges of a tool change and a jam, the preheat and
-park times, and whether the start blip is on. The feed ratio and a load's slow, fast and purge
+the extra purge of a jam, the preheat and
+park times, the power-panic resume's wait and phases, and whether the start
+blip is on. The feed ratio and a load's slow, fast and purge
 lengths are overrides: left out, each printer uses its model's value, which
 the page shows on the printer's card. On the page or through
 `/api/settings`, an empty value or `null` unsets an override. The purge
@@ -104,8 +107,8 @@ curl -X POST -H 'Content-Type: application/json' \
 ```
 
 Actions: `load`, `unload`, `extrude`, `retract`, `select_tool`,
-`start_print`, `pause`, `resume`, `cancel`, `dismiss`, `home`, `runout`, `jam`,
-`clear_jam`, `reboot`, `set_power`, `set_fault`, `set_firmware`,
+`park_tool`, `change_all`, `start_print`, `pause`, `resume`, `cancel`, `dismiss`, `home`, `runout`, `jam`,
+`change_filament`, `clear_jam`, `reboot`, `set_power`, `set_fault`, `set_firmware`,
 `set_sensor_fault`, `set_stuck_write`, `set_tool_enabled`,
 `set_checks`, `set_sensors`, `counter_step_back`,
 `set_extruded_at_unload`, `tap_through`. Parameter names are the keyword arguments of the methods with
@@ -118,8 +121,14 @@ and name the parameter.
 `start_print` takes the fields of `PrintSpec`: `segments`, each
 `{"tool": T, "slicer_mm": MM}` with an optional `"material"`, the filament
 type the file names for that tool, and the optional `duration_s`,
-`preheat_s`, `color_changes_mm` and `name`. The page's start form takes a
-segment per line as `tool:mm` or `tool:mm:TYPE`.
+`preheat_s`, `color_changes_mm` and `name`. On a printer with a multi-tool
+slicer profile, `prime_mm` and `toolchange_purge_mm` replace the profile's
+prime and tool-change purge; elsewhere they answer 400. On a toolchanger,
+`spool_join` is a list of `{"tool": A, "to": B}`: when tool A runs out, the
+print goes on with tool B. Each tool joins on once and is joined to once,
+no chain loops, and B can't be a tool the segments use. The page's start
+form takes a segment per line as `tool:mm` or `tool:mm:TYPE`, and on a
+toolchanger the two overrides and the joins as `A>B, C>D`.
 
 The state lists each printer's and each tool's actions under `actions`, each
 with null when the printer would take it now or the reason it would refuse
@@ -173,10 +182,13 @@ that trace. The points that matter for the bridge, in short:
   filament, and a printer with `auto_retract = false`. The next forward move
   feeds the stored distance back first. At boot, the stored distance sets
   the path's gap; with nothing stored, the gap starts at 0 and the tracker
-  reports no retracted distance until a feed reaches the nozzle. A Nextruder print's end counts 23
-  mm; an INDX print's end counts nothing, because the 8 mm park retract
-  already counts as retracted. The MINI, MK3.5 and the dev kit don't
-  auto-retract.
+  reports no retracted distance until a feed reaches the nozzle. A
+  single-tool Nextruder print's end counts 23 mm. A toolchanger's finished
+  print counts only its slicer profile's last moves at its end, because its
+  end G-code parks the tool first. A stopped XL print counts the 23 mm on
+  its picked tool, and a
+  stopped INDX print counts nothing, because the 8 mm park retract already
+  counts as retracted. The MINI, MK3.5 and the dev kit don't auto-retract.
 - An unload or runout rams with the model's `unload` or `runout` sequence,
   then retracts what's left of the unload length. INDX purges 2 mm first.
   A menu unload of a Nextruder tool that auto-retracted skips the ramming
@@ -238,34 +250,143 @@ that trace. The points that matter for the bridge, in short:
   print started from the page too. A line with no `P`, such as the query
   form `M862.3 Q`, checks nothing.
 - INDX and XL printers are several tools with their own counters. A tool
-  change isn't an unload; the incoming tool gets a purge. Neither stores
-  UUIDs, so `M865.1` does nothing there. Disabled tools don't appear in
-  `/api/v1/filament`.
-- A model's feed system, direct or toolchanger, holds the rules that differ
-  between the two (`feed.py`). The XL and INDX models are toolchangers, and
-  the rest are direct. The feed system says whether `select_tool` can pick a
+  change isn't an unload. Neither stores UUIDs, so `M865.1` does nothing
+  there. Disabled tools don't appear in `/api/v1/filament`.
+- A print on INDX, or on an XL with more than one enabled tool, adds the
+  stock PrusaSlicer profile's moves outside the model (`slicer.py`), each
+  counted on the picked tool through the tracker. They're profile data from
+  PrusaSlicer 2.9.7 with the PrusaResearch vendor bundle 2.5.16, not
+  firmware, so `script/firmware-check` doesn't compare them. The bundle has
+  no Core One L INDX, so both INDX models use the Core One INDX numbers.
+  - XL: the first tool retracts 2 mm; each other used tool, in ascending
+    order, primes 39 mm and retracts 20; then the first tool primes 39 mm
+    and retracts 0.8, which its first move feeds back. At a tool change
+    the old tool rams 4.1575 mm and retracts 20; the new tool feeds the 20
+    back and purges 9.238 mm on its first pick in the print, which stands
+    for the first layer, and 7.0076 mm on later ones. At the end the last
+    tool rams 4.1575 mm when the print uses several tools, then retracts
+    0.8.
+  - INDX: `G427` purges every used tool, in ascending order, in the nozzle
+    cleaner: 25 mm, then the auto-retract. The first tool then primes 1.6
+    + 5.4907 mm and retracts 0.8, fed back. At a tool change the old tool
+    retracts 0.8 mm, then 8 in its park (`G27 R8`). The new tool's first
+    pick moves 1.6 mm, purges 4.1596 and retracts 0.8, fed back; a later
+    pick first moves 1.6 (the lock move), 8 and 0.8 back. At the end the
+    last tool retracts 0.8.
+
+  Unused tools aren't picked. A print's own retract while an auto-retract
+  distance is stored doesn't move the filament and keeps the distance,
+  though the tracker counts it. The priming runs once, when the print
+  first starts feeding, so a pause, a power-panic resume or a filament
+  change doesn't run it again.
+- A model's feed system, direct, XL or INDX, holds the rules that differ
+  between them (`feed.py`). The XL and INDX feed systems are the two
+  toolchangers, and the rest of the models are direct. `ModelInfo.feed` names
+  the system, and `script/firmware-check` compares it with the build's
+  `HAS_TOOLCHANGER` and `HAS_INDX`. The feed system says whether `select_tool` can pick a
   tool, whether the preview's tools-mapping screen applies, what a
-  print's tool change does, which tool a move counts on, and which tool's
-  sensor the idle sensor clear reads.
+  print's tool change does, which tool a move counts on, which tool's
+  sensor the idle sensor clear reads, and where the picked tool rests after
+  a menu load or unload, a pause and a print's end.
+- On a toolchanger, a menu `load` or `unload` picks its tool first, as the
+  printer's menu does. The pick reads `IDLE` and opens no dialog, so the
+  idle sensor clear runs on the newly picked tool before the operation
+  starts: a stored type over an empty sensor counts an unload. INDX docks
+  the tool when the operation ends, and the XL leaves it picked. A load
+  the preview waits for picks its tool inside the dialog, with no clear,
+  and INDX docks it after too. A reload in a print neither picks nor docks.
+  `park_tool` parks the picked tool, as the Pick/park menu does.
+- `change_all` is the Filament menu's Change all on a toolchanger. It takes
+  `tools`, a list of enabled tools, and the preset `name` with an optional
+  `color`, the same for every chosen tool; the other tools keep their
+  filament. The tools change one at a time in index order, and the printer
+  reads `BUSY` from the first to the last. A tool with a stored type
+  unloads first, which counts the unload, then loads; a tool with none only
+  loads. The stored type decides, not the sensor. Each tool is picked
+  inside the dialog, so no idle sensor clear runs at the pick. INDX docks
+  each tool after its load, and the XL ends with the last tool picked. A
+  reboot or power cut drops what's left, and a power-panic resume waits
+  until the last tool is done. The page's **Change all** opens the form.
+- `change_filament` is the Tune menu's Change filament, `M600 T<n>`, on any
+  enabled tool once a print is printing. On the picked tool it's the
+  filament change a runout runs. On another tool it picks that tool, runs
+  the same change there, and the `resume` after the reload changes back to
+  the print's tool with no purge, so the counts land on that tool only.
+  The pick moves nothing and takes no time. The reload writes the type
+  the tool had, else the type the file names for it, else the type its
+  last unload left; with none of them, the firmware can't heat the tool,
+  and nothing changes. A power cut during the change resumes on that tool,
+  which prints until the file's next tool change. The page's **Change**
+  button sends it.
+- A load or unload during a print reads `ATTENTION` in every phase, the
+  reload's load included; with no print, `BUSY`.
+- A `runout` on a tool with a spool join unloads it at once, which counts
+  the unload, and reads `ATTENTION` for `unload_seconds`. Then the printer
+  picks the join's tool, purges it as the firmware's join does, puts the
+  old tool's gap back on it and reads `PRINTING`. The join's tool keeps its
+  type, and the print goes on with it wherever the file names the old tool,
+  through later tool changes too. With no join from the tool, the runout is
+  the filament change. A jam never joins, and the join can't be paused. A
+  power cut during the unload resumes on the old tool, empty, without the
+  join's change or purge, until the file's next tool change.
+- `extrude` and `retract` move only the picked tool, as the menu's Move E
+  does. With no tool picked they answer 409, and on another tool 400.
 - The selected tool can be none, which stands for a toolchanger with no
-  tool picked, though nothing leaves it so. Then no filament moves or
-  counts, the idle sensor clear doesn't run, and a print's end neither
-  retracts nor auto-retracts. The page shows the tool as "none".
+  tool picked: a toolchanger at start unless `picked_tool` names a tool,
+  either toolchanger after a finished print or `park_tool`, an INDX after a
+  menu load or unload, a stopped print and a pause, and an INDX booted
+  after a cut during a print that used several tools. Then no filament
+  moves or counts, the idle sensor clear doesn't run, and a print's end
+  neither retracts nor auto-retracts. The page shows the tool as "none".
+  An XL with one tool enabled isn't a toolchanger in any of this: its
+  toolchanger is off in the firmware, so the tool stays picked, a print
+  runs no profile moves and its end doesn't park, and `select_tool` and
+  `park_tool` are refused.
+- Where the picked tool rests. A finished print with a multi-tool slicer
+  profile ends with the stock profiles' `P0 S1`, which parks the tool
+  before the firmware's end retract and auto-retract, so those find no
+  tool. A stopped
+  XL print and a sync job keep the tool, and INDX docks whatever is picked
+  at a job's end. INDX docks the tool at a pause, after an 8 mm retract,
+  and the resume picks it again and purges it in the nozzle cleaner: 25 mm,
+  then the auto-retract, before the job reads `PRINTING`. The XL keeps its
+  tool through a pause. A boot keeps the picked tool, except on INDX after
+  a cut during a print that used several tools: its EEPROM then holds no
+  tool.
 - MINI, MK3.5 and MK3.5S report the material with no counters. The
   `no_endpoint` firmware mode answers 404, like stock firmware.
 
 - A power-panic resume (`reboot` with `keep_job`, or `set_power` on with
-  `resume`) keeps the job ID, restarts the counters, skips the idle sensor
-  clear, and goes through `BUSY`, then a short `PAUSED`, then `PRINTING`.
+  `resume`) keeps the job ID and restarts the counters. The printer boots
+  `IDLE` with no job for `panic_idle_seconds`, as the firmware does until
+  its autostart resumes the print, and the idle sensor clear runs then on
+  the picked tool, if one is. The resume picks the print's tool before
+  anything moves, then goes through `BUSY`, then a short
+  `PAUSED`, then `PRINTING`. A menu load or unload still running when the
+  wait ends delays the resume by another `panic_idle_seconds`, until the
+  printer is idle. A print started in the wait, an upload too, drops the
+  resume, and the event log says "resume dropped". A plain reboot drops it
+  too, and another power cut leaves it waiting.
   A print that wasn't paused retracts 8 mm at the cut on every model but
   the XL. INDX purges 25 mm in its nozzle cleaner halfway through `BUSY`,
   with no auto-retract after. Every other model that retracted feeds the
   8 mm back at the end of `BUSY`. Both count whether or not the tool holds
-  filament. The MINI and the XL dev kit build no power panic, so there a
-  cut drops the job and the printer boots idle, as a plain reboot does.
-  With `cold_bed`, a resuming printer waits in `ATTENTION` for `resume`
-  before recovering. The page's **Power-loss resume** sends `cold_bed` from
-  its **cold bed** checkbox, and **Resume** continues that wait.
+  filament. A print that was paused comes back `PAUSED` after the `BUSY`,
+  with no filament moved. Only `pause` counts as paused. A cut during a
+  filament change dialog, a runout's, a jam's, a color change's, Tune >
+  Change filament's or a spool join's unload, resumes on its own with the
+  dialog gone. The print goes on through what the cut left in the tool,
+  an empty tool included, with no runout. A load cut short leaves its
+  filament in, which is inferred: nothing in the cut moves the filament
+  back. A color change in the file runs again after the resume. The
+  resume picks the tool the cut found picked, which prints until the
+  file's next tool change, or until the start G-code's when the print
+  hadn't primed yet. The MINI and the XL dev kit build no power panic,
+  so there a cut drops the job and the printer boots idle, as a plain
+  reboot does. With `cold_bed`, the resume waits in `ATTENTION` for
+  `resume` before recovering, for a print that was paused too. The page's **Power-loss resume** sends
+  `cold_bed` from its **cold bed** checkbox, and **Resume** continues that
+  wait.
 - An upload during the start blip is accepted and dropped: the firmware's
   state check passes while it reads `IDLE`, but the print start ignores it.
   The user's print goes on and the uploaded file never runs.
@@ -284,9 +405,11 @@ Choices made where the firmware was silent or the plan left it open:
 - The iX's assisted insertion before the slow load isn't modeled: the
   firmware source doesn't give its length. The iX purges its length in one
   move, not in 5 mm steps with a clean between.
-- A pause and resume with no filament change moves no filament. The
-  firmware retracts at the pause and feeds the same length back at the
-  unpark, which counts nothing unless the gap was near its limit.
+- A pause and resume with no filament change moves no filament, except on
+  INDX. The firmware retracts at the pause and feeds the same length back
+  at the unpark, which counts nothing unless the gap was near its limit.
+  The iX's resume runs its nozzle cleaner's `purge_clean` too, which isn't
+  modeled.
 - `fill()` and a tool built loaded start with gap 0, the tracker valid and
   nothing stored, on every model. A real printer that just loaded would
   have auto-retracted.
@@ -308,8 +431,22 @@ Choices made where the firmware was silent or the plan left it open:
   no ramming, whatever the switch says, and stores that distance for the next feed to feed back.
 - Temperatures, `G12` other than INDX's power-panic purge, the mesh bed
   leveling retract and the MMU don't move filament in the simulator.
-- A power loss during a filament change drops the gap to restore: the
-  resume after the reload doesn't move.
+- A power cut during a runout's or a jam's dialog retracts 8 mm, as any
+  cut in a print does. The firmware skips that retract when the runout or
+  jam interrupted a move, which runs it through the crash recovery
+  (`was_crashed`). The boot leaves the tracker at gap 0 and untrusted
+  either way, so the resume's feed back counts the same.
+- The power-panic resume starts at the autostart's first try, 1.5 s after
+  the boot: the firmware tries every 1.5 s until the USB drive, the
+  temperatures and the screen are ready, and gives up after 100 s, which the
+  simulator never reaches. The firmware doesn't wait for a menu load or
+  unload: it resumes and its moves queue behind the operation. The simulator
+  waits for the printer to be idle instead, trying again every 1.5 s. A print
+  started in the wait drops the resume, as the firmware's autostart does
+  when its next try finds the printer printing and not yet ready. When that
+  try finds everything ready, the firmware starts the resume over the new
+  print: its check that the printer is idle is a debug assertion
+  (`resume_print` in `power_panic.cpp`). The simulator doesn't model that.
 - One `checks` setting stands for the firmware's settings per kind of check
   (model, compatibility mode, G-code level, input shaper and firmware). The
   checks share one screen and the worst severity decides it, so one setting
@@ -338,8 +475,11 @@ Choices made where the firmware was silent or the plan left it open:
 - A print's end auto-retracts the picked tool even when it has no
   filament, as the simulator does for a loaded one. The source doesn't
   say otherwise, but a trace hasn't shown it.
-- The simulator has no spool join. The firmware refuses to turn the
-  sensors off when a print joins spools.
+- The tools-mapping screen doesn't check a spool join's tools. The
+  firmware checks each tool in a join's chain for filament and type, and
+  refuses a join whose earlier tool has no working sensor, so the sensors
+  can't be turned off for a print that joins
+  (`gcode_compatibility.cpp:520-549`).
 - Stuck-filament detection isn't modeled. Load-cell printers have it, on by
   default except on INDX. The MINI and MK3.5 don't have it.
 - The preview doesn't model an uncalibrated INDX nozzle cleaner, which

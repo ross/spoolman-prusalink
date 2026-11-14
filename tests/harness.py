@@ -207,6 +207,7 @@ def add_station(sim, name="default", model="8.1.0", tools=1, *, auto_retract=Fal
         firmware=Firmware.FULL if info.counters else Firmware.NO_COUNTERS,
         boot_id=1,
         tools={tool.index: tool for tool in tools},
+        selected_tool=info.first_tool(sum(tool.enabled for tool in tools)),
         auto_retract=auto_retract,
     )
     sim.add(printer)
