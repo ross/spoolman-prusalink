@@ -347,11 +347,13 @@ class UnloadProcess:
 class MmuProcess:
     """An MMU operation that moves no printer E: the unit's own pulley and selector moves of
     a preload, an eject or a cut (`mmu2_mk4.cpp:897-1019`). It ends when the time is up,
-    writing `material` when one is set."""
+    writing `material` when one is set, to slot `writes`, or to its own slot when that's
+    None."""
 
     op: str  # "preload", "eject" or "cut"
     remaining: float  # seconds
     material: Material | None = None
+    writes: int | None = None
     kind: str = "mmu"
 
     @property

@@ -259,8 +259,10 @@ that trace. The points that matter for the bridge, in short:
   filament is fully auto-retracted, and leaves no slot selected. It writes no type, so no
   unload counts. `eject`, `cut` and each preload take `unload_seconds` and
   move nothing the bridge counts. `eject`, `cut` and `change_all` refuse while
-  the extruder holds filament. `preload_all` stores the preset `name` on
-  every slot, then preloads each in turn. A power cut keeps the types and
+  the extruder holds filament. `preload_all` preloads every slot in turn with
+  the preset `name`: it stores the type on slots 0 and 1 at once and on each
+  later slot when the preload two before it ends, as the firmware's menu
+  waits on the G-code queue. A power cut keeps the types stored so far and
   drops the preloads left.
 - Every print start shows `PRINTING`, then a brief `IDLE` with no job, then
   `PRINTING`. `FINISHED` and `STOPPED` persist until dismissed, and the job

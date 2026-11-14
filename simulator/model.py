@@ -601,11 +601,12 @@ class PrintSpec:
 class Queued:
     """One operation a change all has still to run: the unload of the tool's old filament,
     or the load of `material`. On an MMU, the preload of a slot, which writes `material`
-    when one is set, or the clear of a slot's type."""
+    when one is set, to slot `writes` or else its own, or the clear of a slot's type."""
 
     tool: int
     kind: str  # "unload" or "load"; on an MMU "preload" or "clear"
     material: Material | None = None
+    writes: int | None = None
 
 
 @dataclass(kw_only=True)
@@ -1424,7 +1425,8 @@ class SimPrinter:
                 self._count_unload(t, "change all unload")
                 continue
             if q.kind == "preload":
-                t.process = MmuProcess("preload", self.settings.unload_seconds, q.material)
+                seconds = self.settings.unload_seconds
+                t.process = MmuProcess("preload", seconds, q.material, q.writes)
                 return
             self._pick(t)
             if q.kind == "unload":
@@ -1434,21 +1436,31 @@ class SimPrinter:
             return
 
     def preload_all(self, name: str) -> None:
-        """The MMU menu's Preload All: the preset `name` is written to every slot at once,
-        then each slot is preloaded in turn, as Preload To MMU preloads, reading `BUSY`
-        throughout (`MI_FILAMENT::click`, `screen_menu_mmu_preload_all.cpp:27-49`). The
-        writes count nothing, and a power cut leaves them written. The menu picks a type
-        and no color."""
+        """The MMU menu's Preload All: for each slot in turn, the preset `name` is written
+        and `M704 P<slot>` queued, and the menu waits while the G-code queue holds more than
+        one command (`MI_FILAMENT::click`, `screen_menu_mmu_preload_all.cpp:27-49`). A
+        command stays in the queue's length while it runs (`queue.cpp:526-533`), and the
+        menu reads the length after each command it sends (`marlin_server.cpp:3538,
+        3820-3823`). So slots 0 and 1 are written at once, and slot k's type when slot
+        k - 2's preload ends. The preloads run in turn, as Preload To MMU's do, reading
+        `BUSY` throughout. The writes count nothing, and a power cut keeps those made. The
+        menu picks a type and no color."""
         self._check_mmu_menu()
         materials = {
             i: self._new_material(t, "preset", name, None, None, None)
             for i, t in self.tools.items()
         }
         self._log("action", f"preload all {name}")
-        for i in sorted(materials):
+        slots = sorted(materials)
+        for i in slots[:2]:
             self.tools[i].store(materials[i])
             self._log("load", f"T{i} type set to {describe(self.tools[i].material)}")
-        self.queue = [Queued(i, "preload") for i in sorted(materials)]
+        self.queue = [
+            Queued(i, "preload", materials[slots[n + 2]], slots[n + 2])
+            if n + 2 < len(slots)
+            else Queued(i, "preload")
+            for n, i in enumerate(slots)
+        ]
         self.screen = State.IDLE  # using the menu dismisses a finished or stopped screen
         self._next_queued()
         self._show_state()
@@ -2595,8 +2607,9 @@ class SimPrinter:
         t.process = None
         self._log("mmu", f"T{t.index} {p.op} done")
         if p.material is not None:
-            t.store(p.material)
-            self._log("load", f"T{t.index} type set to {describe(t.material)}")
+            to = t if p.writes is None else self.tools[p.writes]
+            to.store(p.material)
+            self._log("load", f"T{to.index} type set to {describe(to.material)}")
         self._process_done()
 
     def _next_load_step(self, t: SimTool, p: LoadProcess) -> None:
