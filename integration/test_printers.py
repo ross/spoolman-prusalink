@@ -1,6 +1,6 @@
 """Two printers against one Spoolman: docs/scenarios.md rows X1 to X16.
 
-Printer "it" plays the rows' printer A: location `<prefix> T` (the rows' `LA`), spool A
+Printer "it" plays the rows' printer A: location `<prefix>` (the rows' `LA`), spool A
 loaded. Printer "b" plays printer B: location `<prefix> LB`, spool E loaded. Both are
 Core One Ls on one simulation, so `w.advance()` and `w.run_until()` move both.
 """
