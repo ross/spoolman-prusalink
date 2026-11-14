@@ -40,6 +40,7 @@ model = "8.1.0"                     # Core One L: holds an instance UUID on tool
 # firmware = "full"                 # full, no_counters or no_endpoint; default by model
 # auto_accept_model_check = true    # this printer only; default is the global setting
 # high_flow = false                 # a high-flow nozzle doubles the load's purge, but not on INDX
+# auto_retract = true               # false turns the auto-retract off where the model can
 
 [[printers.tools]]
 index = 0

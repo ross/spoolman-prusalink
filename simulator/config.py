@@ -35,6 +35,7 @@ _PRINTER_KEYS = {
     "firmware",
     "auto_accept_model_check",
     "high_flow",
+    "auto_retract",
     "tools",
 }
 _TOOL_KEYS = {"index", "enabled", "material", "extruded", "unload_count", "extruded_at_unload"}
@@ -67,6 +68,7 @@ class PrinterConfig:
     # None means the global setting.
     auto_accept_model_check: bool | None = None
     high_flow: bool = False
+    auto_retract: bool = True
     tools: tuple[ToolConfig, ...] = (ToolConfig(0),)
 
 
@@ -231,6 +233,11 @@ def _printer(entry: object, position: int, control_port: int) -> PrinterConfig:
         if firmware not in {f.value for f in Firmware}:
             known = ", ".join(f.value for f in Firmware)
             raise ConfigError(f"{prefix}.firmware must be one of {known}, got {firmware!r}")
+    auto_retract = _bool(entry.get("auto_retract", True), f"{prefix}.auto_retract")
+    if not auto_retract and not MODELS[model].extruder.auto_retract_switchable:
+        raise ConfigError(
+            f"{prefix}.auto_retract can't be false: model {model} has no auto-retract switch"
+        )
     auto_accept = None
     if "auto_accept_model_check" in entry:
         auto_accept = _bool(entry["auto_accept_model_check"], f"{prefix}.auto_accept_model_check")
@@ -242,6 +249,7 @@ def _printer(entry: object, position: int, control_port: int) -> PrinterConfig:
         firmware=firmware,
         auto_accept_model_check=auto_accept,
         high_flow=_bool(entry.get("high_flow", False), f"{prefix}.high_flow"),
+        auto_retract=auto_retract,
         tools=_tools(entry.get("tools"), prefix, model),
     )
 
@@ -368,6 +376,7 @@ def build(cfg: SimConfig) -> Simulation:
                 firmware=Firmware(pc.firmware) if pc.firmware else default,
                 auto_accept_model_check=pc.auto_accept_model_check,
                 high_flow=pc.high_flow,
+                auto_retract=pc.auto_retract,
                 tools=tools,
                 selected_tool=enabled[0] if enabled else min(tools),
             )

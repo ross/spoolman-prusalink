@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from simulator.config import ConfigError, bridge_config, load, locations
+from simulator.config import ConfigError, bridge_config, build, load, locations
 
 EXAMPLE = Path(__file__).parent.parent / "sim.example.toml"
 
@@ -39,7 +39,7 @@ def test_defaults(tmp_path):
     assert (cfg.host, cfg.control_port, cfg.settings) == ("127.0.0.1", 8000, {})
     p = cfg.printers[0]
     assert (p.port, p.api_key, p.firmware, p.auto_accept_model_check) == (8001, "sim-p", None, None)
-    assert not p.high_flow
+    assert not p.high_flow and p.auto_retract
     assert [t.index for t in p.tools] == [0]
     assert p.tools[0].material is None
 
@@ -62,6 +62,12 @@ def test_high_flow(tmp_path):
     assert load(write(tmp_path, printer("high_flow = true"))).printers[0].high_flow
 
 
+def test_auto_retract_off_where_the_model_has_the_switch(tmp_path):
+    cfg = load(write(tmp_path, printer("auto_retract = false")))
+    assert not cfg.printers[0].auto_retract
+    assert not build(cfg).printer("p").auto_retract
+
+
 def test_normalizes_color_and_uuid(tmp_path):
     uuid = "44C406A5-C6F5-4440-BFBA-E8060564B717"
     material = f'{{ name = "PLA", color = "#73737B", instance_uuid = "{uuid}" }}'
@@ -80,6 +86,15 @@ BAD = {
     "unknown printer key": (printer("bogus = 1"), "printers[0].bogus isn't a known key"),
     "removed setting": ("load_feed_mm = 36\n" + printer(), "load_feed_mm isn't a known key"),
     "bad high flow": (printer("high_flow = 1"), "printers[0].high_flow must be true or false"),
+    "bad auto-retract": (printer("auto_retract = 0"), "printers[0].auto_retract must be true"),
+    "auto-retract off on INDX": (
+        printer("auto_retract = false", model="8.10.0"),
+        "printers[0].auto_retract can't be false: model 8.10.0 has no auto-retract switch",
+    ),
+    "auto-retract off on a MINI": (
+        printer("auto_retract = false", model="2.1.0"),
+        "printers[0].auto_retract can't be false: model 2.1.0",
+    ),
     "negative load length": ("slow_load_mm = -1\n" + printer(), "slow_load_mm must be a number"),
     "unknown tool key": (printer(tool("index = 0\nbogus = 1")), "printers[0].tools[0].bogus"),
     "unknown material key": (
