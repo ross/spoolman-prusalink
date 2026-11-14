@@ -26,6 +26,8 @@ from simulator.model import (
 )
 
 STATIC = Path(__file__).parent / "static"
+# A browser checks the page's files with the server each time, so a reload shows a change.
+REVALIDATE = {"Cache-Control": "no-cache"}
 STATE_INTERVAL = 0.1  # at most ten state events a second per client
 ADVANCE_LIMIT = 24 * 3600.0  # one jump at most a day, in simulated seconds
 HEARTBEAT = 15.0
@@ -258,14 +260,14 @@ def make_app(sim: Simulation) -> web.Application:
         page = STATIC / "index.html"
         if not page.is_file():
             return web.Response(text="The page isn't built yet; see /api/state.")
-        return web.FileResponse(page)
+        return web.FileResponse(page, headers=REVALIDATE)
 
     async def static(request: web.Request) -> web.StreamResponse:
         root = STATIC.resolve()
         path = (root / request.match_info["path"]).resolve()
         if not path.is_relative_to(root) or not path.is_file():
             raise web.HTTPNotFound()
-        return web.FileResponse(path)
+        return web.FileResponse(path, headers=REVALIDATE)
 
     async def state(request: web.Request) -> web.Response:
         return web.json_response(sim.to_json())
