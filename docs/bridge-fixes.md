@@ -27,7 +27,7 @@ update the workstreams it changes.
 | --- | --- | --- | --- |
 | D1 | In what order do the workstreams go? | As [Order and parallelism](#order-and-parallelism) lists: what protects the printer first (workstreams 1 and 3, then 2), then charging (4 to 6), then the toolchangers before the INDX upgrade (7 and 8), then the MMU (9). This breaks the stage table's rule that, within stage 1, charges come before writes: BF26 loses a print, and the write fixes are small. | The order only. |
 | D2 | Does stage 1 ship alone, merged and deployed to the Core One L before stage 2 or 4 work merges? | Yes. Workstream 7 can be built at the same time, but it merges after workstreams 2 and 3, which change the same code in `app.py` and `printer_sync.py`. | Merging workstreams 7 and 9. |
-| D3 | How does BF26 get fixed: a positive `sync_delay` default, a guard in the bridge after a boot that interrupted a print, or wait for the F12 trace? | A positive default, at most `poll_idle`. The code already holds a write while the printer has been idle for less than `sync_delay`, and a new `PrinterBridge` or a failed read starts that clock again, so the first idle poll after a boot only starts it. Each boot opens its own window, so a second cut during the resume opens a second one; workstream 1 starts the clock again at each new `boot_id`, so two cuts between two polls are covered too. That covers a bridge that restarts in the window too, as when one power cut takes down the printer and the bridge's host. What it misses: a config that sets `sync_delay = 0`, and a window that outlasts a poll. What it costs: every write waits one more idle poll, up to 60 s by default. The guard instead keeps ordinary writes at the first idle poll and covers a config with 0, but it misses a restarted bridge: what the printer was doing before the boot is known only in memory. Add the guard as well only if writes at the first idle poll matter to you. Until the default ships, set `sync_delay` above 0 on your own printer. The F12 trace confirms that the window ends within one poll. | Workstream 1. |
+| D3 | How does BF26 get fixed: a positive `sync_delay` default, a guard in the bridge after a boot that interrupted a print, or wait for the F12 trace? | A positive default, at most `poll_idle`. The code already holds a write while the printer has been idle for less than `sync_delay`, and a new `PrinterBridge` or a failed read starts that clock again, so the first idle poll after a boot only starts it. That covers a bridge that restarts in the window too, as when one power cut takes down the printer and the bridge's host. A second cut during the resume opens a second window, which the delay alone misses when a poll in the first window started the clock and the next poll, `poll_idle` later, lands in the second; workstream 1 starts the clock again at each new `boot_id` to close that. What it misses: a config that sets `sync_delay = 0`, and a window that outlasts a poll. What it costs: every write waits one more idle poll, up to 60 s by default. The guard instead keeps ordinary writes at the first idle poll and covers a config with 0, but it misses a restarted bridge: what the printer was doing before the boot is known only in memory. Add the guard as well only if writes at the first idle poll matter to you. Until the default ships, set `sync_delay` above 0 on your own printer. The F12 trace confirms that the window ends within one poll. | Workstream 1. |
 | D4 | Keep `gcode_preamble`, or remove it? | Remove it, unless your own config sets it. Its only effects found are BF2, BF3 and BF4, and the default preamble passes every check on every model the bridge writes to. Pre-release, there's no compatibility to keep. If you keep it, workstream 3 validates it instead. | Workstream 3, and the INDX lock line in workstream 7. |
 | D5 | Amend Q4 so that a ramming or a load isn't a print's first extrusion? | Yes. Q4's intent, that a cancelled print changes nothing, holds; only what counts as the first extrusion narrows. | Workstream 4. |
 | D6 | Amend C7: usage counted on a tool with no filament while a user's print runs is reported lost, not charged to the next spool? | Yes. That filament came from no spool. The hold during a load, which S1 and S2 rely on, stays as it is. | Workstream 5. |
@@ -100,11 +100,20 @@ medium is a new input or condition through `account()` or
   than `sync_delay`. So the first idle poll after a boot the bridge saw as
   an outage, or after the bridge starts, never runs a job.
   - Each boot opens its own window, and a second cut during the resume
-    keeps the print, so two cuts give two windows (F12, P12). If both
-    fall between two polls, the bridge sees no outage, its idle clock
-    keeps running from the first window, and the next poll can land in
-    the second with the delay already passed. Starting the clock again
-    when `read()` sees a new `boot_id` closes that: one line in `read()`.
+    keeps the print, so two cuts give two windows (F12, P12). The delay
+    alone misses this sequence: a poll lands in the first window, reads
+    `IDLE`, starts the clock and holds the job. Because that read was
+    idle, the next poll comes `poll_idle` later. In between, the resume
+    runs and a second cut reboots the printer, and the next poll lands in
+    the second window with the printer idle for longer than `sync_delay`,
+    so the job runs. No read in between saw the printer busy or failed.
+    Two cuts with no poll between them are safe already: the poll before
+    them read the print as busy, so `_note_state` cleared the clock.
+  - To close the gap, start the clock again when `read()` sees a new
+    `boot_id`. The natural place is the existing
+    `self._model_boot != reading.boot_id` branch in `read()`, which runs
+    once per boot, and again on later polls while the model can't be
+    read, when writes are off anyway.
   - If D3 adds the guard, it goes in `sync_printer` and `read()`, and
     needs the state of the last read before the boot, which `read()`
     overwrites today.
@@ -120,8 +129,11 @@ medium is a new input or condition through `account()` or
   print resumes and the write runs after it. The default's assertion in
   `tests/test_app.py` changes. P12 and W2 drop the BF26 sentence, and W2
   gains a `test_w2_...` integration test for the window. Add a unit test
-  with two cuts between two polls, beside `test_a_second_cut_during_the_resume`
-  in `tests/test_power_panic.py`. The MMU variant
+  for the sequence above, beside `test_a_second_cut_during_the_resume` in
+  `tests/test_power_panic.py`: poll in the first window, let the resume
+  run and cut again with no poll between, then poll in the second window
+  after `sync_delay` has passed. A test with no poll between the two cuts
+  passes without the reset, so it doesn't show the fix. The MMU variant
   in `tests/test_mmu.py` follows workstream 9.
 - **Done when**: with the default config, no sync job uploads between a
   boot and the resume of a print, a second cut's boot included.
