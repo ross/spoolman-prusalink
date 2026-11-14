@@ -74,7 +74,9 @@ class MmuUnit:
 
     The selected slot isn't here: it's `SimPrinter.selected_tool`, the firmware's
     `MMU2::extruder`, None for `MMU2_NO_TOOL`. `path.loaded` is the extruder's filament
-    sensor, and its invariant is that `fed` names a slot whenever it's set.
+    sensor. Every MMU operation leaves `fed` set while the path is loaded. Filament loaded by
+    hand while the MMU is off came through no slot, so it leaves `fed` None, and switching
+    the MMU on doesn't change that: the firmware reads no slot back from the unit.
     """
 
     # The `mmu2_enabled` setting, which `M709` switches and `/api/v1/info` reports

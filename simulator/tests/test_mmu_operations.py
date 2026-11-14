@@ -336,3 +336,33 @@ def test_mmu_operations_need_an_mmu_switched_on():
     sim, xl = make("3.1.0", [loaded(0), loaded(1)])
     with pytest.raises(Invalid, match="only an MMU's change all unloads a tool alone"):
         xl.change_all([0], name="PLA", unload=[1])
+
+
+def test_switching_the_mmu_off_and_on_keeps_the_slot_in_the_extruder():
+    # Nothing moved, so slot 2's filament is still past the selector.
+    sim, p = make_mmu(types={0: PLA, 2: PETG}, slot=2, mmu_connect_seconds=0)
+    p.set_mmu(False)
+    p.set_mmu(True)
+    assert p.mmu.fed == 2 and p.mmu.path.loaded and p.selected_tool is None
+    p.unload(2)
+    until_idle(sim, p)
+    assert p.mmu.fed is None and not p.mmu.path.loaded
+
+
+def test_an_unload_by_hand_with_the_mmu_off_leaves_no_slot_fed():
+    # By hand, filament comes through no slot, so these tick without `check`.
+    sim, p = make_mmu(types={0: PLA, 2: PETG}, slot=2, mmu_connect_seconds=0)
+    p.set_mmu(False)
+    p.unload(0)
+    sim.advance(60)
+    assert p.mmu.fed is None and not p.mmu.path.loaded
+    # A load by hand comes through no slot either.
+    p.load(0, source="preset", name="PLA")
+    sim.advance(60)
+    p.set_mmu(True)
+    assert p.mmu.path.loaded and p.mmu.fed is None
+    assert not any(t["loaded"] for t in p.to_json()["tools"])
+    with pytest.raises(Invalid, match="T2's filament isn't in the extruder"):
+        p.unload(2)
+    with pytest.raises(Busy, match="Eject needs the extruder empty"):
+        p.eject(2)

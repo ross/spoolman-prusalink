@@ -1184,6 +1184,9 @@ class SimPrinter:
     def _physical_unload(self, tool: SimTool, why: str) -> None:
         self._count_unload(tool, why)
         tool.path.empty(self.model.gap_mm)
+        # The filament left the path, so no slot's filament is past the MMU's selector.
+        if self.mmu is not None:
+            self.mmu.fed = None
 
     def _idle_sensor_clear(self, tool: SimTool, *, sensor_fault_counts: bool) -> None:
         if not self.sensors:
