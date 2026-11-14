@@ -17,7 +17,16 @@ from pathlib import Path
 import pytest
 
 from simulator import prusalink, trace
-from simulator.model import Material, Power, PrintSpec, Segment, SimPrinter, Simulation, State
+from simulator.model import (
+    Material,
+    Power,
+    PrintSpec,
+    Segment,
+    SimPrinter,
+    SimTool,
+    Simulation,
+    State,
+)
 from simulator.tests.util import make
 from spoolman_prusalink import printer_sync
 from spoolman_prusalink.models import Spool
@@ -235,11 +244,19 @@ def f10_sync_job(rec: Recorder) -> None:
     rec.advance(2.0)
 
 
+def _auto_retracted(tool: SimTool) -> None:
+    """Leave a Core One L tool as its last auto-retract left it: 55 mm stored, the tracker
+    at its 40 mm limit and invalid. The F10 traces start from such a tool: their counter
+    stayed 0 through a sync job, which auto-retracts a tool that isn't."""
+    tool.auto_retracted, tool.gap, tool.gap_valid = 55.0, 40.0, False
+
+
 def f10b_sync_job_rewrite(rec: Recorder) -> None:
     """The bridge's job written by hand with the spool already loaded, from the FINISHED
     screen: the slot's values don't change, so no material event."""
     tool = rec.printer.tools[0]
     tool.fill(TAGGED)
+    _auto_retracted(tool)
     rec.printer.screen = State.FINISHED
     rec.reset()
     rec.advance(LEAD)
@@ -253,6 +270,7 @@ def f10c_sync_job_rewrite_idle(rec: Recorder) -> None:
     job runs much longer on the printer, which the comparison doesn't time."""
     tool = rec.printer.tools[0]
     tool.fill(TAGGED)
+    _auto_retracted(tool)
     rec.printer.homed = False
     rec.reset()
     rec.advance(LEAD)

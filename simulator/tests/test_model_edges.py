@@ -321,7 +321,8 @@ def test_to_json_reports_an_unload_in_progress():
     p.unload(0)
     sim.tick(1)
     process = p.to_json()["tools"][0]["process"]
-    assert process["kind"] == "unload" and process["phase"] == "UNLOAD"
+    # A third of the way through, the unload rams.
+    assert process["kind"] == "unload" and process["phase"] == "RAM"
     assert process["remaining_s"] == pytest.approx(p.settings.unload_seconds - 1)
 
 
@@ -439,7 +440,7 @@ def test_each_state_change_is_logged_once():
     run(sim, 3.1)
     p.screen = State.FINISHED  # a screen set directly isn't logged until the next change
     p.load(0, source="preset", name="PLA")
-    run(sim, 20)
+    run(sim, 40)
     changes = [e.text for e in sim.events if e.kind == "state"]
     assert changes == ["IDLE -> BUSY", "BUSY -> IDLE", "IDLE -> BUSY", "BUSY -> IDLE"]
 

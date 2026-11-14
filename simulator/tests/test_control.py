@@ -55,7 +55,7 @@ async def test_actions_and_errors(setup):
     load = {"tool": 0, "source": "preset", "name": "PLA"}
     resp = await client.post("/api/printers/p/load", json=load)
     assert resp.status == 200
-    sim.tick(20)
+    sim.tick(40)
     assert (await client.post("/api/printers/p/start_print", json=body)).status == 200
     assert p.job.name == "x.bgcode"
     assert (await client.post("/api/printers/p/start_print", json=body)).status == 409

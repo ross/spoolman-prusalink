@@ -34,6 +34,10 @@ DEFAULT_TEMPERATURES = (215, 170, 60)
 # the `FilamentParametersInfo` constructor in `src/feature/openprinttag/data_utils.cpp`.
 # `script/firmware-check` compares them with the firmware source.
 PRESET_ALIASES = {"TPU": "FLEX"}
+# The presets with `is_flexible` set, which don't auto-retract and ram with a build's
+# `*_flexible` sequence where it has one. `script/firmware-check` compares them with the
+# firmware source.
+FLEXIBLE_PRESETS = frozenset({"FLEX"})
 
 Ramming = tuple[tuple[int, int], ...]  # steps of E in mm and feedrate in mm/min
 
@@ -90,6 +94,19 @@ MK3_5_RAMMING: dict[str, Ramming] = {
 MINI_RAMMING: dict[str, Ramming] = {"runout": _MINI_UNLOAD, "unload": _MINI_UNLOAD}
 
 
+def retracted_distance(sequence: Ramming) -> int:
+    """Return how far a ramming sequence leaves the filament retracted, in mm.
+
+    As `RammingSequence::init` in `src/feature/ramming/ramming_sequence.hpp` works it out:
+    a negative E retracts, a positive one pushes back, and pushing past the nozzle resets
+    it to 0.
+    """
+    distance = 0
+    for e, _feedrate in sequence:
+        distance = max(0, distance - e)
+    return distance
+
+
 @dataclass(frozen=True)
 class Lengths:
     """A build's filament change lengths in mm (`include/marlin/Configuration_<X>_adv.h`).
@@ -126,6 +143,16 @@ class Extruder:
     # nozzle cleaner.
     cleaner_purge_mm: float | None = None
     cleaner_auto_retract: bool = False
+    # How far an auto-retract has to have retracted for the filament to count as fully
+    # retracted, and whether that lets an unload skip the ramming: `full_retract_distance`
+    # and `supports_cold_unload` in `src/feature/auto_retract/auto_retract.hpp`, 20 mm and
+    # true on a Nextruder, 8 mm and false on INDX. Only a build that auto-retracts uses
+    # them, and `script/firmware-check` doesn't compare them.
+    full_retract_mm: float = 20.0
+    cold_unload: bool = True
+    # What an unload purges before the ramming: 2 mm on INDX (`unload_purge_process` in
+    # `src/marlin_stubs/pause/pause.cpp`), not compared either.
+    unload_purge_mm: float = 0.0
 
     @property
     def feed_ratio(self) -> float:
@@ -170,6 +197,9 @@ INDX_EXTRUDER = Extruder(
     INDX_RAMMING,
     cleaner_purge_mm=25.0,
     cleaner_auto_retract=True,
+    full_retract_mm=8.0,
+    cold_unload=False,
+    unload_purge_mm=2.0,
 )
 MK3_5_EXTRUDER = Extruder((266, 280), Lengths(4, 8, 105, 30, 50, 21), MK3_5_RAMMING)
 MINI_EXTRUDER = Extruder((325, 325), Lengths(4, 8, 400, 40, 320, 50), MINI_RAMMING)
@@ -210,6 +240,14 @@ def color555(color: str | None) -> str | None:
     return "#" + "".join(f"{(v << 3) | (v >> 2):02x}" for v in channels)
 
 
+def is_flexible(material: Material | None) -> bool:
+    """Whether the firmware treats `material` as flexible: a flexible preset by name, or a
+    name in `PRESET_ALIASES` for one. An `M865` flexible flag isn't modeled."""
+    if material is None:
+        return False
+    return PRESET_ALIASES.get(material.name, material.name) in FLEXIBLE_PRESETS
+
+
 def preset_temperatures(name: str) -> dict[str, int]:
     """Return the temperatures a material named `name` starts from, as `Material` keywords.
 
@@ -220,14 +258,21 @@ def preset_temperatures(name: str) -> dict[str, int]:
     return dict(zip(("nozzle", "preheat", "bed"), values, strict=True))
 
 
-TYPE_STEP = "TYPE"  # the step that writes the type; it moves nothing
+# Steps that move nothing and take no time. Each acts when it comes up.
+TYPE_STEP = "TYPE"  # writes the type
+AUTO_RETRACT_STEP = "AUTO_RETRACT"  # auto-retracts unless the firmware would skip it
+DERETRACT_STEP = "DERETRACT"  # what a ramming sequence starting with a feed does first
+RETRACTED_STEP = "RETRACTED"  # stores `mm` as the auto-retracted distance
+MARKERS = frozenset({TYPE_STEP, AUTO_RETRACT_STEP, DERETRACT_STEP, RETRACTED_STEP})
 
 
 @dataclass
 class LoadStep:
-    """One step of a load: a signed E move in commanded mm, or the type write."""
+    """One step of a load or unload: a signed E move in commanded mm, or a marker."""
 
-    phase: str  # SLOW, FAST, TYPE, PURGE, PRIME or RETRACT
+    # A move's phase is SLOW, FAST, PURGE, PRIME, RETRACT, RAM or UNLOAD; a marker's is
+    # one of MARKERS.
+    phase: str
     mm: float = 0.0  # what's left of the move: positive feeds, negative retracts
 
 
@@ -256,8 +301,16 @@ class LoadProcess:
 
 @dataclass
 class UnloadProcess:
+    """A menu unload: its steps, spread evenly over its duration. It ends when the time is
+    up, with every step run."""
+
+    steps: list[LoadStep]
     remaining: float  # seconds
     kind: str = "unload"
+
+    @property
+    def phase(self) -> str:
+        return self.steps[0].phase if self.steps else "UNLOAD"
 
 
 @dataclass
@@ -271,7 +324,13 @@ class SimTool:
     extruded: float = 0.0
     unload_count: int = 0
     extruded_at_unload: int = 0
+    # The firmware's filament tracker: how far the filament is retracted from the nozzle,
+    # and whether it trusts that distance (`filament_tracker.cpp`).
     gap: float = 0.0
+    gap_valid: bool = True
+    # The auto-retract's stored distance, which survives a boot: None when unknown, 0 when
+    # known not to be retracted (`auto_retract.cpp`).
+    auto_retracted: float | None = None
     sensor_fault: bool = False
     stuck_write: bool = False
     process: LoadProcess | UnloadProcess | None = None
@@ -288,8 +347,13 @@ class SimTool:
     def fill(self, material: Material | None) -> None:
         """Leave the tool as a finished load of `material` leaves it, or a finished unload for
         None. Nothing is counted: this is setup, such as a config or a test's starting state.
+
+        The tracker is left at gap 0 and valid, with no auto-retract stored, whatever the
+        model: a tool that has fed since its last auto-retract. A real idle load would
+        leave the model's auto-retract instead, but the tool doesn't know its model.
         """
         self.loaded = material is not None
+        self.gap, self.gap_valid, self.auto_retracted = 0.0, True, None
         self.store(material)
 
     def store(self, material: Material | None) -> None:
@@ -304,8 +368,13 @@ class SimTool:
             self.previous = replace(material)
 
     def clear_type(self) -> None:
-        """The firmware writes "none": the type goes, and a runout reload can restore it."""
+        """The firmware writes "none": the type goes, and a runout reload can restore it.
+
+        Writing "none" also forgets the auto-retracted distance (`set_filament_type` in
+        `store_definition.cpp`).
+        """
         self.kept_type, self.material = self.material, None
+        self.auto_retracted = None
 
     def kept(self) -> Material | None:
         """The type a load without a source restores: the one the unload left, else the slot."""

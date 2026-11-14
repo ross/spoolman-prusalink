@@ -181,10 +181,16 @@ def fill(tool, material):
 
 
 def add_station(sim, name="default"):
-    """Add a Core One L to `sim`: tool 0 loaded with grey PLA and 1000 mm on its counter."""
+    """Add a Core One L to `sim`: tool 0 loaded with grey PLA and 1000 mm on its counter.
+
+    Its auto-retract is off: these tests move the counter by hand, and the auto-retract
+    at the end of each job would add a count of its own.
+    """
     tool = SimTool(0, extruded=1000.0)
     fill(tool, PLA)
-    printer = SimPrinter(name, 0, "k", MODELS["8.1.0"], boot_id=1, tools={0: tool})
+    printer = SimPrinter(
+        name, 0, "k", MODELS["8.1.0"], boot_id=1, tools={0: tool}, auto_retract=False
+    )
     sim.add(printer)
     return Station(sim, printer)
 

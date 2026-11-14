@@ -56,7 +56,9 @@ def test_unload_bookkeeping():
     assert tool0(p).unload_count == 0
     run(sim, 0.2)
     t = tool0(p)
-    assert (t.unload_count, t.extruded_at_unload, t.loaded) == (1, 100, False)
+    # From gap 0 the unload's ramming counts its 8 mm feed and 15 of its 55 mm feed before
+    # the unload is recorded: 100.7 + 23 * 0.95 = 122.55.
+    assert (t.unload_count, t.extruded_at_unload, t.loaded) == (1, 122, False)
     assert t.material is None and t.previous == PLA
     assert t.gap == 40
     assert p.state is State.IDLE
@@ -71,7 +73,7 @@ def test_menu_use_dismisses_the_finished_screen():
     assert p.state is State.IDLE
     p.screen = State.STOPPED
     p.load(0, source="preset", name="PETG")
-    sim.tick(20)
+    sim.tick(40)  # 108 mm of load and 253 mm of auto-retract at 10 mm/s
     assert p.state is State.IDLE
 
 
@@ -97,10 +99,15 @@ def test_load_runs_its_steps():
     sim.tick(4.0)  # the purge: (20 + 40) * 0.95
     assert tool0(p).extruded == pytest.approx(base + 57)
     assert tool0(p).process.phase == "RETRACT"
-    sim.tick(0.8)  # the retract only grows the gap
+    sim.tick(0.8)  # the retract only grows the gap, to 8
     t = tool0(p)
+    # The auto-retract feeds the tracker's 8 mm back at once (gap 0), then runs its steps.
+    assert t.process.phase == "RAM" and not t.loaded
+    assert t.extruded == pytest.approx(base + 57) and t.gap == 0
+    sim.tick(25.3)  # 253 mm of steps: the 8 mm feed and 15 of the 55 mm feed count
     assert t.loaded and t.process is None
-    assert t.extruded == pytest.approx(base + 57) and t.gap == pytest.approx(8)
+    assert t.extruded == pytest.approx(base + 57 + 23 * 0.95)
+    assert (t.gap, t.gap_valid, t.auto_retracted) == (40, False, 55)
     assert p.state is State.IDLE
 
 
@@ -118,11 +125,13 @@ def test_one_tick_runs_a_whole_load():
     sim, p = make()
     p.unload(0)
     sim.tick(3.0)
+    base = tool0(p).extruded
     p.load(0, source="preset", name="ASA", color="#DE3129")
     sim.tick(100.0)
     t = tool0(p)
     assert t.loaded and t.process is None and p.state is State.IDLE
-    assert t.extruded == pytest.approx(57)  # (20 + 40) * 0.95 past the 40 mm gap
+    # (20 + 40) past the 40 mm gap, then the auto-retract's 8 + 15: 83 * 0.95.
+    assert t.extruded - base == pytest.approx(78.85)
     assert t.material == Material("ASA", "#de3129", **preset_temperatures("ASA"))
 
 
@@ -131,13 +140,13 @@ def test_menu_load_clears_color_and_uuid():
     p.unload(0)
     sim.tick(3)
     p.load(0, source="preset", name="PETG")
-    sim.tick(20)
+    sim.tick(40)
     assert tool0(p).material == Material("PETG", adhoc=False, **preset_temperatures("PETG"))
     assert tool0(p).previous == PLA  # a preset leaves the ad-hoc slot alone
     p.unload(0)
     sim.tick(3)
     p.load(0, source="preset", name="PLA", color="#ff0000")
-    sim.tick(20)
+    sim.tick(40)
     picked = Material("PLA", "#ff0000", **preset_temperatures("PLA"))
     assert tool0(p).material == picked and tool0(p).previous == picked
 
@@ -147,7 +156,7 @@ def test_runout_reload_restores_a_preset_not_the_adhoc_slot():
     p.unload(0)
     sim.tick(3)
     p.load(0, source="preset", name="PETG")
-    sim.tick(20)
+    sim.tick(40)
     p.start_print(one_segment(100, preheat_s=0))
     sim.tick(0.8 + 1)
     p.runout(0)
@@ -163,7 +172,7 @@ def test_tag_load_sets_uuid_on_uuids_model_only():
     p.unload(0)
     sim.tick(3)
     p.load(0, source="tag", name="PETG", color="#186BB5", uuid=uuid.upper())
-    sim.tick(20)
+    sim.tick(40)
     tag = shown(p)
     assert tag.pop("material_uuid") and tag.pop("package_uuid")
     assert tag == {"name": "PETG", "color": "#186bb5", "instance_uuid": uuid}
@@ -241,7 +250,9 @@ def test_print_phases_and_start_blip():
     sim.tick(1.0)
     assert p.job is None and p.state is State.FINISHED
     assert prusalink.job(p) is None
-    assert tool0(p).extruded == pytest.approx(9.5)
+    # The end retracts 8 mm (gap 8), and the auto-retract feeds them back (gap 0), then
+    # counts its 8 mm feed and 15 of its 55 mm feed: (10 + 23) * 0.95.
+    assert tool0(p).extruded == pytest.approx(31.35)
 
 
 def test_start_blip_can_be_turned_off():
@@ -265,7 +276,7 @@ def test_one_tick_runs_a_whole_print():
     p.start_print(one_segment(100, duration_s=10))
     sim.tick(1000)
     assert p.job is None and p.state is State.FINISHED
-    assert tool0(p).extruded == pytest.approx(95)
+    assert tool0(p).extruded == pytest.approx(95 + 23 * 0.95)  # the print, then the auto-retract
 
 
 def test_duration_sets_the_rate():
@@ -282,7 +293,7 @@ def test_print_without_filament_waits_for_a_load():
     assert p.state is State.ATTENTION and p.job.phase is JobPhase.WAIT_LOAD
     assert tool0(p).unload_count == 0
     p.load(0, source="preset", name="PLA")
-    sim.tick(20)
+    sim.tick(40)
     assert p.state is State.PAUSED
     p.resume()
     sim.tick(10)
@@ -331,11 +342,13 @@ def test_runout_keeps_previous_and_reload_restores_it():
     sim, p = make()
     p.start_print(one_segment(100, preheat_s=0))
     sim.tick(0.8 + 2)
-    at = int(tool0(p).extruded)
+    assert tool0(p).extruded == pytest.approx(9.5)
     p.runout(0)
     t = tool0(p)
     assert p.state is State.ATTENTION and str(p.job.attention) == "runout tool 0"
-    assert (t.unload_count, t.extruded_at_unload, t.material) == (1, at, None)
+    # The park retracts 8 mm, the runout ramming feeds them back and counts its 7 mm feed
+    # before the unload is recorded: (10 + 7) * 0.95 = 16.15.
+    assert (t.unload_count, t.extruded_at_unload, t.material) == (1, 16, None)
     assert t.previous == PLA
     assert prusalink.job(p)["state"] == "PAUSED"
     with pytest.raises(Busy):
@@ -386,7 +399,8 @@ def test_color_change_in_one_large_tick():
     sim.tick(1000)
     assert p.state is State.ATTENTION and str(p.job.attention) == "color change tool 0"
     assert p.job.fed_mm == 40
-    assert tool0(p).unload_count == 1 and tool0(p).extruded_at_unload == 38
+    # 40 mm printed, then the runout ramming's 7 mm feed: 47 * 0.95 = 44.65.
+    assert tool0(p).unload_count == 1 and tool0(p).extruded_at_unload == 44
     p.load(0)
     sim.tick(100)
     p.resume()
@@ -772,17 +786,20 @@ def test_tool_change_into_an_empty_tool_purges_after_the_reload():
     sim.tick(0.8 + 10)
     assert p.job.phase is JobPhase.WAIT_LOAD and p.job.toolchange_purge
     p.load(1, source="preset", name="PLA")
-    sim.tick(20)
+    sim.tick(40)
     # T1 was never unloaded, so its gap is 0 and every forward mm counts: the 15 mm slow
-    # load, the 25 mm fast load, the cleaner's 25 mm purge and the 4 mm prime, times
-    # 550/576. The 8 mm retract after the prime only opens the gap.
-    assert p.tools[1].extruded == pytest.approx(69 * 550 / 576)
+    # load, the 25 mm fast load and the cleaner's 25 mm purge. The cleaner's auto-retract
+    # counts its 8 mm feed and leaves 8 mm stored (gap 8); the prime feeds those back
+    # (gap 0) and counts its 4 mm. 77 * 550/576. The 8 mm retract after the prime only
+    # opens the gap.
+    assert p.tools[1].extruded == pytest.approx(77 * 550 / 576)
     assert p.tools[1].gap == pytest.approx(8)
     p.resume()  # back to the empty tool's gap 0: 8 fed, then the tool change purges 30
-    assert p.tools[1].extruded == pytest.approx((69 + 30) * 550 / 576)
+    assert p.tools[1].extruded == pytest.approx((77 + 30) * 550 / 576)
     sim.tick(10)
     assert p.state is State.FINISHED
-    assert p.tools[1].extruded == pytest.approx((69 + 30 + 10) * 550 / 576)
+    # The end retracts 8 mm, which INDX counts as fully retracted: no auto-retract.
+    assert p.tools[1].extruded == pytest.approx((77 + 30 + 10) * 550 / 576)
 
 
 def test_sync_job_progress_moves_with_time():
@@ -835,7 +852,10 @@ def test_cancel_during_the_power_panic_recovery_cleans_nothing():
     assert p.state is State.BUSY and tool0(p).extruded == 0
     p.cancel()
     sim.tick(5)
-    assert p.job is None and p.state is State.STOPPED and tool0(p).extruded == 0
+    # No clean, but the stop retracts and auto-retracts. The boot left the tracker at gap 0
+    # and invalid, so nothing is fed back first: the retract opens 8 mm, the sequence's
+    # 8 mm feed refills them, and only 15 of its 55 mm feed count: 15 * 0.95.
+    assert p.job is None and p.state is State.STOPPED and tool0(p).extruded == 14.25
 
 
 def test_power_loss_resume_skips_the_idle_sensor_clear():
