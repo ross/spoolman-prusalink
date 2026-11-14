@@ -18,6 +18,16 @@ from pathlib import Path
 from typing import Any, ClassVar
 
 from simulator import gcode, sync
+from simulator.compatibility import (
+    CORE_ONE_CHECKS,
+    INDX_CHECKS,
+    IX_CHECKS,
+    MK3_5_CHECKS,
+    MK4_CHECKS,
+    PLAIN_CHECKS,
+    XL_CHECKS,
+    GCodeChecks,
+)
 from simulator.tool import (
     AUTO_RETRACT_STEP,
     CORE_ONE_EXTRUDER,
@@ -191,6 +201,11 @@ class ModelInfo:
     max_tools: int = 1
     counters: bool = True
     mmu: bool = False  # whether the build can drive an MMU3: HAS_MMU2
+    # Its `compatibility_group` in `printer_model_data.hpp`. The MK3.5, MK4 and XL builds
+    # run several models and check a file against the one the printer is set to
+    # (`PrinterModelInfo::current`), so each model has its own entry's group.
+    group: str = field(kw_only=True)
+    checks: GCodeChecks = field(kw_only=True)  # its build's
 
     def holds_uuid(self, tool: int) -> bool:
         """Whether `tool` keeps tag UUIDs: tool 0 of a model with a tag reader (F21).
@@ -218,22 +233,120 @@ def _models(*infos: ModelInfo) -> dict[str, ModelInfo]:
 
 # The printer models, from the firmware: `script/firmware-check` compares them with its source.
 MODELS = _models(
-    ModelInfo("1.3.5", "MK3.5", MK3_5_EXTRUDER, MK3_5_PRESETS, counters=False, mmu=True),
-    ModelInfo("1.3.6", "MK3.5S", MK3_5_EXTRUDER, MK3_5_PRESETS, counters=False, mmu=True),
-    ModelInfo("1.3.9", "MK3.9", MK4_EXTRUDER, LOAD_CELL_PRESETS, mmu=True),
-    ModelInfo("1.3.10", "MK3.9S", MK4_EXTRUDER, LOAD_CELL_PRESETS, mmu=True),
-    ModelInfo("1.4.0", "MK4", MK4_EXTRUDER, LOAD_CELL_PRESETS, mmu=True),
-    ModelInfo("1.4.1", "MK4S", MK4_EXTRUDER, LOAD_CELL_PRESETS, mmu=True),
-    ModelInfo("2.1.0", "MINI", MINI_EXTRUDER, MINI_PRESETS, counters=False),
-    ModelInfo("3.1.0", "XL", MK4_EXTRUDER, LOAD_CELL_PRESETS, max_tools=5),
-    ModelInfo("3.1.1", "XLP", MK4_EXTRUDER, LOAD_CELL_PRESETS, max_tools=5),
-    ModelInfo("5.1.0", "XL", XL_DEV_KIT_EXTRUDER, LOAD_CELL_PRESETS, max_tools=5, counters=False),
-    ModelInfo("4.1.0", "iX", IX_EXTRUDER, LOAD_CELL_PRESETS),
-    ModelInfo("7.1.0", "COREONE", CORE_ONE_EXTRUDER, CORE_ONE_PRESETS, uuids=True, mmu=True),
-    ModelInfo("7.2.0", "COREONEOAK", CORE_ONE_EXTRUDER, CORE_ONE_PRESETS, uuids=True, mmu=True),
-    ModelInfo("8.1.0", "COREONEL", CORE_ONE_EXTRUDER, CORE_ONE_PRESETS, uuids=True, mmu=True),
-    ModelInfo("7.10.0", "COREONEINDX", INDX_EXTRUDER, INDX_PRESETS, gap_mm=27.0, max_tools=8),
-    ModelInfo("8.10.0", "COREONEL-INDX", INDX_EXTRUDER, INDX_PRESETS, gap_mm=27.0, max_tools=8),
+    ModelInfo(
+        "1.3.5",
+        "MK3.5",
+        MK3_5_EXTRUDER,
+        MK3_5_PRESETS,
+        counters=False,
+        mmu=True,
+        group="mk3_5",
+        checks=MK3_5_CHECKS,
+    ),
+    ModelInfo(
+        "1.3.6",
+        "MK3.5S",
+        MK3_5_EXTRUDER,
+        MK3_5_PRESETS,
+        counters=False,
+        mmu=True,
+        group="mk3_5",
+        checks=MK3_5_CHECKS,
+    ),
+    ModelInfo(
+        "1.3.9", "MK3.9", MK4_EXTRUDER, LOAD_CELL_PRESETS, mmu=True, group="mk4", checks=MK4_CHECKS
+    ),
+    ModelInfo(
+        "1.3.10",
+        "MK3.9S",
+        MK4_EXTRUDER,
+        LOAD_CELL_PRESETS,
+        mmu=True,
+        group="mk4s",
+        checks=MK4_CHECKS,
+    ),
+    ModelInfo(
+        "1.4.0", "MK4", MK4_EXTRUDER, LOAD_CELL_PRESETS, mmu=True, group="mk4", checks=MK4_CHECKS
+    ),
+    ModelInfo(
+        "1.4.1", "MK4S", MK4_EXTRUDER, LOAD_CELL_PRESETS, mmu=True, group="mk4s", checks=MK4_CHECKS
+    ),
+    ModelInfo(
+        "2.1.0",
+        "MINI",
+        MINI_EXTRUDER,
+        MINI_PRESETS,
+        counters=False,
+        group="mini",
+        checks=PLAIN_CHECKS,
+    ),
+    ModelInfo(
+        "3.1.0", "XL", MK4_EXTRUDER, LOAD_CELL_PRESETS, max_tools=5, group="xl", checks=XL_CHECKS
+    ),
+    ModelInfo(
+        "3.1.1", "XLP", MK4_EXTRUDER, LOAD_CELL_PRESETS, max_tools=5, group="xls", checks=XL_CHECKS
+    ),
+    ModelInfo(
+        "5.1.0",
+        "XL",
+        XL_DEV_KIT_EXTRUDER,
+        LOAD_CELL_PRESETS,
+        max_tools=5,
+        counters=False,
+        group="xl",
+        checks=PLAIN_CHECKS,
+    ),
+    ModelInfo("4.1.0", "iX", IX_EXTRUDER, LOAD_CELL_PRESETS, group="ix", checks=IX_CHECKS),
+    ModelInfo(
+        "7.1.0",
+        "COREONE",
+        CORE_ONE_EXTRUDER,
+        CORE_ONE_PRESETS,
+        uuids=True,
+        mmu=True,
+        group="coreone",
+        checks=CORE_ONE_CHECKS,
+    ),
+    ModelInfo(
+        "7.2.0",
+        "COREONEOAK",
+        CORE_ONE_EXTRUDER,
+        CORE_ONE_PRESETS,
+        uuids=True,
+        mmu=True,
+        group="coreone",
+        checks=CORE_ONE_CHECKS,
+    ),
+    ModelInfo(
+        "8.1.0",
+        "COREONEL",
+        CORE_ONE_EXTRUDER,
+        CORE_ONE_PRESETS,
+        uuids=True,
+        mmu=True,
+        group="coreonel",
+        checks=CORE_ONE_CHECKS,
+    ),
+    ModelInfo(
+        "7.10.0",
+        "COREONEINDX",
+        INDX_EXTRUDER,
+        INDX_PRESETS,
+        gap_mm=27.0,
+        max_tools=8,
+        group="coreone_indx",
+        checks=INDX_CHECKS,
+    ),
+    ModelInfo(
+        "8.10.0",
+        "COREONEL-INDX",
+        INDX_EXTRUDER,
+        INDX_PRESETS,
+        gap_mm=27.0,
+        max_tools=8,
+        group="coreonel_indx",
+        checks=INDX_CHECKS,
+    ),
 )
 
 

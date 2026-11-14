@@ -19,6 +19,7 @@ from firmware.compare import (
 from firmware.source import Unreadable
 from firmware.tests import fixtures
 from simulator import tool
+from simulator.compatibility import GCodeChecks
 from simulator.model import MODELS, ModelInfo
 from simulator.tool import Extruder, Lengths
 from spoolman_prusalink.printer_sync import Preset, PrinterModel
@@ -282,6 +283,9 @@ def build(name, features, tools, gap_mm, presets):
 MK4_PRESETS = {"PLA": (215, 170, 60), "FLEX": (240, 210, 50)}
 MINI_PRESETS = {"PLA": (215, 170, 60)}
 CORE_ONE_PRESETS = {**MK4_PRESETS, "PPS": (320, 170, 105)}
+INPUT_SHAPER = frozenset({"Input Shaper"})
+MODE = GCodeChecks(True, INPUT_SHAPER, INPUT_SHAPER)
+NO_MODE = GCodeChecks(False, INPUT_SHAPER, INPUT_SHAPER)
 
 
 def synthetic():
@@ -345,12 +349,29 @@ def synthetic():
         default_preheat=170,
         preset_preheat=170,
         sim_models={
-            "1.4.0": ModelInfo("1.4.0", "MK4", EXTRUDER, MK4_PRESETS),
+            "1.4.0": ModelInfo("1.4.0", "MK4", EXTRUDER, MK4_PRESETS, group="mk4", checks=MODE),
             "2.1.0": ModelInfo(
-                "2.1.0", "MINI", EXTRUDER, MINI_PRESETS, counters=False, gap_mm=99.0
+                "2.1.0",
+                "MINI",
+                EXTRUDER,
+                MINI_PRESETS,
+                counters=False,
+                gap_mm=99.0,
+                group="mini",
+                checks=NO_MODE,
             ),
-            "3.1.0": ModelInfo("3.1.0", "XL", EXTRUDER, {}, max_tools=5),
-            "7.1.0": ModelInfo("7.1.0", "COREONE", EXTRUDER, CORE_ONE_PRESETS, uuids=True),
+            "3.1.0": ModelInfo(
+                "3.1.0", "XL", EXTRUDER, {}, max_tools=5, group="xl", checks=NO_MODE
+            ),
+            "7.1.0": ModelInfo(
+                "7.1.0",
+                "COREONE",
+                EXTRUDER,
+                CORE_ONE_PRESETS,
+                uuids=True,
+                group="coreone",
+                checks=MODE,
+            ),
         },
         sim_flexible=frozenset({"FLEX"}),
         sim_defaults=(215, 170, 60),
@@ -379,7 +400,9 @@ def test_model_differences():
     bridge["9.9.9"] = PrinterModel("NEW")
     sim = dict(copies.sim_models)
     sim["1.4.0"] = replace(sim["1.4.0"], gap_mm=27.0, max_tools=2, counters=False)
-    sim["2.1.0"] = ModelInfo("2.1.0", "MINI", EXTRUDER, MINI_PRESETS, uuids=True)
+    sim["2.1.0"] = ModelInfo(
+        "2.1.0", "MINI", EXTRUDER, MINI_PRESETS, uuids=True, group="mini", checks=NO_MODE
+    )
     del sim["7.1.0"]
     copies = replace(copies, bridge_models=bridge, sim_models=sim)
     b, s = "bridge PRINTER_MODELS", "simulator MODELS"
