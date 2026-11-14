@@ -709,10 +709,10 @@ class SimPrinter:
         """Feed back an auto-retracted distance (`maybe_deretract_to_nozzle`).
 
         On a Nextruder that's 55 mm into a gap that stops at 40, so 15 mm count that never
-        left the nozzle.
+        left the nozzle. It needs a picked tool (`auto_retract.cpp`).
         """
         stored = tool.path.auto_retracted
-        if stored:
+        if stored and self.feed.credited(self, tool) is not None:
             tool.path.auto_retracted = 0.0
             self._count(tool, stored)
             self._log("load", f"T{tool.index} deretracted {stored:g} mm")

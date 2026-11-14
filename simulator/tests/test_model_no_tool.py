@@ -35,6 +35,20 @@ def test_a_move_moves_nothing(model, move):
     assert (path.gap, path.gap_valid, path.auto_retracted) == (5.0, True, 8.0)
 
 
+def test_an_unload_moves_nothing():
+    """An unload's ramming starts by feeding back the stored distance, which needs a picked
+    tool as any move does."""
+    sim, p = none_selected(INDX, [loaded(0), loaded(1)])
+    path = p.tools[0].path
+    path.auto_retracted = 5.0
+    p.unload(0)
+    sim.tick(1)  # into the ramming
+    assert p.tools[0].extruded == 0
+    assert (path.gap, path.auto_retracted) == (0.0, 5.0)
+    sim.tick(60)
+    assert p.tools[0].extruded == 0 and p.tools[0].unload_count == 1
+
+
 def test_the_idle_clear_needs_a_selected_tool():
     sim, p = none_selected(INDX, [loaded(0), loaded(1)])
     p.tools[1].path.loaded = False
