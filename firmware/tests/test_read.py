@@ -2,7 +2,7 @@
 
 import pytest
 
-from firmware import read
+from firmware import compare, read
 from firmware.compare import FEATURES
 from firmware.source import Unreadable
 from firmware.tests import fixtures
@@ -536,6 +536,118 @@ def test_tracker_gap_skips_unit_test_only_lines():
 def test_tracker_gap_fail_closed(text, problem):
     with pytest.raises(Unreadable, match=f"can't read {read.TRACKER_FILE}: {problem}"):
         read.tracker_gap(text, macros(A=True))
+
+
+# Each build's `Configuration_<X>.h` and `_adv.h`, and its ramming variant.
+CONFIGURATIONS = {
+    "MINI": ("MINI", "mini"),
+    "MK3.5": ("MK3.5", "mk3_5"),
+    "MK4": ("MK4", "nextruder"),
+    "XL": ("XL", "nextruder"),
+    "XL_DEV_KIT": ("XL_DEV_KIT", "nextruder"),
+    "iX": ("iX", "nextruder"),
+    "COREONE": ("COREONE", "nextruder"),
+    "COREONE_INDX": ("COREONE", "indx"),
+    "COREONEL": ("COREONEL", "nextruder"),
+    "COREONEL_INDX": ("COREONEL", "indx"),
+}
+
+
+def fixture_features():
+    return read.features(fixtures.OPTIONS_CMAKE, FEATURES)
+
+
+@pytest.mark.parametrize(("build", "name"), [(b, c[0]) for b, c in CONFIGURATIONS.items()])
+def test_configuration(build, name):
+    values = compare.macros(build, fixture_features())
+    assert read.configuration(fixtures.CONFIGURATION_H, values) == name
+    assert read.configuration(fixtures.CONFIGURATION_ADV_H, values, advanced=True) == name
+
+
+def test_configurations_cover_every_build():
+    assert CONFIGURATIONS.keys() == {b for b in compare.MODEL_BUILDS.values() if b}
+
+
+def test_configuration_of_the_xl_tool_head():
+    names = ("MINI", "XL_DEV_KIT", "MK4", "MK3_5", "iX", "COREONE", "COREONEL")
+    values = {f"PRINTER_IS_PRUSA_{n}": False for n in names}
+    values = macros(**values, PRINTER_IS_PRUSA_XL=True, BOARD_IS_XLBUDDY=False, BOARD_IS_DWARF=True)
+    assert read.configuration(fixtures.CONFIGURATION_H, values) == "XL_Dwarf"
+    assert read.configuration(fixtures.CONFIGURATION_ADV_H, values, advanced=True) == "XL_Dwarf"
+
+
+@pytest.mark.parametrize(
+    ("old", "new", "problem"),
+    [
+        ('    #include "Configuration_MK4.h"', "", "0 active Configuration includes"),
+        ('"config.h"\n', '"config.h"\n#include "Configuration_MINI.h"\n', "2 active"),
+        ("PRINTER_IS_PRUSA_MK4()", "PRINTER_IS_PRUSA_NEW()", r"unknown macro .*_NEW\(\)"),
+        ("PRINTER_IS_PRUSA_MK4()", "0", 'the build reaches #error "Unknown PRINTER_TYPE!"'),
+        ("#pragma once\n", "#pragma once\nint x;\n", "unexpected 'int x;'"),
+        ("#pragma once", "#pragma pack(1)", r"unexpected #pragma pack\(1\)"),
+        ('"config.h"', '"other.h"', 'unexpected #include "other.h"'),
+        ('"Configuration_MK4.h"', '"Configuration_MK4_adv.h"', "unexpected #include"),
+        ('"Configuration_MK4.h"', "<Configuration_MK4.h>", "unexpected #include"),
+        ("#pragma once", "#define X 1", "unexpected #define"),
+    ],
+)
+def test_configuration_fail_closed(old, new, problem):
+    text = fixtures.CONFIGURATION_H
+    assert old in text
+    values = compare.macros("MK4", fixture_features())
+    with pytest.raises(Unreadable, match=f"can't read {read.CONFIGURATION_FILE}: {problem}"):
+        read.configuration(text.replace(old, new, 1), values)
+
+
+def test_advanced_configuration_fail_closed():
+    text = fixtures.CONFIGURATION_ADV_H.replace("Configuration_MK4_adv.h", "Configuration_MK4.h")
+    values = compare.macros("MK4", fixture_features())
+    match = f'can\'t read {read.ADVANCED_FILE}: unexpected #include "Configuration_MK4.h"'
+    with pytest.raises(Unreadable, match=match):
+        read.configuration(text, values, advanced=True)
+
+
+@pytest.mark.parametrize(("build", "variant"), [(b, c[1]) for b, c in CONFIGURATIONS.items()])
+def test_ramming_variant(build, variant):
+    assert read.ramming_variant(fixtures.RAMMING_CMAKE, build, fixture_features()) == variant
+
+
+@pytest.mark.parametrize(
+    ("old", "new", "problem"),
+    [
+        # The MK4 takes the first branch, so these break a condition after it.
+        ('PRINTER STREQUAL "MINI"', 'PRINTER MATCHES "MINI"', "can't read the condition"),
+        ('PRINTER STREQUAL "MINI"', "HAS_INDX AND HAS_MMU2", "can't read the condition"),
+        ('PRINTER STREQUAL "MINI"', '"HAS_INDX"', "can't read the condition"),
+        ("elseif(HAS_INDX)", "elseif(HAS_NEW)", "unknown feature HAS_NEW on line 5"),
+        ("  target_sources(firmware PRIVATE standard_ramming_sequence_nextruder.cpp)\n", "", "0 "),
+        ("ramming_sequence.cpp)", "ramming_sequence.cpp standard_ramming_sequence_mini.cpp)", "2 "),
+        ("sequence_mini.cpp", "sequence-mini.cpp", "can't read the ramming source .*-mini.cpp"),
+        ("sequence_mini.cpp", "sequence_mini.cc", r"can't read the ramming source .*_mini\.cc"),
+        ("message(FATAL_ERROR", "message(WARNING", r"unexpected message\(\) on line 12"),
+        ("firmware PRIVATE ramming", "firmware PUBLIC ramming", r"unexpected target_sources"),
+        ("target_sources(firmware PRIVATE ramming", "add_library(x", r"unexpected add_library"),
+        ("elseif(HAS_INDX)", "if(HAS_INDX)", r"unexpected if\(\) on line 5"),
+        ("else()", "else()\nelseif(HAS_INDX)", r"unexpected elseif\(\) on line 12"),
+        ("else()", "else()\nelse()", r"unexpected else\(\) on line 12"),
+        ("else()", "else(X)", r"unexpected else\(\) on line 11"),
+        ("endif()", "endif(X)", r"unexpected endif\(\) on line 13"),
+        ("endif()", "endif()\nendif()", r"unexpected endif\(\) on line 14"),
+        ("target_sources(firmware", "elseif(X)\ntarget_sources(firmware", r"unexpected elseif"),
+        ("endif()", "", r"if\(\) isn't closed"),
+    ],
+)
+def test_ramming_variant_fail_closed(old, new, problem):
+    text = fixtures.RAMMING_CMAKE
+    assert old in text
+    with pytest.raises(Unreadable, match=f"can't read {read.RAMMING_CMAKE_FILE}: {problem}"):
+        read.ramming_variant(text.replace(old, new, 1), "MK4", fixture_features())
+
+
+def test_ramming_variant_fails_for_a_build_without_one():
+    match = r"NEW reaches message\(FATAL_ERROR\) on line 12"
+    with pytest.raises(Unreadable, match=match):
+        read.ramming_variant(fixtures.RAMMING_CMAKE, "NEW", fixture_features())
 
 
 @pytest.mark.parametrize(
