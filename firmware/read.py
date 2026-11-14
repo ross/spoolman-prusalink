@@ -9,7 +9,7 @@ the files use today, nothing more: see `evaluate` and `active_lines`.
 from __future__ import annotations
 
 import re
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from typing import NoReturn
 
 from firmware.source import Unreadable
@@ -22,6 +22,8 @@ ALIASES_FILE = "src/feature/openprinttag/data_utils.cpp"
 TRACKER_FILE = "src/feature/filament_tracker/filament_tracker.hpp"
 RAMMING_CMAKE_FILE = "src/feature/ramming/CMakeLists.txt"
 CLEANER_FILE = "src/feature/nozzle_cleaner/nozzle_cleaner.cpp"
+CONFIGURATION_FILE = "include/marlin/Configuration.h"
+ADVANCED_FILE = "include/marlin/Configuration_adv.h"
 
 
 def configuration_file(name: str) -> str:
@@ -253,6 +255,130 @@ def tracker_gap(text: str, macros: Macros) -> float | None:
         return float(m.group(1))
     except ValueError as e:
         raise Unreadable(TRACKER_FILE, str(e)) from None
+
+
+# What `Configuration.h` and `Configuration_adv.h` include besides the build's own file.
+_CONFIGURATION_INCLUDES = frozenset({'"config.h"', "<device/board.h>"})
+_CONFIGURATION_INCLUDE = re.compile(r'"Configuration_([\w.]+?)(_adv)?\.h"')
+
+
+def configuration(text: str, macros: Macros, advanced: bool = False) -> str:
+    """Return the `<X>` of the `Configuration_<X>.h` that `Configuration.h` includes for
+    one build, or with `advanced`, of the `Configuration_<X>_adv.h` that
+    `Configuration_adv.h` includes.
+
+    The file may only hold preprocessor lines: the `#if` chain, `#pragma once` and the
+    includes in `_CONFIGURATION_INCLUDES`. Exactly one `Configuration_<X>` include has to be
+    active for the build, and no `#error`.
+    """
+    try:
+        lines = _strip_comments(text).splitlines()
+        for line in lines:
+            if line.strip() and not line.lstrip().startswith("#"):
+                raise ValueError(f"unexpected {line.strip()!r}")
+        found = []
+        for line in active_lines(lines, macros):
+            if not line.strip():
+                continue
+            m = re.match(r"\s*#\s*(\w+)\s*(.*?)\s*$", line)
+            if not m:
+                raise ValueError(f"unexpected {line.strip()!r}")
+            directive, rest = m.groups()
+            if directive == "error":
+                raise ValueError(f"the build reaches #error {rest}")
+            if directive == "pragma":
+                if rest != "once":
+                    raise ValueError(f"unexpected #pragma {rest}")
+                continue
+            if rest in _CONFIGURATION_INCLUDES:
+                continue
+            m = _CONFIGURATION_INCLUDE.fullmatch(rest)
+            if not m or bool(m.group(2)) != advanced:
+                raise ValueError(f"unexpected #include {rest}")
+            found.append(m.group(1))
+        if len(found) != 1:
+            raise ValueError(f"{len(found)} active Configuration includes")
+    except ValueError as e:
+        raise Unreadable(ADVANCED_FILE if advanced else CONFIGURATION_FILE, str(e)) from None
+    return found[0]
+
+
+_RAMMING_SOURCE = re.compile(r"standard_ramming_sequence_(\w+)\.cpp")
+_CMAKE_SOURCE_KEYWORDS = frozenset({"PRIVATE", "PUBLIC", "INTERFACE", "FILE_SET"})
+
+
+def ramming_variant(text: str, build: str, features: Mapping[str, frozenset[str]]) -> str:
+    """Return the `<variant>` of the `standard_ramming_sequence_<variant>.cpp` that
+    `src/feature/ramming/CMakeLists.txt` compiles into one build.
+
+    Evaluates the file's `if()`/`elseif()`/`else()` chain, which may not nest, for the build.
+    A condition may only test a feature, by name (a key of `features`, which gives the builds
+    each is set for), or `PRINTER STREQUAL "<build>"`. Besides the chain, the file may only
+    call `target_sources(firmware PRIVATE ...)` and `message(FATAL_ERROR ...)`, and the build
+    may not reach the `message`. Exactly one ramming source has to be compiled.
+    """
+    try:
+        # In an if(): whether a branch was taken, whether this one is active, whether
+        # else() was seen. None outside one.
+        chain: list[bool] | None = None
+        found = []
+        for name, args, line in _cmake_commands(text):
+            if name == "if" and chain is None:
+                value = _cmake_condition(args, build, features, line)
+                chain = [value, value, False]
+            elif name == "elseif" and chain is not None and not chain[2]:
+                # Evaluated after a taken branch too, so an unreadable condition fails for
+                # every build.
+                value = _cmake_condition(args, build, features, line)
+                chain = [chain[0] or value, value and not chain[0], False]
+            elif name == "else" and chain is not None and not chain[2] and not args.strip():
+                chain = [True, not chain[0], True]
+            elif name == "endif" and chain is not None and not args.strip():
+                chain = None
+            elif name in ("if", "elseif", "else", "endif"):
+                raise ValueError(f"unexpected {name}() on line {line}")
+            else:
+                active = chain is None or chain[1]
+                words = _cmake_words(args)
+                if name == "target_sources" and words[:2] == ["firmware", "PRIVATE"]:
+                    for file in words[2:]:
+                        # A variable could name a ramming source, and a later keyword
+                        # starts another list with other rules.
+                        if "$" in file or file in _CMAKE_SOURCE_KEYWORDS:
+                            raise ValueError(f"unexpected {file} in target_sources() line {line}")
+                        if "standard_ramming_sequence" not in file:
+                            continue
+                        m = _RAMMING_SOURCE.fullmatch(file)
+                        if not m:
+                            raise ValueError(f"can't read the ramming source {file}")
+                        if active:
+                            found.append(m.group(1))
+                elif name == "message" and words[:1] == ["FATAL_ERROR"]:
+                    if active:
+                        raise ValueError(f"{build} reaches message(FATAL_ERROR) on line {line}")
+                else:
+                    raise ValueError(f"unexpected {name}() on line {line}")
+        if chain is not None:
+            raise ValueError("if() isn't closed")
+        if len(found) != 1:
+            raise ValueError(f"{len(found)} ramming sources for {build}")
+    except ValueError as e:
+        raise Unreadable(RAMMING_CMAKE_FILE, str(e)) from None
+    return found[0]
+
+
+def _cmake_condition(
+    args: str, build: str, features: Mapping[str, frozenset[str]], line: int
+) -> bool:
+    condition = args.strip()
+    m = re.fullmatch(r'PRINTER\s+STREQUAL\s+"([^"\\$]*)"', condition)
+    if m:
+        return build == m.group(1)
+    if not _CMAKE_NAME.fullmatch(condition):
+        raise ValueError(f"can't read the condition ({condition}) on line {line}")
+    if condition not in features:
+        raise ValueError(f"unknown feature {condition} on line {line}")
+    return build in features[condition]
 
 
 # The extruder's steps per mm in `Configuration_<X>.h`: what it runs at, then what feeds
