@@ -6,33 +6,99 @@ MODELS_HPP = """\
 inline constexpr std::array printer_model_info {
     PrinterModelInfo {
         .model = PrinterModel::mk3,
+        .compatibility_group = PrinterModelCompatibilityGroup::mk3,
         .version = { 1, 3, 0 },
+        .help_url = nullptr,
+        .usb_pid = 0,
+        .gcode_check_code = 300,
         .id_str = "MK3",
     },
     PrinterModelInfo {
         .model = PrinterModel::mk4,
+        .compatibility_group = PrinterModelCompatibilityGroup::mk4,
         .version = { 1, 4, 0 },
         .help_url = "mk4",
+        .usb_pid = 13,
+        .gcode_check_code = 130,
         .id_str = "MK4",
     },
     PrinterModelInfo {
         .model = PrinterModel::mini,
+        .compatibility_group = PrinterModelCompatibilityGroup::mini,
         .version = { 2, 1, 0 },
+        .help_url = "mini",
+        .usb_pid = 12,
+        .gcode_check_code = 120,
         .id_str = "MINI",
     },
     PrinterModelInfo {
         .model = PrinterModel::coreone,
+        .compatibility_group = PrinterModelCompatibilityGroup::coreone,
         .version = { 7, 1, 0 },
+        .help_url = "core-one",
+        .usb_pid = 31,
+        .gcode_check_code = 310,
         .id_str = "COREONE",
     },
 };
 
 inline constexpr std::array printer_model_mmu_variant {
     PrinterModelMMUVariant {
+        .model = PrinterModel::mk3,
+        .gcode_check_code = 20300,
+        .id_str = "MK3MMU2",
+    },
+    PrinterModelMMUVariant {
         .model = PrinterModel::mk4,
+        .gcode_check_code = 30130,
         .id_str = "MK4MMU3",
     },
+    // Oak shares PRINTER=COREONE so it inherits HAS_MMU2. This entry exists only
+    // to satisfy the static_assert in printer_model.cpp — MMU is not expected on Oak.
+    PrinterModelMMUVariant {
+        .model = PrinterModel::coreone,
+        .gcode_check_code = 30310,
+        .id_str = "COREONEMMU3",
+    },
 };
+
+constexpr const PrinterModelInfo &PrinterModelInfo::get_constexpr(PrinterModel model) {
+    return printer_model_info[std::to_underlying(model)];
+}
+"""
+
+GCODE_INFO_HPP = """\
+#pragma once
+
+#include <option/has_indx.h>
+#include <option/has_mmu2.h>
+
+// these strings are meant NOT to be translated
+namespace gcode_info {
+inline constexpr const char *time = "estimated printing time (normal mode)";
+#if EXTRUDERS > 1
+inline constexpr const char *filament_wipe_tower_g = "total filament used for wipe tower [g]";
+#endif
+inline constexpr const char *m862 = "M862";
+
+// M862.6 feature tokens, spelled as the slicer emits them in P"...". Shared with the
+// M862.6 Q response, which must answer in the same spelling it accepts.
+inline constexpr const char *m862_6_input_shaper = "Input Shaper";
+#if HAS_MMU2()
+inline constexpr const char *m862_6_mmu = "MMU3";
+#endif
+#if HAS_INDX()
+inline constexpr const char *m862_6_indx_lock = "INDX lock";
+#endif
+#if HAS_HT_HOTEND()
+inline constexpr const char *m862_6_ht_hotend = "HT Hotend";
+#endif
+
+inline constexpr const char *m115 = "M115";
+#if EXTRUDERS > 1
+inline constexpr const char *total_toolchanges = "total toolchanges";
+#endif
+}; // namespace gcode_info
 """
 
 OPTIONS_CMAKE = """\
@@ -117,6 +183,7 @@ set_feature_for_printers_master_board(
   "COREONEL_INDX"
   )
 set_feature_for_printers(HAS_MMU2 "MK4" "MK3.5" "COREONE" "COREONEL")
+set_feature_for_printers(HAS_GCODE_COMPATIBILITY "MK3.5" "MK4" "COREONE" "COREONEL" "XL")
 set_feature_for_printers(
   HAS_AUTO_RETRACT
   "COREONE"
@@ -981,6 +1048,7 @@ endif()
 
 FILES = {
     read.MODELS_FILE: MODELS_HPP,
+    read.GCODE_INFO_FILE: GCODE_INFO_HPP,
     read.OPTIONS_FILE: OPTIONS_CMAKE,
     read.PRESETS_FILE: PRESETS_CPP,
     read.FILAMENT_FILE: FILAMENT_HPP,

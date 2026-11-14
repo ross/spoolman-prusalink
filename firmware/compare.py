@@ -6,9 +6,11 @@ models, the preset filaments, the reset defaults and the tag aliases. This modul
 the same tables from the firmware source for each firmware build and lists every place
 a copy differs. A difference on `EXPECTED` is reported but doesn't fail the check.
 
-Each build also carries its preset filaments and its extruder numbers (steps per mm,
-filament change lengths, ramming sequences and the nozzle cleaner's purge), which the
-simulator's models copy.
+Each build also carries its preset filaments, its extruder numbers (steps per mm,
+filament change lengths, ramming sequences and the nozzle cleaner's purge) and what its
+G-code checks know (the compatibility mode and the `M862.6` feature names), which the
+simulator's models copy. The simulator's `GROUPS` copies every name a file's `M862.3` can
+carry, with its compatibility group.
 """
 
 from __future__ import annotations
@@ -93,6 +95,7 @@ FEATURES = (
     "HAS_SWITCHABLE_AUTO_RETRACT",
     "HAS_NOZZLE_CLEANER",
     "HAS_MMU2",
+    "HAS_GCODE_COMPATIBILITY",
 )
 
 Ramming = tuple[read.Step, ...]
@@ -146,6 +149,7 @@ class Build:
     # gets another sequence.
     ramming: Mapping[str, Ramming]
     cleaner_purge: CleanerPurge | None  # None without HAS_NOZZLE_CLEANER
+    feature_names: frozenset[str]  # the `M862.6` names it knows
 
     @property
     def counters(self) -> bool:
@@ -165,10 +169,24 @@ class Build:
 @dataclass(frozen=True)
 class Firmware:
     commit: str
-    models: Mapping[str, str]  # type code to `id_str`, built or not
+    models: Mapping[str, read.PrinterModel]  # by type code, built or not
+    mmu_variants: Mapping[str, str]  # name to the base model's type code
     builds: Mapping[str, Build]
     defaults: tuple[int, int, int]  # what `M865 R` resets nozzle, preheat and bed to
     aliases: Mapping[str, str]
+
+    def groups(self) -> dict[str, str]:
+        """Return every name a file's `M862.3` can carry, with its compatibility group.
+
+        Where two entries share a name, the first that `PrinterModelInfo::from_id_str`
+        tries wins: the MMU variants, then the models in order.
+        """
+        groups: dict[str, str] = {}
+        for name, code in self.mmu_variants.items():
+            groups.setdefault(name, self.models[code].group)
+        for model in self.models.values():
+            groups.setdefault(model.name, model.group)
+        return groups
 
     def built(self) -> dict[str, Build]:
         """Return each type code some build runs, with that build."""
@@ -208,10 +226,11 @@ def macros(build: str, features: Mapping[str, frozenset[str]]) -> read.Macros:
 
 def load(source: Source) -> Firmware:
     """Read the firmware's tables from `source` and evaluate them for every build."""
-    models = read.printer_models(source.read(read.MODELS_FILE))
+    models_text = source.read(read.MODELS_FILE)
+    models = read.printer_models(models_text)
     unknown = sorted(models.keys() - MODEL_BUILDS.keys(), key=_version)
     if unknown:
-        listed = ", ".join(f"{code} ({models[code]})" for code in unknown)
+        listed = ", ".join(f"{code} ({models[code].name})" for code in unknown)
         raise Unreadable(read.MODELS_FILE, f"no build for {listed}; add it to MODEL_BUILDS")
     options = source.read(read.OPTIONS_FILE)
     features = read.features(options, FEATURES)
@@ -224,6 +243,7 @@ def load(source: Source) -> Firmware:
     configurations = source.read(read.CONFIGURATION_FILE)
     advanced_configurations = source.read(read.ADVANCED_FILE)
     ramming_cmake = source.read(read.RAMMING_CMAKE_FILE)
+    gcode_info = source.read(read.GCODE_INFO_FILE)
     # Several builds share each of the files below.
     text = functools.cache(source.read)
     builds = {}
@@ -246,10 +266,12 @@ def load(source: Source) -> Firmware:
             pause=Pause(*read.pause_lengths(text(advanced), values, advanced)),
             ramming=read.ramming(text(ramming), values, ramming),
             cleaner_purge=cleaner,
+            feature_names=read.feature_names(gcode_info, values),
         )
     return Firmware(
         commit=source.commit,
         models=models,
+        mmu_variants=read.mmu_variants(models_text),
         builds=builds,
         defaults=read.reset_defaults(source.read(read.FILAMENT_FILE)),
         aliases=read.aliases(source.read(read.ALIASES_FILE)),
@@ -269,13 +291,14 @@ class Copies:
     default_preheat: int
     preset_preheat: int  # the `Preset` dataclass's preheat default
     sim_models: Mapping[str, Any]  # simulator.model.ModelInfo
+    sim_groups: Mapping[str, str]
     sim_flexible: frozenset[str]
     sim_defaults: tuple[int, int, int]
     sim_aliases: Mapping[str, str]
 
     @classmethod
     def current(cls) -> Copies:
-        from simulator import model, tool
+        from simulator import compatibility, model, tool
         from spoolman_prusalink import printer_sync as bridge
 
         preheat = next(f.default for f in fields(bridge.Preset) if f.name == "preheat")
@@ -289,6 +312,7 @@ class Copies:
             default_preheat=bridge.DEFAULT_PREHEAT,
             preset_preheat=preheat,  # type: ignore[arg-type]
             sim_models=model.MODELS,
+            sim_groups=compatibility.GROUPS,
             sim_flexible=tool.FLEXIBLE_PRESETS,
             sim_defaults=tool.DEFAULT_TEMPERATURES,
             sim_aliases=tool.PRESET_ALIASES,
@@ -331,6 +355,7 @@ TABLES = (
     "bridge DEFAULT_PREHEAT",
     "bridge PRESET_ALIASES",
     "simulator MODELS",
+    "simulator GROUPS",
     "simulator presets",
     "simulator DEFAULT_TEMPERATURES",
     "simulator PRESET_ALIASES",
@@ -348,6 +373,10 @@ def compare(firmware: Firmware, copies: Copies) -> list[Difference]:
     built = firmware.built()
     _compare_bridge_models(built, firmware.models, copies, differ)
     _compare_sim_models(built, firmware.models, copies, differ)
+    groups = firmware.groups()
+    for name in sorted(groups.keys() | copies.sim_groups.keys()):
+        fw, copy = groups.get(name, MISSING), copies.sim_groups.get(name, MISSING)
+        differ("simulator GROUPS", None, name, "group", fw, copy)
 
     # The presets of each model the bridge writes to. The bridge holds one table for
     # every model; a material only some builds have (PPS and PPA) may be in it.
@@ -407,7 +436,10 @@ Differ = Callable[[str, str | None, str | None, str, Any, Any], None]
 
 
 def _compare_bridge_models(
-    built: Mapping[str, Build], names: Mapping[str, str], copies: Copies, differ: Differ
+    built: Mapping[str, Build],
+    models: Mapping[str, read.PrinterModel],
+    copies: Copies,
+    differ: Differ,
 ) -> None:
     table = "bridge PRINTER_MODELS"
     for code in sorted(built.keys() | copies.bridge_models.keys(), key=_version):
@@ -418,11 +450,11 @@ def _compare_bridge_models(
                 code,
                 None,
                 "model",
-                names[code] if build else MISSING,
+                models[code].name if build else MISSING,
                 model.name if model else MISSING,
             )
             continue
-        differ(table, code, None, "name", names[code], model.name)
+        differ(table, code, None, "name", models[code].name, model.name)
         differ(table, code, None, "uuids", build.uuids, model.uuids)
         # The reason the bridge gives has to be true. A model the bridge can't serve has
         # to be refused, for that reason or another: it keeps one reason per model.
@@ -444,7 +476,10 @@ def _compare_bridge_models(
 
 
 def _compare_sim_models(
-    built: Mapping[str, Build], names: Mapping[str, str], copies: Copies, differ: Differ
+    built: Mapping[str, Build],
+    models: Mapping[str, read.PrinterModel],
+    copies: Copies,
+    differ: Differ,
 ) -> None:
     table = "simulator MODELS"
     for code in sorted(built.keys() | copies.sim_models.keys(), key=_version):
@@ -455,17 +490,23 @@ def _compare_sim_models(
                 code,
                 None,
                 "model",
-                names[code] if build else MISSING,
+                models[code].name if build else MISSING,
                 model.name if model else MISSING,
             )
             continue
-        differ(table, code, None, "name", names[code], model.name)
+        differ(table, code, None, "name", models[code].name, model.name)
         differ(table, code, None, "uuids", build.uuids, model.uuids)
         differ(table, code, None, "counters", build.counters, model.counters)
         differ(table, code, None, "max_tools", build.tools, model.max_tools)
         if build.gap_mm is not None:
             differ(table, code, None, "gap_mm", build.gap_mm, model.gap_mm)
         differ(table, code, None, "mmu", "HAS_MMU2" in build.features, model.mmu)
+        # The model's own group, as `PrinterModelInfo::current` picks it on every build.
+        differ(table, code, None, "group", models[code].group, model.group)
+        mode = "HAS_GCODE_COMPATIBILITY" in build.features
+        differ(table, code, None, "compatibility_mode", mode, model.checks.compatibility_mode)
+        names = sorted(model.checks.features)
+        differ(table, code, None, "feature_names", sorted(build.feature_names), names)
         _compare_extruder(table, code, build, model.extruder, differ)
 
 

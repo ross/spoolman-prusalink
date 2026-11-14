@@ -177,9 +177,11 @@ trace.
 models, preset filaments, reset defaults, and tag aliases. The bridge keeps one preset
 table for every model. Each simulator model keeps its build's presets and extruder
 numbers: steps per mm, filament change lengths, ramming sequences, and the nozzle
-cleaner's purge. The simulator also lists the flexible presets. `script/firmware-check`
-rebuilds the tables from the firmware source and lists each difference. A weekly
-workflow runs it.
+cleaner's purge. It also keeps its G-code compatibility group, whether its build has a
+compatibility mode, and the `M862.6` feature names its build knows. The simulator also
+lists the flexible presets and every G-code model name with its group.
+`script/firmware-check` rebuilds the tables from the firmware source and lists each
+difference. A weekly workflow runs it.
 
 After you change a copied table, run the check. If a difference is intended, add it to
 `EXPECTED` in `firmware/compare.py`. The check also fails when an expected difference no

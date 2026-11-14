@@ -109,7 +109,13 @@ EXTRUDERS = {
 def test_load_reads_every_build():
     firmware = compare.load(fixtures.FakeSource())
     assert firmware.commit == "c0ffee"
-    assert firmware.models == {"1.3.0": "MK3", "1.4.0": "MK4", "2.1.0": "MINI", "7.1.0": "COREONE"}
+    assert firmware.models == {
+        "1.3.0": read.PrinterModel("MK3", "mk3"),
+        "1.4.0": read.PrinterModel("MK4", "mk4"),
+        "2.1.0": read.PrinterModel("MINI", "mini"),
+        "7.1.0": read.PrinterModel("COREONE", "coreone"),
+    }
+    assert firmware.mmu_variants == {"MK3MMU2": "1.3.0", "MK4MMU3": "1.4.0", "COREONEMMU3": "7.1.0"}
     assert firmware.builds.keys() == {b for b in compare.MODEL_BUILDS.values() if b}
     assert firmware.defaults == (215, 170, 60)
     assert firmware.aliases == {"TPU": "FLEX"}
@@ -127,6 +133,12 @@ def test_load_reads_every_build():
     # PRINTER_IS_PRUSA_MINI is true on the MINI build only.
     assert mini.presets["PA"]["nozzle_temperature"] == 280
     assert firmware.builds["XL_DEV_KIT"].presets["PA"]["nozzle_temperature"] == 285
+    assert "HAS_GCODE_COMPATIBILITY" in mk4.features
+    assert "HAS_GCODE_COMPATIBILITY" not in mini.features
+    assert mk4.feature_names == {"Input Shaper", "MMU3"}
+    assert mini.feature_names == {"Input Shaper"}
+    assert firmware.builds["COREONE"].feature_names == {"Input Shaper", "MMU3", "HT Hotend"}
+    assert indx.feature_names == {"Input Shaper", "INDX lock"}
 
 
 @pytest.mark.parametrize("name", sorted(EXTRUDERS))
@@ -265,8 +277,12 @@ def fw_preset(nozzle, preheat, bed, chamber=None, filtration=None, flexible=Fals
     return values
 
 
+INPUT_SHAPER = frozenset({"Input Shaper"})
+
+
 def build(name, features, tools, gap_mm, presets):
-    """A `Build` with the fields the comparison reads, and fixed extruder numbers."""
+    """A `Build` with the fields the comparison reads, and fixed extruder numbers and
+    feature names."""
     return Build(
         name,
         features,
@@ -277,13 +293,13 @@ def build(name, features, tools, gap_mm, presets):
         pause=NEXTRUDER_PAUSE,
         ramming=NEXTRUDER,
         cleaner_purge=None,
+        feature_names=INPUT_SHAPER,
     )
 
 
 MK4_PRESETS = {"PLA": (215, 170, 60), "FLEX": (240, 210, 50)}
 MINI_PRESETS = {"PLA": (215, 170, 60)}
 CORE_ONE_PRESETS = {**MK4_PRESETS, "PPS": (320, 170, 105)}
-INPUT_SHAPER = frozenset({"Input Shaper"})
 MODE = GCodeChecks(True, INPUT_SHAPER, INPUT_SHAPER)
 NO_MODE = GCodeChecks(False, INPUT_SHAPER, INPUT_SHAPER)
 
@@ -297,12 +313,13 @@ def synthetic():
             "HAS_CHAMBER_API",
             "HAS_CHAMBER_FILTRATION_API",
             "HAS_HT_HOTEND",
+            "HAS_GCODE_COMPATIBILITY",
         }
     )
     builds = {
         "MK4": build(
             "MK4",
-            frozenset({"HAS_FILAMENT_TRACKER"}),
+            frozenset({"HAS_FILAMENT_TRACKER", "HAS_GCODE_COMPATIBILITY"}),
             1,
             40.0,
             {"PLA": fw_preset(215, 170, 60), "FLEX": fw_preset(240, 210, 50, flexible=True)},
@@ -323,7 +340,13 @@ def synthetic():
     }
     firmware = Firmware(
         commit="c0ffee",
-        models={"1.4.0": "MK4", "2.1.0": "MINI", "3.1.0": "XL", "7.1.0": "COREONE"},
+        models={
+            "1.4.0": read.PrinterModel("MK4", "mk4"),
+            "2.1.0": read.PrinterModel("MINI", "mini"),
+            "3.1.0": read.PrinterModel("XL", "xl"),
+            "7.1.0": read.PrinterModel("COREONE", "coreone"),
+        },
+        mmu_variants={"MK4MMU3": "1.4.0"},
         builds=builds,
         defaults=(215, 170, 60),
         aliases={"TPU": "FLEX"},
@@ -372,6 +395,13 @@ def synthetic():
                 group="coreone",
                 checks=MODE,
             ),
+        },
+        sim_groups={
+            "MK4": "mk4",
+            "MK4MMU3": "mk4",
+            "MINI": "mini",
+            "XL": "xl",
+            "COREONE": "coreone",
         },
         sim_flexible=frozenset({"FLEX"}),
         sim_defaults=(215, 170, 60),
@@ -469,6 +499,53 @@ def test_extruder_differences():
     ]
     assert str(found[3]) == "1.4.0 lengths.purge_mm: firmware 27, copy 28"
     assert str(found[5]) == "1.4.0 ramming.extra: firmware missing, copy ((1, 1),)"
+
+
+def test_gcode_check_differences():
+    firmware, copies = synthetic()
+    mk4 = firmware.builds["MK4"]
+    builds = {**firmware.builds, "MK4": replace(mk4, feature_names=INPUT_SHAPER | {"MMU3"})}
+    firmware = replace(firmware, builds=builds)
+    sim = dict(copies.sim_models)
+    sim["2.1.0"] = replace(sim["2.1.0"], group="mk4", checks=MODE)
+    sim["7.1.0"] = replace(sim["7.1.0"], checks=replace(MODE, features=frozenset({"Input"})))
+    # The MMU variant has the wrong group, the XL is missing, and the MK3 is extra.
+    groups = {**copies.sim_groups, "MK4MMU3": "mk4s", "MK3": "mk3"}
+    del groups["XL"]
+    s, g = "simulator MODELS", "simulator GROUPS"
+    found = compare.compare(firmware, replace(copies, sim_models=sim, sim_groups=groups))
+    assert found == [
+        Difference(s, "1.4.0", None, "feature_names", ["Input Shaper", "MMU3"], ["Input Shaper"]),
+        Difference(s, "2.1.0", None, "group", "mini", "mk4"),
+        Difference(s, "2.1.0", None, "compatibility_mode", False, True),
+        Difference(s, "7.1.0", None, "feature_names", ["Input Shaper"], ["Input"]),
+        Difference(g, None, "MK3", "group", MISSING, "mk3"),
+        Difference(g, None, "MK4MMU3", "group", "mk4", "mk4s"),
+        Difference(g, None, "XL", "group", "xl", MISSING),
+    ]
+    assert str(found[1]) == "2.1.0 group: firmware 'mini', copy 'mk4'"
+    assert str(found[6]) == "XL group: firmware 'xl', copy missing"
+
+
+def test_groups_follow_from_id_str():
+    firmware, _ = synthetic()
+    models = {
+        **firmware.models,
+        # The XL dev kit shares the XL's name; the first entry wins.
+        "5.1.0": read.PrinterModel("XL", "xl_dev_kit"),
+        "1.4.1": read.PrinterModel("MK4S", "mk4s"),
+    }
+    # A variant named like a model wins over it, as `from_id_str` tries variants first.
+    variants = {"MK4MMU3": "1.4.0", "MK4S": "1.4.0"}
+    firmware = replace(firmware, models=models, mmu_variants=variants)
+    assert firmware.groups() == {
+        "MK4MMU3": "mk4",
+        "MK4S": "mk4",
+        "MK4": "mk4",
+        "MINI": "mini",
+        "XL": "xl",
+        "COREONE": "coreone",
+    }
 
 
 def test_a_model_refused_for_another_reason_passes():

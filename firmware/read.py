@@ -10,11 +10,13 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable, Iterable, Mapping
+from dataclasses import dataclass
 from typing import NoReturn
 
 from firmware.source import Unreadable
 
 MODELS_FILE = "include/common/printer_model_data.hpp"
+GCODE_INFO_FILE = "src/common/gcode/gcode_info.hpp"
 OPTIONS_FILE = "ProjectOptions.cmake"
 PRESETS_FILE = "src/common/filament_presets.cpp"
 FILAMENT_FILE = "src/common/filament.hpp"
@@ -47,26 +49,88 @@ Macros = Callable[[str], bool]
 Value = int | bool | str | None
 
 
-def printer_models(text: str) -> dict[str, str]:
-    """Return each printer model's type code, as "a.b.c", with its `id_str`."""
+@dataclass(frozen=True)
+class PrinterModel:
+    """One `printer_model_info` entry."""
+
+    name: str  # `id_str`, the name a file's `M862.3` gives the model
+    group: str  # its `PrinterModelCompatibilityGroup`
+
+
+def printer_models(text: str) -> dict[str, PrinterModel]:
+    """Return each printer model's type code, as "a.b.c", with its entry."""
     try:
-        region = _one(r"printer_model_info\s*\{(.*?)\n\};", text, "printer_model_info array")
-        entries = re.split(r"PrinterModelInfo\s*\{", region)[1:]
-        if not entries:
-            raise ValueError("no PrinterModelInfo entries")
-        models: dict[str, str] = {}
-        for entry in entries:
-            version = _one(
-                r"\.version\s*=\s*\{\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*\}", entry, ".version", 3
-            )
-            name = _one(r'\.id_str\s*=\s*"([^"]*)"', entry, ".id_str")
-            code = ".".join(version)
-            if code in models:
-                raise ValueError(f"model {code} appears twice")
-            models[code] = name
+        entries = _model_entries(_strip_comments(text))
     except ValueError as e:
         raise Unreadable(MODELS_FILE, str(e)) from None
-    return models
+    return {code: PrinterModel(name, group) for _, code, name, group in entries}
+
+
+def mmu_variants(text: str) -> dict[str, str]:
+    """Return each `printer_model_mmu_variant` name with its base model's type code.
+
+    `PrinterModelInfo::from_id_str` takes a file's `M862.3` name as the base model.
+    """
+    try:
+        text = _strip_comments(text)
+        codes = {model: code for model, code, _, _ in _model_entries(text)}
+        region = _one(
+            r"printer_model_mmu_variant\s*\{(.*?)\n\};", text, "printer_model_mmu_variant array"
+        )
+        entries = re.split(r"PrinterModelMMUVariant\s*\{", region)[1:]
+        if not entries:
+            raise ValueError("no PrinterModelMMUVariant entries")
+        variants: dict[str, str] = {}
+        for entry in entries:
+            model = _enum_field(entry, "model", "PrinterModel")
+            name = _one(_ID_STR_FIELD, entry, ".id_str")
+            if model not in codes:
+                raise ValueError(f"the MMU variant {name} names an unknown PrinterModel::{model}")
+            if name in variants:
+                raise ValueError(f"the MMU variant {name} appears twice")
+            variants[name] = codes[model]
+    except ValueError as e:
+        raise Unreadable(MODELS_FILE, str(e)) from None
+    return variants
+
+
+_ID_STR_FIELD = r'\.id_str\s*=\s*"([^"]*)"'
+
+
+def _enum_field(entry: str, field: str, enum: str) -> str:
+    """Return the member a designated initializer `.field = enum::member` names."""
+    value = _one(rf"\.{field}\s*=\s*([^,}}]*)", entry, f".{field}").strip()
+    m = re.fullmatch(rf"{enum}::(\w+)", value)
+    if not m:
+        raise ValueError(f"can't read .{field} = {value}")
+    return m.group(1)
+
+
+def _model_entries(text: str) -> list[tuple[str, str, str, str]]:
+    """Return each `printer_model_info` entry as (`PrinterModel` member, type code, `id_str`,
+    compatibility group). Raises ValueError."""
+    region = _one(r"printer_model_info\s*\{(.*?)\n\};", text, "printer_model_info array")
+    entries = re.split(r"PrinterModelInfo\s*\{", region)[1:]
+    if not entries:
+        raise ValueError("no PrinterModelInfo entries")
+    found = []
+    codes, models = set(), set()
+    for entry in entries:
+        model = _enum_field(entry, "model", "PrinterModel")
+        group = _enum_field(entry, "compatibility_group", "PrinterModelCompatibilityGroup")
+        version = _one(
+            r"\.version\s*=\s*\{\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*\}", entry, ".version", 3
+        )
+        name = _one(_ID_STR_FIELD, entry, ".id_str")
+        code = ".".join(version)
+        if code in codes:
+            raise ValueError(f"model {code} appears twice")
+        if model in models:
+            raise ValueError(f"PrinterModel::{model} appears twice")
+        codes.add(code)
+        models.add(model)
+        found.append((model, code, name, group))
+    return found
 
 
 def features(text: str, needed: Iterable[str]) -> dict[str, frozenset[str]]:
@@ -421,14 +485,45 @@ def defines(text: str, names: Iterable[str], macros: Macros) -> tuple[int, ...]:
     Raises ValueError otherwise.
     """
     text = _strip_comments(text).replace("\\\n", " ")
+    found: dict[str, list[tuple[list[str], str]]] = {name: [] for name in names}
+    for line, scope in _scoped(text):
+        m = re.match(r"\s*#\s*(\w+)\s*(.*?)\s*$", line)
+        if not m or m.group(1) not in ("define", "undef"):
+            continue
+        name, value = re.match(r"(\w*)(.*)", m.group(2)).groups()  # type: ignore[union-attr]
+        if name not in found:
+            continue
+        if m.group(1) == "undef":
+            raise ValueError(f"#undef {name}")
+        found[name].append((scope, value))
+    values = []
+    for name, defined in found.items():
+        if not defined:
+            raise ValueError(f"no #define {name}")
+        active = [value for scope, value in defined if active_lines(scope, macros)]
+        if len(active) != 1:
+            raise ValueError(f"{name} is defined {len(active)} times for the build")
+        if not re.fullmatch(r"-?\d+", active[0].strip()):
+            raise ValueError(f"can't read #define {name} {active[0].strip()}")
+        values.append(int(active[0]))
+    return tuple(values)
+
+
+def _scoped(text: str) -> list[tuple[str, list[str]]]:
+    """Pair each line outside the `#if` family with the lines `active_lines` needs to decide
+    that line alone: the `#if`, `#elif` and `#else` lines of the branches around it, a
+    stand-in for the line, and an `#endif` for each open `#if`.
+
+    `active_lines` of a line's scope is empty exactly when the line is inactive, and
+    evaluates only those conditions, so the rest of the file may use conditions `evaluate`
+    can't read.
+    """
     # Per open #if, its directive lines so far: the #if and any #elif or #else after it.
     open_ifs: list[list[str]] = []
-    found: dict[str, list[tuple[list[str], str]]] = {name: [] for name in names}
+    scoped = []
     for line in text.splitlines():
-        m = re.match(r"\s*#\s*(\w+)\s*(.*?)\s*$", line)
-        if not m:
-            continue
-        directive, rest = m.groups()
+        m = re.match(r"\s*#\s*(\w+)", line)
+        directive = m.group(1) if m else None
         if directive in ("if", "ifdef", "ifndef"):
             open_ifs.append([line])
         elif directive in ("elif", "else"):
@@ -439,28 +534,45 @@ def defines(text: str, names: Iterable[str], macros: Macros) -> tuple[int, ...]:
             if not open_ifs:
                 raise ValueError("#endif without #if")
             open_ifs.pop()
-        elif directive in ("define", "undef"):
-            name, value = re.match(r"(\w*)(.*)", rest).groups()  # type: ignore[union-attr]
-            if name not in found:
-                continue
-            if directive == "undef":
-                raise ValueError(f"#undef {name}")
+        else:
             enclosing = [d for branches in open_ifs for d in branches]
-            found[name].append((enclosing + ["define"] + ["#endif"] * len(open_ifs), value))
+            scoped.append((line, [*enclosing, "line", *["#endif"] * len(open_ifs)]))
     if open_ifs:
         raise ValueError("#if without #endif")
-    values = []
-    for name, defined in found.items():
-        if not defined:
-            raise ValueError(f"no #define {name}")
-        # Each define with only its enclosing directives, which `active_lines` evaluates.
-        active = [value for lines, value in defined if active_lines(lines, macros)]
-        if len(active) != 1:
-            raise ValueError(f"{name} is defined {len(active)} times for the build")
-        if not re.fullmatch(r"-?\d+", active[0].strip()):
-            raise ValueError(f"can't read #define {name} {active[0].strip()}")
-        values.append(int(active[0]))
-    return tuple(values)
+    return scoped
+
+
+_FEATURE_NAME = re.compile(
+    r'inline\s+constexpr\s+const\s+char\s*\*\s*(m862_6_\w+)\s*=\s*"([^"\\]*)"\s*;'
+)
+
+
+def feature_names(text: str, macros: Macros) -> frozenset[str]:
+    """Return the `M862.6` feature names one build knows: the `gcode_info::m862_6_*`
+    constants its preprocessor keeps in `gcode_info.hpp`.
+
+    Only the `#if` branches around those constants are evaluated. Any other line that names
+    one fails the read, so a constant declared another way can't go unseen.
+    """
+    try:
+        found: dict[str, str] = {}
+        for line, scope in _scoped(_strip_comments(text)):
+            if "m862_6_" not in line:
+                continue
+            m = _FEATURE_NAME.fullmatch(line.strip())
+            if not m:
+                raise ValueError(f"can't read {line.strip()!r}")
+            if not active_lines(scope, macros):
+                continue
+            constant, name = m.groups()
+            if constant in found:
+                raise ValueError(f"{constant} is declared twice for the build")
+            found[constant] = name
+        if not found:
+            raise ValueError("no M862.6 feature names")
+    except ValueError as e:
+        raise Unreadable(GCODE_INFO_FILE, str(e)) from None
+    return frozenset(found.values())
 
 
 # The `StandardRammingSequence` cases (`standard_ramming_sequence.hpp`).

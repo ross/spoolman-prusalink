@@ -17,11 +17,31 @@ def macros(**values):
 
 def test_printer_models():
     assert read.printer_models(fixtures.MODELS_HPP) == {
-        "1.3.0": "MK3",
-        "1.4.0": "MK4",
-        "2.1.0": "MINI",
-        "7.1.0": "COREONE",
+        "1.3.0": read.PrinterModel("MK3", "mk3"),
+        "1.4.0": read.PrinterModel("MK4", "mk4"),
+        "2.1.0": read.PrinterModel("MINI", "mini"),
+        "7.1.0": read.PrinterModel("COREONE", "coreone"),
     }
+
+
+def model_entry(model="mk4", group="mk4", version="1, 4, 0", name="MK4", extra=""):
+    return (
+        f"PrinterModelInfo {{ .model = PrinterModel::{model},"
+        f" .compatibility_group = PrinterModelCompatibilityGroup::{group},"
+        f' .version = {{ {version} }}, .id_str = "{name}",{extra} }},'
+    )
+
+
+def model_table(*entries, variants=""):
+    text = "printer_model_info {\n" + "\n".join(entries) + "\n};\n"
+    if variants:
+        text += f"printer_model_mmu_variant {{\n{variants}\n}};\n"
+    return text
+
+
+def test_printer_models_ignore_comments():
+    entry = model_entry(extra=' // .id_str = "OLD", .model = PrinterModel::mk3,\n')
+    assert read.printer_models(model_table(entry)) == {"1.4.0": read.PrinterModel("MK4", "mk4")}
 
 
 @pytest.mark.parametrize(
@@ -29,24 +49,106 @@ def test_printer_models():
     [
         ("int x;", "no printer_model_info array"),
         ("printer_model_info {\n};", "no PrinterModelInfo entries"),
+        (model_table(model_entry().replace(' .id_str = "MK4",', "")), "no .id_str"),
+        (model_table(model_entry(), model_entry(model="mk4s")), "model 1.4.0 appears twice"),
         (
-            "printer_model_info {\n PrinterModelInfo { .version = { 1, 4, 0 }, },\n};",
-            "no .id_str",
+            model_table(model_entry(), model_entry(version="1, 4, 1")),
+            "PrinterModel::mk4 appears twice",
+        ),
+        (model_table(model_entry(version="1, 4")), "no .version"),
+        (
+            model_table(model_entry().replace("PrinterModel::mk4,", "mk4,")),
+            "can't read .model = mk4",
         ),
         (
-            'printer_model_info {\n PrinterModelInfo { .version = { 1, 4, 0 }, .id_str = "A" },'
-            ' PrinterModelInfo { .version = { 1, 4, 0 }, .id_str = "B" },\n};',
-            "model 1.4.0 appears twice",
+            model_table(model_entry().replace("PrinterModelCompatibilityGroup::", "")),
+            "can't read .compatibility_group = mk4",
         ),
         (
-            'printer_model_info {\n PrinterModelInfo { .version = { 1, 4 }, .id_str = "A" },\n};',
-            "no .version",
+            model_table(model_entry().replace(" .compatibility_group = ", " .group = ")),
+            "no .compatibility_group",
+        ),
+        (
+            model_table(model_entry(extra=" .compatibility_group = 3,")),
+            ".compatibility_group appears 2 times",
         ),
     ],
 )
 def test_printer_models_fail_closed(text, problem):
     with pytest.raises(Unreadable, match=f"can't read {read.MODELS_FILE}: {problem}"):
         read.printer_models(text)
+
+
+def test_mmu_variants():
+    assert read.mmu_variants(fixtures.MODELS_HPP) == {
+        "MK3MMU2": "1.3.0",
+        "MK4MMU3": "1.4.0",
+        "COREONEMMU3": "7.1.0",
+    }
+
+
+def variant(model="mk4", name="MK4MMU3"):
+    return f'PrinterModelMMUVariant {{ .model = PrinterModel::{model}, .id_str = "{name}" }},'
+
+
+@pytest.mark.parametrize(
+    ("text", "problem"),
+    [
+        ("int x;", "no printer_model_info array"),
+        (model_table(model_entry()), "no printer_model_mmu_variant array"),
+        (model_table(model_entry(), variants="// none"), "no PrinterModelMMUVariant entries"),
+        (
+            model_table(model_entry(), variants=variant(model="mk4s")),
+            "the MMU variant MK4MMU3 names an unknown PrinterModel::mk4s",
+        ),
+        (
+            model_table(model_entry(), variants=variant() + variant()),
+            "the MMU variant MK4MMU3 appears twice",
+        ),
+        (model_table(model_entry(), variants=variant().replace(".model", ".m")), "no .model"),
+        (model_table(model_entry(), variants=variant().replace(".id_str", ".s")), "no .id_str"),
+    ],
+)
+def test_mmu_variants_fail_closed(text, problem):
+    with pytest.raises(Unreadable, match=f"can't read {read.MODELS_FILE}: {problem}"):
+        read.mmu_variants(text)
+
+
+def gcode_macros(**values):
+    return macros(**{"HAS_MMU2": False, "HAS_INDX": False, "HAS_HT_HOTEND": False, **values})
+
+
+@pytest.mark.parametrize(
+    ("values", "names"),
+    [
+        ({}, {"Input Shaper"}),
+        ({"HAS_MMU2": True, "HAS_HT_HOTEND": True}, {"Input Shaper", "MMU3", "HT Hotend"}),
+        ({"HAS_INDX": True}, {"Input Shaper", "INDX lock"}),
+    ],
+)
+def test_feature_names(values, names):
+    # `#if EXTRUDERS > 1`, which `evaluate` can't read, is left alone.
+    assert read.feature_names(fixtures.GCODE_INFO_HPP, gcode_macros(**values)) == names
+
+
+DECLARE = 'inline constexpr const char *m862_6_{} = "{}";'
+
+
+@pytest.mark.parametrize(
+    ("text", "problem"),
+    [
+        ("", "no M862.6 feature names"),
+        ("#if HAS_MMU2()\n" + DECLARE.format("mmu", "MMU3") + "\n#endif", "no M862.6 feature"),
+        ("#if NEW()\n" + DECLARE.format("mmu", "MMU3") + "\n#endif", r"unknown macro NEW\(\)"),
+        ("const char *m862_6_mmu = MMU_NAME;", "can't read 'const char \\*m862_6_mmu"),
+        (DECLARE.format("a", "A") + "\n" + DECLARE.format("a", "B"), "m862_6_a is declared twice"),
+        ("#if HAS_MMU2()\n" + DECLARE.format("mmu", "MMU3"), "#if without #endif"),
+        ("#endif\n" + DECLARE.format("a", "A"), "#endif without #if"),
+    ],
+)
+def test_feature_names_fail_closed(text, problem):
+    with pytest.raises(Unreadable, match=f"can't read {read.GCODE_INFO_FILE}: {problem}"):
+        read.feature_names(text, gcode_macros())
 
 
 def test_features():
