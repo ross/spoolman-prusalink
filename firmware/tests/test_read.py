@@ -589,6 +589,8 @@ def test_configuration_of_the_xl_tool_head():
         ('"Configuration_MK4.h"', '"Configuration_MK4_adv.h"', "unexpected #include"),
         ('"Configuration_MK4.h"', "<Configuration_MK4.h>", "unexpected #include"),
         ("#pragma once", "#define X 1", "unexpected #define"),
+        ("#pragma once", "#", "unexpected '#'"),
+        ("#pragma once", '# "x"', """unexpected '# "x"'"""),
     ],
 )
 def test_configuration_fail_closed(old, new, problem):
@@ -619,6 +621,8 @@ def test_ramming_variant(build, variant):
         ('PRINTER STREQUAL "MINI"', 'PRINTER MATCHES "MINI"', "can't read the condition"),
         ('PRINTER STREQUAL "MINI"', "HAS_INDX AND HAS_MMU2", "can't read the condition"),
         ('PRINTER STREQUAL "MINI"', '"HAS_INDX"', "can't read the condition"),
+        ('PRINTER STREQUAL "MINI"', 'PRINTER STREQUAL "${X}"', "can't read the condition"),
+        ('PRINTER STREQUAL "MINI"', r'PRINTER STREQUAL "MI\NI"', "can't read the condition"),
         ("elseif(HAS_INDX)", "elseif(HAS_NEW)", "unknown feature HAS_NEW on line 5"),
         ("  target_sources(firmware PRIVATE standard_ramming_sequence_nextruder.cpp)\n", "", "0 "),
         ("ramming_sequence.cpp)", "ramming_sequence.cpp standard_ramming_sequence_mini.cpp)", "2 "),
@@ -626,6 +630,8 @@ def test_ramming_variant(build, variant):
         ("sequence_mini.cpp", "sequence_mini.cc", r"can't read the ramming source .*_mini\.cc"),
         ("message(FATAL_ERROR", "message(WARNING", r"unexpected message\(\) on line 12"),
         ("firmware PRIVATE ramming", "firmware PUBLIC ramming", r"unexpected target_sources"),
+        ("PRIVATE standard", "PRIVATE ${SRC} standard", r"unexpected \$\{SRC\} in target_sources"),
+        ("PRIVATE standard", "PRIVATE x.cpp INTERFACE standard", "unexpected INTERFACE in target"),
         ("target_sources(firmware PRIVATE ramming", "add_library(x", r"unexpected add_library"),
         ("elseif(HAS_INDX)", "if(HAS_INDX)", r"unexpected if\(\) on line 5"),
         ("else()", "else()\nelseif(HAS_INDX)", r"unexpected elseif\(\) on line 12"),

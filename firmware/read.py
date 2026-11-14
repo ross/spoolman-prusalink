@@ -281,7 +281,9 @@ def configuration(text: str, macros: Macros, advanced: bool = False) -> str:
             if not line.strip():
                 continue
             m = re.match(r"\s*#\s*(\w+)\s*(.*?)\s*$", line)
-            directive, rest = m.groups()  # type: ignore[union-attr]
+            if not m:
+                raise ValueError(f"unexpected {line.strip()!r}")
+            directive, rest = m.groups()
             if directive == "error":
                 raise ValueError(f"the build reaches #error {rest}")
             if directive == "pragma":
@@ -302,6 +304,7 @@ def configuration(text: str, macros: Macros, advanced: bool = False) -> str:
 
 
 _RAMMING_SOURCE = re.compile(r"standard_ramming_sequence_(\w+)\.cpp")
+_CMAKE_SOURCE_KEYWORDS = frozenset({"PRIVATE", "PUBLIC", "INTERFACE", "FILE_SET"})
 
 
 def ramming_variant(text: str, build: str, features: Mapping[str, frozenset[str]]) -> str:
@@ -339,6 +342,10 @@ def ramming_variant(text: str, build: str, features: Mapping[str, frozenset[str]
                 words = _cmake_words(args)
                 if name == "target_sources" and words[:2] == ["firmware", "PRIVATE"]:
                     for file in words[2:]:
+                        # A variable could name a ramming source, and a later keyword
+                        # starts another list with other rules.
+                        if "$" in file or file in _CMAKE_SOURCE_KEYWORDS:
+                            raise ValueError(f"unexpected {file} in target_sources() line {line}")
                         if "standard_ramming_sequence" not in file:
                             continue
                         m = _RAMMING_SOURCE.fullmatch(file)
