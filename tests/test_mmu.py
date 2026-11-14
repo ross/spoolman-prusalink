@@ -2,7 +2,7 @@
 
 from harness import LOC, jobs, ledger, make, menu, spool_x, tool_locations
 
-from simulator.model import PrintSpec, Segment
+from simulator.model import JobPhase, PrintSpec, Segment
 from simulator.prusalink import filament, info
 from simulator.tool import SimTool
 
@@ -188,4 +188,67 @@ async def test_a_second_mmu_print_in_one_boot_counts_less_at_its_start(tmp_path)
     assert first == {1: 624, 2: 444}
     # 1275.3072 and 934.7672 mm counted: 1211 and 888.
     assert second == {1: 1211 - 624, 2: 888 - 444}
+    await bridge.aclose()
+
+
+async def resume_after_cut(station, spec, fed, connect=None):
+    """Print `spec` to `fed` mm, polling, then cut the power and run the window, the
+    recovery and the unpark. `connect` sets how long the MMU connects after the boot."""
+    p = station.printer
+    await station.start_print(spec)
+    await run(station, lambda: p.job.fed_mm >= fed)
+    await station.poll()  # the bridge charges what the print counted so far
+    if connect is not None:
+        station.sim.settings.mmu_connect_seconds = connect
+    p.reboot(keep_job=True)
+    await station.poll()  # in the window
+    await run(station, lambda: p.job is not None and p.job.phase is JobPhase.PRINTING)
+    await station.poll()
+
+
+async def test_an_mmu_print_resumed_after_a_cut_is_charged_nothing_until_a_tool_change(
+    tmp_path,
+):
+    # BF17: the boot leaves no slot selected. The MMU connects in 0.2 s here, before the
+    # resume, so its 8 mm feed back and the rest of slot 0's segment count on no slot. The
+    # change to slot 1 runs from none: slot 0's tower unload and the firmware's feed count
+    # nothing, and slot 1 counts from its first pick on. Spool 1 is charged nothing after
+    # the cut, though slot 0 printed 70 more mm.
+    bridge, fake, station, _ = mmu(tmp_path, [(0, "PLA"), (1, "PLA")], t0="PLA", t1="PLA")
+    p = station.printer
+    await bridge.poll()
+    spec = PrintSpec([Segment(0, 100), Segment(1, 100)], duration_s=20)
+    await resume_after_cut(station, spec, 30)
+    # Before the cut, slot 0 counted the start's 17 + 53 and 30 mm of its segment: 95.
+    assert totals(fake) == {1: 95}
+    assert p.mmu.active and p.selected_tool is None and p.job.segment == 0
+    await run(station, lambda: p.job.segment == 1)
+    await station.poll()
+    # Slot 0 printed its last 70 mm and changed to slot 1; slot 1's first pick counted.
+    assert totals(fake) == {1: 95, 2: 82}
+    await run(station, lambda: p.job is None)
+    await station.poll()
+    # Slot 1: 32 + 54.63, its 100 mm and its tower unload at the end, 35.9518: 222.5818
+    # mm counted, 211 charged.
+    assert totals(fake) == {1: 95, 2: 211}
+    assert "tool change none -> T1" in [e.text for e in station.sim.events if e.kind == "job"]
+    await bridge.aclose()
+
+
+async def test_the_resume_feed_back_lands_on_slot_0_while_the_mmu_connects(tmp_path):
+    # BF17: a print on slot 2, resumed while the MMU still connects. The resume feeds 8 mm
+    # of slot 2's filament back, which counts 7.6 on slot 0, and the MMU is Active before
+    # the print goes on, so nothing counts after that. The bridge charges spool 1, which
+    # never moved, and spool 3 nothing from the cut to the print's end.
+    bridge, fake, station, _ = mmu(tmp_path, [(0, "PLA"), (2, "PLA")], t0="PLA", t2="PLA")
+    p = station.printer
+    await bridge.poll()
+    spec = PrintSpec([Segment(2, 200)], duration_s=20)
+    # 3.5 s after the boot the 8 mm feeds back, and 4.5 s after it the print goes on.
+    await resume_after_cut(station, spec, 30, connect=4)
+    # Before the cut, slot 2 counted the start's 17 + 53 and 30 mm of the print: 95.
+    assert totals(fake) == {3: 95, 1: 7} and station.counter_at(0) == 7
+    await run(station, lambda: p.job is None)
+    await station.poll()
+    assert totals(fake) == {3: 95, 1: 7}
     await bridge.aclose()
