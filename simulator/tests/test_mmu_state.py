@@ -258,9 +258,7 @@ def test_mmu_guards():
         p.set_tool_enabled(3, False)
     with pytest.raises(Invalid, match="the MMU's filament menu has no plain load"):
         p.load(1, source="preset", name="PLA")
-    # Temporary refusals until the MMU's operations and prints arrive.
-    with pytest.raises(Invalid, match="Unload Filament arrives in a later PR"):
-        p.unload(2)
+    # A temporary refusal until the MMU's prints arrive.
     with pytest.raises(Invalid, match="MMU prints arrive in a later PR"):
         p.start_print(one_segment(10))
     # An upload still runs.

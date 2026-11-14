@@ -285,15 +285,23 @@ TYPE_STEP = "TYPE"  # writes the type
 AUTO_RETRACT_STEP = "AUTO_RETRACT"  # auto-retracts unless the firmware would skip it
 DERETRACT_STEP = "DERETRACT"  # what a ramming sequence starting with a feed does first
 RETRACTED_STEP = "RETRACTED"  # stores `mm` as the auto-retracted distance
-MARKERS = frozenset({TYPE_STEP, AUTO_RETRACT_STEP, DERETRACT_STEP, RETRACTED_STEP})
+# An MMU's slot switch: SELECT makes the process's tool the selected slot, with its filament
+# in the extruder, as the end of a tool change does; DESELECT leaves no slot selected and
+# the extruder empty, as the end of an MMU unload does (`mmu2_mk4.cpp:674, 869-871`).
+SELECT_STEP = "SELECT"
+DESELECT_STEP = "DESELECT"
+MARKERS = frozenset(
+    {TYPE_STEP, AUTO_RETRACT_STEP, DERETRACT_STEP, RETRACTED_STEP, SELECT_STEP, DESELECT_STEP}
+)
 
 
 @dataclass
 class LoadStep:
     """One step of a load or unload: a signed E move in commanded mm, or a marker."""
 
-    # A move's phase is SLOW, FAST, PURGE, PRIME, RETRACT, RAM or UNLOAD; a marker's is
-    # one of MARKERS.
+    # A move's phase is SLOW, FAST, PURGE, PRIME, RETRACT, RAM or UNLOAD, or on an MMU FEED,
+    # the firmware's tool-change feed, or LOAD, its load to the nozzle; a marker's is one of
+    # MARKERS.
     phase: str
     mm: float = 0.0  # what's left of the move: positive feeds, negative retracts
 
@@ -333,6 +341,22 @@ class UnloadProcess:
     @property
     def phase(self) -> str:
         return self.steps[0].phase if self.steps else "UNLOAD"
+
+
+@dataclass
+class MmuProcess:
+    """An MMU operation that moves no printer E: the unit's own pulley and selector moves of
+    a preload, an eject or a cut (`mmu2_mk4.cpp:897-1019`). It ends when the time is up,
+    writing `material` when one is set."""
+
+    op: str  # "preload", "eject" or "cut"
+    remaining: float  # seconds
+    material: Material | None = None
+    kind: str = "mmu"
+
+    @property
+    def phase(self) -> str:
+        return self.op.upper()
 
 
 @dataclass
@@ -420,7 +444,7 @@ class SimTool:
     extruded_at_unload: int = 0
     stuck_write: bool = False
     # One process per printer, and a load types one tool, so the process stays on the tool.
-    process: LoadProcess | UnloadProcess | None = None
+    process: LoadProcess | UnloadProcess | MmuProcess | None = None
     path: FilamentPath = field(default_factory=FilamentPath)
 
     # The stored type, the ad-hoc slot and the kept type change only through these methods.

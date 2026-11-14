@@ -239,6 +239,12 @@ class Mmu(FeedSystem):
         `filament_sensors_handler.cpp:161-182, 303-312`)."""
         return None
 
+    def end_unload(self, p: SimPrinter, t: SimTool) -> None:
+        """End the MMU menu's Unload Filament. Its last step left no slot selected, and it
+        writes no type, so nothing counts: the MMU's unload never reaches the write of none
+        in `unload_process` (`pause.cpp:969-973, 1263-1278`)."""
+        p._log("load", f"T{t.index} unloaded into the MMU: no type written")
+
 
 # Outside `FEED_SYSTEMS`: a model's build decides its feed system, and an MMU is switched
 # on and off at run time (`SimPrinter.feed`).

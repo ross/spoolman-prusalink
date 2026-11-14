@@ -35,6 +35,7 @@ PRINTER_CALLS: dict[str, Callable[[SimPrinter], None]] = {
     "clear_jam": lambda p: p.clear_jam(),
     "tap_through": lambda p: p.tap_through(),
     "set_mmu": lambda p: p.set_mmu(not (p.mmu and p.mmu.on)),
+    "preload_all": lambda p: p.preload_all("PETG"),
 }
 TOOL_CALLS: dict[str, Callable[[SimPrinter, int], None]] = {
     "load": lambda p, i: p.load(i, source="preset", name="PLA"),
@@ -46,6 +47,9 @@ TOOL_CALLS: dict[str, Callable[[SimPrinter, int], None]] = {
     "jam": lambda p, i: p.jam(i),
     "change_filament": lambda p, i: p.change_filament(i),
     "select_tool": lambda p, i: p.select_tool(i),
+    "load_to_nozzle": lambda p, i: p.load_to_nozzle(i),
+    "eject": lambda p, i: p.eject(i),
+    "cut": lambda p, i: p.cut(i),
     "set_sensor_fault": lambda p, i: p.set_sensor_fault(i, True),
     "set_stuck_write": lambda p, i: p.set_stuck_write(i, True),
     "set_tool_enabled": lambda p, i: p.set_tool_enabled(i, not p.tools[i].enabled),
@@ -293,6 +297,26 @@ def mmu_off():
     return sim, p
 
 
+def mmu_empty():
+    """An MK4S whose MMU is Active with the extruder empty: slots 0 and 2 typed."""
+    return make_mmu(types={0: PLA, 2: PLA})
+
+
+def mmu_loading():
+    """The MMU loads slot 2 to the nozzle, so the printer reads BUSY."""
+    sim, p = mmu_empty()
+    p.load_to_nozzle(2)
+    return sim, p
+
+
+def mmu_preloading():
+    """A Preload To MMU of slots 1 and 3 runs on slot 1, with slot 3 queued."""
+    sim, p = mmu_empty()
+    p.change_all([1, 3], name="PETG")
+    assert p.queue
+    return sim, p
+
+
 def mmu_sync_job():
     sim, p = make_mmu()
     p.upload("x.gcode", sliced(p, ""), print_after=True, overwrite=False)
@@ -309,6 +333,9 @@ def mmu_sensors_off():
 
 SITUATIONS = [
     mmu_loaded,
+    mmu_empty,
+    mmu_loading,
+    mmu_preloading,
     mmu_connecting,
     mmu_off,
     mmu_sync_job,
