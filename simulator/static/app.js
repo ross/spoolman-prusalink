@@ -170,7 +170,8 @@ function gate(actions, name, o) {
 function matHtml(m, prev) {
   if (!m) return '<span class="muted">-</span>';
   const uuid = m.instance_uuid || m.uuid;
-  return '<span class="' + (prev ? 'prev' : '') + '">' +
+  const tip = m.name + (m.adhoc === false ? ' (preset)' : '') + (uuid ? ' ' + uuid : '');
+  return '<span class="' + (prev ? 'prev' : '') + '" title="' + esc(tip) + '">' +
     (m.color ? '<span class="swatch" style="background:' + esc(m.color) + '" title="' + esc(m.color) + '"></span>' : '') +
     esc(m.name) + (m.adhoc === false ? ' <span class="tag" title="preset material">preset</span>' : '') +
     (uuid ? ' <span class="uuid" title="' + esc(uuid) + '">' + esc(String(uuid).slice(0, 8)) + '</span>' : '') +
@@ -198,8 +199,8 @@ function renderTool(p, t) {
     '<td class="' + (p.selected_tool === i ? 'sel' : '') + '">' + (p.selected_tool === i ? '&#9654;' : '') + i + '</td>' +
     '<td>' + (t.enabled ? 'on' : '<span class="dis">off</span>') + '</td>' +
     '<td>' + (t.loaded ? 'yes' : '<span class="muted">no</span>') + '</td>' +
-    '<td>' + matHtml(t.material, false) + '</td>' +
-    '<td>' + matHtml(t.kept_type || t.previous, true) + '</td>' +
+    '<td class="mat">' + matHtml(t.material, false) + '</td>' +
+    '<td class="mat">' + matHtml(t.kept_type || t.previous, true) + '</td>' +
     '<td class="num">' + Math.floor(t.extruded || 0) + '</td>' +
     '<td class="num">' + t.unload_count + '</td>' +
     '<td class="num">' + t.extruded_at_unload + '</td>' +
@@ -274,7 +275,7 @@ function renderPrinter(p) {
 
   h += '<div class="jobline">';
   if (job) {
-    h += '<span>job <b>#' + esc(job.id) + '</b> ' + esc(job.kind) + ' ' + esc(job.name) +
+    h += '<span title="' + esc(job.kind + ' ' + job.name + ' ' + ph) + '">job <b>#' + esc(job.id) + '</b> ' + esc(job.kind) + ' ' + esc(job.name) +
       ' <span class="muted">' + esc(ph) + '</span></span>';
     if (ph === 'HOLD') {
       // the attention text stands in for the bar
@@ -289,7 +290,7 @@ function renderPrinter(p) {
     h += '<span class="muted">no job</span>';
   }
   h += '</div>';
-  h += '<div class="msgline">' + (p.message ? '<span class="pill" title="last M117">' + esc(p.message) + '</span>' : '') + '</div>';
+  h += '<div class="msgline">' + (p.message ? '<span class="pill" title="last M117: ' + esc(p.message) + '">' + esc(p.message) + '</span>' : '') + '</div>';
 
   const a = p.actions || {};
   h += '<div class="btns">' +

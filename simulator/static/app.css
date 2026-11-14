@@ -49,7 +49,7 @@ small, .small { font-size: 11px; }
 .snap { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
 .snap select { max-width: 12em; }
 
-.cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(370px, 1fr)); gap: 8px; padding: 8px; }
+.cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(400px, 1fr)); gap: 8px; padding: 8px; }
 .card { position: relative; background: var(--panel); border: 1px solid var(--border); border-radius: 4px;
   padding: 6px 8px; min-width: 0; }
 .card .row { display: flex; flex-wrap: wrap; gap: 3px 8px; align-items: center; margin-bottom: 3px; }
@@ -70,12 +70,13 @@ small, .small { font-size: 11px; }
 /* The lines below keep their height and their parts keep their width, whatever they show,
    so nothing under them moves when a state changes. */
 .jobline { display: flex; gap: 2px 8px; align-items: center; min-height: 1.5em; white-space: nowrap; }
-.jobline > span:first-child { overflow: hidden; text-overflow: ellipsis; }
-.jobline .attn { flex: 1 1 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+/* The job's name gives way first, so the reason a printer waits always has room. */
+.jobline > span:first-child { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.jobline .attn { flex: 1 0 8em; overflow: hidden; text-overflow: ellipsis; }
 .msgline { min-height: 1.5em; margin-top: 3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .homed, .picked { display: inline-block; }
 .homed { min-width: 5.5em; }
-.picked { min-width: 4.5em; }
+.picked { min-width: 5.5em; }
 button.fixw { min-width: 5em; }
 .bar { flex: 1 1 100px; min-width: 80px; height: 8px; background: var(--pill); border-radius: 4px; overflow: hidden; }
 .bar > i { display: block; height: 100%; background: var(--printing); }
@@ -83,14 +84,16 @@ button.fixw { min-width: 5em; }
 .btns { display: flex; flex-wrap: wrap; gap: 3px; margin: 4px 0; }
 
 table.tools { width: 100%; border-collapse: collapse; margin-top: 4px; table-layout: fixed; }
-table.tools col.c-n { width: 2.6em; }
-table.tools col.c-en { width: 2.4em; }
-table.tools col.c-ld { width: 3.6em; }
-table.tools col.c-ex { width: 4.6em; }
-table.tools col.c-ul { width: 2.4em; }
-table.tools col.c-at { width: 4.2em; }
-table.tools col.c-gap { width: 3.4em; }
+table.tools col.c-n { width: 2.2em; }
+table.tools col.c-en { width: 2em; }
+table.tools col.c-ld { width: 3.4em; }
+table.tools col.c-ex { width: 3.8em; }
+table.tools col.c-ul { width: 2em; }
+table.tools col.c-at { width: 3.4em; }
+table.tools col.c-gap { width: 2.8em; }
 table.tools tr.t td { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* A material's name is never cut: on a narrow card it wraps. */
+table.tools tr.t td.mat { white-space: normal; overflow: visible; }
 table.tools th { text-align: left; font-weight: 600; color: var(--muted); font-size: 11px;
   padding: 1px 3px; border-bottom: 1px solid var(--border); }
 table.tools td { padding: 1px 3px; vertical-align: top; }
