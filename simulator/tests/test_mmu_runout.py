@@ -30,9 +30,6 @@ RELOAD = 7 + 4  # the load to the nozzle past the 40 mm gap, and the prime
 RAM_AFTER_PARK = 20 - 8  # the MMU's ramming after the park's retract to 8
 JOIN_LOAD = 47 - 40  # the load to the nozzle past the 40 mm gap the ramming left
 FIRST_PICK = 32 + 54.63  # a slot's first pick in the print, PLA
-# A print on slot 0 alone: the firmware's `T0` from no slot and its 35 mm, then the
-# profile's -2 (gap 2) and 17 + 53, which count 15 + 53 (`test_a_one_color_print`).
-ONE_SLOT = 35 + 15 + 53
 
 
 def three_slots():
@@ -45,12 +42,11 @@ def three_slots():
 
 def printing(sim, p, print_spec, seconds: float = 3.0) -> float:
     """Start the print and run it `seconds`; return the mm fed on slot 0, at gap 0."""
-    begun = START if len({s.tool for s in print_spec.segments}) > 1 else ONE_SLOT
     start(sim, p, print_spec)
     sim.advance(seconds)
     assert p.job.phase is JobPhase.PRINTING and p.job.segment == 0
     assert p.selected_tool == 0 and p.mmu.path.gap == 0
-    assert counts(p)[0] == pytest.approx(begun + p.job.fed_mm)
+    assert counts(p)[0] == pytest.approx(START + p.job.fed_mm)
     return p.job.fed_mm
 
 
@@ -148,7 +144,7 @@ def test_a_join_chain_goes_on_to_the_next_slot():
     assert p.job.mapped == {0: 3} and p.selected_tool == 3
     # Slot 2 printed from gap 0, so its ramming counts 20 too.
     assert counts(p) == pytest.approx(
-        {0: ONE_SLOT + fed + 20, 1: 0, 2: JOIN_LOAD + on_2 + 20, 3: JOIN_LOAD, 4: 0}
+        {0: START + fed + 20, 1: 0, 2: JOIN_LOAD + on_2 + 20, 3: JOIN_LOAD, 4: 0}
     )
     sim.advance(100)
     assert p.state is State.FINISHED
@@ -215,7 +211,7 @@ def test_change_filament_on_the_selected_slot_runs_the_mmus_m600():
     p.resume()
     sim.advance(100)
     assert p.state is State.FINISHED
-    assert counts(p)[0] == pytest.approx(ONE_SLOT + 40 + RAM_AFTER_PARK + RELOAD + 19.3)
+    assert counts(p)[0] == pytest.approx(START + 40 + RAM_AFTER_PARK + RELOAD + 19.3)
     unchanged(p)
 
 
@@ -235,14 +231,14 @@ def test_a_color_change_in_the_file_runs_the_mmus_m600():
     start(sim, p, spec((0, 40), color_changes_mm=[10]))
     sim.advance(5)
     assert str(p.job.attention) == "color change tool 0"
-    assert counts(p)[0] == pytest.approx(ONE_SLOT + 10 + RAM_AFTER_PARK)
+    assert counts(p)[0] == pytest.approx(START + 10 + RAM_AFTER_PARK)
     p.load(0)
     sim.advance(60)
     p.resume()
     assert p.job.pending_color_changes == []
     sim.advance(100)
     assert p.state is State.FINISHED
-    assert counts(p)[0] == pytest.approx(ONE_SLOT + 40 + RAM_AFTER_PARK + RELOAD + 19.3)
+    assert counts(p)[0] == pytest.approx(START + 40 + RAM_AFTER_PARK + RELOAD + 19.3)
     unchanged(p)
 
 
@@ -281,7 +277,7 @@ def test_a_cancel_while_waiting_for_the_reload_unloads_nothing():
     assert p.state is State.PRINTING and p.job.phase is JobPhase.PARKING
     sim.advance(5)
     assert p.state is State.STOPPED
-    assert counts(p)[0] == pytest.approx(ONE_SLOT + fed + RAM_AFTER_PARK)
+    assert counts(p)[0] == pytest.approx(START + fed + RAM_AFTER_PARK)
     assert "M702 W2: the end of the print unloads into the MMU" not in messages(sim, "job")
     unchanged(p)
 
@@ -300,7 +296,7 @@ def test_a_cancel_during_the_reload_unloads_the_selected_slot():
     assert "M702 W2: the end of the print unloads into the MMU" in messages(sim, "job")
     sim.advance(5)
     assert p.state is State.STOPPED
-    assert counts(p)[0] == pytest.approx(ONE_SLOT + fed + RAM_AFTER_PARK)
+    assert counts(p)[0] == pytest.approx(START + fed + RAM_AFTER_PARK)
     unchanged(p)
 
 

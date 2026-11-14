@@ -2052,6 +2052,22 @@ void GCodeInfo::parse_m862(GcodeBuffer::String cmd) {
         visit_tool([&](auto &info) { info.requires_high_flow_nozzle = *requires_high_flow_nozzle; });
     }
 }
+
+bool GCodeInfo::is_singletool_gcode() const {
+    // Tool 0 needs to be given in comments and used
+    if (!per_extruder_info[0].used()) {
+        return false;
+    }
+
+    // Other tools need to not be given in comments at all
+    for (uint8_t e = 1; e < std::size(per_extruder_info); e++) {
+        if (per_extruder_info[e].given()) {
+            return false;
+        }
+    }
+
+    return true;
+}
 """  # noqa: E501 (verbatim firmware lines)
 
 

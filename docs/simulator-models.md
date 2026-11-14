@@ -487,11 +487,11 @@ from the feed system and the profile, not one global purge:
   slot, then the slicer's load and purge on the incoming one. The first
   change of a print, from no slot, counts nothing, and a `T` to the
   selected slot does nothing (F40).
-- MMU, at the start and end: a file that prints on tool 0 alone
-  (`PrintSpec.single_tool_file`, which has no profile) gets the firmware's
+- MMU, at the start and end: a single-tool file, sliced without the MMU3
+  profile (`PrintSpec.single_tool_file`), gets the firmware's
   `T0` and 35 mm load when no slot is selected. A stopped print, and a
   finished single-tool file, unload into the MMU (`M702 W2`) while the
-  printer reads `PRINTING`. A finished multi-color print and the sync job
+  printer reads `PRINTING`. A finished MMU3 profile print and the sync job
   leave that to the file (F42).
 
 The slicer's part (priming, ramming, the load after a change, the wipe
