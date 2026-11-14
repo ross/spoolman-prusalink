@@ -33,7 +33,8 @@ async def test_state_and_page(setup):
     data = await (await client.get("/api/state")).json()
     assert data["printers"][0]["tools"][0]["material"]["name"] == "PLA"
     assert data["printers"][0]["model"]["name"] == "COREONEL"
-    assert (await client.get("/")).status == 200
+    page = await client.get("/")
+    assert page.status == 200 and page.headers["Cache-Control"] == "no-cache"
     assert (await client.get("/static/../model.py")).status == 404
 
 
