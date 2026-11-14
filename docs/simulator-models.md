@@ -141,7 +141,7 @@ Paths are in the firmware at `ff61540d4`.
 | Feed ratio | E steps over calibrated E steps: 380/400 on every build but INDX, which is 550/576. | `planner.cpp:2210-2218`, `Configuration_COREONE.h:476-484` |
 | Auto-retract | After an idle load and at the end of a print, a Nextruder's sequence leaves the filament 55 mm retracted, but the tracker's gap stops at 40. The sequence first feeds back whatever the tracker says is retracted, so it starts from a gap of 0 and counts 23 mm: its 8 mm feed, which does leave the nozzle, and 15 mm that never does. When the tracker has lost the distance (the gap at its limit), only the 15 mm counts. The next forward move counts 15 mm more that never left the nozzle. INDX is exact. Off for flexible filament and when the user turns it off. | `standard_ramming_sequence_nextruder.cpp`, `ramming_sequence.cpp`, `mapi/motion.cpp`, `marlin_server.cpp:763-770, 1045-1080`, `pause.cpp:1041-1044` |
 | Unload | A menu unload rams first. It counts about 23 mm on a Nextruder that isn't auto-retracted and about 19 mm on INDX, before the unload is recorded. | `pause.cpp` |
-| Power-panic resume | INDX purges 25 mm (`G750 E25`). The MK4 family, Core One, Core One L and iX feed back the 8 mm they retracted at the cut. The XL moves nothing. This reading disagrees with F12, which has the 25 mm on the single-tool Core One L: the F12 trace decides. | `power_panic.cpp:110-116, 480-521` |
+| Power-panic resume | INDX purges 25 mm (`G750 E25`). The MK4 family, Core One, Core One L and iX feed back the 8 mm they retracted at the cut. The XL moves nothing. F12 in printer-behaviors.md reads the same; the simulator still purges 25 mm on every model (`panic_purge_mm`), and the F12 trace decides. | `power_panic.cpp:110-116, 480-521` |
 | Nozzle-cleaner sequences | On the iX and INDX, a file under `/usb/macros/nozzle_cleaner/` replaces a built-in sequence, the INDX purges included. The simulator assumes the built-in ones. | `gcode_loader.cpp:24-30, 105-115` |
 
 With the gap full, a Core One L menu load counts 20 mm before the type
@@ -183,12 +183,14 @@ counts, and print-after-upload goes through the same checks
 - **The per-tool checks need the file's filament-used metadata**: a tool
   with no filament or another type asks, and a disabled tool refuses.
   Those severities are fixed; only the nozzle checks follow a menu
-  setting (`gcode_compatibility.cpp:155-243`). The bridge's sync
+  setting (`gcode_compatibility.cpp:155-265`). The bridge's sync
   job has no such metadata, so it raises none of them (`gcode_info.hpp:95-98`,
   `gcode_compatibility.cpp:156-205, 420-423`).
 - **With an MMU and filament at the nozzle, the preview asks to unload
-  first**, unless the filament sensors are off. Yes unloads. No starts the
-  print as it is (`marlin_print_preview.cpp:228-256, 699-708`).
+  first**, unless the filament sensors are off, or a single-tool file of
+  the loaded type meets filament at the sensor, which starts at once. Yes
+  unloads. No starts the print as it is
+  (`marlin_print_preview.cpp:228-256, 699-708`).
 
 The idle sensor clear runs while the preview opens and stops once a question
 shows, except on the tools-mapping screen (`marlin_server.cpp:1448-1460`).
@@ -463,8 +465,9 @@ of work. A finding from a later workstream gets an entry there.
 
 Left to the work:
 
-- F12 against this plan on the single-tool power-panic purge, 25 mm or
-  8 mm. The F12 trace decides; until then the simulator keeps 25 mm.
+- The single-tool power-panic resume: the source gives a plain Core One L
+  the 8 mm fed back, not a 25 mm purge (F12). The F12 trace decides; until
+  then the simulator purges 25 mm on every model.
 - PrusaSlicer's default wiping volume, from [slicer run](#slicer-runs) 1.
 - Whether an INDX profile's retract before a tool change is emitted, from
   slicer run 5.

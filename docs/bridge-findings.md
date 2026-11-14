@@ -172,7 +172,7 @@ written.
   a write", describes only the warning. The INDX lock question (BF1)
   always asks. Of the checks of a print's tools, the nozzle checks follow
   a setting and the rest have fixed severities
-  (`gcode_compatibility.cpp:155-243`). The sync job, which names no
+  (`gcode_compatibility.cpp:155-265`). The sync job, which names no
   filament used, raises none of them (F28).
 - **Effect**: Set to abort, a job that fails a check is refused instead of
   held, and goes the way of BF5. Set to ignore, it runs. The default
@@ -221,17 +221,23 @@ written.
 ### BF6. A failed `M865` is silent
 
 - **Printers**: All the bridge writes to.
-- **What happens**: An `M865` the firmware can't take prints a serial
-  error, and the job still ends `FINISHED`. A name that's empty, `---` or
-  has a character outside `a-zA-Z0-9_-` stores nothing
-  (`filament_common.cpp:27-42`), and nor does a preset name the build
-  lacks (`FilamentType::from_name` in `src/common/filament_common.cpp`).
-  A name longer than 7 characters overflows the parse buffer
-  (`M865.cpp:132`, `filament_name_buffer_size` in `filament.hpp:32`).
-  `printer_name` in `printer_sync.py` keeps the bridge's names inside
-  these rules.
+- **What happens**: The job ends `FINISHED` whether or not the printer
+  took its `M865`. A name that's empty, `---` or has a character outside
+  `a-zA-Z0-9_-` prints a serial error and stores nothing
+  (`M865.cpp:133-138`, `filament_common.cpp:27-42`), and so does a preset
+  name the build lacks (`M865.cpp:73-78`, `FilamentType::from_name` in
+  `src/common/filament_common.cpp`). A name longer than 7 characters is
+  dropped without an error: the parser stops at the 7-character buffer
+  and skips `N` (`M865.cpp:132-133`, `gcode_parser.cpp:153-155`), and its
+  error report does nothing because `M865`'s parser has no error callback
+  (`M865.cpp:57`, `gcode_parser_helper.cpp:21-24`). The type keeps its
+  old name, and the rest of the line is stored. `printer_name` in
+  `printer_sync.py` keeps the bridge's names inside these rules, and cuts
+  them to 7 characters (`NAME_LIMIT`).
 - **Effect**: A late flag only. The printer still differs, so the bridge
-  flags the spool "didn't take" after the second job (W5).
+  flags the spool "didn't take" after the second job (W5). The bridge
+  can't write a name longer than 7 characters, so the silent drop doesn't
+  reach it.
 - **Evidence**: Read in the firmware source. The simulator models the
   preset case (`simulator/sync.py`,
   `simulator/tests/test_model_presets.py`).
@@ -310,8 +316,9 @@ written.
 - **Printers**: Every Nextruder, as BF9.
 - **What happens**: A cancelled print's end runs the auto-retract too. On a
   tool that isn't already auto-retracted, such as one fed with Move E or
-  Purge filament since its last load or print, the ramming counts about
-  22 mm (23 mm commanded at 0.95) while the job is still visible.
+  Purge filament since its last load or print, or one loaded at this
+  print's preview (BF23, F28), the ramming counts about 22 mm (23 mm
+  commanded at 0.95) while the job is still visible.
   `accounting.print_start` takes the first counter rise in a new job as
   the print's start (Q4), so it takes the ramming as one. A cancel during
   the scan or the start blip moves nothing and ends in `IDLE` (F27), so
@@ -324,16 +331,20 @@ written.
   cancel, still confirms it.
 - **Evidence**: Inferred from the source and `accounting.py`. Reproduced,
   no test kept: the bridge records `swap_assumed`, a provisional 22 mm
-  charge and `swap_staged`. The P8 test doesn't show it: its tool is
-  already auto-retracted, it fixes Spoolman before the cancel, and its
-  `finish()` polls every 1 s while the job parks for 0.2 s.
+  charge and `swap_staged`. Through the unit harness, a tool loaded at
+  the preview gives `swap_assumed` and the 22 mm charge too, with or
+  without polls during the load (BF23). The P8 test doesn't show it: its
+  tool is already auto-retracted, it fixes Spoolman before the cancel,
+  and its `finish()` polls every 1 s while the job parks for 0.2 s.
 - **Scenario rows**: P8, Q4, S4, Q1, S9, Q2.
 - **To reproduce**: Start from
   `test_p8_cancelled_during_preheat_is_not_a_print_start` in
   `integration/test_prints.py`. Open an unconfirmed swap as it does, then
   feed the tool (`extrude`) after the load. Start the print, `cancel` in
   the preheat, and poll every 0.1 s while the job parks. Fix Spoolman only
-  after the cancel. Expect `swap_assumed` for the job.
+  after the cancel. Expect `swap_assumed` for the job. BF23's cancel
+  path, with polls during the load and the auto-retract on, shows the
+  same after a load at the preview.
 - **Status**: Open.
 
 ### BF11. A power-panic resume loses usage and counts a purge
@@ -341,26 +352,27 @@ written.
 - **Printers**: All with counters. The purge differs by build.
 - **What happens**: The counters restart at boot and aren't in the
   power-panic data, so usage since the bridge's last poll is lost. The
-  resume then moves filament, and two readings of the source disagree on
-  how much. F12 reads a 25 mm purge on the Core One L
-  (`power_panic.cpp:484-488`, `nozzle_cleaner.cpp:96-106`).
-  simulator-models.md reads 25 mm on INDX only: the MK4 family, Core One,
-  Core One L and iX feed back the 8 mm retracted at the cut, and the XL
-  moves nothing (`power_panic.cpp:110-116, 480-521`). The bridge charges
-  whatever counts to the spool active after the boot.
+  resume then moves filament. INDX purges 25 mm with `G12 S21`
+  (`power_panic.cpp:480-488`, `nozzle_cleaner.cpp:96-109`). The MK4
+  family, Core One, Core One L and iX feed back the 8 mm retracted at the
+  cut, and the XL moves nothing (`power_panic.cpp:110-116, 518-521`). The
+  purge sits under `HAS_NOZZLE_CLEANER`, which only the iX and the INDX
+  builds set (`ProjectOptions.cmake:755-756`), and the iX's plain `G12`
+  wipes without a purge (`power_panic.cpp:489-491`,
+  `nozzle_cleaner.cpp:157-190`). The bridge charges whatever counts to
+  the spool active after the boot.
 - **Effect**: Up to one poll interval of printing, 30 s by default, is
-  never charged. The purge is charged to the active spool, which is right
-  if it leaves the nozzle; its size is unsettled.
-- **Evidence**: Read in the firmware source, with two readings that
-  disagree. The purge at `power_panic.cpp:484-488` sits under
-  `HAS_NOZZLE_CLEANER`, which only the iX and the INDX builds set
-  (`ProjectOptions.cmake:755`), so the source favors simulator-models.md's
-  reading. The size on the Core One L is to be confirmed: the F12 trace
-  decides, and has to be taken before the INDX upgrade.
+  never charged. The purge or feed is charged to the active spool, which
+  is right if it leaves the nozzle; on a plain Core One L the source says
+  8 mm.
+- **Evidence**: Read in the firmware source. The size on the Core One L
+  is to be confirmed: the F12 trace decides, and has to be taken before
+  the INDX upgrade. The simulator still purges 25 mm on every model
+  (`panic_purge_mm`).
 - **Scenario rows**: P12, Q5, C1.
 - **To reproduce**: `test_p12_power_panic_resume_keeps_the_job` in
-  `integration/test_prints.py` shows the loss and a 25 mm purge today. The
-  purge per build needs workstream 4.
+  `integration/test_prints.py` shows the loss and the simulator's 25 mm
+  purge today. The amount per build needs workstream 4.
 - **Status**: Open. A candidate for Accepted: printer-behaviors.md, under
   "Bridge follow-ups found here", calls both parts fine.
 
@@ -383,7 +395,9 @@ written.
   load's count as the print's first extrusion: at the wrong-filament
   question, or in the preheat once the print goes on. A cancel in that
   preheat then ends a job already taken as started. That's BF10's outcome
-  without the cancel's ramming, so an auto-retracted tool gets it too.
+  even with no ramming, as with auto-retract off. With auto-retract on,
+  the preview's load leaves the tool not retracted (F28), so the cancel
+  rams too, and that alone counts the job as started through BF10.
 - **Effect**: A job that never printed counts as started. An open
   unconfirmed swap closes as "assumed same spool" with a provisional
   charge (S4, Q1), and a staged spool is flagged (S9, Q2), as in BF10. It
@@ -392,18 +406,23 @@ written.
   doesn't know. The simulator's load is 108 mm at 10 mm/s, about 11 s. A
   Core One L moves 40 mm at 6 mm/s, 20 mm at 25 mm/s and a 40 mm purge at
   3 mm/s, then retracts 8 mm: about 21 s
-  (`standard_feedrates_nextruder.cpp:15-18`). It also reads `BUSY` while
+  (`standard_feedrates_nextruder.cpp:12-18`). It also reads `BUSY` while
   it heats to the load temperature and waits for the filament to go in,
   so a 30 s `poll_printing` lands in the load far more often than in the
-  simulator, and that poll avoids the finding. The live check will tell.
+  simulator. That poll avoids this finding's load path, but with
+  auto-retract on, a cancel in that preheat still counts as started
+  through BF10. The live check will tell.
 - **Evidence**: The preview's load is read in the firmware source.
-  Reproduced, no test kept, for both paths: a decline at the
-  wrong-filament question and a cancel in the preheat each give
-  `swap_assumed`. The simulator reaches the wrong-filament question for
-  any type, because its preview load is the user's free choice of preset
-  (`simulator/README.md`). A poll during the load avoids it: the bridge
-  sees no job then, and takes the job's counter afresh when the job comes
-  back. The printer's timing is to be confirmed.
+  Reproduced through the unit harness, no test kept, for both paths: a
+  decline at the wrong-filament question and a cancel in the preheat each
+  give `swap_assumed`. The simulator reaches the wrong-filament question
+  for any type, because its preview load is the user's free choice of
+  preset (`simulator/README.md`). A poll during the load avoids the load
+  path: the bridge sees no job then, and takes the job's counter afresh
+  when the job comes back. With polls every 0.2 s during the load, the
+  cancel path still gives `swap_assumed` and a provisional 22 mm charge
+  with the auto-retract on (BF10), and nothing with it off. The printer's
+  timing is to be confirmed.
 - **Scenario rows**: P8, Q4, S4, Q1, S9, Q2.
 - **To reproduce**: Unload the tool's spool and poll, to open an
   unconfirmed swap. Start a print on the empty tool, and poll at the "no
@@ -411,10 +430,11 @@ written.
   during the load. For the decline, load another type than the segment
   names, poll at the wrong-filament question, then `cancel`. For the
   cancel, load the segment's type, poll in the preheat, then `cancel`.
-  Either way the ledger shows `swap_assumed` for the job. On the Core One
-  L, the live check `F28-load-then-decline` confirms it with the
-  production bridge: sitting D in printer-behaviors.md, under "Capture
-  plan".
+  Either way the ledger shows `swap_assumed` for the job. To see the
+  cancel path through BF10, poll during the load with the auto-retract
+  on, which the unit harness leaves off (BF22). On the Core One L, the
+  live check `F28-load-then-decline` confirms it with the production
+  bridge: sitting D in printer-behaviors.md, under "Capture plan".
 - **Status**: Open.
 
 ### BF24. Usage counted on an empty tool lands on the next spool
@@ -608,10 +628,11 @@ before workstream 5, and the scenarios have no MMU rows yet.
 ### BF18. MMU: the sync job can wait on a question and unload the filament
 
 - **What happens**: With an MMU and filament at the nozzle, the preview
-  asks to unload first, unless the filament sensors are off. Yes unloads;
-  no starts the job as it is
-  (`marlin_print_preview.cpp:228-256, 699-708`). The stock
-  MMU3 end G-code unloads after every print, so this needs a printer left
+  asks to unload first, unless the filament sensors are off. The shortcut
+  for a single-tool file of the loaded type doesn't apply: the sync job
+  uses no tool (`gcode_info.cpp:611-615`). Yes unloads; no starts the job
+  as it is (`marlin_print_preview.cpp:228-256, 699-708`). The stock MMU3
+  end G-code unloads after every print, so this needs a printer left
   loaded by hand.
 - **Effect**: The sync job waits in `ATTENTION` and goes the way of BF5.
   Answering yes unloads the filament for a job that moves none.
