@@ -113,7 +113,12 @@ medium is a new input or condition through `account()` or
     `boot_id`. The natural place is the existing
     `self._model_boot != reading.boot_id` branch in `read()`, which runs
     once per boot, and again on later polls while the model can't be
-    read, when writes are off anyway.
+    read, when writes are off anyway. How the reset is written sets the
+    cost. Clearing `_idle_since` holds the job at that poll but starts the
+    clock only at the next one, because `sync_printer` returns before its
+    own `_note_state`: a write after any boot then waits two idle polls.
+    Setting `_idle_since` to the current time while the printer reads
+    idle makes it one. Both are safe: choose one on purpose.
   - If D3 adds the guard, it goes in `sync_printer` and `read()`, and
     needs the state of the last read before the boot, which `read()`
     overwrites today.
