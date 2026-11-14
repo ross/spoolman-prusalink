@@ -776,6 +776,11 @@ class SimPrinter:
         """The rules of the model's feed system."""
         return FEED_SYSTEMS[self.model.feed]
 
+    def _head_tool(self) -> SimTool | None:
+        """The tool whose path the head's own moves run on: the picked tool, or None on a
+        toolchanger with none picked."""
+        return None if self.selected_tool is None else self.tools[self.selected_tool]
+
     # Plumbing.
 
     @property
@@ -1775,10 +1780,11 @@ class SimPrinter:
                 if picked != self._job_tool(job).index:
                     job.resumed_on = picked
                 if self.model.extruder.panic_retract:
-                    # The cut retracts the picked tool through the planner, which forgets a
+                    # The cut retracts the head's tool through the planner, which forgets a
                     # stored auto-retract distance (`panic_loop` in `power_panic.cpp`). The
-                    # counters restart at the boot.
-                    self._track(self.tools[picked], -self.model.extruder.lengths.retract_mm)
+                    # counters restart at the boot. A print in progress always has a tool
+                    # picked.
+                    self._track(self._head_tool(), -self.model.extruder.lengths.retract_mm)
             job.restore = None  # a power loss ends the filament change before its restore
             job.paused_from = JobPhase.PRINTING if was_paused else None
             if was_paused:
@@ -2183,11 +2189,7 @@ class SimPrinter:
             return
         self._run_steps(t, p.steps)  # what rounding left
         t.process = None
-        self._physical_unload(t, "unload")
-        # `M702` docks after every unload on INDX. `M1600` docks only after its load, so a
-        # change all's unload keeps the tool for the load that follows.
-        if not (self.queue and self.queue[0].tool == t.index):
-            self.feed.rest(self)
+        self.feed.end_unload(self, t)
         self._process_done()
 
     def _next_load_step(self, t: SimTool, p: LoadProcess) -> None:
@@ -2312,7 +2314,7 @@ class SimPrinter:
 
     def _ask_print(self, job: UserJob) -> None:
         """The "G-code incompatible" screen (`stateFromPrinterCheck`), then the rest."""
-        rows = print_checks(self.feed.tool_mapping, self._uses(job), self._tool_views()).rows
+        rows = print_checks(self.feed.maps_tools(self), self._uses(job), self._tool_views()).rows
         if rows:
             self._preview_question(job, Reason.PREVIEW, rows)
         else:
@@ -2326,7 +2328,7 @@ class SimPrinter:
         applies, with nothing wrong too: only a remote start that is fully compatible skips
         it (`checks_done` in `src/common/marlin_print_preview.cpp`).
         """
-        checks = print_checks(self.feed.tool_mapping, self._uses(job), self._tool_views())
+        checks = print_checks(self.feed.maps_tools(self), self._uses(job), self._tool_views())
         if checks.mapped:
             job.mapping = self._mapping_report(job, checks.mapping)
             self._wait(job, job.mapping[0])
@@ -2366,7 +2368,8 @@ class SimPrinter:
         """The wrong-filament screen (`stateFromFilamentType`), which a printer with tool
         mapping leaves to its tools-mapping screen."""
         uses, views = self._uses(job), self._tool_views()
-        rows = [] if tool_mapping(self.feed.tool_mapping, uses, views) else wrong_types(uses, views)
+        mapped = tool_mapping(self.feed.maps_tools(self), uses, views)
+        rows = [] if mapped else wrong_types(uses, views)
         if rows:
             self._preview_question(job, Reason.WRONG_FILAMENT, rows)
         else:
@@ -2379,74 +2382,34 @@ class SimPrinter:
         spec = job.spec
         job.enter(JobPhase.PREHEAT)
         job.remaining = self.settings.preheat_seconds if spec.preheat_s is None else spec.preheat_s
-        self.selected_tool = self._seg_tool(job, 0)
+        self.feed.select_for_print(self, self.tools[self._seg_tool(job, 0)])
         self._show_state()
 
     def _begin_feeding(self, job: UserJob) -> None:
         if not job.primed:
             job.primed = True
             job.resumed_on = None  # the start G-code's tool changes end it
-            self._prime(job)
-        self.selected_tool = self._job_tool(job).index
+            self.feed.prime(self, job, self._slicer(job))
+        self.feed.select_for_print(self, self._job_tool(job))
         job.enter(JobPhase.PRINTING)
         self._show_state()
 
     @property
     def profile(self) -> Slicer | None:
-        """The multi-tool slicer profile the printer prints with, on a toolchanger only. An
-        XL with one tool isn't one (`toolchanger`), and its single-tool profiles inherit
-        `*commonXL*`, whose end G-code doesn't park, so it prints as a direct printer does."""
-        return self.model.slicer if self.toolchanger else None
+        """The multi-tool slicer profile the printer prints with, as its feed system says."""
+        return self.feed.profile(self)
 
     def _slicer(self, job: UserJob) -> Slicer | None:
         """The print's slicer profile, with the print's overrides."""
         slicer, spec = self.profile, job.spec
         return slicer and slicer.overridden(spec.prime_mm, spec.toolchange_purge_mm)
 
-    def _prime(self, job: UserJob) -> None:
-        """The start G-code's moves outside the model, on a toolchanger (`Slicer`).
-
-        `G427` picks each used tool in ascending order and purges it in the nozzle cleaner
-        (`run` and `prepare_tool` in
-        `src/feature/tool_offset_calibration/tool_offset_calibration.cpp:186-233, 663-850`).
-        """
-        slicer = self._slicer(job)
-        if slicer is None:
-            return
-        # The start G-code's tools go through the tool mapping too.
-        tools = {self._seg_tool(job, i) for i in range(len(job.spec.segments))}
-        first = self.tools[self._seg_tool(job, 0)]
-        used = [self.tools[i] for i in sorted(tools)]
-        self._pick(first)
-        self._print_moves(first, slicer.cleanup)
-        if slicer.calibrates:
-            for t in used:
-                self._pick(t)
-                self._purge_clean(t)
-        if slicer.prime_others is not None:
-            for t in used:
-                if t is not first:
-                    self._pick(t)
-                    self._print_moves(t, slicer.prime_others.moves())
-        self._pick(first)
-        self._print_moves(first, slicer.prime.moves())
-        self._log("job", f"start G-code primed {', '.join(f'T{t.index}' for t in used)}")
-
     def _park(self, job: UserJob | SyncJob, end: State) -> None:
-        """End a job: a finished print's end G-code on a toolchanger runs the profile's last
-        moves and parks the tool (`P0 S1`, `src/marlin_stubs/P.cpp:35-48`), then the
-        firmware's own end runs, and INDX docks what's still picked (`pre_finalize_print`).
-        A stopped print and a sync job keep the tool to the firmware's end."""
-        slicer = None
+        """End a job: a finished print's end G-code runs the feed system's last moves, then
+        the firmware's own end runs, and INDX docks what's still picked
+        (`pre_finalize_print`). A stopped print and a sync job run no end G-code."""
         if isinstance(job, UserJob) and end is State.FINISHED:
-            slicer = self._slicer(job)
-        if slicer is not None:
-            t = self.tools[self.selected_tool]
-            if len({s.tool for s in job.spec.segments}) > 1:
-                self._print_moves(t, slicer.tower_end)
-            self._print_moves(t, slicer.end)
-            self._log("job", f"end G-code parks T{t.index}")
-            self.selected_tool = None
+            self.feed.end_moves(self, job, self._slicer(job))
         self._end_of_print()
         self.feed.rest(self)
         job.enter(JobPhase.PARKING)
@@ -2470,7 +2433,7 @@ class SimPrinter:
         and the valid gaps are still stored: that loop goes over every hotend.
         """
         ex = self.model.extruder
-        t = None if self.selected_tool is None else self.tools[self.selected_tool]
+        t = self._head_tool()
         if t is not None:
             self._retract_to(t, ex.lengths.retract_mm)
         if not ex.auto_retracts:

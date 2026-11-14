@@ -12,7 +12,7 @@ from enum import StrEnum
 from typing import TYPE_CHECKING, ClassVar
 
 if TYPE_CHECKING:
-    from simulator.model import SimPrinter
+    from simulator.model import SimPrinter, UserJob
     from simulator.slicer import Slicer
     from simulator.tool import SimTool
 
@@ -25,8 +25,40 @@ class Feed(StrEnum):
 
 class FeedSystem:
     selectable: ClassVar[bool]  # the user can pick a tool (select_tool)
-    tool_mapping: ClassVar[bool]  # the preview's tools-mapping screen applies (HAS_TOOL_MAPPING)
     docks: ClassVar[bool] = False  # whether the picked tool goes back to a dock (INDX)
+
+    def maps_tools(self, p: SimPrinter) -> bool:
+        """Whether the preview's tools-mapping screen applies (`HAS_TOOL_MAPPING`). A direct
+        printer has no tool mapping."""
+        return False
+
+    def profile(self, p: SimPrinter) -> Slicer | None:
+        """The multi-tool slicer profile `p` prints with. A direct printer has none: its
+        single-tool profiles add no moves the simulator models."""
+        return None
+
+    def select_for_print(self, p: SimPrinter, tool: SimTool) -> None:
+        """Make `tool` the picked tool as a print starts its preheat and each time it starts
+        feeding: the start G-code's tool, or the one a resume found picked."""
+        p.selected_tool = tool.index
+
+    def prime(self, p: SimPrinter, job: UserJob, slicer: Slicer | None) -> None:
+        """The start G-code's moves outside the model, run once as the print first feeds.
+        `slicer` is the print's profile with its overrides. A direct printer has none."""
+
+    def end_moves(self, p: SimPrinter, job: UserJob, slicer: Slicer | None) -> None:
+        """A finished print's end G-code moves outside the model, before the firmware's own
+        end. `slicer` is the print's profile with its overrides. A direct printer has none."""
+
+    def end_unload(self, p: SimPrinter, t: SimTool) -> None:
+        """End a menu unload of `t` once its moves have run: the filament leaves the path and
+        the type clears. The picked tool then goes to rest, unless a change all goes on with
+        a load of `t`: `M702` docks after every unload on INDX (`M701_2.cpp:194-197`), and
+        `M1600` docks only after its load, so a change all's unload keeps the tool for the
+        load that follows."""
+        p._physical_unload(t, "unload")
+        if not (p.queue and p.queue[0].tool == t.index):
+            self.rest(p)
 
     def tool_change(
         self, p: SimPrinter, old: SimTool, new: SimTool, slicer: Slicer, first: bool
@@ -78,14 +110,62 @@ class Direct(FeedSystem):
     """One tool fed straight from its spool: a print's segments all use tool 0."""
 
     selectable = False
-    tool_mapping = False
 
 
 class Toolchanger(FeedSystem):
     """Several tools, each with its own spool, that a print picks up in turn (XL, INDX)."""
 
     selectable = True
-    tool_mapping = True
+
+    def maps_tools(self, p: SimPrinter) -> bool:
+        return True
+
+    def prime(self, p: SimPrinter, job: UserJob, slicer: Slicer | None) -> None:
+        """The profile's start moves (`Slicer`), when the printer has a profile.
+
+        `G427` picks each used tool in ascending order and purges it in the nozzle cleaner
+        (`run` and `prepare_tool` in
+        `src/feature/tool_offset_calibration/tool_offset_calibration.cpp:186-233, 663-850`).
+        """
+        if slicer is None:
+            return
+        # The start G-code's tools go through the tool mapping too.
+        tools = {p._seg_tool(job, i) for i in range(len(job.spec.segments))}
+        first = p.tools[p._seg_tool(job, 0)]
+        used = [p.tools[i] for i in sorted(tools)]
+        p._pick(first)
+        p._print_moves(first, slicer.cleanup)
+        if slicer.calibrates:
+            for t in used:
+                p._pick(t)
+                p._purge_clean(t)
+        if slicer.prime_others is not None:
+            for t in used:
+                if t is not first:
+                    p._pick(t)
+                    p._print_moves(t, slicer.prime_others.moves())
+        p._pick(first)
+        p._print_moves(first, slicer.prime.moves())
+        p._log("job", f"start G-code primed {', '.join(f'T{t.index}' for t in used)}")
+
+    def end_moves(self, p: SimPrinter, job: UserJob, slicer: Slicer | None) -> None:
+        """The profile's last moves on the head's tool, the wipe tower's when the print used
+        several tools, then the end G-code's park (`P0 S1`, `src/marlin_stubs/P.cpp:35-48`),
+        when the printer has a profile."""
+        if slicer is None:
+            return
+        t = p._head_tool()
+        if len({s.tool for s in job.spec.segments}) > 1:
+            p._print_moves(t, slicer.tower_end)
+        p._print_moves(t, slicer.end)
+        p._log("job", f"end G-code parks T{t.index}")
+        p.selected_tool = None
+
+    def profile(self, p: SimPrinter) -> Slicer | None:
+        """On a toolchanger only. An XL with one tool isn't one (`SimPrinter.toolchanger`),
+        and its single-tool profiles inherit `*commonXL*`, whose end G-code doesn't park, so
+        it prints as a direct printer does."""
+        return p.model.slicer if p.toolchanger else None
 
     def pick(self, p: SimPrinter, tool: SimTool) -> None:
         """Pick `tool` up, parking the picked one first. Neither moves counted filament."""
