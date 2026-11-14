@@ -456,7 +456,10 @@ that trace. The points that matter for the bridge, in short:
   wait ends delays the resume by another `panic_idle_seconds`, until the
   printer is idle. A print started in the wait, an upload too, drops the
   resume, and the event log says "resume dropped". A plain reboot drops it
-  too, and another power cut leaves it waiting.
+  too, and another power cut leaves it waiting. A power cut during the
+  resume, in `BUSY`, the short `PAUSED` or a cold bed's wait, keeps the
+  print too: it retracts nothing, and the next boot resumes the print
+  again, with its feed back or purge.
   A print that wasn't paused retracts 8 mm at the cut on every model but
   the XL. INDX purges 25 mm in its nozzle cleaner halfway through `BUSY`,
   with no auto-retract after. Every other model that retracted feeds the
@@ -524,8 +527,10 @@ Choices made where the firmware was silent or the plan left it open:
 - A power cut during a runout's or a jam's dialog retracts 8 mm, as any
   cut in a print does. The firmware skips that retract when the runout or
   jam interrupted a move, which runs it through the crash recovery
-  (`was_crashed`). The boot leaves the tracker at gap 0 and untrusted
-  either way, so the resume's feed back counts the same.
+  (`was_crashed`). A cut while a resumed print still replays the move the
+  first cut interrupted retracts too, where the firmware skips it. The boot
+  leaves the tracker at gap 0 and untrusted either way, so the resume's feed
+  back counts the same.
 - The power-panic resume starts at the autostart's first try, 1.5 s after
   the boot: the firmware tries every 1.5 s until the USB drive, the
   temperatures and the screen are ready, and gives up after 100 s, which the
@@ -537,10 +542,6 @@ Choices made where the firmware was silent or the plan left it open:
   try finds everything ready, the firmware starts the resume over the new
   print: its check that the printer is idle is a debug assertion
   (`resume_print` in `power_panic.cpp`). The simulator doesn't model that.
-- A second power cut during the resume's recovery or unpark loses the print
-  in the simulator, on every model, where the firmware keeps the saved state
-  through the resume and resumes again (`power_panic.cpp:228-237, 270-279,
-  732, 946-983`).
 - A `T` while the MMU connects waits for it on every model. The Core
   One's MMU, on MODBUS, connects that way. The MK4 family's, on UART, first
   runs its bootloader for up to 10 s, where the firmware's `T` doesn't

@@ -150,3 +150,41 @@ async def test_a_sync_job_in_the_window_drops_the_resume(tmp_path):
     assert printer.state is State.FINISHED and printer.job is None
     assert printer.job_counter == job + 1
     await bridge.aclose()
+
+
+async def test_a_second_cut_during_the_resume(tmp_path):
+    """The power fails again while the resume unparks the head. The print resumes again
+    with its ID, and each resume's 8 mm feed back is charged: the first refills the first
+    cut's retract (BF11), and the second feeds filament that the second cut never
+    retracted, which leaves the nozzle (F12)."""
+    bridge, fake, station = make(tmp_path, [spool(19)])
+    printer = station.printer
+    await bridge.poll()  # the baseline
+    job = await start(bridge, station)
+    before = charged(fake, 19)
+    printer.set_power("off")
+    printer.set_power("on", resume=True)
+    mark = len(ledger(tmp_path))
+    await bridge.poll()  # in the window
+    await station.run_until(
+        lambda: printer.job is not None and printer.job.phase is JobPhase.UNPARK,
+        poll_every=0.5,
+    )
+    await bridge.poll()
+    assert printer.state is State.PAUSED and station.counter == 7  # 8 * 0.95
+    assert charged(fake, 19) == before + 7
+
+    printer.set_power("off")
+    printer.set_power("on", resume=True)
+    await bridge.poll()  # in the second window
+    assert printer.state is State.IDLE and printer.job is None and printer.resuming.id == job
+    await station.run_until(lambda: printer.state is State.PAUSED, poll_every=0.5)
+    await bridge.poll()
+    assert printer.job.id == job and station.counter == 7
+    assert charged(fake, 19) == before + 7 + 7
+
+    await station.run_until(lambda: printer.job is None, poll_every=0.5, limit=60)
+    await bridge.poll()
+    assert charged(fake, 19) == before + 7 + station.counter
+    assert events(ledger(tmp_path)[mark:]) == ["reboot", "reboot"]
+    await bridge.aclose()

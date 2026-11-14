@@ -1032,8 +1032,8 @@ static constexpr EnumArray<Sequence, GCodeFile, static_cast<int>(Sequence::_cnt)
 } // namespace nozzle_cleaner
 """
 
-# Cut down to the namespace with the two constants, all of `resume_loop`, and the cut's
-# retract in a stub of `panic_loop`.
+# Cut down to the namespace with the two constants, the resume's start and end, all of
+# `resume_loop`, the cut's retract in a stub of `panic_loop`, and all of `ac_fault_isr`.
 POWER_PANIC_CPP = """\
 #include "power_panic.hpp"
 
@@ -1052,6 +1052,103 @@ constexpr bool power_panic_deretracts = power_panic_retracts
 
 
 namespace power_panic {
+
+/// reset PP state during atomic_finish (holds print state)
+static void atomic_reset() {
+    // stored state
+    if (state_stored()) {
+        erase();
+    }
+
+    // internal state
+    power_panic_state = PPState::Inactive;
+    resume_state = ResumeState::Setup;
+    runtime_state.nested_fault = false;
+}
+
+/// transition from a nested_fault to a normal fault atomically
+static void atomic_finish() {
+    HAL_NVIC_DisableIRQ(buddy::hw::acFault.getIRQn());
+
+#if HAS_TOOLCHANGER() && HAS_INDX()
+    if (state_buf.toolchanger.phase != PrusaToolChanger::ToolchangePhase::none) {
+        // Power panic hit during a toolchange; finish the toolchange on resume
+        marlin_server::powerpanic_finish_indx_toolchange();
+    } else
+#endif
+#if HAS_TOOLCHANGER() && HAS_TOOL_CRASH_RECOVERY()
+        if (prusa_toolchanger.is_pos_in_toolchange_area(state_buf.crash.crash_machine_position.xy()) && prusa_toolchanger.is_toolchanger_enabled()) {
+
+        // Continue with toolcrash recovery
+        marlin_server::powerpanic_finish_toolcrash();
+    } else
+#endif
+    {
+        if (state_buf.planner.was_paused) {
+            marlin_server::powerpanic_finish_pause();
+        } else {
+            marlin_server::powerpanic_finish_recovery();
+        }
+    }
+    atomic_reset();
+
+    HAL_NVIC_EnableIRQ(buddy::hw::acFault.getIRQn());
+}
+
+void resume_print() {
+    debug_assert(state_stored()); // caller is responsible for checking
+    debug_assert(marlin_server::printer_idle()); // caller is responsible for checking
+
+    // load the data
+    fixed_t::load();
+    state_t::load();
+
+    log_info(PowerPanic, "resuming print");
+    runtime_state.nested_fault = true;
+
+    // immediately update print progress
+    {
+        print_job_timer.resume(state_buf.progress.print_duration);
+        print_job_timer.pause();
+
+        const auto mode_specific = [](const state_progress_t::ModeSpecificData &mbuf, ClProgressData::ModeSpecificData &pdata) {
+            pdata.percent_done.mSetValue(mbuf.percent_done, state_buf.progress.print_duration);
+            pdata.time_to_end.mSetValue(mbuf.time_to_end, state_buf.progress.print_duration);
+            pdata.time_to_pause.mSetValue(mbuf.time_to_pause, state_buf.progress.print_duration);
+        };
+        mode_specific(state_buf.progress.standard_mode, oProgressData.standard_mode);
+        mode_specific(state_buf.progress.stealth_mode, oProgressData.stealth_mode);
+    }
+
+    const bool auto_recover = [] {
+        if (state_buf.print.odometer_e_start >= Odometer_s::instance().get_extruded_all()) {
+            // nothing has been extruded on the bed so far, it's safe to auto-resume irregardless of temp
+            return true;
+        }
+
+// check the bed temperature
+#if HAS_MODULAR_BED()
+        thermalManager.setEnabledBedletMask(state_buf.planner.enabled_bedlets_mask);
+#endif
+        const float current_bed_temp = thermalManager.degBed();
+
+        if (!state_buf.planner.target_bed || current_bed_temp >= state_buf.planner.target_bed) {
+            return true;
+        }
+
+        return (state_buf.planner.target_bed - current_bed_temp) < POWER_PANIC_MAX_BED_DIFF;
+    }();
+
+    if (resume_state == ResumeState::Setup && auto_recover) {
+        resume_state = ResumeState::Resume;
+    }
+
+    const GCodeReaderPosition gcode_pos {
+        .restore_info = state_buf.gcode_stream_restore_info,
+        .offset = state_buf.crash.sdpos,
+    };
+    marlin_server::powerpanic_resume(runtime_state.media_SFN_path, gcode_pos, auto_recover);
+}
 
 void resume_loop() {
     switch (resume_state) {
@@ -1335,6 +1432,202 @@ void panic_loop() {
         }
         break;
     }
+}
+
+void ac_fault_isr() {
+    if (!ac_fault_enabled) {
+        return;
+    }
+
+    // Mark ac_fault as triggered
+    ac_fault_triggered = true;
+
+    // prevent re-entry
+    HAL_NVIC_DisableIRQ(buddy::hw::acFault.getIRQn());
+
+    // check if handling the fault is worth it (printer is active or can be resumed)
+    if (!runtime_state.nested_fault) {
+        if ((marlin_server::printer_idle() && !marlin_server::printer_paused())
+            || marlin_server::aborting_or_aborted() || marlin_server::print_preview()) {
+            runtime_state.fault_stamp = ticks_ms();
+            power_panic_state = PPState::WaitingToDie;
+            // will continue in the main loop
+
+            // Without the yield, the interrupted task would keep running until the next tick, delaying the ac_fault task.
+            const BaseType_t higher_priority_task_woken = xTaskResumeFromISR(ac_fault_task);
+            portYIELD_FROM_ISR(higher_priority_task_woken);
+            return;
+        }
+    }
+
+    // TODO: can be avoided if running at the same priority as STEP_TIMER_PRIO
+    buddy::InterruptDisabler _;
+
+    // ensure the crash handler can't be re-triggered
+    HAL_NVIC_DisableIRQ(buddy::hw::xDiag.getIRQn());
+    HAL_NVIC_DisableIRQ(buddy::hw::yDiag.getIRQn());
+
+    runtime_state.orig_state = power_panic_state;
+    runtime_state.fault_stamp = ticks_ms();
+    power_panic_state = PPState::Triggered;
+
+    // power off devices in order of power draw
+    runtime_state.orig_axes_home_level = axes_home_level;
+    disable_XY();
+    // Cuts power to heaters "the hard way". Proper one is in manage_heater.
+    buddy_disable_heaters();
+    buddy::hw::hsUSBEnable.write(buddy::hw::Pin::State::high);
+#if HAS_EMBEDDED_ESP32()
+    buddy::hw::espPower.reset();
+#endif
+
+    // stop motion
+    if (!runtime_state.nested_fault) {
+        state_buf.planner.was_paused = marlin_server::printer_paused();
+        state_buf.planner.was_crashed = crash_s.did_trigger();
+    }
+
+    if (!state_buf.planner.was_crashed) {
+        // fault occurred outside of a crash: trigger one now to update the crash position
+        crash_s.set_state(Crash_s::TRIGGERED_AC_FAULT);
+        crash_s.crash_axes_home_level = runtime_state.orig_axes_home_level;
+    }
+
+    if (!runtime_state.nested_fault) {
+        const marlin_server::resume_state_t &resume = *marlin_server::get_resume_data();
+
+        if (state_buf.planner.was_paused) {
+            // crash_native_position *is* current_position while the print is paused,
+            // so abuse the slot for the restore position instead
+            state_buf.crash.sdpos = marlin_server::media_position();
+            state_buf.crash.crash_native_position = resume.pos;
+        } else {
+            state_buf.crash.sdpos = crash_s.sdpos;
+            state_buf.crash.crash_native_position = crash_s.crash_native_position;
+        }
+
+        // save crash parameters
+#if HAS_TOOLCHANGER() && (HAS_TOOL_CRASH_RECOVERY() || HAS_INDX())
+    #if HAS_INDX()
+        // Snapshot the phase before the preempted tool_change()'s ScopeGuard
+        // runs and wipes phase_. The acquire-load also acts as a publication fence for the
+        // return_data() read below.
+        state_buf.toolchanger.phase = prusa_toolchanger.phase();
+    #endif
+        if (crash_s.is_toolchange_event()) {
+            // Panic during toolchange, use the intended destination for replay
+            // !! We're losing E somewhere?!
+            state_buf.crash.start_current_position = xyze_pos_t(prusa_toolchanger.return_data().return_pos.asNative());
+        } else
+#endif
+        {
+            state_buf.crash.start_current_position = crash_s.start_current_position;
+        }
+        state_buf.crash.crash_machine_position = crash_s.crash_machine_position;
+        state_buf.crash.segments_finished = crash_s.segments_finished;
+        state_buf.crash.axes_home_level = crash_s.crash_axes_home_level;
+        state_buf.crash.leveling_active = crash_s.leveling_active;
+        state_buf.crash.recover_flags = crash_s.recover_flags;
+        state_buf.crash.fr_mm_s = crash_s.fr_mm_s;
+
+        crash_s.counters.increment(Crash_s::Counter::power_panic);
+        state_buf.crash.counters = crash_s.counters.backup_data();
+
+        // save print temperatures
+        if (state_buf.planner.was_paused) { // Paused print or whenever nozzle is cooled down
+            state_buf.planner.target_nozzle = resume.nozzle_temp;
+
+        } else {
+            state_buf.planner.target_nozzle = buddy::safety_timer().original_hotend_targets();
+        }
+
+        if (state_buf.planner.was_paused) {
+            state_buf.planner.fan_speed = resume.fan_speed;
+            state_buf.planner.print_speed = resume.print_speed;
+#if HAS_INDX()
+            state_buf.planner.active_tool = resume.active_tool;
+#endif
+        } else {
+            state_buf.planner.fan_speed = thermalManager.print_fan_speed;
+            state_buf.planner.print_speed = marlin_vars().print_speed;
+#if HAS_INDX()
+            state_buf.planner.active_tool = match(
+                PhysicalToolIndex::currently_selected(),
+                [](PhysicalToolIndex tool) { return tool.to_raw(); },
+                [](NoTool) { return PrusaToolChanger::MARLIN_NO_TOOL_PICKED; });
+#endif
+        }
+#if HAS_MOTOR_CURRENT_PROFILES()
+        state_buf.planner.current_profile = static_cast<uint8_t>(buddy::active_motor_current_profile());
+#endif
+        state_buf.planner.target_bed = thermalManager.degTargetBed();
+#if HAS_MODULAR_BED()
+        state_buf.planner.enabled_bedlets_mask = thermalManager.getEnabledBedletMask();
+#endif
+#if ENABLED(PREVENT_COLD_EXTRUSION)
+        state_buf.planner.extrude_min_temp = thermalManager.extrude_min_temp;
+        state_buf.planner.allow_cold_extrude = thermalManager.allow_cold_extrude;
+#endif
+
+        // remaining planner parameters
+        state_buf.planner.flow_percentage = planner.flow_percentage;
+        state_buf.planner.axis_relative = gcode.axis_relative;
+
+        // IS/PA
+        LOOP_XYZ(i) {
+            if (!input_shaper::current_config().axis[i]) {
+                state_buf.planner.axis_config[i].frequency = 0.f;
+            } else {
+                state_buf.planner.axis_config[i] = *input_shaper::current_config().axis[i];
+            }
+        }
+
+        if (!input_shaper::get_config_for_m74().axis[Y_AXIS]) {
+            state_buf.planner.original_y.frequency = 0.f;
+        } else {
+            state_buf.planner.original_y = *input_shaper::get_config_for_m74().axis[Y_AXIS];
+        }
+
+        if (!input_shaper::current_config().weight_adjust_y) {
+            state_buf.planner.axis_y_weight_adjust.frequency_delta = 0.f;
+        } else {
+            state_buf.planner.axis_y_weight_adjust = *input_shaper::current_config().weight_adjust_y;
+        }
+
+        state_buf.planner.axis_e_config = pressure_advance::get_axis_e_config();
+
+#if HAS_TOOLCHANGER()
+        // Restore planner config if it was changed by toolchange
+        prusa_toolchanger.try_restore();
+#endif
+
+        state_buf.planner.settings = planner.user_settings;
+
+#if !HAS_CLASSIC_JERK
+        state_buf.planner.junction_deviation_mm = planner.junction_deviation_mm;
+#endif
+    }
+
+    if (state_buf.planner.was_crashed) {
+        // fault occured while handling a crash: original crash location has been saved,
+        // it's now safe to overwrite with the current intermediate location for parking
+        crash_s.set_state(Crash_s::TRIGGERED_AC_FAULT);
+    }
+
+    state_buf.planner.compatibility = gcode.compatibility;
+
+    static_assert(
+        std::is_same_v<
+            decltype(state_buf.planner.marlin_debug_flags),
+            decltype(marlin_debug_flags)>
+        == true);
+    state_buf.planner.marlin_debug_flags = marlin_debug_flags;
+
+    // will continue in the main loop
+
+    // Without the yield, the interrupted task would keep running until the next tick, delaying the ac_fault task.
+    const BaseType_t higher_priority_task_woken = xTaskResumeFromISR(ac_fault_task);
+    portYIELD_FROM_ISR(higher_priority_task_woken);
 }
 
 } // namespace power_panic
@@ -1862,6 +2155,17 @@ void CompatibilityReport::generate_toolmapping_only_noclear([[maybe_unused]] con
 #endif
     }
 }
+
+#if HAS_INDX()
+        {
+            GeneralCheck::indx_lock,
+            CheckMetadata {
+                .severity = HWCheckSeverity::Warning,
+                .title = N_("Sliced with old INDX profiles"),
+                .description = N_("G-Code is not sliced with newest INDX profiles. There will be some issues with the print."),
+            },
+        },
+#endif
 """  # noqa: E501 (verbatim firmware lines)
 
 TOOLS_MAPPING_CPP = """\
@@ -3573,8 +3877,8 @@ bool should_enable(FilamentSensorID id) {
 """  # noqa: E501 (verbatim firmware lines)
 
 # `marlin_server.cpp`, excerpts: `pre_finalize_print`, its unload, the single-tool start,
-# the preview's Print and Inactive results, and the G-code queue's length as a client
-# reads it.
+# the preview's Print and Inactive results, the G-code queue's length as a client reads it,
+# the printing and paused checks, and the end of a power-panic resume.
 MARLIN_SERVER_CPP = """\
 static bool pre_finalize_print([[maybe_unused]] bool finished) {
 #if HAS_ANFC()
@@ -3708,6 +4012,35 @@ static bool _process_server_request(const Request &request) {
     }
     return processed;
 }
+
+bool is_printing() {
+    switch (marlin_vars().print_state) {
+    case State::Aborted:
+    case State::Idle:
+    case State::Finished:
+    case State::PrintPreviewInit:
+    case State::PrintPreviewImage:
+#if HAS_TOOL_MAPPING()
+    case State::PrintPreviewToolsMapping:
+#endif
+        return false;
+    default:
+        return true;
+    }
+}
+
+bool printer_paused() {
+    return server.print_state == State::Paused;
+}
+
+void powerpanic_finish_recovery() {
+    // WARNING: this sequence needs to _just_ set the server state and exit
+    // perform any higher-level operation inside power_panic::atomic_finish
+
+    // setup for replay and start recovery
+    crash_s.set_state(Crash_s::RECOVERY);
+    server.print_state = State::Resuming_UnparkHead_ZE;
+}
 """  # noqa: E501 (verbatim firmware lines)
 
 # The tag radio's MMU condition.
@@ -3793,6 +4126,144 @@ void M600_manual(const GCodeParser2 &p) {
         p.option<Color>('C'),
         p.option<FilamentType>('S'),
         false);
+}
+
+void M600_execute(mapi::ParkingPosition park_position, VirtualToolIndex target_tool, xyze_float_t resume_point,
+    std::optional<float> unloadLength, std::optional<float> fastLoadLength, std::optional<float> retractLength,
+    std::optional<Color> filament_colour, std::optional<FilamentType> filament_type,
+    bool is_filament_stuck) {
+
+    // Ignore estalls during filament change
+    BlockEStallDetection estall_blocker;
+
+    auto physical_target_tool = target_tool.to_physical();
+
+#if HAS_TOOLCHANGER()
+    struct ToolChangeData {
+        XYZEval<float, LogicalPosTag> original_resume_point;
+        int16_t target_extruder_original_temperature;
+        std::variant<VirtualToolIndex, NoTool> original_extruder;
+    };
+
+    // Check if we need to do a toolchange
+    std::optional<ToolChangeData> tool_change_data {};
+    if (!stdext::holds_value(VirtualToolIndex::currently_selected(), target_tool)) {
+        // Since the native coordinates contain hotend_currently_applied_offset we need to store the logical
+        // version of these coordinates to make it easier to convert to the target_extruder's native coordinates.
+        const auto logical_resume = resume_point.asLogical();
+        tool_change_data = ToolChangeData {
+            .original_resume_point = logical_resume,
+            .target_extruder_original_temperature = Temperature::degTargetHotend(physical_target_tool),
+            .original_extruder = VirtualToolIndex::currently_selected(),
+        };
+
+        tool_change(target_tool, tool_return_t::no_return, tool_change_lift_t::mbl_only_lift, true);
+
+        resume_point = logical_resume.asNative(); // Convert original resume point to the new native coordinates
+        resume_point.set(prusa_toolchanger.get_tool_dock_position(physical_target_tool)); // Sets only x, y coordinates
+
+        // Sets the target temperature based on the current filament type
+        // M600 generally should not set target temperature, this is an exception for specific scenario where user wants to change filament on currently unused toolhead during print
+        const auto filament_data = FilamentType::for_tool_heuristic(target_tool).parameters();
+        Temperature::setTargetHotend(filament_data.nozzle_temperature, physical_target_tool);
+    }
+#endif
+    // X/Y are taken as-is; an absolute Z becomes an AtLeast (never-go-down).
+    if (auto *z = std::get_if<float>(&park_position.z)) {
+        park_position.z = mapi::ParkingPosition::AtLeast { .above_print = Z_NOZZLE_PARK_RISE_M600, .absolute = *z };
+    } else {
+        // Other alternatives express the intended park behavior on their own; flag a caller not asking for any Z handling
+        debug_assert(!std::holds_alternative<mapi::ParkingPosition::Unchanged>(park_position.z));
+    }
+    pause::Settings settings;
+    settings.SetParkPoint(park_position);
+    settings.SetResumePoint(resume_point);
+    if (unloadLength.has_value()) {
+        settings.SetUnloadLength(unloadLength.value());
+    }
+    if (fastLoadLength.has_value()) {
+        settings.SetFastLoadLength(fastLoadLength.value());
+    }
+    if (retractLength.has_value()) {
+        settings.SetRetractLength(retractLength.value());
+    } // Initial retract before move to filament change position
+    settings.SetExtruder(target_tool);
+
+    // A pause that outlives the safety timer leaves the heaters disabled, which zeroes
+    // both the target and the displayed temperature. Restore them before snapshotting,
+    // otherwise the resume temperature captured below is 0 and turns the nozzle off.
+    // Pause::filament_change() restores anyway; this only moves it ahead of the read.
+    buddy::safety_timer().reset_restore_nonblocking();
+
+    const float disp_temp = marlin_vars().hotend(physical_target_tool).display_nozzle;
+    const float targ_temp = Temperature::degTargetHotend(physical_target_tool);
+
+    if (disp_temp > targ_temp) {
+        Temperature::setTargetHotend(static_cast<int16_t>(disp_temp), physical_target_tool);
+    }
+
+    // Loading drops the target to the new filament's default; restore the print temperature
+    // on resume. Snapshot what the branch above left in effect, not the pre-raise target.
+    settings.SetResumeNozzleTemperature(static_cast<int16_t>(std::max(disp_temp, targ_temp)));
+
+    if (filament_type.has_value()) {
+        config_store().set_filament_type(target_tool, filament_type.value());
+    } else {
+        filament_type = FilamentType::for_tool_heuristic(target_tool);
+    }
+
+    *filament_type = filament::apply_load_color(*filament_type, target_tool, filament_colour);
+
+    filament::set_type_to_load(*filament_type);
+    Pause::Instance().filament_change(settings, is_filament_stuck);
+
+#if HAS_TOOLCHANGER()
+    if (!tool_change_data.has_value()) {
+        return;
+    }
+
+    const auto &change_data = *tool_change_data;
+
+    if (std::isfinite(change_data.target_extruder_original_temperature)) {
+        Temperature::setTargetHotend(change_data.target_extruder_original_temperature, physical_target_tool);
+    }
+
+    /// Evaluated in the coordinate frame of whichever tool is picked at the time of the call.
+    const auto resume_position = [&change_data]() {
+        if (std::isfinite(change_data.original_resume_point.x) && std::isfinite(change_data.original_resume_point.y) && std::isfinite(change_data.original_resume_point.z)) {
+            return change_data.original_resume_point.asNative().xyz();
+        }
+        xyz_pos_t result = current_position.xyz();
+        result.set(match(
+            change_data.original_extruder,
+            [](VirtualToolIndex virtual_tool) { return prusa_toolchanger.get_tool_dock_position(virtual_tool.to_physical()); },
+            [](NoTool) -> xy_float_t { return current_position.xy(); }));
+        return result;
+    };
+
+    // Change back to the original tool, without the return move - the tool
+    // has to be ready to print before the head returns to the print.
+    if (!tool_change(stdext::to_variant(change_data.original_extruder), tool_return_t::no_return, tool_change_lift_t::mbl_only_lift, false)) {
+        // Leave the head where the failed change left it, the recovery deals with it from there.
+        log_error(PRUSA_GCODE, "M600 failed to change back to the original tool");
+        return;
+    }
+
+    if (const auto original_tool = stdext::get_optional<VirtualToolIndex>(change_data.original_extruder)) {
+    #if HAS_NOZZLE_CLEANER()
+        // A parked tool is not heated, so the tool cooled down during the change.
+        // Reheat over safe spot where we wont be oozing
+        auto reheat_position = mapi::get_parking_position(mapi::ParkPosition::purge);
+        reheat_position.z = mapi::ParkingPosition::unchanged;
+        mapi::park(reheat_position);
+    #endif
+        Temperature::wait_for_hotend(original_tool->to_physical(), { .fan_cooling = true });
+    }
+
+    auto return_position = resume_position();
+    apply_motion_limits(return_position);
+    mapi::park({ .x = return_position.x, .y = return_position.y, .z = return_position.z });
+#endif
 }
 """  # noqa: E501 (verbatim firmware lines)
 
@@ -4574,6 +5045,248 @@ void GCodeQueue::advance() {
 }
 """
 
+# INDX's last picked tool.
+TOOLCHANGER_INDX_CPP = """\
+void PrusaToolChanger::persist_last_picked_tool(std::variant<PhysicalToolIndex, NoTool> tool, bool override_always) {
+    // Single-tool print: the tool can't change, so leave EEPROM frozen at the value set at print start.
+    if (!override_always && freeze_last_picked_tool_ && marlin_server::is_printing()) {
+        return;
+    }
+    // If we are not printing, we need to save the no tool picked to eeprom
+    if (override_always || !marlin_server::is_printing()) {
+        config_store().set_indx_last_picked_tool(tool);
+        config_store().indx_last_picked_tool_valid.set(true);
+    } else if (config_store().indx_last_picked_tool_valid.get()) {
+        // Tool park while printing && not yet invalidated -> invalidate
+        config_store().indx_last_picked_tool_valid.set(false);
+    }
+}
+"""  # noqa: E501 (verbatim firmware lines)
+
+# The type a filament change reloads when it's given none.
+FILAMENT_TOOLS_CPP = """\
+FilamentType FilamentType::for_tool_heuristic(std::variant<VirtualToolIndex, NoTool> tool) {
+    if (auto filament = for_tool(tool)) {
+        return filament;
+    }
+
+    if (!std::holds_alternative<VirtualToolIndex>(tool)) {
+        return FilamentType::none;
+    }
+    const auto virtual_tool = std::get<VirtualToolIndex>(tool);
+
+    // Try to get data from the GCodeInfo if we're printing
+    if (marlin_vars().print_state != marlin_server::State::Idle) {
+        for (auto gcode_tool : GcodeToolIndex::all()) {
+            if (!stdext::holds_value(gcode_tool.to_virtual(), virtual_tool)) {
+                continue;
+            }
+
+            const auto &filament_name = GCodeInfo::getInstance().get_extruder_info(gcode_tool).filament_name;
+            if (auto filament = from_name(filament_name)) {
+                return filament;
+            }
+        }
+    }
+
+    // Last resort - check previously loaded filament
+    if (auto filament = config_store().get_previous_filament_type(virtual_tool)) {
+        return filament;
+    }
+
+    return NoFilamentType {};
+}
+"""  # noqa: E501 (verbatim firmware lines)
+
+# The autostart's retry, which resumes a print after a power cut.
+PRINT_UTILS_CPP = """\
+void print_utils_loop() {
+    static constexpr uint32_t rescan_delay = 1500; ///< Check run_once_after_boot this often [ms]
+    static constexpr uint32_t max_rescan_time = 100000; ///< Wait for run_once_after_boot at most [ms]
+
+    static uint32_t current_time = ticks_ms();
+
+    if (!TaskDeps::check(TaskDeps::Dependency::autostart_done) && ticks_ms() >= current_time + rescan_delay) {
+        current_time += rescan_delay;
+        if (usb_host::is_media_inserted() && thermalManager.temperatures_ready() && TaskDeps::check(TaskDeps::Dependency::gui_ready)) {
+            run_once_after_boot();
+            TaskDeps::provide(TaskDeps::Dependency::autostart_done);
+        } else if (current_time > max_rescan_time || !marlin_server::printer_idle()) {
+            // no longer attempt to run the autostart sequence
+            TaskDeps::provide(TaskDeps::Dependency::autostart_done);
+        }
+    }
+}
+"""  # noqa: E501 (verbatim firmware lines)
+
+# The menu's load and unload.
+M701_2_CPP = """\
+void filament_gcodes::M701_load(const M701LoadArgs &args) {
+    InProgress progress;
+
+    FilamentType filament_to_be_loaded = args.filament_to_be_loaded;
+    const VirtualToolIndex virtual_tool = args.virtual_tool;
+    const bool do_purge_only = args.fast_load_length.has_value() && *args.fast_load_length <= 0.0f;
+
+    if (args.op_preheat) {
+        if (filament_to_be_loaded == FilamentType::none) {
+            const FilamentSelectionArgs data {
+                .mode = do_purge_only ? PreheatMode::purge : PreheatMode::standard_load,
+                .tool = virtual_tool,
+                .ret_cool = *args.op_preheat,
+#if HAS_ANFC()
+                .openprinttag_uid_hash = args.openprinttag_uid_hash,
+#endif
+            };
+            auto preheat_ret = preheat(data, PreheatBehavior::for_filament_load());
+            if (preheat_ret.first) {
+                // canceled
+                M70X_process_user_response(*preheat_ret.first, virtual_tool);
+                return;
+            }
+
+            filament_to_be_loaded = preheat_ret.second;
+        } else {
+            preheat_to(filament_to_be_loaded, virtual_tool.to_physical(), PreheatBehavior::for_filament_load(false));
+        }
+    }
+
+    filament_to_be_loaded = filament::apply_load_color(filament_to_be_loaded, virtual_tool, args.color_to_be_loaded);
+
+    filament::set_type_to_load(filament_to_be_loaded);
+
+    pause::Settings settings;
+    settings.SetExtruder(virtual_tool);
+    settings.SetFastLoadLength(args.fast_load_length);
+    settings.SetRetractLength(0.f);
+
+    mapi::ParkingPosition park_position = mapi::get_parking_position(do_purge_only ? mapi::ParkPosition::purge : mapi::ParkPosition::load);
+    park_position.z = mapi::ParkingPosition::AtLeast { .above_print = Z_NOZZLE_PARK_RISE, .absolute = args.z_min_pos };
+
+    settings.SetParkPoint(park_position);
+    const xyze_pos_t current_position_tmp = current_position;
+
+    // Pick the right tool
+    if (!Pause::Instance().tool_change(virtual_tool, Pause::LoadType::load, settings)) {
+        return;
+    }
+
+#ifndef DO_NOT_RESTORE_Z_AXIS
+    // Has to be set before last Pause operation, otherwise it unparks and parks again inbetween operations
+    settings.SetResumePoint(current_position_tmp);
+#endif
+
+    const bool do_resume_print = args.resume_print_request && marlin_server::printer_paused();
+    // Load
+    if (load_unload(do_purge_only ? Pause::LoadType::load_purge : Pause::LoadType::load, settings)) {
+        if (!do_resume_print) {
+            M70X_process_user_response(PreheatStatus::Result::DoneHasFilament, virtual_tool);
+        }
+    } else {
+        M70X_process_user_response(PreheatStatus::Result::DidNotFinish, virtual_tool);
+    }
+
+    // Pretend like we haven't moved the extruder at all
+    sync_e_position_to(current_position_tmp.e);
+    destination.e = current_position_tmp.e;
+
+#if HAS_INDX()
+    // Park the tool back to its dock after load
+    if (!do_resume_print) {
+        tool_change(NoTool {}, tool_return_t::dock_backoff);
+    }
+#endif
+
+    if (do_resume_print) {
+        marlin_server::print_resume();
+    }
+}
+
+void filament_gcodes::M702_unload(std::optional<float> unload_length, float z_min_pos, std::optional<RetAndCool_t> op_preheat, VirtualToolIndex virtual_tool, bool ask_unloaded) {
+    InProgress progress;
+
+    bool do_preheat = op_preheat.has_value();
+#if HAS_AUTO_RETRACT()
+    do_preheat = do_preheat && !buddy::auto_retract().can_cold_unload(virtual_tool.to_physical());
+#endif
+
+    if (do_preheat) {
+        const FilamentSelectionArgs data {
+            .mode = PreheatMode::unload,
+            .tool = virtual_tool,
+            .ret_cool = *op_preheat,
+        };
+        auto preheat_ret = preheat(data, PreheatBehavior::for_filament_unload());
+        if (preheat_ret.first) {
+            // canceled
+            M70X_process_user_response(*preheat_ret.first, virtual_tool);
+            return;
+        }
+    }
+
+    pause::Settings settings;
+    settings.SetExtruder(virtual_tool);
+    settings.SetUnloadLength(unload_length);
+    settings.SetRetractLength(0.f);
+    mapi::ParkingPosition park_position = mapi::get_parking_position(mapi::ParkPosition::unload);
+    park_position.z = mapi::ParkingPosition::AtLeast { .above_print = Z_NOZZLE_PARK_RISE, .absolute = z_min_pos };
+    settings.SetParkPoint(park_position);
+    xyze_pos_t current_position_tmp = current_position;
+
+    // Pick the right tool
+    if (!Pause::Instance().tool_change(virtual_tool, Pause::LoadType::unload, settings)) {
+        return;
+    }
+
+#ifndef DO_NOT_RESTORE_Z_AXIS
+    // Has to be set before last Pause operation, otherwise it unparks and parks again inbetween operations
+    settings.SetResumePoint(current_position_tmp);
+#endif
+
+    // Unload
+    load_unload(ask_unloaded ? Pause::LoadType::unload_confirm : Pause::LoadType::unload, settings);
+    M70X_process_user_response(PreheatStatus::Result::CooledDown, virtual_tool);
+    sync_e_position_to(current_position_tmp.e);
+    destination.e = current_position_tmp.e;
+
+#if HAS_INDX()
+    // Park the tool back to its dock after unload
+    tool_change(NoTool {}, tool_return_t::dock_backoff);
+#endif
+}
+"""  # noqa: E501 (verbatim firmware lines)
+
+# The read of an ad-hoc slot's parameters, with the UUIDs for tool 0 only.
+FILAMENT_CPP = """\
+        } else if constexpr (std::is_same_v<T, AdHocFilamentType>) {
+            const auto i = v.tool.to_raw();
+
+#if HAS_ANFC()
+            static_assert(decltype(config_store().adhoc_filament_parameters_6)::item_count == 1);
+#endif
+
+            return build_eeprom(
+                config_store().adhoc_filament_parameters.get(i),
+#if HAS_CHAMBER_API()
+                config_store().adhoc_filament_parameters_2.get(i),
+#endif
+#if HAS_FILAMENT_HEATBREAK_PARAM()
+                config_store().adhoc_filament_parameters_3.get(i),
+#endif
+#if HAS_FILAMENT_BASE_PRESET_PARAM()
+                config_store().adhoc_filament_parameters_4.get(i),
+#endif
+                config_store().adhoc_filament_parameters_5.get(i),
+#if HAS_ANFC()
+                config_store().adhoc_filament_assigned_openprinttag.get(i),
+
+                // Silently don't get for i > 0 - only first slot UUIDs are stored in EEPROM
+                i == 0 ? config_store().adhoc_filament_parameters_6.get(i) : FilamentTypeParameters_EEPROM6 {},
+#endif
+                std::monostate());
+"""  # noqa: E501 (verbatim firmware lines)
+
+
 FILES = {
     read.MODELS_FILE: MODELS_HPP,
     read.GCODE_INFO_FILE: GCODE_INFO_HPP,
@@ -4639,6 +5352,11 @@ FILES = {
     read.PAUSE_SETTINGS_FILE: PAUSE_SETTINGS_HPP,
     "lib/Marlin/Marlin/src/gcode/queue.cpp": GCODE_QUEUE_CPP,
     "lib/Marlin/Marlin/src/feature/prusa/MMU2/protocol_logic.cpp": PROTOCOL_LOGIC_CPP,
+    "lib/Marlin/Marlin/src/module/prusa/toolchanger_indx.cpp": TOOLCHANGER_INDX_CPP,
+    "src/common/filament_tools.cpp": FILAMENT_TOOLS_CPP,
+    "src/common/print_utils.cpp": PRINT_UTILS_CPP,
+    "src/marlin_stubs/pause/M701_2.cpp": M701_2_CPP,
+    "src/common/filament.cpp": FILAMENT_CPP,
 }
 
 

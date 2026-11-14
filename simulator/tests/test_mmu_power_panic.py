@@ -380,6 +380,24 @@ def test_a_cut_after_the_resume_with_no_slot_selected_retracts_on_none(monkeypat
     assert counts(p)[0] == pytest.approx(8)
 
 
+@pytest.mark.parametrize("point", [WINDOW + RECOVER / 2, WINDOW + RECOVER + UNPARK / 2])
+def test_a_cut_during_the_resume_retracts_nothing_and_resumes_again(monkeypatch, point):
+    # A cut in the recovery or the unpark, while the MMU still connects: a retract then
+    # would count on slot 0 and leave the gap at 8, but the cut doesn't retract (F12). The
+    # second boot starts the MMU connecting again, and the second resume's 8 mm counts on
+    # slot 0 again.
+    sim, p, _ = two_color_cut(50)
+    sim.advance(point)
+    assert not p.mmu.active and p.selected_tool is None and p.mmu.path.gap == 0
+    gaps = boot_gap(monkeypatch, p)
+    p.reboot(keep_job=True)
+    assert gaps[0] == 0 and in_window(p) and p.resuming.id == 1
+    assert p.mmu.connecting == 10 and p.mmu.fed == 1
+    sim.advance(WINDOW + RECOVER)
+    assert p.job.phase is JobPhase.UNPARK
+    assert counts(p) == pytest.approx({0: 8, 1: 0, 2: 0, 3: 0, 4: 0})
+
+
 def test_a_plain_reboot_leaves_the_slot_in_the_extruder_with_none_selected():
     sim, p = make_mmu(types={0: PLA, 2: PETG}, slot=2, mmu_connect_seconds=1)
     p.reboot()
