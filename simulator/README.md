@@ -265,6 +265,19 @@ that trace. The points that matter for the bridge, in short:
   reads `PRINTING`; a finished sync job leaves the filament. A color
   change, `change_filament` and `runout` are refused on an MMU for now, and
   `jam` always is: the MMU's jam isn't read.
+- The preview on an MMU (F43). With the MMU connected, no used slot is
+  checked for filament, and a print always gets the tools-mapping screen.
+  When FINDA sees filament, a slot fed past the selector, the preview first
+  asks to unload it, holding the job in `ATTENTION` with its ID: a print
+  from the page and a sync job alike. A `single_tool_file` of slot 0's type
+  with filament at the extruder's sensor skips the question and the
+  mapping screen and prints at once. `tap_through` answers No, which prints
+  with the filament in place and no mapping screen. `unload_first` answers
+  Yes: the MMU unloads the filament over `unload_seconds`, counting on the
+  selected slot or on none, reading `BUSY` with no job, and `cancel` waits
+  for it; then the mapping screen or the job. `cancel` at the question
+  ends in `IDLE` as at any preview question. A power cut during the unload
+  drops the job and leaves the filament in.
 - The MMU menu's operations need the MMU on and connected and the printer
   idle, and each reads `BUSY` until it's done (F41).
   `load_to_nozzle` is Load To Nozzle: it unloads the selected slot, feeds
@@ -291,8 +304,8 @@ that trace. The points that matter for the bridge, in short:
   scanned. Then the print preview checks the `M862` lines in the file's
   first 200 G-code lines: the model by compatibility group (`M862.3`), the
   G-code level (`M862.5`), and the features (`M862.6`): input shaper on
-  every build but the iX, the INDX lock on INDX, an MMU3 file with the MMU
-  off, and a feature the build doesn't know. A failed check that `checks`
+  every build but the iX, the INDX lock on INDX, an MMU3 file unless the
+  MMU is on and connected, and a feature the build doesn't know. A failed check that `checks`
   doesn't ignore holds the job in `ATTENTION`, with its ID in
   `/api/v1/status` and `PAUSED` in `/api/v1/job`, and one screen lists
   every failed check. Under `warn`, `tap_through` answers Print: the start
@@ -508,8 +521,7 @@ Choices made where the firmware was silent or the plan left it open:
   (model, compatibility mode, G-code level, input shaper and firmware). The
   checks share one screen and the worst severity decides it, so one setting
   shows the bridge every outcome.
-- The preview takes the MMU for off, so a file with `M862.6 P"MMU3"` fails
-  on a build that knows the MMU3. A file that declares the `HT Hotend` is taken as
+- A file that declares the `HT Hotend` is taken as
   satisfied: whether the hotend is high-temperature is printer state the
   simulator doesn't hold.
 - A print started from the page isn't a sliced file and has no `M862`
