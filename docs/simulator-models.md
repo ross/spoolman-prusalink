@@ -231,8 +231,8 @@ builds that can take one and false elsewhere (`basic_gets.cpp:229-253`).
 
 The simulator has the first row, and an idle sensor clear that follows the
 picked tool. Its selected tool can be none, but nothing makes it none, so
-in practice it always has a tool picked. So T4 (the idle clear on a picked
-tool) describes something an INDX does only with a tool left on the head.
+T4 (the idle clear on a picked tool) describes something an INDX does only
+with a tool left on the head.
 
 One correction applies to every build. After a power cut, the firmware sits
 in `IDLE` for at least 1.5 s before the resume starts, and the idle sensor
