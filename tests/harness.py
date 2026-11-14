@@ -11,8 +11,10 @@ from dataclasses import fields, replace
 import httpx
 
 from integration.station import SETTINGS, Station
+from simulator.config import tool_location
 from simulator.model import (
     MODELS,
+    Firmware,
     Material,
     PrintSpec,
     Segment,
@@ -181,35 +183,62 @@ def fill(tool, material):
     tool.fill(material)
 
 
-def add_station(sim, name="default"):
-    """Add a Core One L to `sim`: tool 0 loaded with grey PLA and 1000 mm on its counter.
+def add_station(sim, name="default", model="8.1.0", tools=1, *, auto_retract=False):
+    """Add a printer to `sim`, by default a Core One L with one tool.
 
-    Its auto-retract is off: these tests move the counter by hand, and the auto-retract
-    at the end of each job would add a count of its own.
+    `tools` is a count, or the `SimTool`s themselves, indexed from 0. With a count, tool
+    0 is loaded with grey PLA and 1000 mm on its counter, and the others are empty. A
+    model with no usage counters reports none.
+
+    The auto-retract is off by default: most tests move the counter by hand, and the
+    auto-retract at the end of each job would add a count of its own. A test that runs
+    the simulator's own loads, unloads and prints turns it on.
     """
-    tool = SimTool(0, extruded=1000.0)
-    fill(tool, PLA)
-    printer = SimPrinter(name, 0, "k", MODEL, boot_id=1, tools={0: tool}, auto_retract=False)
+    if isinstance(tools, int):
+        tools = [SimTool.loaded_with(0, PLA, extruded=1000.0)] + [
+            SimTool(index) for index in range(1, tools)
+        ]
+    info = MODELS[model]
+    printer = SimPrinter(
+        name,
+        0,
+        "k",
+        info,
+        firmware=Firmware.FULL if info.counters else Firmware.NO_COUNTERS,
+        boot_id=1,
+        tools={tool.index: tool for tool in tools},
+        auto_retract=auto_retract,
+    )
     sim.add(printer)
     return Station(sim, printer)
+
+
+def tool_locations(prefix, tools):
+    """Tool index -> Spoolman location for a printer with `tools` tools (a count or a list),
+    named as `bridge-config` names them: `prefix` for one tool, else `<prefix> T1` and on."""
+    count = tools if isinstance(tools, int) else len(tools)
+    return {index: tool_location(prefix, index, count) for index in range(count)}
 
 
 PRINTER_KEYS = {f.name for f in fields(PrinterConfig)}
 
 
-def make(tmp_path, spools, **cfg):
+def make(tmp_path, spools, *, model="8.1.0", tools=1, auto_retract=False, **cfg):
     """A bridge on a fake Spoolman and one simulated printer, "default", served in process.
 
-    Returns the bridge, the fake Spoolman and the printer's `Station`. A sync job the
-    bridge uploads runs only as the test ticks: `Station.finish_job()` runs it to its end.
+    Returns the bridge, the fake Spoolman and the printer's `Station`. `model`, `tools`
+    and `auto_retract` go to `add_station`, and the tools' locations follow
+    `tool_locations(LOC, tools)`. A sync job the bridge uploads runs only as the test
+    ticks: `Station.finish_job()` runs it to its end.
     """
     fake = FakeSpoolman(spools)
-    printer = add_station(Simulation(Settings(**SETTINGS)))
+    sim = Simulation(Settings(**SETTINGS))
+    printer = add_station(sim, "default", model, tools, auto_retract=auto_retract)
     printer_cfg = PrinterConfig(
         name="default",
         url="http://printer",
         api_key="k",
-        tools={0: LOC},
+        tools=tool_locations(LOC, tools),
         **{k: cfg.pop(k) for k in list(cfg) if k in PRINTER_KEYS},
     )
     config = Config(
@@ -371,19 +400,26 @@ def restart(bridge, **cfg):
 CLAIMED = {"bridge_claim": "true"}
 
 
-def two_printers(tmp_path, spools, **cfg):
-    """A bridge with printers "a" and "b", each with one tool, against one fake Spoolman.
+def two_printers(tmp_path, spools, *, model="8.1.0", tools=1, **cfg):
+    """A bridge with printers "a" and "b" against one fake Spoolman.
 
-    Returns the bridge, the fake Spoolman and the two printers' stations by name. They
-    share one simulation, so a tick moves both.
+    Each is `model` with a count of `tools` (see `add_station`), by default a Core One L
+    with one tool, at `tool_locations("Tool a", tools)` and the same for "b". Returns
+    the bridge, the fake Spoolman and the two printers' stations by name. They share one
+    simulation, so a tick moves both.
     """
     fake = FakeSpoolman(spools)
     sim = Simulation(Settings(**SETTINGS))
-    printers = {name: add_station(sim, name) for name in ("a", "b")}
+    printers = {name: add_station(sim, name, model, tools) for name in ("a", "b")}
     config = Config(
         spoolman_url="http://spoolman",
         printers=tuple(
-            PrinterConfig(name=name, url=f"http://{name}", api_key="k", tools={0: f"Tool {name}"})
+            PrinterConfig(
+                name=name,
+                url=f"http://{name}",
+                api_key="k",
+                tools=tool_locations(f"Tool {name}", tools),
+            )
             for name in printers
         ),
         db_file=tmp_path / "bridge.db",

@@ -306,10 +306,17 @@ def load(path: str | os.PathLike) -> SimConfig:
     return SimConfig(host, control_port, data_dir, settings, printers)
 
 
+def tool_location(name: str, index: int, tools: int) -> str:
+    """The Spoolman location of tool `index` on a printer named `name` with `tools` tools:
+    the name for one tool, else the name and the tool's number from 1, as `<name> T1`.
+
+    The test harnesses name their tools' locations by it too.
+    """
+    return name if tools == 1 else f"{name} T{index + 1}"
+
+
 def _location(printer: PrinterConfig, tool: ToolConfig) -> str:
-    if len(printer.tools) == 1:
-        return printer.name
-    return f"{printer.name} T{tool.index + 1}"
+    return tool_location(printer.name, tool.index, len(printer.tools))
 
 
 def locations(cfg: SimConfig) -> list[Location]:
