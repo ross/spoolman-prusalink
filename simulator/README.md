@@ -261,11 +261,11 @@ that trace. The points that matter for the bridge, in short:
   the XL. INDX purges 25 mm in its nozzle cleaner halfway through `BUSY`,
   with no auto-retract after. Every other model that retracted feeds the
   8 mm back at the end of `BUSY`. Both count whether or not the tool holds
-  filament. The MINI and the XL dev kit build no power panic, so there a cut
-  drops the job and the printer boots idle, as a plain reboot does. With `cold_bed` it waits in `ATTENTION` for `resume` before
-  recovering. The page's
-  **Power-loss resume** sends `cold_bed` from its **cold bed** checkbox, and
-  **Resume** continues that wait.
+  filament. The MINI and the XL dev kit build no power panic, so there a
+  cut drops the job and the printer boots idle, as a plain reboot does.
+  With `cold_bed`, a resuming printer waits in `ATTENTION` for `resume`
+  before recovering. The page's **Power-loss resume** sends `cold_bed` from
+  its **cold bed** checkbox, and **Resume** continues that wait.
 - An upload during the start blip is accepted and dropped: the firmware's
   state check passes while it reads `IDLE`, but the print start ignores it.
   The user's print goes on and the uploaded file never runs.
