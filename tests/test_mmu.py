@@ -157,11 +157,13 @@ async def print_through(station, spec):
 
 async def test_an_mmu_tool_change_charges_the_outgoing_slot_the_firmware_feed(tmp_path):
     # BF16: each change counts the firmware's feed, 206.9 mm of the new slot's filament, on
-    # the old slot, and the wipe tower's stamping 15 mm more past the 40 mm gap. The bridge
-    # charges each slot's spool what its counter says: slot 0 counts 657.6536 mm, slot 1
-    # 467.3836 (simulator/tests/test_mmu_prints.py), so 624 and 444 at 0.95, where the
-    # model, the start and the purges come to 70 + 40 + 61.95 + 3 x 20.9518 on slot 0 and
-    # 86.63 + 40 + 20.9518 on slot 1.
+    # the old slot, and the wipe tower's stamping 15 mm more past the gap. The bridge
+    # charges each slot's spool what its counter says. In commanded mm, slot 0 counts
+    # 657.6536 and slot 1 467.3836 (simulator/tests/test_mmu_prints.py), and the counters
+    # read 624 and 444 at 0.95. Each slot rams out twice, so the start, the model, the
+    # loads, the purges and the rammings come to 70 + 40 + 32 + 29.95 + 2 x 20.9518 =
+    # 213.8536 on slot 0 and 32 + 54.63 + 40 + 32 + 29.95 + 2 x 20.9518 = 230.4836 on
+    # slot 1; the rest is 2 x (206.9 + 15) on slot 0 and 206.9 + 2 x 15 on slot 1.
     bridge, fake, station, _ = mmu(tmp_path, [(0, "PLA"), (1, "PLA")], t0="PLA", t1="PLA")
     p = station.printer
     await bridge.poll()
