@@ -363,7 +363,11 @@ def start_job(station, name="part.bgcode"):
 
 
 def end_job(station):
-    """Cancel the running job and tick until the printer has none."""
+    """Cancel the printer's job and tick until it has none.
+
+    A job that's printing parks and ends `STOPPED`; one still at the preview, at a question
+    or the scan, ends `IDLE` at once.
+    """
     station.printer.cancel()
     station.finish_job()
 

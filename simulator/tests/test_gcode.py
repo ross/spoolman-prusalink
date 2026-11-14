@@ -111,6 +111,13 @@ def test_a_parameter_that_does_not_parse_names_the_rest_of_the_line():
         ("M862.6 P MMU3", FeatureCheck("")),
         ("M862.6 Q", Ignored("M862.6 Q")),
         ("M862.1 P0.4", Ignored("M862.1 P0.4")),
+        # The firmware pops one letter, reads its value if it knows the letter, then skips
+        # to the next space, so a `P` glued after another letter is never read
+        # (`GCodeInfo::parse_m862` in `src/common/gcode/gcode_info.cpp`).
+        ('M862.3 XP"MINI"', Ignored('M862.3 XP"MINI"')),
+        ('M862.3 T0P"MINI"', Ignored('M862.3 T0P"MINI"')),
+        ("M862.5 XP3", Ignored("M862.5 XP3")),
+        ('M862.3 X P"MINI"', ModelCheck("MINI")),
     ],
 )
 def test_checks_never_fail_to_parse(line, check):
