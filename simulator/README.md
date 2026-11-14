@@ -82,7 +82,12 @@ power-panic resume, the preheat and park times, and whether the start blip
 and the model check are on. The feed ratio and a load's slow, fast and purge
 lengths are overrides: left out, each printer uses its model's value, which
 the page shows on the printer's card. On the page or through
-`/api/settings`, an empty value or `null` unsets an override.
+`/api/settings`, an empty value or `null` unsets an override. The purge
+override follows the firmware's `purge_length`: it replaces the model's
+length, a high-flow nozzle doesn't double it, and a purge is never shorter
+than 1 mm. The iX purges in 5 mm steps, so it rounds the length up to the
+next multiple of 5, and INDX ignores the override: its nozzle cleaner purges
+25 mm.
 
 ## The page and the control API
 
@@ -196,7 +201,9 @@ Choices made where the firmware was silent or the plan left it open:
   every printer, single-tool included.
 - A `jam` with `unload` off goes to `ATTENTION` without counting anything and
   `clear_jam` resumes it. With `unload` on, it's a runout whose reload purges
-  more.
+  `jam_purge_mm` more, on top of the 1 mm minimum and before the iX's
+  rounding. The firmware has no extra jam purge: it stands for the user
+  picking Purge more.
 - The iX's assisted insertion before the slow load isn't modeled: the
   firmware source doesn't give its length. The iX purges its length in one
   move, not in 5 mm steps with a clean between.

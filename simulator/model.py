@@ -6,6 +6,7 @@ it directly and the server calls it with scaled real time.
 
 from __future__ import annotations
 
+import math
 import random
 import re
 import sys
@@ -46,6 +47,12 @@ from simulator.tool import (
 EVENT_LIMIT = 2000
 SNAPSHOT_NAME = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
 EPSILON = 1e-9
+# The shortest purge a load runs, whatever the override: `minimal_purge` in
+# `src/marlin_stubs/include/pause_settings.hpp`.
+MINIMAL_PURGE_MM = 1.0
+# The iX's nozzle cleaner purges in steps of this until it has purged the purge length
+# (`nozzle_cleaner_purge_sequence` in `src/marlin_stubs/pause/pause.cpp`).
+IX_PURGE_STEP_MM = 5.0
 UUID_TOOL = 0  # the one tool that keeps tag UUIDs, on a model that has them
 
 
@@ -227,7 +234,9 @@ class Settings:
     unload_seconds: float = 3.0
     slow_load_mm: float | None = None
     fast_load_mm: float | None = None
-    purge_mm: float | None = None  # the whole purge: no doubling, no cleaner's fixed length
+    # The whole purge, not doubled for a high-flow nozzle. At least 1 mm, in 5 mm steps on
+    # the iX, and INDX ignores it: its cleaner purges a fixed length.
+    purge_mm: float | None = None
     toolchange_purge_mm: float = 30.0
     jam_purge_mm: float = 60.0
     preheat_seconds: float = 5.0
@@ -645,7 +654,11 @@ class SimPrinter:
     def _load_steps(self, purge: float | None, extra: float, printing: bool) -> list[LoadStep]:
         """The moves of a load (`src/marlin_stubs/pause/pause.cpp`), with the overrides.
 
-        `purge` is the load's own purge override, and `extra` is added to the purge.
+        `purge` is the load's own purge override, and `extra` is added to the purge. As
+        `Settings::purge_length` in `src/marlin_stubs/pause/pause_settings.cpp` does, an
+        override replaces the build's length, high-flow doubling included, and no purge is
+        shorter than 1 mm. INDX's cleaner G-code purges its fixed length whatever the
+        override, and the iX purges in 5 mm steps until it reaches the length.
 
         The type is written before the purge. Without a nozzle cleaner the purge ends with a
         retract; the iX purges with no retract, and the INDX cleaner's purge ends with an
@@ -657,15 +670,22 @@ class SimPrinter:
         slow, fast, model_purge = self._load_lengths()
         slow = slow if s.slow_load_mm is None else s.slow_load_mm
         fast = fast if s.fast_load_mm is None else s.fast_load_mm
-        if purge is None:
-            purge = model_purge if s.purge_mm is None else s.purge_mm
+        ex = self.model.extruder
+        if ex.cleaner_purge_mm:
+            purge = ex.cleaner_purge_mm
+        else:
+            if purge is None:
+                purge = model_purge if s.purge_mm is None else s.purge_mm
+            purge = max(purge, MINIMAL_PURGE_MM)
+        purge += extra
+        if ex.cleaner_purge_mm == 0:  # the iX
+            purge = math.ceil(purge / IX_PURGE_STEP_MM - EPSILON) * IX_PURGE_STEP_MM
         steps = [
             LoadStep("SLOW", slow),
             LoadStep("FAST", fast),
             LoadStep(TYPE_STEP),
-            LoadStep("PURGE", purge + extra),
+            LoadStep("PURGE", purge),
         ]
-        ex = self.model.extruder
         if ex.cleaner_purge_mm is None:
             steps.append(LoadStep("RETRACT", -lengths.retract_mm))
         if ex.cleaner_auto_retract:

@@ -122,11 +122,51 @@ def test_an_override_of_0_skips_the_step():
     # Nothing feeds before the type; the 40 mm purge only fills the gap, so only the
     # auto-retract counts.
     assert menu_load(sim, p) == pytest.approx((0, 23 * 0.95))
-    sim, p = unloaded("4.1.0", slow_load_mm=0, fast_load_mm=0, purge_mm=0)
+
+
+@pytest.mark.parametrize(("setting", "call"), [(0, None), (None, 0.5)])
+def test_a_purge_is_never_shorter_than_1_mm(setting, call):
+    # 40 slow refills the full gap, so the purge counts all it feeds.
+    sim, p = unloaded("8.1.0", slow_load_mm=40, fast_load_mm=0, purge_mm=setting)
     p.auto_retract = False
-    p.load(0, source="preset", name="PETG")  # the iX's load is then only the type
-    assert p.tools[0].loaded and p.tools[0].material.name == "PETG"
-    assert p.tools[0].process is None and p.state is State.IDLE
+    p.load(0, source="preset", name="PETG", purge_mm=call)
+    before = p.tools[0].extruded
+    sim.advance(100)
+    # The override, 0 or 0.5, is raised to 1; the 8 mm retract then only grows the gap.
+    assert p.tools[0].extruded - before == pytest.approx(1 * 0.95)
+
+
+@pytest.mark.parametrize(("setting", "call"), [(5, None), (None, 5)])
+def test_indx_purges_the_cleaners_25_mm_whatever_the_override(setting, call):
+    sim, p = unloaded("8.10.0", purge_mm=setting)
+    before = p.tools[0].extruded
+    p.load(0, source="preset", name="PETG", purge_mm=call)
+    sim.advance(100)
+    # 15 slow + 25 fast - 27 gap = 13 before the type; then the cleaner's 25, not 5, and
+    # its auto-retract's 8.
+    assert p.tools[0].extruded - before == pytest.approx((13 + 25 + 8) * INDX_RATIO)
+
+
+@pytest.mark.parametrize(("purge", "purged"), [(12, 15), (15, 15), (0, 5)])
+def test_the_ix_purges_in_5_mm_steps(purge, purged):
+    # 40 slow refills the full gap, and no auto-retract follows.
+    sim, p = unloaded("4.1.0", slow_load_mm=40, fast_load_mm=0, purge_mm=purge)
+    p.auto_retract = False
+    assert menu_load(sim, p) == pytest.approx((0, purged * 0.95))
+
+
+def test_a_jam_reload_purges_its_extra_on_top_of_the_minimum():
+    sim, p = make("8.1.0", [loaded(0, PLA)], slow_load_mm=40, fast_load_mm=0, purge_mm=0)
+    p.start_print(PrintSpec([Segment(0, 100)], preheat_s=0))
+    sim.tick(0.8 + 1)
+    p.jam(0)
+    before = p.tools[0].extruded
+    p.load(0)
+    sim.advance(100)
+    # The jam left the gap full and 40 slow refills it. The purge of 0 is raised to 1, and
+    # the jam adds its 60: 61 counted. The prime of 4 and retract of 8 only move the gap.
+    assert p.job.phase is JobPhase.PAUSED
+    assert p.tools[0].extruded - before == pytest.approx(61 * 0.95)
 
 
 def test_the_load_purge_override_wins_over_the_setting():
