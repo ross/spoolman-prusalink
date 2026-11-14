@@ -42,6 +42,7 @@ TOOL_CALLS: dict[str, Callable[[SimPrinter, int], None]] = {
     "retract": lambda p, i: p.retract(i, 1),
     "runout": lambda p, i: p.runout(i),
     "jam": lambda p, i: p.jam(i),
+    "change_filament": lambda p, i: p.change_filament(i),
     "select_tool": lambda p, i: p.select_tool(i),
     "set_sensor_fault": lambda p, i: p.set_sensor_fault(i, True),
     "set_stuck_write": lambda p, i: p.set_stuck_write(i, True),
@@ -143,6 +144,15 @@ def multi_tool_print():
     p.tap_through()  # Print
     run(sim, 1.8)
     assert p.job.phase is JobPhase.PRINTING
+    return sim, p
+
+
+def xl_changing_another_tool():
+    """The XL's two-tool print on T0 waits for T1's reload after Tune > Change filament
+    on T1, with T1 picked."""
+    sim, p = multi_tool_print()
+    p.change_filament(1)
+    assert p.job.phase is JobPhase.WAIT_LOAD and p.selected_tool == 1
     return sim, p
 
 
@@ -262,6 +272,7 @@ SITUATIONS = [
     off_mid_print,
     cold_bed,
     multi_tool_print,
+    xl_changing_another_tool,
     panic_window,
     multi_tool_idle,
     xl_picked_after_a_load,

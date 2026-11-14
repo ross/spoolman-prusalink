@@ -9,7 +9,7 @@ a time.
 
 ## Reading an entry
 
-Each finding has an ID from BF1 to BF26, for "bridge finding". The single
+Each finding has an ID from BF1 to BF27, for "bridge finding". The single
 letters are taken by the scenario rows in [scenarios.md](scenarios.md) and
 the printer behaviors (F) in [printer-behaviors.md](printer-behaviors.md).
 An ID stays with its finding when the finding moves stage or is fixed.
@@ -61,6 +61,7 @@ written.
 | 1 | BF23 | A print declined after the preview's load can count as started |
 | 1 | BF24 | Usage counted on an empty tool lands on the next spool |
 | 1 | BF25 | Printing past an empty tool leaves the filament sensors off |
+| 1 | BF27 | A filament change before a tool's first extrusion in a print looks like its print start |
 | 1 | BF3 | A custom preamble without the input-shaper check makes every sync job wait |
 | 1 | BF2 | The bridge refuses a preamble the printer accepts |
 | 1 | BF4 | The printer's check settings change what a failed check does |
@@ -548,6 +549,43 @@ written.
   hand and pick it as `test_t4_idle_sensor_clear_on_a_picked_tool` in
   `integration/test_tools.py` does, and poll: no unload counts, where T4
   counts one. No bridge test covers it.
+- **Status**: Open.
+
+### BF27. A filament change before a tool's first extrusion in a print looks like its print start
+
+- **Printers**: Core One INDX, Core One L INDX and XL, through Tune >
+  Change filament on a tool the print hasn't used yet. Every model with
+  counters, through a runout during a print's preheat.
+- **What happens**: Tune > Change filament on a toolchanger asks for a
+  tool and sends `M600 P T<n>`, which picks that tool, changes its
+  filament and changes back (F34, `src/marlin_stubs/pause/M600.cpp:204-340`,
+  `src/gui/screen/screen_m600.cpp`). The change counts an unload on the
+  tool, and its ramming counts too. `accounting.print_start` takes a
+  tool's first counter rise in a new job as that tool's print start (Q4).
+  On a tool that hasn't extruded in the running job, the ramming is that
+  rise, so the bridge sees the unload and the tool's print start in the
+  same poll: it records `unload` and `swap_unconfirmed`, then at once
+  `swap_assumed` with a provisional charge, and flags the spool as assumed
+  reloaded. On a tool the print has already extruded with, the swap stays
+  open as P2 and P3 say. A runout during a print's preheat, before any
+  extrusion, takes the same path on a single-tool printer.
+- **Effect**: A Spoolman change made while the printer waits for the
+  reload, which P2 promises confirms the swap, is staged instead (S13),
+  and the reload and the rest of the print go to the old spool until a
+  claim moves them. With no Spoolman change, the old spool carries an
+  "assumed reloaded" flag where P3 would leave the swap open.
+- **Evidence**: Shown in the simulator on an INDX by
+  `test_a_change_on_a_tool_the_print_has_not_used_looks_like_its_print_start`
+  in `tests/test_toolchanger_prints.py`. Reproduced, no test kept: the
+  same change on a tool the print used earlier follows P2, and a runout in
+  the preheat of a Core One L print gives `unload`, `swap_unconfirmed` and
+  `swap_assumed` in one poll. That a real runout can come before the
+  print's first extrusion is inferred: the start G-code's heat waits come
+  before its purge line.
+- **Scenario rows**: T10, P2, P3, P8, Q4, S13.
+- **To reproduce**: That test, today. For the single-tool path, start a
+  print with a preheat on a Core One L through the unit harness, poll
+  during the preheat, `runout(0)`, and poll.
 - **Status**: Open.
 
 ## Multi-tool

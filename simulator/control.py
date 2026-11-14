@@ -39,6 +39,7 @@ ACTIONS = frozenset(
         "home",
         "runout",
         "jam",
+        "change_filament",
         "clear_jam",
         "reboot",
         "set_power",

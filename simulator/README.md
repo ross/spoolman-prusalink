@@ -108,7 +108,7 @@ curl -X POST -H 'Content-Type: application/json' \
 
 Actions: `load`, `unload`, `extrude`, `retract`, `select_tool`,
 `park_tool`, `change_all`, `start_print`, `pause`, `resume`, `cancel`, `dismiss`, `home`, `runout`, `jam`,
-`clear_jam`, `reboot`, `set_power`, `set_fault`, `set_firmware`,
+`change_filament`, `clear_jam`, `reboot`, `set_power`, `set_fault`, `set_firmware`,
 `set_sensor_fault`, `set_stuck_write`, `set_tool_enabled`,
 `set_checks`, `set_sensors`, `counter_step_back`,
 `set_extruded_at_unload`, `tap_through`. Parameter names are the keyword arguments of the methods with
@@ -274,6 +274,17 @@ that trace. The points that matter for the bridge, in short:
   each tool after its load, and the XL ends with the last tool picked. A
   reboot or power cut drops what's left, and a power-panic resume waits
   until the last tool is done. The page's **Change all** opens the form.
+- `change_filament` is the Tune menu's Change filament, `M600 T<n>`, on any
+  enabled tool once a print is printing. On the picked tool it's the
+  filament change a runout runs. On another tool it picks that tool, runs
+  the same change there, and the `resume` after the reload changes back to
+  the print's tool with no purge, so the counts land on that tool only.
+  The pick moves nothing and takes no time. The reload writes the type
+  the tool had, else the type the file names for it, else the type its
+  last unload left; with none of them, the firmware can't heat the tool,
+  and nothing changes. The page's **Change** button sends it.
+- A load or unload during a print reads `ATTENTION` in every phase, the
+  reload's load included; with no print, `BUSY`.
 - `extrude` and `retract` move only the picked tool, as the menu's Move E
   does. With no tool picked they answer 409, and on another tool 400.
 - The selected tool can be none, which stands for a toolchanger with no

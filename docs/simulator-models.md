@@ -126,6 +126,11 @@ firmware update.
   load. Each pick is inside the dialog, with no clear. INDX docks after
   each tool, and the XL ends with the last one picked. A power cut drops
   the tools not yet reached.
+- Tune > Change filament (`change_filament`) runs the filament change on
+  any tool during a print: on another tool it picks that tool, and the
+  resume changes back with no purge. The counts land on that tool only. A
+  runout and a color change on INDX follow the firmware's INDX flow, and a
+  load or unload in a print reads `ATTENTION` in every phase.
 - The model's feed system, direct, XL or INDX, holds the rules that
   differ between them. `ModelInfo.feed` names it, and
   `script/firmware-check` compares it with `HAS_TOOLCHANGER` and
@@ -258,12 +263,12 @@ builds that can take one and false elsewhere (`basic_gets.cpp:229-253`).
 | The picked tool at rest | INDX docks its tool after a load, an unload, a pause and a print, so an idle INDX has none picked. The pause docks in `Pausing_ParkHead`, and the resume picks the tool again and purges it in the nozzle cleaner, 25 mm then `M1705 N`, while `PAUSED`. A finished print's stock end G-code parks the tool on both toolchangers (`P0 S1`, PrusaResearch.ini 2.5.16), so the firmware's end retract and auto-retract find no tool. A stopped XL print keeps its tool and gets the end's retract and auto-retract; a stopped INDX print docks after its auto-retract. A sync job leaves the tool as it was. At boot the XL picks the Dwarf on its head. INDX restores the EEPROM's last picked tool, checked against its nozzle sensor; parking a tool while printing invalidates it unless a single-tool print froze it, so a multi-tool print cut short boots with none. | `M701_2.cpp:135-140, 194-197, 339-342`, `marlin_server.cpp:1077-1100, 2549-2563, 2662-2674, 2789-2817, 3298-3307, 3423-3434`, `P.cpp:35-48`, `toolchanger_utils_indx.cpp:50-57`, `toolchanger_indx.cpp:213-261, 926-939`, `toolchanger_utils_xl.cpp:54-58`, `toolchanger_xl.cpp:589-597` |
 | Idle sensor clear | Only the picked tool, and only while not printing and with no load or unload dialog open: the XL reads the Dwarf's extruder sensor, INDX the tool's side sensor. It doesn't run on an idle INDX with none picked. The XL keeps a tool picked after a menu operation, a stop and a boot, so it runs there often. A tool emptied by hand while docked keeps its type until something picks it while idle, the menu's pick before a load or unload included. Nothing sweeps the tools at boot or at a print start. | `filament_sensors_handler.cpp:120-131, 197-212, 303-312`, `filament_sensors_handler_XL.cpp:17-61`, `filament_sensors_handler_INDX.cpp:20-23` |
 | Runout with a spool join | Counts an unload on the old tool, and the print goes on with the join's tool. The new tool's type isn't set or copied. Its purge counts on it: 27 mm on the XL, 25 mm on INDX. | `spool_join.cpp:258-342`, `toolchanger_xl.cpp:505-549`, `nozzle_cleaner.cpp:87` |
-| Runout without one | `M600` on the same tool, as on a single-tool printer. | `filament_sensors_handler.cpp:237` |
-| `M600 T<n>` | Picks tool `n`, changes its filament, and goes back. | `M600.cpp:223-241, 319` |
+| Runout without one | `M600` on the same tool. On INDX it isn't the single-tool flow: it parks over the wastebin, purges 2 mm before the INDX ramming, cleans the nozzle after the unload, purges 25 mm with `purge_clean` and its `M1705 N` auto-retract at the reload, then primes 4 mm, retracts 8 mm and cleans again. The reload writes the old type back, so `unload_count` +1 with the same `material`. | `filament_sensors_handler.cpp:237`, `M600.cpp:223, 282-290`, `pause.cpp:1233-1297, 1054-1096`, `mapi/parking.cpp:101-110` |
+| `M600 T<n>` | Tune > Change filament sends it for a chosen tool. Picks tool `n` outside any dialog, so it reads `PRINTING`, with the resume point at `n`'s dock and `n` heated for its type. Changes `n`'s filament in the dialog (`ATTENTION`), then changes back to the print's tool with no E move; INDX reheats over the purge position. With no type found for `n`, nothing changes. | `M600.cpp:204-340`, `screen_m600.cpp` |
 | Change all, on the XL and INDX | For each chosen tool in index order, inside one `BUSY` dialog: `M1600` (an unload that counts, then a load) when a type is stored, else `M701` (a load). Each picks its tool inside its dialog. INDX docks after each tool; the XL ends with the last one picked. | `multi_filament_change.cpp:151-239`, `M701_2.cpp:135-140, 240-343` |
-| A load or unload during a print | Reads `ATTENTION` in every phase, not only while waiting. Idle, it reads `BUSY`. | `printer_state.cpp:178-190, 238-243` |
+| A load or unload during a print | Reads `ATTENTION` in every phase, `ChangingTool` included, not only while waiting. Idle, it reads `BUSY`. A preheat in a print reads `PRINTING`, not `ATTENTION`. | `printer_state.cpp:152-190, 238-246` |
 
-The simulator has the first five rows. An INDX docks after a menu load or
+The simulator has every row but spool join. An INDX docks after a menu load or
 unload, a pause and a job's end, so its selected tool becomes none, and the
 Pick/park menu picks or parks a tool on either toolchanger. The end G-code's
 park stands for the stock profile until the slicer is modeled

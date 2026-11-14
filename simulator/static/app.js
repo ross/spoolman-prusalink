@@ -214,6 +214,7 @@ function renderTool(p, t) {
     btn('Jam', 'jam', gate(a, 'jam', { tool: i })) +
     '<label title="unload on jam"><input type="checkbox" data-k="jam' + i + '"' +
     (getv(p.name, 'jam' + i, true) ? ' checked' : '') + '>unload</label>' +
+    btn('Change', 'change_filament', gate(a, 'change_filament', { tool: i, title: 'Tune > Change filament: M600 T' + i })) +
     btn('Select', 'select_tool', gate(a, 'select_tool', { tool: i })) +
     btn('Sensor fault', 'sensor_fault', gate(a, 'set_sensor_fault', { tool: i, cls: t.sensor_fault ? 'on' : '' })) +
     btn('Stuck write', 'stuck_write', gate(a, 'set_stuck_write', { tool: i, cls: t.stuck_write ? 'on' : '' })) +
@@ -470,7 +471,7 @@ function onClick(e) {
         return go('change_all', changeAllBody(name, p), () => { pst(name).open.changeall = false; renderCard(name); });
       case 'load_submit':
         return go('load', loadBody(name, tool), () => { pst(name).open['load' + tool] = false; renderCard(name); });
-      case 'unload': case 'runout': case 'select_tool':
+      case 'unload': case 'runout': case 'select_tool': case 'change_filament':
         return go(act, { tool });
       case 'extrude': case 'retract': {
         const mm = numOrNull(getv(name, 'mm', '10'));

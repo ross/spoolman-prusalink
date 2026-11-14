@@ -1316,6 +1316,9 @@ class SimPrinter:
             tool, gap = job.restore
             self._restore_to(self.tools[tool], gap)
             job.restore = None
+            # A change on another tool changes back to the print's tool after the dialog,
+            # with no E move and no purge (`M600_execute`, `M600.cpp:317-339`).
+            self._pick(self._job_tool(job))
         else:
             self._unpark_prime(job)
         if job.paused_from is JobPhase.PREHEAT:
@@ -1403,7 +1406,7 @@ class SimPrinter:
         t = self._tool(tool)
         self._check_sensor_runout(t)
         self._log("action", f"runout T{tool}")
-        self._runout(t, Reason.RUNOUT)
+        self._filament_change(t, Reason.RUNOUT)
 
     def jam(self, tool: int, unload: bool = True) -> None:
         """A jam either unloads like a runout (and purges more on reload) or is cleared in place."""
@@ -1411,17 +1414,57 @@ class SimPrinter:
         self._check_runout(t)
         self._log("action", f"jam T{tool}" + ("" if unload else " without unloading"))
         if unload:
-            self._runout(t, Reason.JAM)
+            self._filament_change(t, Reason.JAM)
             return
         job = self.job
         job.paused_from = job.phase
         job.enter(JobPhase.HOLD, Attention(Reason.JAM, tool))
         self._show_state()
 
-    def _runout(self, t: SimTool, reason: Reason) -> None:
+    def change_filament(self, tool: int) -> None:
+        """Change the filament in `tool` during a print: Tune > Change filament, which on a
+        toolchanger asks for the tool and sends `M600 P T<n>`, and on a direct printer names
+        the picked tool (`src/gui/screen/screen_m600.cpp`).
+
+        On the picked tool it's the filament change a runout runs. On another tool, `M600`
+        picks that tool with no dialog open, so it reads `PRINTING`, runs the same change
+        on it, and changes back to the print's tool when the change ends, with no E move
+        (`M600_execute` in `src/marlin_stubs/pause/M600.cpp:204-340`). The simulator
+        changes back at the resume. Picking the other tool heats it for the type
+        `_type_to_load` finds; with none found its target is 0, so `Pause::filament_change`
+        returns at once as too cold, and `M600` changes back with nothing changed.
+        """
+        t = self._tool(tool)
+        self._check_change_filament()
         job = self.job
-        # Only a print in progress runs out, so the phase is PRINTING or PREHEAT here.
+        self._log("action", f"change filament T{tool}")
+        if t.index != self.selected_tool:
+            if self._type_to_load(t, job) is None:
+                self._log("job", f"T{tool} has no type to heat for: nothing changes")
+                return
+            self._pick(t)
+        self._filament_change(t, Reason.COLOR_CHANGE)
+
+    def _type_to_load(self, t: SimTool, job: UserJob) -> Material | None:
+        """The type a filament change on `t` loads back, read before its unload:
+        `FilamentType::for_tool_heuristic` (`M600.cpp:282-290`,
+        `src/common/filament_tools.cpp:15-45`). The stored type; else the type the print's
+        file names for the tool, when it's a preset of the build; else the type the last
+        unload left, or the ad-hoc slot."""
+        if t.material is not None:
+            return t.material
+        named = {s.tool: s.material for s in job.spec.segments}.get(t.index)
+        if named in self.model.presets:
+            return self._new_material(t, "preset", named, None, None, None)
+        return t.kept()
+
+    def _filament_change(self, t: SimTool, reason: Reason) -> None:
+        """The filament change on the picked tool `t` that every `M600` runs: a runout, a
+        jam that unloads, a color change in the file, and Tune > Change filament."""
+        job = self.job
+        # Only a print in progress changes filament, so the phase is PRINTING or PREHEAT.
         job.paused_from = job.phase
+        loads = self._type_to_load(t, job)
         # The filament change records the tracker's distance, parks with a retract, then
         # rams and unloads (`Pause::filament_change` and `park_nozzle_and_notify` in
         # `src/marlin_stubs/pause/pause.cpp`).
@@ -1429,6 +1472,8 @@ class SimPrinter:
         self._retract_to(t, self.model.extruder.lengths.retract_mm)
         self._run_steps(t, self._unload_steps(t, "runout"))
         self._physical_unload(t, str(reason))
+        if loads is not None:
+            t.kept_type = loads  # what the reload writes (`filament::set_type_to_load`)
         job.enter(JobPhase.WAIT_LOAD, Attention(reason, t.index))
         self._show_state()
 
@@ -1743,6 +1788,15 @@ class SimPrinter:
         if not t.path.loaded:
             raise Busy(f"T{t.index} has no filament")
 
+    def _check_change_filament(self) -> None:
+        self._need_power()
+        job = self.job
+        # Tune > Change filament is enabled once the print has printed something
+        # (`max_printed_z > 0` in `MI_M600::Loop`, `src/gui/screen/screen_m600.cpp`), so
+        # not during the preheat.
+        if not (isinstance(job, UserJob) and job.phase is JobPhase.PRINTING):
+            raise Busy("a filament change needs a print in progress")
+
     def _check_sensor_runout(self, t: SimTool) -> None:
         # A runout is the sensor seeing the filament go. A jam is found another way.
         self._check_runout(t)
@@ -1838,6 +1892,7 @@ class SimPrinter:
             "retract": lambda: self._check_move(t),
             "runout": lambda: self._check_sensor_runout(t),
             "jam": lambda: self._check_runout(t),
+            "change_filament": self._check_change_filament,
             "select_tool": self._check_select,
             # The fault switches take any enabled tool, in any state.
             "set_sensor_fault": lambda: None,
@@ -2168,7 +2223,7 @@ class SimPrinter:
             if change is not None and change <= target:
                 job.pending_color_changes.pop(0)
                 self._log("job", f"color change at {change:g} mm")
-                self._runout(tool, Reason.COLOR_CHANGE)
+                self._filament_change(tool, Reason.COLOR_CHANGE)
                 return 0.0
             if job.segment == len(spec.segments) - 1:
                 self._park(job, State.FINISHED)

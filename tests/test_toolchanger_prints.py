@@ -156,3 +156,53 @@ async def test_a_tool_emptied_by_hand_while_docked_counts_no_unload(tmp_path):
         (1, "swap_committed"),
     ]
     await bridge.aclose()
+
+
+async def test_a_change_on_a_tool_the_print_has_not_used_looks_like_its_print_start(tmp_path):
+    """T10, pinned as the bridge behaves today: Tune > Change filament on T1 while the print
+    is on T0 counts T1's unload mid-print. T1 hasn't extruded in this job, so the bridge
+    takes the change's ramming as T1's print start and assumes the old spool reloaded at
+    once. A Spoolman change during the pause is then staged instead of confirming the swap
+    (P2), and the reload is charged to the old spool."""
+    tools = [
+        SimTool.loaded_with(0, PLA, extruded=1000.0),
+        SimTool.loaded_with(1, PLA, extruded=500.0),
+    ]
+    bridge, fake, station = indx(tmp_path, tools)
+    fake.spools[3] = spool_x(3, SHELF)
+    printer = station.printer
+    await bridge.poll()  # the baseline
+    mark = len(ledger(tmp_path))
+
+    await station.start_print(PrintSpec([Segment(0, 100)], duration_s=20))
+    station.advance(2)
+    await bridge.poll()
+    printer.change_filament(1)
+    await bridge.poll()
+    # T1's park retract, 2 mm purge and ramming count 17 * 550/576 = 16.23: 516.
+    assert station.counter_at(1) == 516 and station.tool_at(1).unload_count == 1
+    # A known fault, BF27 in docs/bridge-findings.md: the unload and T1's first counted
+    # move in the job land in the same poll, so the swap closes as assumed at once. A fix
+    # in the bridge changes these lines.
+    swaps = ("unload", "swap_unconfirmed", "swap_assumed", "swap_staged", "swap_confirmed")
+    events = [(r["tool"], r["event"]) for r in ledger(tmp_path)[mark:] if r.get("event") in swaps]
+    assert events == [(1, "unload"), (1, "swap_unconfirmed"), (1, "swap_assumed")]
+    assert "assumed reloaded" in fake.flag(2)
+
+    # Spool 3 goes into T1's location while the printer waits for the reload (P2).
+    mark = len(ledger(tmp_path))
+    location = tool_locations(LOC, MODELS[INDX].max_tools)[1]
+    fake.spools[2]["location"], fake.spools[3]["location"] = SHELF, location
+    await bridge.poll()
+    await station.swap_cycle(tool=1, poll_every=1.0)
+    assert printer.state is State.PAUSED
+    printer.resume()
+    await station.run_until(lambda: printer.job is None, poll_every=1.0, limit=60)
+    await bridge.poll()
+    events = [(r["tool"], r["event"]) for r in ledger(tmp_path)[mark:] if r.get("event") in swaps]
+    assert events == [(1, "swap_staged")]
+    # The reload counts 50 more: 67 * 550/576 = 63.98 reads 563, all on spool 2. T0's 100
+    # * 550/576 = 95.49 goes to spool 1, and spool 3 gets nothing.
+    assert station.counter_at(1) == 563
+    assert totals(fake) == {1: 95, 2: 63}
+    await bridge.aclose()
