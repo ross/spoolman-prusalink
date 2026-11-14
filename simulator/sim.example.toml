@@ -1,5 +1,7 @@
 # Printer simulator configuration. Copy to sim.toml and run `python -m simulator -c sim.toml`.
-# Every setting below is shown commented with its default.
+# Every setting below is shown commented with its default. "default: the model's" means
+# each printer uses its model's value from the firmware until the setting is given; the
+# values shown for those are the Core One L's.
 
 # Where the control page and API listen, and where snapshots are saved.
 # host = "127.0.0.1"
@@ -8,12 +10,13 @@
 
 # Timing and lengths. Durations and rates are in simulated seconds.
 # time_scale = 1.0                  # simulated seconds per real second
-# feed_ratio = 0.95                 # extruded = slicer mm * feed_ratio
+# feed_ratio = 0.95                 # counted mm per mm moved; default: the model's
 # print_rate_mm_s = 5.0             # slicer mm per second for a print with no duration
 # load_rate_mm_s = 10.0             # feed and purge speed during a load
 # unload_seconds = 3.0
-# load_feed_mm = 36.0               # counted feed before the material is set
-# purge_mm = 40.0
+# slow_load_mm = 40.0               # default: the model's
+# fast_load_mm = 20.0               # default: the model's
+# purge_mm = 40.0                   # the whole purge; default: the model's
 # toolchange_purge_mm = 30.0
 # jam_purge_mm = 60.0               # extra purge on the reload after a jam
 # preheat_seconds = 5.0
@@ -36,6 +39,7 @@ model = "8.1.0"                     # Core One L: holds an instance UUID on tool
 # port = 8001
 # firmware = "full"                 # full, no_counters or no_endpoint; default by model
 # auto_accept_model_check = true    # this printer only; default is the global setting
+# high_flow = false                 # a high-flow nozzle doubles the load's purge, but not on INDX
 
 [[printers.tools]]
 index = 0

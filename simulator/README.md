@@ -74,11 +74,15 @@ poll_idle = 3
 
 See [sim.example.toml](sim.example.toml), which shows every setting with its
 default. A printer has a `model` (a PrusaLink type code such as `8.1.0`), an
-`api_key`, a `firmware` mode, and `[[printers.tools]]` entries that can start
-loaded with a material and counters. The top-level settings are timing and
-lengths: the time scale, the feed ratio, how fast loads and prints move
-filament, the gap, feed and purge lengths of a load, the preheat and park
-times, and whether the start blip and the model check are on.
+`api_key`, a `firmware` mode, `high_flow` for a high-flow nozzle, and
+`[[printers.tools]]` entries that can start loaded with a material and
+counters. The top-level settings are timing and lengths: the time scale, how
+fast loads and prints move filament, the purges of a tool change, a jam and a
+power-panic resume, the preheat and park times, and whether the start blip
+and the model check are on. The feed ratio and a load's slow, fast and purge
+lengths are overrides: left out, each printer uses its model's value, which
+the page shows on the printer's card. On the page or through
+`/api/settings`, an empty value or `null` unsets an override.
 
 ## The page and the control API
 
@@ -129,11 +133,19 @@ that trace. The points that matter for the bridge, in short:
   material, but keeps it: a runout or `M600` reload restores the old name,
   color and UUID. A menu load replaces them with a preset, dropping color
   and UUID.
-- A load counts in three phases: the retraction gap is refilled uncounted,
-  then feed counts with no material reported, then the material is set and
-  the purge counts under it.
-- `extruded` is the slicer length times the feed ratio, 0.95 by default.
-  Retracts grow a gap, and the next feed fills it before counting.
+- Every filament move counts as the firmware's filament tracker counts it.
+  A retract grows the tool's gap up to the model's limit, 40 mm or 27 mm on
+  INDX. A feed fills the gap first, and what goes past it counts times the
+  model's feed ratio: 380/400 steps, or 550/576 on INDX. This covers prints,
+  loads, purges and manual moves.
+- A menu load feeds the model's slow and fast lengths with no material
+  reported, sets the material, then purges. The purge ends with an 8 mm
+  retract, except on the iX and INDX, whose nozzle cleaners end it. A
+  high-flow nozzle doubles the purge, except on INDX, whose cleaner purges a
+  fixed 25 mm. A reload during a print then primes 4 mm and retracts 8 mm,
+  and the resume feeds the 8 mm back. From a full gap, a Core One L load
+  counts 20 mm before the material shows and 40 mm after, times the feed
+  ratio.
 - Every print start shows `PRINTING`, then a brief `IDLE` with no job, then
   `PRINTING`. `FINISHED` and `STOPPED` persist until dismissed, and the job
   disappears from `/api/v1/status` and `/api/v1/job` as soon as a print ends.
@@ -168,6 +180,12 @@ Choices made where the firmware was silent or the plan left it open:
 - A `jam` with `unload` off goes to `ATTENTION` without counting anything and
   `clear_jam` resumes it. With `unload` on, it's a runout whose reload purges
   more.
+- The iX's assisted insertion before the slow load isn't modeled: the
+  firmware source doesn't give its length. The iX purges its length in one
+  move, not in 5 mm steps with a clean between.
+- A pause and resume with no filament change moves no filament. The
+  firmware retracts at the pause and feeds the same length back at the
+  unpark, which counts nothing unless the gap was near its limit.
 
 ## Tests
 

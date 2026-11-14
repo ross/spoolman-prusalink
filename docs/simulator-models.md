@@ -78,9 +78,13 @@ firmware update.
 - `ModelInfo` holds a type code, a name, whether tool 0 keeps UUIDs, the
   retraction gap, the most tools, and whether the build has counters.
   `script/firmware-check` compares those with the source.
-- Every other length and time is one global `Settings`: a load is the gap,
-  then 36 mm counted, then a 40 mm purge, on every model. The feed ratio is
-  0.95 everywhere.
+- Each model has its build's extruder profile. Every filament move counts
+  through the tracker's arithmetic with the model's gap and feed ratio, and
+  a menu load runs the model's slow, fast and purge lengths, with the
+  purge's end per build and the high-flow doubling. The ramming,
+  auto-retract and unload counts aren't modeled yet. Other lengths and
+  times are one global `Settings`, and the feed ratio and load lengths
+  there are overrides.
 - A tool has its own counters, material, gap and sensor. A print is a list
   of (tool, mm) segments with a fixed purge at each tool change. Picking a
   tool can trigger the idle sensor clear. A tool can be disabled.
