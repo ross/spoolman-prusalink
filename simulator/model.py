@@ -744,16 +744,18 @@ class SimPrinter:
         model's gap counts, times the feed ratio (`FilamentPath.move`). The feed system says
         which tool it counts on."""
         credited = self.feed.credited(self, tool)
+        # Every caller picks the tool first: the firmware's planner stops on this.
+        assert credited is not None, "E move without tool"
         credited.extruded += tool.path.move(mm, self.model.gap_mm) * self.feed_ratio
 
     def _deretract(self, tool: SimTool) -> None:
         """Feed back an auto-retracted distance (`maybe_deretract_to_nozzle`).
 
         On a Nextruder that's 55 mm into a gap that stops at 40, so 15 mm count that never
-        left the nozzle. It needs a picked tool (`auto_retract.cpp`).
+        left the nozzle.
         """
         stored = tool.path.auto_retracted
-        if stored and self.feed.credited(self, tool) is not None:
+        if stored:
             tool.path.auto_retracted = 0.0
             self._count(tool, stored)
             self._log("load", f"T{tool.index} deretracted {stored:g} mm")
