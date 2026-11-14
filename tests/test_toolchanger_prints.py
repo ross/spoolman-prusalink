@@ -12,9 +12,10 @@ from __future__ import annotations
 
 import logging
 
+import pytest
 from harness import LOC, PLA, ledger, levels, make, spool, spool_x, tool_locations
 
-from simulator.model import MODELS, PrintSpec, Reason, Segment, SimTool, State
+from simulator.model import MODELS, Join, PrintSpec, Reason, Segment, SimTool, State
 
 INDX = "8.10.0"
 SHELF = "shelf"
@@ -209,4 +210,56 @@ async def test_a_change_on_a_tool_the_print_has_not_used_looks_like_its_print_st
     # 550/576 = 133.77 on spool 1, and spool 3 gets nothing.
     assert station.counter_at(1) == 563
     assert totals(fake) == {1: 133, 2: 63}
+    await bridge.aclose()
+
+
+async def test_a_spool_join_counts_an_unload_on_the_old_tool_mid_print(tmp_path):
+    """T9 and BF13, pinned as the bridge behaves today: a runout on T0 with a spool join to
+    T1 counts T0's unload mid-print and goes on with T1. The bridge opens an unconfirmed
+    swap on T0, which stays open after the print (P3), and flags spool 1 for the unload
+    and, with plenty left in Spoolman, as run out mid-print (M5a). T1's purge and the rest
+    of the print are charged to spool 2, with no event."""
+    tools = [
+        SimTool.loaded_with(0, PLA, extruded=1000.0),
+        SimTool.loaded_with(1, PLA, extruded=500.0),
+    ]
+    bridge, fake, station = indx(tmp_path, tools)
+    fake.spools[1]["filament"]["weight"] = 1000.0
+    fake.spools[1]["used_weight"], fake.spools[1]["remaining_weight"] = 100.0, 900.0
+    printer = station.printer
+    await bridge.poll()  # the baseline
+    mark = len(ledger(tmp_path))
+
+    spec = PrintSpec([Segment(0, 100)], duration_s=20, spool_join=[Join(0, 1)])
+    await station.start_print(spec)
+    station.advance(4)
+    await bridge.poll()
+    assert printer.job.fed_mm == pytest.approx(23)
+    printer.runout(0)
+    await bridge.poll()
+    # T0: G427's 25 + 8 and the prime's 1.6 + 5.4907, 23 printed, then the join's 2 mm
+    # unload purge and ramming, 19: 82.0907 * 550/576 = 78.39. The dialog reads ATTENTION.
+    assert printer.state is State.ATTENTION and station.counter_at(0) == 1078
+    assert station.tool_at(0).unload_count == 1 and station.counter_at(1) == 500
+    # A known fault, BF13 in docs/bridge-findings.md: the join's unload looks like a
+    # runout waiting for a reload of the same tool. A fix in the bridge changes these
+    # lines.
+    swaps = ("unload", "swap_unconfirmed", "swap_assumed", "swap_staged", "swap_confirmed")
+    events = [(r["tool"], r["event"]) for r in ledger(tmp_path)[mark:] if r.get("event") in swaps]
+    assert events == [(0, "unload"), (0, "swap_unconfirmed")]
+
+    mark = len(ledger(tmp_path))
+    await station.run_until(lambda: printer.job is None, poll_every=1.0, limit=60)
+    await bridge.poll()
+    # T1 isn't in the file, so G427 doesn't purge it: the join's 25 + 8, then the other
+    # 77 mm, 110 * 550/576 = 105.03.
+    assert station.counter_at(1) == 605 and station.tool_at(1).unload_count == 0
+    assert totals(fake) == {1: 78, 2: 105}
+    records = ledger(tmp_path)[mark:]
+    assert [r for r in records if "event" in r] == []
+    assert {r["tool"] for r in records if r.get("spool_id") == 2} == {1}
+    assert "filament was unloaded with no Spoolman change" in fake.flag(1)
+    assert "unloaded mid-print with 900 g left" in fake.flag(1)
+    assert fake.flag(2) is None
+    assert bridge.printers[0].tools[0].swap is not None
     await bridge.aclose()

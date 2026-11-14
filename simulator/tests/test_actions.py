@@ -11,6 +11,7 @@ from simulator.model import (
     Busy,
     Invalid,
     JobPhase,
+    Join,
     PrintSpec,
     Segment,
     SimPrinter,
@@ -156,6 +157,19 @@ def xl_changing_another_tool():
     return sim, p
 
 
+def xl_joining():
+    """The XL's print on T0 with joins to T1, then T2: T0 ran out, and the join unloads it."""
+    sim, p = make("3.1.0", [loaded(0), loaded(1), loaded(2), SimTool(3)])
+    spec = PrintSpec([Segment(0, 100)], preheat_s=0, spool_join=[Join(0, 1), Join(1, 2)])
+    p.start_print(spec)
+    run(sim, 1)
+    p.tap_through()  # Print
+    run(sim, 1.8)
+    p.runout(0)
+    assert p.job.phase is JobPhase.JOIN
+    return sim, p
+
+
 def panic_window():
     """The XL's two-tool print cut mid-print: IDLE with no job until the resume."""
     sim, p = multi_tool_print()
@@ -273,6 +287,7 @@ SITUATIONS = [
     cold_bed,
     multi_tool_print,
     xl_changing_another_tool,
+    xl_joining,
     panic_window,
     multi_tool_idle,
     xl_picked_after_a_load,

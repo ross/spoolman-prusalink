@@ -14,7 +14,16 @@ from typing import Any, Union, get_args, get_origin, get_type_hints
 
 from aiohttp import web
 
-from simulator.model import SNAPSHOT_NAME, Busy, Event, Invalid, PrintSpec, Segment, Simulation
+from simulator.model import (
+    SNAPSHOT_NAME,
+    Busy,
+    Event,
+    Invalid,
+    Join,
+    PrintSpec,
+    Segment,
+    Simulation,
+)
 
 STATIC = Path(__file__).parent / "static"
 STATE_INTERVAL = 0.1  # at most ten state events a second per client
@@ -167,6 +176,22 @@ def _check(where: str, value: Any, hint: Any) -> Any:
 _SEGMENT_KEYS = {f.name for f in fields(Segment)}
 _SEGMENT_NEEDS = {"tool", "slicer_mm"}
 _PRINT_KEYS = {f.name for f in fields(PrintSpec)}
+_JOIN_KEYS = {f.name for f in fields(Join)}
+
+
+def _joins(value: Any) -> list[Join]:
+    """The print's spool joins, each `{"tool": A, "to": B}`; none when left out."""
+    where = "start_print spool_join"
+    if value is None:
+        return []
+    if not isinstance(value, list) or not all(
+        isinstance(j, dict) and set(j) == _JOIN_KEYS for j in value
+    ):
+        raise Invalid(f'{where} must be a list of {{"tool": A, "to": B}}, got {value!r}')
+    return [
+        Join(_check(f"{where}[{i}] tool", j["tool"], int), _check(f"{where}[{i}] to", j["to"], int))
+        for i, j in enumerate(value)
+    ]
 
 
 def _print_spec(body: dict) -> PrintSpec:
@@ -203,6 +228,7 @@ def _print_spec(body: dict) -> PrintSpec:
         toolchange_purge_mm=_check(
             "start_print toolchange_purge_mm", body.get("toolchange_purge_mm"), float | None
         ),
+        spool_join=_joins(body.get("spool_join")),
     )
 
 

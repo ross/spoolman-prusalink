@@ -123,9 +123,12 @@ and name the parameter.
 type the file names for that tool, and the optional `duration_s`,
 `preheat_s`, `color_changes_mm` and `name`. On a printer with a multi-tool
 slicer profile, `prime_mm` and `toolchange_purge_mm` replace the profile's
-prime and tool-change purge; elsewhere they answer 400. The page's start
+prime and tool-change purge; elsewhere they answer 400. On a toolchanger,
+`spool_join` is a list of `{"tool": A, "to": B}`: when tool A runs out, the
+print goes on with tool B. Each tool joins on once and is joined to once,
+no chain loops, and B can't be a tool the segments use. The page's start
 form takes a segment per line as `tool:mm` or `tool:mm:TYPE`, and on a
-toolchanger the two overrides.
+toolchanger the two overrides and the joins as `A>B, C>D`.
 
 The state lists each printer's and each tool's actions under `actions`, each
 with null when the printer would take it now or the reason it would refuse
@@ -315,6 +318,15 @@ that trace. The points that matter for the bridge, in short:
   and nothing changes. The page's **Change** button sends it.
 - A load or unload during a print reads `ATTENTION` in every phase, the
   reload's load included; with no print, `BUSY`.
+- A `runout` on a tool with a spool join unloads it at once, which counts
+  the unload, and reads `ATTENTION` for `unload_seconds`. Then the printer
+  picks the join's tool, purges it as the firmware's join does, puts the
+  old tool's gap back on it and reads `PRINTING`. The join's tool keeps its
+  type, and the print goes on with it wherever the file names the old tool,
+  through later tool changes too. With no join from the tool, the runout is
+  the filament change. A jam never joins, and the join can't be paused. A
+  power cut during the unload resumes on the join's tool without the
+  join's purge.
 - `extrude` and `retract` move only the picked tool, as the menu's Move E
   does. With no tool picked they answer 409, and on another tool 400.
 - The selected tool can be none, which stands for a toolchanger with no
@@ -449,8 +461,11 @@ Choices made where the firmware was silent or the plan left it open:
 - A print's end auto-retracts the picked tool even when it has no
   filament, as the simulator does for a loaded one. The source doesn't
   say otherwise, but a trace hasn't shown it.
-- The simulator has no spool join. The firmware refuses to turn the
-  sensors off when a print joins spools.
+- The tools-mapping screen doesn't check a spool join's tools. The
+  firmware checks each tool in a join's chain for filament and type, and
+  refuses a join whose earlier tool has no working sensor, so the sensors
+  can't be turned off for a print that joins
+  (`gcode_compatibility.cpp:520-549`).
 - Stuck-filament detection isn't modeled. Load-cell printers have it, on by
   default except on INDX. The MINI and MK3.5 don't have it.
 - The preview doesn't model an uncalibrated INDX nozzle cleaner, which

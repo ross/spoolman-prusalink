@@ -640,21 +640,28 @@ written.
 
 - **Printers**: Core One INDX, Core One L INDX, XL.
 - **What happens**: A runout with a spool join counts an unload on the old
-  tool, and the print goes on with the join's tool. The new tool's type
-  isn't set or copied, and its purge counts on it: 27 mm on the XL, 25 mm
-  on INDX (`spool_join.cpp:258-342`, `toolchanger_xl.cpp:505-549`,
-  `nozzle_cleaner.cpp:87`). No
-  scenario row covers a join. The bridge takes the old tool's unload as a
-  runout during a started print: it opens an unconfirmed swap there (P3)
-  and may raise the runout flag (M5a). The rest of the print is charged to
-  the spool in the join tool's location.
+  tool mid-print, while the job reads `ATTENTION`, and the print goes on
+  with the join's tool (F35). The join's tool's type isn't set or copied,
+  and its purge counts on it: 27 mm and an 8 mm retract on the XL, the
+  nozzle cleaner's 25 mm and its auto-retract on INDX
+  (`spool_join.cpp:239-365`, `toolchanger_xl.cpp:505-571`,
+  `nozzle_cleaner.cpp:87`). The bridge takes the old tool's unload as a
+  runout during a started print: it records `unload` and
+  `swap_unconfirmed` there and flags the old spool, and with more than 5%
+  of its net weight left in Spoolman flags it as run out mid-print too
+  (M5a). The swap stays open after the print (P3). The join's tool's first
+  count in the job is its purge, which the bridge takes as that tool's
+  print start, and the rest of the print is charged to the spool in its
+  location, with no event.
 - **Effect**: Not settled. The charges follow the filament when each tool's
   location holds its spool. The old tool's swap and flags follow rules
-  written for a reload of the same tool.
-- **Evidence**: Read in the firmware source; the bridge's side is
-  inferred.
-- **Scenario rows**: P2, P3, P4, M5a, T2.
-- **To reproduce**: Needs workstream 4.
+  written for a reload of the same tool: they ask for a spool to be moved
+  into a tool the print has left empty.
+- **Evidence**: Read in the firmware source. Shown in the simulator on an
+  INDX by `test_a_spool_join_counts_an_unload_on_the_old_tool_mid_print`
+  in `tests/test_toolchanger_prints.py`.
+- **Scenario rows**: T9, P2, P3, P4, M5a, T2.
+- **To reproduce**: That test, today.
 - **Status**: Open.
 
 ### BF14. Writes are refused on multi-tool models

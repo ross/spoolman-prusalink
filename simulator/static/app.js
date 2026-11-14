@@ -318,7 +318,8 @@ function renderPrinter(p) {
       '<label>color changes mm (a, b)' + inp(p, 'start.cc', '', 'type="text"') + '</label>' +
       (p.toolchanger
         ? '<label title="the slicer profile\'s prime; empty for the stock one">prime mm' + inp(p, 'start.prime', '', 'type="number" step="any"') + '</label>' +
-          '<label title="the slicer profile\'s tool-change purge; empty for the stock one">tool-change purge mm' + inp(p, 'start.tcpurge', '', 'type="number" step="any"') + '</label>'
+          '<label title="the slicer profile\'s tool-change purge; empty for the stock one">tool-change purge mm' + inp(p, 'start.tcpurge', '', 'type="number" step="any"') + '</label>' +
+          '<label title="when tool a runs out, the print goes on with tool b">spool joins (a&gt;b, c&gt;d)' + inp(p, 'start.joins', '', 'type="text"') + '</label>'
         : '') +
       '<label>file name' + inp(p, 'start.name', 'part.bgcode', 'type="text"') + '</label>' +
       btn('Start', 'start_submit', {}) + '</div>';
@@ -420,6 +421,14 @@ function startBody(name) {
   if (Number.isNaN(prime) || Number.isNaN(tcpurge)) throw new Error('Prime and purge must be numbers');
   if (prime != null) body.prime_mm = prime;
   if (tcpurge != null) body.toolchange_purge_mm = tcpurge;
+  const joins = [];
+  for (const part of String(getv(name, 'start.joins', '')).split(',')) {
+    if (!part.trim()) continue;
+    const m = /^\s*(\d+)\s*>\s*(\d+)\s*$/.exec(part);
+    if (!m) throw new Error('Bad spool join: ' + part.trim());
+    joins.push({ tool: Number(m[1]), to: Number(m[2]) });
+  }
+  if (joins.length) body.spool_join = joins;
   const cc = String(getv(name, 'start.cc', '')).split(',').map((x) => x.trim()).filter(Boolean).map(Number);
   if (cc.some((x) => !Number.isFinite(x))) throw new Error('Color changes must be numbers');
   if (cc.length) body.color_changes_mm = cc;
