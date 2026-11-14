@@ -4241,6 +4241,198 @@ PrintPreview::Result PrintPreview::Loop() {
 }
 """  # noqa: E501 (verbatim firmware lines)
 
+SPOOL_JOIN_CPP = """\
+bool SpoolJoin::do_join(VirtualToolIndex current_virtual_tool) {
+    std::unique_lock lock(mutex);
+    auto new_raw_virtual_tool = spool_join.get_spool_2_unlocked(current_virtual_tool.to_raw());
+    if (!new_raw_virtual_tool.has_value()) {
+        return false;
+    }
+    const auto new_virtual_tool = VirtualToolIndex::from_raw(new_raw_virtual_tool.value());
+
+    log_info(Marlin, "Spool join from %d to %d (z=%f)", current_virtual_tool.to_raw(), new_virtual_tool.to_raw(), planner.get_axis_position_mm(AxisEnum::Z_AXIS));
+    PrintStatusMessageGuard statusGuard;
+    statusGuard.update<PrintStatusMessage::joining_spool>({});
+
+    planner.synchronize();
+
+    
+    [[maybe_unused]] const XYZval<float, LogicalPosTag> return_pos = current_position.asLogical().xyz();
+
+    
+    
+    const auto gcode_tool = stdext::get_optional<GcodeToolIndex>(tool_mapper.to_gcode(current_virtual_tool));
+    if (!gcode_tool.has_value()) {
+        return false;
+    }
+    if (!tool_mapper.set_mapping(*gcode_tool, new_virtual_tool)) {
+        return false;
+    }
+    tool_mapper.set_enable(true);
+
+    static_assert((HAS_INDX() + HAS_DWARF() + HAS_MMU2()) == 1, "This code assumes exactly one of these toolchanger types");
+
+#if HAS_TOOLCHANGER()
+    const auto current_physical_tool = current_virtual_tool.to_physical();
+    const auto new_physical_tool = new_virtual_tool.to_physical();
+
+    const auto nozzle_temp = thermalManager.degTargetHotend(current_physical_tool);
+
+    const auto orig_e_pos = current_position.e;
+
+    bool should_park = true;
+    #if HAS_CRASH_DETECTION()
+    
+    
+    should_park &= (crash_s.get_state() != Crash_s::RECOVERY);
+    #endif
+
+    const float target_retracted_distance = buddy::filament_tracker().get_retracted_distance(current_physical_tool).value_or(0);
+
+    
+    thermalManager.setTargetHotend(nozzle_temp, new_physical_tool);
+
+    if (should_park) {
+        
+        mapi::park(mapi::ParkingPosition { .z = mapi::ParkingPosition::AtLeast { .above_print = TOOLCHANGE_ZRAISE } });
+    }
+
+    
+    {
+        FS_EventAutolock fs_lock;
+        BlockEStallDetection estall_lock;
+
+        pause::Settings settings;
+        settings.SetExtruder(current_virtual_tool);
+
+        
+        settings.SetRetractLength(0.f);
+
+        settings.SetParkPoint(mapi::get_parking_position(mapi::ParkPosition::unload));
+
+        
+        Pause::Instance().perform(Pause::LoadType::unload_spool_join, settings);
+    }
+
+    
+    thermalManager.setTargetHotend(0, current_physical_tool);
+
+    const auto wait_for_temp = [&] {
+        if (nozzle_temp != 0) {
+            thermalManager.wait_for_hotend(new_physical_tool, { .no_wait_for_cooling = false, .fan_cooling = true });
+        }
+    };
+
+    #if !HAS_INDX()
+    
+    tool_change(NoTool {}, tool_return_t::no_return, tool_change_lift_t::no_lift, false);
+
+    
+    wait_for_temp();
+    #endif
+
+    
+    tool_change(new_virtual_tool, tool_return_t::no_return, tool_change_lift_t::no_lift, false);
+
+    #if HAS_NOZZLE_CLEANER()
+    nozzle_cleaner::load_and_execute(nozzle_cleaner::Sequence::enter_cleaner);
+
+    wait_for_temp();
+
+    nozzle_cleaner::load_and_execute(nozzle_cleaner::Sequence::purge_clean);
+    nozzle_cleaner::load_and_execute(nozzle_cleaner::Sequence::clean);
+    nozzle_cleaner::load_and_execute(nozzle_cleaner::Sequence::exit_cleaner);
+
+    #else
+    wait_for_temp();
+    prusa_toolchanger.purge_tool(new_physical_tool);
+
+    #endif
+
+    if (should_park) {
+        
+        do_blocking_move_to(return_pos.asNative());
+    }
+
+    
+    mapi::restore_retracted_distance(target_retracted_distance, buddy::standard_feedrates::current_extruder(buddy::standard_feedrates::Extruder::retract));
+
+    
+    sync_e_position_to(orig_e_pos);
+
+#elif HAS_MMU2()
+    MMU2::mmu2.tool_change_full(new_virtual_tool.to_raw());
+#else
+    #error "unknown printer"
+#endif
+
+    print_status_message().show_temporary<PrintStatusMessage::spool_joined>({});
+    return true;
+}
+"""  # noqa: E501 (verbatim firmware lines)
+
+FILAMENT_SENSOR_MMU_CPP = """\
+void FSensorMMU::cycle() {
+    
+    switch (mmu2.State()) {
+    case xState::Active:
+        state = mmu2.FindaDetectsFilament() ? FilamentSensorState::HasFilament : FilamentSensorState::NoFilament;
+        break;
+    case xState::Connecting:
+    case xState::Bootloader:
+        state = FilamentSensorState::NotInitialized;
+        break;
+    case xState::Stopped:
+        state = FilamentSensorState::Disabled;
+        break;
+    }
+}
+"""  # noqa: E501 (verbatim firmware lines)
+
+PRINTER_STATE_CPP = """\
+optional<ErrCode> load_unload_attention_while_printing([[maybe_unused]] const fsm::BaseData &data) {
+#if HAS_MMU2()
+    if (config_store().mmu2_enabled.get()) {
+        
+        switch (GetEnumFromPhaseIndex<PhasesLoadUnload>(data.GetPhase())) {
+        case PhasesLoadUnload::MMU_ERRWaitingForUser:
+            return ErrCode::CONNECT_MMU_LOAD_UNLOAD_ERROR;
+            
+        case PhasesLoadUnload::LoadFilamentIntoMMU:
+        case PhasesLoadUnload::IsColor:
+        case PhasesLoadUnload::IsColorPurge:
+            return ErrCode::CONNECT_FILAMENT_RUNOUT;
+    #if HAS_LOADCELL()
+        case PhasesLoadUnload::FilamentStuck:
+            return ErrCode::ERR_MECHANICAL_STUCK_FILAMENT_DETECTED;
+    #endif
+    #if HAS_SIDE_FSENSOR()
+        case PhasesLoadUnload::LoadingObstruction_stoppable:
+        case PhasesLoadUnload::LoadingObstruction_unstoppable:
+            return ErrCode::ERR_MECHANICAL_LOADING_OBSTRUCTION;
+    #endif
+        default:
+            return nullopt;
+        }
+    }
+#endif
+    
+    switch (GetEnumFromPhaseIndex<PhasesLoadUnload>(data.GetPhase())) {
+#if HAS_LOADCELL() && HAS_EXTRUDER_FSENSOR()
+    case PhasesLoadUnload::FilamentStuck:
+        return ErrCode::ERR_MECHANICAL_STUCK_FILAMENT_DETECTED;
+#endif
+#if HAS_SIDE_FSENSOR() && HAS_EXTRUDER_FSENSOR()
+    case PhasesLoadUnload::LoadingObstruction_stoppable:
+    case PhasesLoadUnload::LoadingObstruction_unstoppable:
+        return ErrCode::ERR_MECHANICAL_LOADING_OBSTRUCTION;
+#endif
+    default:
+        return ErrCode::CONNECT_FILAMENT_RUNOUT;
+    }
+}
+"""
+
 FILES = {
     read.MODELS_FILE: MODELS_HPP,
     read.GCODE_INFO_FILE: GCODE_INFO_HPP,
@@ -4299,6 +4491,9 @@ FILES = {
     "src/gui/screen_menu_filament_mmu.hpp": SCREEN_MENU_FILAMENT_MMU_HPP,
     "src/marlin_stubs/pause/M600.cpp": M600_CPP,
     "src/gui/screen/screen_m600.cpp": SCREEN_M600_CPP,
+    "lib/Marlin/Marlin/src/module/prusa/spool_join.cpp": SPOOL_JOIN_CPP,
+    "src/feature/filament_sensor/filament_sensor_mmu.cpp": FILAMENT_SENSOR_MMU_CPP,
+    "src/state/printer_state.cpp": PRINTER_STATE_CPP,
     read.IMAGES_FILE: PRESETS_JSON,
     read.PAUSE_SETTINGS_FILE: PAUSE_SETTINGS_HPP,
 }

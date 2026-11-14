@@ -752,6 +752,38 @@ WATCHED = (
         "21e2e2aaec06103b",
         UPSTREAM_7D8BF685,
     ),
+    # A spool join on an MMU: no G-code tool mapped falls back to `M600`, and the MMU's
+    # branch has no dialog, purge or restore.
+    Watched(
+        "the spool join",
+        "lib/Marlin/Marlin/src/module/prusa/spool_join.cpp",
+        "function",
+        "SpoolJoin::do_join",
+        "SimPrinter._mmu_join in simulator/model.py",
+        "b92f5b6187f3791e",
+        UPSTREAM_7D8BF685,
+    ),
+    # FINDA's sensor reads not initialized while the MMU connects.
+    Watched(
+        "FINDA's sensor",
+        "src/feature/filament_sensor/filament_sensor_mmu.cpp",
+        "function",
+        "FSensorMMU::cycle",
+        "SimPrinter._check_finda_runout (the Busy while the MMU connects) and"
+        " SimPrinter._ask_mmu_unload (the question while it connects) in simulator/model.py",
+        "ddbb10b71cb63b1f",
+        UPSTREAM_7D8BF685,
+    ),
+    # With the MMU on, only its questions and errors read ATTENTION in a print.
+    Watched(
+        "the filament change's state in a print",
+        "src/state/printer_state.cpp",
+        "function",
+        "load_unload_attention_while_printing",
+        "SimPrinter._mmu_reloading in simulator/model.py: PRINTING while the MMU's reload runs",
+        "50948269e679c31f",
+        UPSTREAM_7D8BF685,
+    ),
 )
 
 
