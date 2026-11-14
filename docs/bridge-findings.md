@@ -521,8 +521,9 @@ written.
   usage because the tool reports no material (C7). When filament is next
   loaded in that tool, the bridge charges the held usage, with the load's
   own count, to the spool reported there. An MMU's runout writes no type,
-  so a cut while it waits holds nothing: the resumed print has no slot
-  selected and counts nothing at all (F44, BF17).
+  so a cut while it waits holds nothing: slot 0 keeps its type, and the
+  resumed print counts on slot 0 while the MMU connects and on no slot
+  after (F44, BF17).
 - **Effect**: The new spool is charged for filament that came from no
   spool: in the test, the held 84 mm on top of the load's own count.
 - **Evidence**: On a toolchanger, shown in the simulator by

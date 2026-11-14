@@ -229,9 +229,10 @@ async def test_an_mmu_runout_swap_counts_no_unload(tmp_path):
 
 
 async def test_a_cut_while_an_mmu_runout_waits_charges_nothing_after(tmp_path):
-    # BF24 doesn't reach an MMU this way: the runout writes no type, so the bridge holds no
-    # usage. The resume finds no slot selected, so the resumed print counts nothing on any
-    # slot (BF17), and spool 1 is charged only what slot 0 counted before the runout.
+    # BF24 doesn't reach an MMU this way: the runout writes no type and slot 0 keeps its
+    # type, so the bridge holds no usage. The resumed print counts on slot 0 while the MMU
+    # connects and on no slot after (BF17). The harness's MMU connects in 0.2 s, before the
+    # resume feeds, so here spool 1 is charged only what slot 0 counted before the runout.
     bridge, fake, station, _ = mmu(tmp_path, [(0, "PLA")], t0="PLA")
     p = station.printer
     await bridge.poll()
