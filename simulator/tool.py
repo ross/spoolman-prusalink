@@ -9,25 +9,42 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 from typing import Any
 
-# Nozzle, preheat and bed temperatures of the firmware's preset filaments
-# (`src/common/filament_presets.cpp`), with the preheat for printers with a load cell.
-# `script/firmware-check` compares them with the firmware source.
-PRESET_TEMPERATURES = {
+Temperatures = tuple[int, int, int]  # nozzle, preheat and bed
+
+# Nozzle, preheat and bed temperatures of the firmware's preset filaments, which
+# `src/common/filament_presets.cpp` conditions on the build. This is the table of a build
+# without a load cell, the MK3.5's; the overlays below change it for the other builds.
+# `script/firmware-check` compares each model's table with its build's.
+_BASE_PRESETS: dict[str, Temperatures] = {
     "PLA": (215, 170, 60),
     "PETG": (230, 170, 85),
     "ASA": (260, 170, 100),
-    "PC": (275, 250, 100),
+    "PC": (275, 170, 100),
     "PVB": (215, 170, 75),
     "ABS": (255, 170, 100),
     "HIPS": (220, 170, 100),
     "PP": (240, 170, 100),
-    "FLEX": (240, 210, 50),
+    "FLEX": (240, 170, 50),
     "PA": (285, 260, 100),
-    "PPS": (320, 170, 105),
-    "PPA": (320, 170, 105),
     "PVA": (210, 160, 60),
     "BVOH": (210, 160, 60),
 }
+# A load cell raises the PC and FLEX preheats, but INDX raises only PC's, and less.
+_LOAD_CELL = {"PC": (275, 250, 100), "FLEX": (240, 210, 50)}
+_INDX = {"PC": (275, 230, 100)}
+# PPS and PPA exist only with the high-temperature hotend (`HAS_HT_HOTEND`).
+_HT_HOTEND = {"PPS": (320, 170, 105), "PPA": (320, 170, 105)}
+_MINI = {"PA": (280, 255, 100)}
+
+# Each build's table, shared by the models that run the build.
+MK3_5_PRESETS = _BASE_PRESETS
+MINI_PRESETS = _BASE_PRESETS | _MINI
+# The MK4, XL, XL dev kit and iX builds.
+LOAD_CELL_PRESETS = _BASE_PRESETS | _LOAD_CELL
+# The Core One and Core One L builds.
+CORE_ONE_PRESETS = LOAD_CELL_PRESETS | _HT_HOTEND
+# The two INDX builds.
+INDX_PRESETS = _BASE_PRESETS | _INDX
 # What `M865 R` resets them to (`FilamentTypeParameters` in `filament.hpp`).
 DEFAULT_TEMPERATURES = (215, 170, 60)
 # Tag names the firmware loads as another preset: the TPU workaround in
@@ -246,16 +263,6 @@ def is_flexible(material: Material | None) -> bool:
     if material is None:
         return False
     return PRESET_ALIASES.get(material.name, material.name) in FLEXIBLE_PRESETS
-
-
-def preset_temperatures(name: str) -> dict[str, int]:
-    """Return the temperatures a material named `name` starts from, as `Material` keywords.
-
-    A preset's name matches exactly, as `FilamentType::from_name` does. A name in
-    `PRESET_ALIASES`, such as TPU, starts from its preset. Anything else gets the defaults.
-    """
-    values = PRESET_TEMPERATURES.get(PRESET_ALIASES.get(name, name), DEFAULT_TEMPERATURES)
-    return dict(zip(("nozzle", "preheat", "bed"), values, strict=True))
 
 
 # Steps that move nothing and take no time. Each acts when it comes up.

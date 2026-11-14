@@ -14,6 +14,7 @@ from simulator.model import (
     Firmware,
     Invalid,
     Material,
+    ModelInfo,
     Settings,
     SimPrinter,
     SimTool,
@@ -21,7 +22,6 @@ from simulator.model import (
     check_color,
     check_name,
     check_uuid,
-    preset_temperatures,
 )
 
 _NAME_PATTERN = r"[A-Za-z0-9_.-]{1,64}"
@@ -365,7 +365,7 @@ def build(cfg: SimConfig) -> Simulation:
     for pc in cfg.printers:
         model = MODELS[pc.model]
         default = Firmware.FULL if model.counters else Firmware.NO_COUNTERS
-        tools = {tc.index: _sim_tool(tc) for tc in pc.tools}
+        tools = {tc.index: _sim_tool(model, tc) for tc in pc.tools}
         enabled = sorted(i for i, t in tools.items() if t.enabled)
         sim.add(
             SimPrinter(
@@ -384,14 +384,14 @@ def build(cfg: SimConfig) -> Simulation:
     return sim
 
 
-def _sim_tool(tc: ToolConfig) -> SimTool:
+def _sim_tool(model: ModelInfo, tc: ToolConfig) -> SimTool:
     m = tc.material
     material = None
     if m:
         color, uuid_ = m["color"], m["instance_uuid"]
         # A configured color or UUID can only come from an ad-hoc type; a bare name is a preset.
         adhoc = bool(color or uuid_)
-        material = Material(m["name"], color, uuid_, adhoc, **preset_temperatures(m["name"]))
+        material = Material(m["name"], color, uuid_, adhoc, **model.preset_temperatures(m["name"]))
     return SimTool.loaded_with(
         tc.index,
         material,

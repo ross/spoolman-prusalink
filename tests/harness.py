@@ -21,7 +21,6 @@ from simulator.model import (
     SimTool,
     Simulation,
     State,
-    preset_temperatures,
 )
 from simulator.prusalink import DROP, Answer
 from spoolman_prusalink.app import Bridge
@@ -159,7 +158,9 @@ def spool(id, location=LOC, flag=None):
     }
 
 
-PLA = Material("PLA", "#73737b", **preset_temperatures("PLA"))
+# Every station is a Core One L.
+MODEL = MODELS["8.1.0"]
+PLA = Material("PLA", "#73737b", **MODEL.preset_temperatures("PLA"))
 
 
 def menu(name="PLA", color=None, **fields):
@@ -168,7 +169,7 @@ def menu(name="PLA", color=None, **fields):
     `fields` are `Material` fields that differ, such as `bed=70` for an edit on the
     printer's screen.
     """
-    values = {**preset_temperatures(name), **fields}
+    values = {**MODEL.preset_temperatures(name), **fields}
     return Material(name, color, adhoc=color is not None, **values)
 
 
@@ -188,9 +189,7 @@ def add_station(sim, name="default"):
     """
     tool = SimTool(0, extruded=1000.0)
     fill(tool, PLA)
-    printer = SimPrinter(
-        name, 0, "k", MODELS["8.1.0"], boot_id=1, tools={0: tool}, auto_retract=False
-    )
+    printer = SimPrinter(name, 0, "k", MODEL, boot_id=1, tools={0: tool}, auto_retract=False)
     sim.add(printer)
     return Station(sim, printer)
 

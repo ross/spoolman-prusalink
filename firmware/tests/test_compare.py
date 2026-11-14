@@ -249,7 +249,7 @@ def test_macros():
 def test_current_copies():
     copies = Copies.current()
     assert copies.preset_preheat == copies.default_preheat == 170
-    assert "PLA" in copies.bridge_presets and "PLA" in copies.sim_presets
+    assert "PLA" in copies.bridge_presets and "PLA" in copies.sim_models["1.4.0"].presets
     assert copies.sim_aliases["TPU"] == "FLEX"
     assert copies.bridge_models["1.4.0"].name == "MK4"
     assert copies.sim_models["1.4.0"].name == "MK4"
@@ -293,8 +293,13 @@ def build(name, features, tools, gap_mm, presets):
     )
 
 
+MK4_PRESETS = {"PLA": (215, 170, 60), "FLEX": (240, 210, 50)}
+MINI_PRESETS = {"PLA": (215, 170, 60)}
+CORE_ONE_PRESETS = {**MK4_PRESETS, "PPS": (320, 170, 105)}
+
+
 def synthetic():
-    """A firmware with three models, and copies that match it."""
+    """A firmware with four models, and copies that match it."""
     core = frozenset(
         {
             "HAS_FILAMENT_TRACKER",
@@ -354,12 +359,13 @@ def synthetic():
         default_preheat=170,
         preset_preheat=170,
         sim_models={
-            "1.4.0": ModelInfo("1.4.0", "MK4", EXTRUDER),
-            "2.1.0": ModelInfo("2.1.0", "MINI", EXTRUDER, counters=False, gap_mm=99.0),
-            "3.1.0": ModelInfo("3.1.0", "XL", EXTRUDER, max_tools=5),
-            "7.1.0": ModelInfo("7.1.0", "COREONE", EXTRUDER, uuids=True),
+            "1.4.0": ModelInfo("1.4.0", "MK4", EXTRUDER, MK4_PRESETS),
+            "2.1.0": ModelInfo(
+                "2.1.0", "MINI", EXTRUDER, MINI_PRESETS, counters=False, gap_mm=99.0
+            ),
+            "3.1.0": ModelInfo("3.1.0", "XL", EXTRUDER, {}, max_tools=5),
+            "7.1.0": ModelInfo("7.1.0", "COREONE", EXTRUDER, CORE_ONE_PRESETS, uuids=True),
         },
-        sim_presets={"PLA": (215, 170, 60), "FLEX": (240, 210, 50), "PPS": (320, 170, 105)},
         sim_flexible=frozenset({"FLEX"}),
         sim_defaults=(215, 170, 60),
         sim_aliases={"TPU": "FLEX"},
@@ -386,8 +392,8 @@ def test_model_differences():
     bridge["7.1.0"] = PrinterModel("CORE", NO_COUNTERS)  # it has the tracker and UUIDs
     bridge["9.9.9"] = PrinterModel("NEW")
     sim = dict(copies.sim_models)
-    sim["1.4.0"] = ModelInfo("1.4.0", "MK4", EXTRUDER, gap_mm=27.0, max_tools=2, counters=False)
-    sim["2.1.0"] = ModelInfo("2.1.0", "MINI", EXTRUDER, uuids=True)
+    sim["1.4.0"] = replace(sim["1.4.0"], gap_mm=27.0, max_tools=2, counters=False)
+    sim["2.1.0"] = ModelInfo("2.1.0", "MINI", EXTRUDER, MINI_PRESETS, uuids=True)
     del sim["7.1.0"]
     copies = replace(copies, bridge_models=bridge, sim_models=sim)
     b, s = "bridge PRINTER_MODELS", "simulator MODELS"
@@ -405,8 +411,9 @@ def test_model_differences():
         Difference(s, "2.1.0", None, "uuids", False, True),
         Difference(s, "2.1.0", None, "counters", False, True),
         Difference(s, "7.1.0", None, "model", "COREONE", MISSING),
-        # The presets of a model the bridge no longer supports aren't compared, so only
-        # the door table notices the Core One's PPS.
+        # The bridge's presets of a model it no longer supports aren't compared, so only
+        # the door table notices the Core One's PPS. A model the simulator lacks has no
+        # presets to compare.
         Difference("bridge HT_IDLER_DOOR", None, None, "materials", [], ["PPS"]),
     ]
 
@@ -473,25 +480,41 @@ def test_preset_differences():
             "ABS": Preset(255, 100, chamber=(70, 40, 75)),
         },
         ht_idler_door=frozenset({"PPS", "PPA"}),
-        sim_presets={"PLA": (216, 170, 60), "FLEX": (240, 210, 50), "XYZ": (1, 2, 3)},
     )
-    b, s = "bridge PRESETS", "simulator PRESET_TEMPERATURES"
+    b = "bridge PRESETS"
     assert compare.compare(firmware, copies) == [
         # The MK4 has no chamber, so only the Core One compares it.
         Difference(b, "1.4.0", "PLA", "preheat", 170, 171),
         Difference(b, "1.4.0", "PLA", "bed", 60, 61),
-        Difference(s, "1.4.0", "PLA", "nozzle", 215, 216),
         Difference(b, "7.1.0", "PLA", "preheat", 170, 171),
         Difference(b, "7.1.0", "PLA", "bed", 60, 61),
         Difference(b, "7.1.0", "PLA", "chamber", (20, 15, 38), (20, 15, 39)),
         Difference(b, "7.1.0", "PLA", "filtration", False, True),
-        Difference(s, "7.1.0", "PLA", "nozzle", 215, 216),
         Difference(b, "7.1.0", "PPS", "material", PRESENT, MISSING),
-        Difference(s, "7.1.0", "PPS", "material", PRESENT, MISSING),
         Difference(b, None, "ABS", "material", MISSING, PRESENT),
-        Difference(s, None, "XYZ", "material", MISSING, PRESENT),
         Difference("bridge HT_IDLER_DOOR", None, None, "materials", ["PPS"], ["PPA", "PPS"]),
     ]
+
+
+def test_simulator_preset_differences():
+    firmware, copies = synthetic()
+    sim = dict(copies.sim_models)
+    # The MK4's PLA runs hot, the MINI lacks its PLA, and the Core One has the MK4's table.
+    sim["1.4.0"] = replace(sim["1.4.0"], presets={**MK4_PRESETS, "PLA": (216, 170, 60)})
+    sim["2.1.0"] = replace(sim["2.1.0"], presets={})
+    sim["7.1.0"] = replace(sim["7.1.0"], presets=MK4_PRESETS)
+    # The XL's build has no presets, so anything its model has is extra.
+    sim["3.1.0"] = replace(sim["3.1.0"], presets={"PPS": (320, 170, 105)})
+    s = "simulator presets"
+    found = compare.compare(firmware, replace(copies, sim_models=sim))
+    assert found == [
+        Difference(s, "1.4.0", "PLA", "nozzle", 215, 216),
+        Difference(s, "2.1.0", "PLA", "material", PRESENT, MISSING),
+        Difference(s, "3.1.0", "PPS", "material", MISSING, PRESENT),
+        Difference(s, "7.1.0", "PPS", "material", PRESENT, MISSING),
+    ]
+    assert str(found[0]) == "1.4.0 PLA nozzle: firmware 215, copy 216"
+    assert str(found[2]) == "3.1.0 PPS material: firmware missing, copy present"
 
 
 def test_flexible_and_unset_chamber_differences():
@@ -501,7 +524,7 @@ def test_flexible_and_unset_chamber_differences():
     presets["FLEX"] = {**presets["FLEX"], "is_flexible": False, "chamber_min_temperature": None}
     builds = {**firmware.builds, "COREONE": replace(core, presets=presets)}
     firmware = replace(firmware, builds=builds)
-    b, s = "bridge PRESETS", "simulator PRESET_TEMPERATURES"
+    b, s = "bridge PRESETS", "simulator presets"
     assert compare.compare(firmware, copies) == [
         Difference(b, "7.1.0", "FLEX", "flexible", False, True),
         Difference(b, "7.1.0", "FLEX", "chamber", (25, None, 40), (25, 15, 40)),
@@ -512,10 +535,11 @@ def test_flexible_and_unset_chamber_differences():
 def test_simulator_flexible_differences():
     firmware, copies = synthetic()
     copies = replace(copies, sim_flexible=frozenset({"PLA", "XYZ"}))
-    s = "simulator PRESET_TEMPERATURES"
+    s = "simulator presets"
     assert compare.compare(firmware, copies) == [
         Difference(s, "1.4.0", "PLA", "flexible", False, True),
         Difference(s, "1.4.0", "FLEX", "flexible", True, False),
+        Difference(s, "2.1.0", "PLA", "flexible", False, True),
         Difference(s, "7.1.0", "PLA", "flexible", False, True),
         Difference(s, "7.1.0", "FLEX", "flexible", True, False),
         Difference(s, None, "XYZ", "flexible", MISSING, PRESENT),
@@ -574,7 +598,7 @@ def test_report_marks_expected_differences():
         in (lines)
     )
     assert "  1.4.0 max_tools: firmware 1, copy 2" in lines
-    assert "simulator PRESET_TEMPERATURES: ok" in lines
+    assert "simulator presets: ok" in lines
     assert lines[-1] == "1 unexpected differences, 2 expected, 0 stale expected entries"
 
     lines, ok = compare.report(differences[:2], expected)

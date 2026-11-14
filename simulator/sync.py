@@ -11,7 +11,7 @@ from dataclasses import replace
 from typing import TYPE_CHECKING
 
 from simulator import gcode
-from simulator.tool import DEFAULT_TEMPERATURES, Material, SimTool, describe, preset_temperatures
+from simulator.tool import DEFAULT_TEMPERATURES, Material, SimTool, describe
 
 if TYPE_CHECKING:
     from simulator.model import SimPrinter
@@ -91,7 +91,7 @@ def _apply_filament(p: SimPrinter, c: gcode.SetFilament) -> None:
         _apply_temperatures(material, c.temps)
     elif c.name:
         # A preset write: the firmware ignores every parameter but the type.
-        material = Material(c.name, adhoc=False, **preset_temperatures(c.name))
+        material = Material(c.name, adhoc=False, **p.model.preset_temperatures(c.name))
         if c.color or c.temps:
             p._log("gcode", f"M865 L{c.tool}: parameters ignored on preset {c.name}")
     elif (c.color or c.temps) and t.material is not None:

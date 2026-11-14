@@ -17,7 +17,6 @@ from simulator.model import (
     SimTool,
     Simulation,
     State,
-    preset_temperatures,
 )
 from simulator.tests.util import PLA, loaded, make, run
 
@@ -132,7 +131,7 @@ def test_one_tick_runs_a_whole_load():
     assert t.loaded and t.process is None and p.state is State.IDLE
     # (20 + 40) past the 40 mm gap, then the auto-retract's 8 + 15: 83 * 0.95.
     assert t.extruded - base == pytest.approx(78.85)
-    assert t.material == Material("ASA", "#de3129", **preset_temperatures("ASA"))
+    assert t.material == Material("ASA", "#de3129", **p.model.preset_temperatures("ASA"))
 
 
 def test_menu_load_clears_color_and_uuid():
@@ -141,13 +140,13 @@ def test_menu_load_clears_color_and_uuid():
     sim.tick(3)
     p.load(0, source="preset", name="PETG")
     sim.tick(40)
-    assert tool0(p).material == Material("PETG", adhoc=False, **preset_temperatures("PETG"))
+    assert tool0(p).material == Material("PETG", adhoc=False, **p.model.preset_temperatures("PETG"))
     assert tool0(p).previous == PLA  # a preset leaves the ad-hoc slot alone
     p.unload(0)
     sim.tick(3)
     p.load(0, source="preset", name="PLA", color="#ff0000")
     sim.tick(40)
-    picked = Material("PLA", "#ff0000", **preset_temperatures("PLA"))
+    picked = Material("PLA", "#ff0000", **p.model.preset_temperatures("PLA"))
     assert tool0(p).material == picked and tool0(p).previous == picked
 
 
@@ -162,7 +161,7 @@ def test_runout_reload_restores_a_preset_not_the_adhoc_slot():
     p.runout(0)
     p.load(0)
     sim.tick(20)
-    assert tool0(p).material == Material("PETG", adhoc=False, **preset_temperatures("PETG"))
+    assert tool0(p).material == Material("PETG", adhoc=False, **p.model.preset_temperatures("PETG"))
     assert tool0(p).previous == PLA
 
 
@@ -209,7 +208,7 @@ def test_load_and_unload_while_off_count_nothing_until_boot():
     p.set_power("off")
     p.load(0, source="preset", name="PETG")
     assert tool0(p).loaded and tool0(p).material == Material(
-        "PETG", adhoc=False, **preset_temperatures("PETG")
+        "PETG", adhoc=False, **p.model.preset_temperatures("PETG")
     )
     assert tool0(p).extruded == 0
 

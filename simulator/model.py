@@ -21,13 +21,20 @@ from simulator import gcode, sync
 from simulator.tool import (
     AUTO_RETRACT_STEP,
     CORE_ONE_EXTRUDER,
+    CORE_ONE_PRESETS,
+    DEFAULT_TEMPERATURES,
     DERETRACT_STEP,
     INDX_EXTRUDER,
+    INDX_PRESETS,
     IX_EXTRUDER,
+    LOAD_CELL_PRESETS,
     MARKERS,
     MINI_EXTRUDER,
+    MINI_PRESETS,
     MK3_5_EXTRUDER,
+    MK3_5_PRESETS,
     MK4_EXTRUDER,
+    PRESET_ALIASES,
     RETRACTED_STEP,
     TYPE_STEP,
     XL_DEV_KIT_EXTRUDER,
@@ -37,10 +44,10 @@ from simulator.tool import (
     Material,
     Ramming,
     SimTool,
+    Temperatures,
     UnloadProcess,
     describe,
     is_flexible,
-    preset_temperatures,
     retracted_distance,
 )
 
@@ -177,6 +184,8 @@ class ModelInfo:
     code: str
     name: str
     extruder: Extruder
+    # The build's preset filaments. Left out of the hash so a `ModelInfo` stays hashable.
+    presets: dict[str, Temperatures] = field(hash=False)
     uuids: bool = False
     gap_mm: float = 40.0
     max_tools: int = 1
@@ -191,6 +200,17 @@ class ModelInfo:
         """
         return self.uuids and tool == UUID_TOOL
 
+    def preset_temperatures(self, name: str) -> dict[str, int]:
+        """Return the temperatures a material named `name` starts from, as `Material`
+        keywords.
+
+        A preset's name matches exactly, as `FilamentType::from_name` does. A name in
+        `PRESET_ALIASES`, such as TPU, starts from its preset. Anything else gets the
+        defaults, a preset only other builds have included.
+        """
+        values = self.presets.get(PRESET_ALIASES.get(name, name), DEFAULT_TEMPERATURES)
+        return dict(zip(("nozzle", "preheat", "bed"), values, strict=True))
+
 
 def _models(*infos: ModelInfo) -> dict[str, ModelInfo]:
     return {m.code: m for m in infos}
@@ -198,22 +218,22 @@ def _models(*infos: ModelInfo) -> dict[str, ModelInfo]:
 
 # The printer models, from the firmware: `script/firmware-check` compares them with its source.
 MODELS = _models(
-    ModelInfo("1.3.5", "MK3.5", MK3_5_EXTRUDER, counters=False, mmu=True),
-    ModelInfo("1.3.6", "MK3.5S", MK3_5_EXTRUDER, counters=False, mmu=True),
-    ModelInfo("1.3.9", "MK3.9", MK4_EXTRUDER, mmu=True),
-    ModelInfo("1.3.10", "MK3.9S", MK4_EXTRUDER, mmu=True),
-    ModelInfo("1.4.0", "MK4", MK4_EXTRUDER, mmu=True),
-    ModelInfo("1.4.1", "MK4S", MK4_EXTRUDER, mmu=True),
-    ModelInfo("2.1.0", "MINI", MINI_EXTRUDER, counters=False),
-    ModelInfo("3.1.0", "XL", MK4_EXTRUDER, max_tools=5),
-    ModelInfo("3.1.1", "XLP", MK4_EXTRUDER, max_tools=5),
-    ModelInfo("5.1.0", "XL", XL_DEV_KIT_EXTRUDER, max_tools=5, counters=False),
-    ModelInfo("4.1.0", "iX", IX_EXTRUDER),
-    ModelInfo("7.1.0", "COREONE", CORE_ONE_EXTRUDER, uuids=True, mmu=True),
-    ModelInfo("7.2.0", "COREONEOAK", CORE_ONE_EXTRUDER, uuids=True, mmu=True),
-    ModelInfo("8.1.0", "COREONEL", CORE_ONE_EXTRUDER, uuids=True, mmu=True),
-    ModelInfo("7.10.0", "COREONEINDX", INDX_EXTRUDER, gap_mm=27.0, max_tools=8),
-    ModelInfo("8.10.0", "COREONEL-INDX", INDX_EXTRUDER, gap_mm=27.0, max_tools=8),
+    ModelInfo("1.3.5", "MK3.5", MK3_5_EXTRUDER, MK3_5_PRESETS, counters=False, mmu=True),
+    ModelInfo("1.3.6", "MK3.5S", MK3_5_EXTRUDER, MK3_5_PRESETS, counters=False, mmu=True),
+    ModelInfo("1.3.9", "MK3.9", MK4_EXTRUDER, LOAD_CELL_PRESETS, mmu=True),
+    ModelInfo("1.3.10", "MK3.9S", MK4_EXTRUDER, LOAD_CELL_PRESETS, mmu=True),
+    ModelInfo("1.4.0", "MK4", MK4_EXTRUDER, LOAD_CELL_PRESETS, mmu=True),
+    ModelInfo("1.4.1", "MK4S", MK4_EXTRUDER, LOAD_CELL_PRESETS, mmu=True),
+    ModelInfo("2.1.0", "MINI", MINI_EXTRUDER, MINI_PRESETS, counters=False),
+    ModelInfo("3.1.0", "XL", MK4_EXTRUDER, LOAD_CELL_PRESETS, max_tools=5),
+    ModelInfo("3.1.1", "XLP", MK4_EXTRUDER, LOAD_CELL_PRESETS, max_tools=5),
+    ModelInfo("5.1.0", "XL", XL_DEV_KIT_EXTRUDER, LOAD_CELL_PRESETS, max_tools=5, counters=False),
+    ModelInfo("4.1.0", "iX", IX_EXTRUDER, LOAD_CELL_PRESETS),
+    ModelInfo("7.1.0", "COREONE", CORE_ONE_EXTRUDER, CORE_ONE_PRESETS, uuids=True, mmu=True),
+    ModelInfo("7.2.0", "COREONEOAK", CORE_ONE_EXTRUDER, CORE_ONE_PRESETS, uuids=True, mmu=True),
+    ModelInfo("8.1.0", "COREONEL", CORE_ONE_EXTRUDER, CORE_ONE_PRESETS, uuids=True, mmu=True),
+    ModelInfo("7.10.0", "COREONEINDX", INDX_EXTRUDER, INDX_PRESETS, gap_mm=27.0, max_tools=8),
+    ModelInfo("8.10.0", "COREONEL-INDX", INDX_EXTRUDER, INDX_PRESETS, gap_mm=27.0, max_tools=8),
 )
 
 
@@ -841,12 +861,13 @@ class SimPrinter:
         if source == "preset":
             if uuid or temps is not None:
                 raise Invalid("a preset load has no UUID or temperatures")
+            temps = self.model.preset_temperatures(name)
             # Picking a color makes the preset ad-hoc, which replaces the ad-hoc slot.
-            return Material(name, color, adhoc=color is not None, **preset_temperatures(name))
+            return Material(name, color, adhoc=color is not None, **temps)
         if not self.model.uuids:
             raise Invalid(f"{self.model.name} has no tag reader")
         value = check_uuid(uuid)
-        tag_temps = preset_temperatures(name)
+        tag_temps = self.model.preset_temperatures(name)
         if temps is not None:
             tag_temps = dict(zip(tag_temps, _check_temperatures(temps), strict=True))
         if not self.model.holds_uuid(t.index):

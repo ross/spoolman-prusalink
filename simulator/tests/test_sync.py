@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import replace
 
 from simulator import gcode, sync
-from simulator.model import Material, SimTool, preset_temperatures
+from simulator.model import Material, SimTool
 from simulator.tests.test_model import PETG, temperatures, tool0
 from simulator.tests.test_model_edges import TAG, messages
 from simulator.tests.util import PLA, loaded, make
@@ -23,7 +23,7 @@ def test_m865_reset_clears_uuid_and_preset_write_ignores_parameters():
     sync.apply(p, gcode.parse('M865 X O"#000000" L0'))  # ad-hoc edit keeps the UUID
     assert tool0(p).material.instance_uuid and tool0(p).material.color == "#000000"
     sync.apply(p, gcode.parse('M865 N"PETG" O"#ffffff" T250 L0'))
-    assert tool0(p).material == Material("PETG", adhoc=False, **preset_temperatures("PETG"))
+    assert tool0(p).material == Material("PETG", adhoc=False, **p.model.preset_temperatures("PETG"))
 
 
 def test_preset_ignores_edits_and_adhoc_write_edits_the_slot():
@@ -32,7 +32,7 @@ def test_preset_ignores_edits_and_adhoc_write_edits_the_slot():
     sync.apply(p, gcode.parse('M865 N"PETG" L0'))
     assert tool0(p).previous == PLA  # a preset write leaves the ad-hoc slot alone
     sync.apply(p, gcode.parse(f'M865.1 I0 C"{uuid}"\nM865 O"#ffffff" L0'))
-    assert tool0(p).material == Material("PETG", adhoc=False, **preset_temperatures("PETG"))
+    assert tool0(p).material == Material("PETG", adhoc=False, **p.model.preset_temperatures("PETG"))
     assert "ignored on preset" in sim.events[-1].text
     sync.apply(p, gcode.parse('M865 X O"#000000" L0'))  # the slot is the base, not the preset
     assert tool0(p).material == replace(PLA, color="#000000")
@@ -119,7 +119,7 @@ def test_m865_copy_onto_another_tool_drops_the_uuids():
     sim, p = make("1.4.1", [loaded(0, tagged)])
     p.tools[1] = SimTool(1, enabled=False)
     # Only tool 0 holds UUIDs.
-    p.model = type(p.model)("x", "X", p.model.extruder, uuids=True, max_tools=2)
+    p.model = replace(p.model, uuids=True, max_tools=2)
     sync.apply(p, gcode.parse("M865 I0 L1"))
     copy = p.tools[1].material
     assert (copy.name, copy.instance_uuid, copy.material_uuid, copy.package_uuid) == (
