@@ -9,7 +9,7 @@ a time.
 
 ## Reading an entry
 
-Each finding has an ID from BF1 to BF25, for "bridge finding". The single
+Each finding has an ID from BF1 to BF26, for "bridge finding". The single
 letters are taken by the scenario rows in [scenarios.md](scenarios.md) and
 the printer behaviors (F) in [printer-behaviors.md](printer-behaviors.md).
 An ID stays with its finding when the finding moves stage or is fixed.
@@ -65,6 +65,7 @@ written.
 | 1 | BF2 | The bridge refuses a preamble the printer accepts |
 | 1 | BF4 | The printer's check settings change what a failed check does |
 | 1 | BF5 | A declined or refused sync job uses up a job ID and never finishes |
+| 1 | BF26 | A sync job in the power-panic window drops the resume |
 | 2 | BF12 | Hand swaps on a toolchanger can be missed |
 | 2 | BF13 | A spool join counts an unload in the middle of a print |
 | 2 | BF14 | Writes are refused on multi-tool models |
@@ -283,6 +284,37 @@ written.
   the simulator reports a 230 preheat. The write needs BF14.
 - **Status**: Open.
 
+### BF26. A sync job in the power-panic window drops the resume
+
+- **Printers**: Every model with power panic that the bridge writes to:
+  MK3.9, MK3.9S, MK4, MK4S, Core One, Core One Oak, Core One L. INDX and
+  the XL once BF14 is built.
+- **What happens**: After a power cut the printer boots and reads `IDLE`
+  with no job for at least 1.5 s, until the firmware's autostart resumes
+  the print (F12; `print_utils.cpp:67-82`, `printer_state.cpp:376-384`).
+  A write that waited for the print (W2), such as a Spoolman edit of the
+  loaded spool (W14), is still due. The bridge's first poll after the boot
+  sees an idle printer, reads the status again right before the upload,
+  finds `IDLE` again, and uploads its sync job (`sync_printer` in
+  `app.py`). The job starts a print. At its next try the autostart finds
+  the printer printing and gives the resume up, unless the USB drive, the
+  temperatures and the screen are all ready by then. Then it resumes over
+  the running job: its check that the printer is idle is a debug assertion
+  (`print_utils.cpp:75-79`, `power_panic.cpp:269-271`). `sync_delay`, 0 by
+  default, holds the job only when it's longer than the window.
+- **Effect**: The user's print is lost: it never resumes, and the printer
+  ends the sync job `FINISHED`. If the autostart resumes anyway, the two
+  jobs collide in a way the source doesn't define.
+- **Evidence**: Read in the firmware source. Shown in the simulator by
+  `test_a_sync_job_in_the_window_drops_the_resume` in
+  `tests/test_power_panic.py`, which pins it on a Core One L. To be
+  confirmed on the printer: whether PrusaLink answers before the
+  autostart's first try. The F12 trace shows the window, and has to be
+  taken before the INDX upgrade.
+- **Scenario rows**: P12, W2, W14.
+- **To reproduce**: That test, today.
+- **Status**: Open.
+
 ## Charging
 
 ### BF9. The auto-retract charges filament that wasn't used
@@ -362,7 +394,10 @@ written.
   builds set (`ProjectOptions.cmake:755-756`), and the iX's plain `G12`
   wipes without a purge (`power_panic.cpp:489-491`,
   `nozzle_cleaner.cpp:157-190`). The bridge charges whatever counts to
-  the spool active after the boot.
+  the spool active after the boot. When the filament was pulled out while
+  the power was off, the idle sensor clear in the window before the resume
+  counts an unload first (F12), and the purge or feed counts on the empty
+  tool: that's BF24.
 - **Effect**: Up to one poll interval of printing, 30 s by default, is
   never charged. The purge or feed is charged to the active spool, which
   is right if it leaves the nozzle; on a plain Core One L the source says
@@ -374,7 +409,9 @@ written.
 - **To reproduce**: `test_p12_power_panic_resume_keeps_the_job` in
   `integration/test_prints.py` shows the loss and the 8 mm fed back on a
   Core One L, 7.6 mm counted. `simulator/tests/test_model_power_panic.py`
-  shows the amount per model.
+  shows the amount per model. With the filament pulled out while off,
+  `test_an_unload_in_the_window_then_printing_on_an_empty_tool` in
+  `tests/test_power_panic.py`.
 - **Status**: Open. A candidate for Accepted: printer-behaviors.md, under
   "Bridge follow-ups found here", calls both parts fine.
 
@@ -444,7 +481,8 @@ written.
 - **Printers**: Single-tool models with counters, when the user turns the
   filament sensors off at the filament-not-inserted screen instead of
   loading (F29). Core One INDX, Core One L INDX and XL, at the
-  tools-mapping screen.
+  tools-mapping screen. Every model with power panic and counters, after a
+  power cut with the filament pulled out while off.
 - **What happens**: On the tools-mapping screen, Print with a used tool
   empty first asks to turn the filament sensors off, and only that lets
   the print go on. When the file names a type for the empty tool, a type
@@ -452,7 +490,12 @@ written.
   filament-not-inserted screen offers the same, and the print goes on
   alike (F29). The print then runs through the empty tool, and the tracker
   counts every move on that tool with no material, a toolchanger's pickup
-  purge included. The bridge holds that usage because the tool reports no
+  purge included. A power-panic resume gets there a second way: when the
+  filament was pulled out while the power was off, the idle sensor clear
+  in the window before the resume counts the unload and clears the type,
+  and the resumed print goes on through the empty tool, since a runout
+  needs the sensor to see the filament go (F12, F29). The resume's feed
+  back or purge counts there too (BF11). The bridge holds that usage because the tool reports no
   material (C7). When filament is next loaded in that tool, the bridge
   charges the held usage, with the load's own count, to the spool
   reported there.
@@ -463,9 +506,14 @@ written.
   `tests/test_toolchanger_prints.py`, on an INDX, which pins the charge:
   the held 76 mm plus the load's 70. On a single-tool
   printer, read in the firmware source (F29): the simulator doesn't model
-  that path.
-- **Scenario rows**: C7, T2.
-- **To reproduce**: That test, today, on a toolchanger. On the Core One L,
+  that path. After a power cut, shown in the simulator on a Core One L by
+  `test_an_unload_in_the_window_then_printing_on_an_empty_tool` in
+  `tests/test_power_panic.py`: the bridge records the unload and
+  `swap_unconfirmed` in the window, holds the usage of the resumed print,
+  and charges it with the next load's count to the spool reported then.
+- **Scenario rows**: C7, T2, P12.
+- **To reproduce**: Those tests, today, on a toolchanger and after a power
+  cut. On the Core One L,
   the live check `F29-sensors-off-print` confirms it with the production
   bridge: sitting D in printer-behaviors.md, under "Capture plan".
 - **Status**: Open.
