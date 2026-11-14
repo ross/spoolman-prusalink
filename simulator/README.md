@@ -271,7 +271,7 @@ that trace. The points that matter for the bridge, in short:
   ramming counts on the slot, the unit ejects it, and the printer waits in
   `ATTENTION` for the filament to be loaded into the MMU. No type is
   written, so no unload counts. `load` with no source then reloads the same
-  slot: the feed counts nothing, the load to the nozzle counts 7 mm past
+  slot, reading `PRINTING` while it runs: the feed counts nothing, the load to the nozzle counts 7 mm past
   the 40 mm gap and the prime 4, and the print waits `PAUSED` for the
   resume, which feeds the 8 mm back. With a spool join from the slot, the
   join unloads the slot into the MMU, changes to the join's slot from no

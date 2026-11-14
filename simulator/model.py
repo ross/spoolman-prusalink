@@ -852,10 +852,25 @@ class SimPrinter:
     def state(self) -> State:
         """The state PrusaLink reports, which follows from the job phase or the idle screen."""
         if self.job is not None:
+            if self._mmu_reloading():
+                return State.PRINTING
             return PHASE_STATES[self.job.phase]
         if any(t.process is not None for t in self.tools.values()):
             return State.BUSY
         return self.screen
+
+    def _mmu_reloading(self) -> bool:
+        """Whether an `M600`'s reload runs on an MMU. It reads `PRINTING`: the MMU's progress
+        moves the filament change to its `MMU_*` phases, and with the MMU on only its
+        questions and errors read `ATTENTION` (`load_unload_attention_while_printing`,
+        `src/state/printer_state.cpp:152-177`)."""
+        job, tool = self.job, self.job and self.job.wait_tool
+        return (
+            job.phase is JobPhase.WAIT_LOAD
+            and self.feed is MMU
+            and tool is not None
+            and self.tools[tool].process is not None
+        )
 
     @property
     def toolchanger(self) -> bool:
@@ -3274,7 +3289,8 @@ class SimPrinter:
         job = None
         if self.job is not None:
             j = self.job
-            a = j.attention
+            # The question is answered once the MMU's reload runs.
+            a = None if self._mmu_reloading() else j.attention
             user = isinstance(j, UserJob)
             job = {
                 "id": j.id,
