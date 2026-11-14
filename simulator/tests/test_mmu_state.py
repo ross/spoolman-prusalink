@@ -216,6 +216,21 @@ def test_the_page_shows_the_mmu_and_which_slot_is_in_the_extruder():
     assert make()[1].to_json()["mmu"] is None
 
 
+def test_with_the_mmu_off_the_page_shows_tool_0_loaded_from_its_path():
+    # Off, the printer feeds slot 0 as a single-tool one, so the fed slot doesn't decide.
+    sim, p = make_mmu(types={})
+    p.set_mmu(False)
+    p.load(0, source="preset", name="PLA")
+    sim.advance(60)
+    assert p.mmu.path.loaded and p.mmu.fed is None
+    tool = p.to_json()["tools"][0]
+    assert tool["loaded"] is True and tool["actions"]["unload"] is None
+
+    sim, p = make_mmu(types={0: PLA, 2: PETG}, slot=2)
+    p.set_mmu(False)
+    assert [t["loaded"] for t in p.to_json()["tools"]] == [True, False, False, False, False]
+
+
 def test_the_tag_reader_is_off_while_the_mmu_is_on():
     sim, p = make_mmu(CORE_ONE)
     assert p.to_json()["load_sources"] == ["preset"]
@@ -271,3 +286,35 @@ def test_an_mmu_switched_off_prints_as_a_single_tool_printer():
     p.set_mmu(False)
     p.start_print(one_segment(10))
     assert p.job is not None
+
+
+def test_a_plain_mmu_build_stores_slot_writes_but_lists_tool_0_alone():
+    # An MK4 with no MMU attached: `M865 I2` lands in slot 2's config, but the printer has
+    # slot 0 alone while the MMU setting is off, so slot 2 can't be enabled or listed.
+    sim, p = make("1.4.0")
+    run_sync(sim, p, sliced(p, 'M865 I2 N"PETG"\n'))
+    assert p.tools[2].material.name == "PETG" and not p.tools[2].enabled
+    reason = "T2 is an MMU slot, and the MMU is off"
+    assert p.to_json()["tools"][1]["actions"]["set_tool_enabled"] == reason
+    with pytest.raises(Invalid, match=reason):
+        p.set_tool_enabled(2, True)
+    assert listed(p) == [0]
+
+
+def test_switching_an_mmu_off_again_with_the_sensors_off_clears_slot_0():
+    # `M709 S0` runs `mmu_off` with the MMU already off, and the switched-off sensors,
+    # no longer forced on by the MMU, never surely see filament.
+    sim, p = make_mmu(types={0: PETG, 2: PLA}, slot=2)
+    p.set_mmu(False)
+    p.set_sensors(False)
+    assert p.tools[0].material.name == "PETG" and p.tools[0].unload_count == 0
+    p.set_mmu(False)
+    assert p.tools[0].material is None and p.tools[0].unload_count == 1
+    assert p.to_json()["actions"]["set_mmu"] == "the MMU needs the filament sensors on"
+
+
+def test_turning_the_sensors_off_with_filament_in_the_extruder_keeps_slot_0():
+    # The MMU forced the sensors on, so they still read when `mmu_off` looks.
+    sim, p = make_mmu(types={0: PETG, 2: PLA}, slot=2)
+    p.set_sensors(False)
+    assert p.tools[0].material.name == "PETG" and p.tools[0].unload_count == 0

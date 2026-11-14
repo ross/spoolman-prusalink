@@ -3097,6 +3097,245 @@ void MI_MMU_LOAD_TO_NOZZLE_I::click(IWindowMenu &) {
     gcode.append_printf("\\" W2 P%i", slot_i_);
     gui_try_gcode_with_msg(gcode.str());
 }
+
+void MI_MMU_ENABLE::OnChange([[maybe_unused]] size_t old_index) {
+    if (value() && !config_store().is_mmu_rework.get() && !set_mmu_rework(true)) {
+        set_value(false);
+        return;
+
+    } else if (value() && !FSensors_instance().is_working(LogicalFilamentSensor::extruder)) {
+        MsgBoxWarning(_("Can't enable MMU: calibrate and enable the printer's filament sensor first."), Responses_Ok);
+        set_value(false);
+        return;
+    }
+
+    marlin_client::gcode(value() ? "M709 S1" : "M709 S0");
+}
+"""  # noqa: E501 (verbatim firmware lines)  # noqa: E501 (verbatim firmware lines)
+
+# The MMU's start in `app_setup`.
+APPMAIN_CPP = """\
+static void app_setup(void) {
+    metric_record_event(&metric_app_start);
+
+#if HAS_MMU2()
+    if (config_store().mmu2_enabled.get()) {
+        MMU2::mmu2.Start();
+    }
+#endif
+}
+"""
+
+# The filament sensors' MMU setting, idle clear, switch-off and forced sensors.
+FILAMENT_SENSORS_HANDLER_CPP = """\
+void FilamentSensors::reconfigure_sensors_if_needed(bool force) {
+    const auto new_tool = stdext::get_optional<PhysicalToolIndex>(PhysicalToolIndex::currently_selected());
+    const auto new_tool_index = new_tool ? new_tool->to_raw() : PhysicalToolIndex::count;
+
+    if (!force && new_tool_index == tool_index) {
+        return;
+    }
+
+    tool_index = new_tool_index;
+
+    has_mmu =
+#if HAS_MMU2()
+        config_store().mmu2_enabled.get(); // there is a slight semantic difference:
+    // - mmu2_enabled in eeprom describes the "intent" to enable MMU on the machine (this flag is true even when the MMU is not communicating)
+    // - mmu2.Enabled() is true when the MMU is operational (i.e. powered up and initial communication handshake accomplished)
+    // at this spot of filament runout logic, using the "intent" is better because:
+    // - you cannot start a print with MMU in the "connecting" stage
+    // - when communication drops out during print, an error screen occurrs and must be resolved to continue -> runout are completely irrelevant at that moment
+    // - enabling MMU in the eeprom ("intent") is an atomic operation, while it takes ~10s for the MMU to become operational
+#else
+        false;
+#endif
+
+    extruder_fs_independent =
+#if PRINTER_IS_PRUSA_iX()
+        // iX always has the "MMU rework"
+        false;
+#elif HAS_MMU2()
+        !config_store().is_mmu_rework.get();
+#else
+            true;
+#endif
+
+    using LFS = LogicalFilamentSensor;
+    auto &ls = logical_sensors_;
+
+    const auto extruder_fs = new_tool ? GetExtruderFSensor(*new_tool) : nullptr;
+    const auto side_fs = new_tool ? GetSideFSensor(*new_tool) : nullptr;
+
+    const bool side_fs_enabled = side_fs && side_fs->is_enabled();
+
+    ls[LFS::extruder] = extruder_fs;
+    ls[LFS::side] = side_fs;
+    ls[LFS::primary_runout] = side_fs_enabled ? side_fs : extruder_fs;
+    ls[LFS::closest_to_nozzle] = extruder_fs ?: side_fs;
+    ls[LFS::closest_to_nozzle_independent] = (extruder_fs && extruder_fs_independent) ? extruder_fs : side_fs;
+}
+
+    } else {
+        // During MMU standard operation, there is no filament loaded to the nozzle when not printing.
+        // So it's not a good idea to reset what filament types we have stored.
+        if (!has_mmu && no_filament_surely(LogicalFilamentSensor::closest_to_nozzle) && tool_index < PhysicalToolIndex::count) {
+            const auto physical_tool = PhysicalToolIndex::from_raw(tool_index);
+            const auto virtual_tool = stdext::get_optional<VirtualToolIndex>(physical_tool.currently_selected_virtual_tool());
+            if (virtual_tool.has_value()) {
+                config_store().set_filament_type(*virtual_tool, FilamentType::none);
+            }
+        }
+
+void FilamentSensors::process_enable_state_update() {
+    enable_state_update_processing = true;
+    enable_state_update_pending = false;
+
+    for_all_sensors([](IFSensor &s, PhysicalToolIndex, bool) {
+        s.set_enabled(should_enable(s.id()));
+    });
+
+#if HAS_MMU2()
+    if (config_store().mmu2_enabled.get() && !config_store().fsensor_enabled.get()) {
+        // MMU requires enabled filament sensor to work, turn it off if the fsensors got disabled
+        marlin_server::enqueue_gcode("M709 S0");
+    }
+#endif
+
+    enable_state_update_processing = false;
+}
+
+bool should_enable(FilamentSensorID id) {
+#if HAS_MMU2()
+    /// MMU override: when MMU is active, both extruder and side sensors
+    /// are required regardless of per-sensor enable bits.
+    if (config_store().mmu2_enabled.get()) {
+        return true;
+    }
+#endif
+
+    if (!config_store().fsensor_enabled.get()) {
+        return false;
+    }
+
+    if (id.position == FilamentSensorID::Position::side) {
+        return config_store().fsensor_side_enabled_bits.get() & (1 << id.index);
+    } else {
+        return config_store().fsensor_extruder_enabled_bits.get() & (1 << id.index);
+    }
+}
+"""  # noqa: E501 (verbatim firmware lines)
+
+# `pre_finalize_print`, the end of a print.
+MARLIN_SERVER_CPP = """\
+static bool pre_finalize_print([[maybe_unused]] bool finished) {
+#if HAS_ANFC()
+    buddy::openprinttag::filament_usage_tracker().flush({
+        .tools = AllTools {},
+        .warn_on_failure = true,
+    });
+#endif
+
+#if HAS_AUTO_RETRACT()
+    // During multi tool printing, slicer handles retraction/ramming and keeps FW in the dark
+    // FilamentTracker keeps track of retracted distances on each hotend
+    // This overwrites retracted distances in persistent storage with temporary ones from FilamentTracker
+    for (auto tool : PhysicalToolIndex::all()) {
+        const auto dist = buddy::filament_tracker().get_retracted_distance(tool);
+        // Do not save filament_tracker value before it was validated
+        if (dist.has_value()) {
+            // update only used hotends
+            buddy::auto_retract().set_retracted_distance(tool, dist);
+        }
+    }
+#endif
+
+#if HAS_MMU2()
+    if (MMU2::mmu2.Enabled()) {
+        // Unloading from nozzle is handled by Slicer, do not use auto_retract (frequent filament changes cause filament_tracker cannot properly hold valid value)
+        // When we are running single-filament gcode with MMU, we should unload current filament.
+        if (!finished || GCodeInfo::getInstance().is_singletool_gcode()) {
+            safely_unload_filament_from_nozzle_to_mmu();
+        }
+    } else
+#endif
+
+#if HAS_AUTO_RETRACT()
+        if (true) {
+        buddy::auto_retract().maybe_retract_from_nozzle();
+    } else
+#endif
+    {
+    }
+
+#if HAS_NOZZLE_CLEANER()
+    // Skip nozzle cleaning if no tool is picked (e.g. tool already parked during pause on INDX)
+    if (!std::holds_alternative<NoTool>(PhysicalToolIndex::currently_selected())) {
+        if (!nozzle_cleaner::load_and_execute(nozzle_cleaner::Sequence::clean)) {
+            return false;
+        }
+        mapi::park(mapi::get_parking_position(mapi::ParkPosition::park).without_z_move());
+    }
+#endif
+
+#if HAS_INDX()
+    // Park the tool to its dock and persist the state to eeprom.
+    // Done here (still with axes homed) so tool_change's ensure_safe_move() doesn't trigger another G28.
+    tool_change(NoTool {}, tool_return_t::no_return);
+    prusa_toolchanger.persist_last_picked_tool(PhysicalToolIndex::currently_selected(), true);
+#endif
+
+#if HAS_CHAMBER_VENTS()
+    buddy::chamber().close_vents_after_print();
+#endif
+
+    disable_e_steppers();
+    disable_xy_steppers();
+
+    return true;
+}
+"""  # noqa: E501 (verbatim firmware lines)
+
+# The tag radio's MMU condition.
+REQUEST_MANAGER_CPP = """\
+    static_assert(!HAS_INDX(), "Revisit all HAS_ANFC_FOR_MULTIPLE_TOOLS block (especially code below) when implementing NFC for 'multi-tool' printers.");
+#if (HAS_MMU2() && !HAS_ANFC_FOR_MULTIPLE_TOOLS())
+    // Turn NFC antenna off if MMU is active
+    // !!This code should be temporary!!
+    const bool want_radio = !config_store().mmu2_enabled.get();
+#else
+    const bool want_radio = true;
+#endif
+"""  # noqa: E501 (verbatim firmware lines)
+
+# Whether a tool has a tag reader.
+TOOL_TAG_BUDDY_CPP = """\
+bool has_tool_openprinttag_reader([[maybe_unused]] VirtualToolIndex tool) {
+
+#if HAS_MMU2() && !HAS_ANFC_FOR_MULTIPLE_TOOLS()
+    return !config_store().mmu2_enabled.get();
+#else
+    return true;
+#endif
+}
+"""
+
+# The MMU's filament menu.
+SCREEN_MENU_FILAMENT_MMU_HPP = """\
+using ScreenMenuFilamentMMU__ = ScreenMenu<GuiDefaults::MenuFooter, MI_RETURN,
+    MI_LOADED_FILAMENT,
+    MI_MMU_PRELOAD,
+    MI_MMU_PRELOAD_ALL,
+    MI_MMU_LOAD_TO_NOZZLE,
+    MI_MMU_UNLOAD_FILAMENT,
+    MI_MMU_EJECT_FILAMENT,
+    MI_MMU_CUT_FILAMENT,
+    // MI_PURGE, doing purges in MMU mode is not only unsupported but dangerous and doesn't play well with the preferred workflow of the MMU-enabled machine
+    // debug items, but the functionality will be used by the error screens - hidden in release builds
+    MI_MMU_SW_RESET,
+    MI_MMU_HW_RESET,
+    MI_MMU_POWER_CYCLE,
+    MI_FILAMENT_MANAGEMENT>;
 """  # noqa: E501 (verbatim firmware lines)
 
 FILES = {
@@ -3147,7 +3386,13 @@ FILES = {
     "src/common/multi_filament_change.cpp": MULTI_FILAMENT_CHANGE_CPP,
     "src/gui/screen/screen_menu_mmu_preload_all.cpp": MMU_PRELOAD_ALL_CPP,
     "src/gui/screen_menu_filament_mmu.cpp": FILAMENT_MMU_CPP,
+    "src/common/appmain.cpp": APPMAIN_CPP,
+    "src/feature/filament_sensor/filament_sensors_handler.cpp": FILAMENT_SENSORS_HANDLER_CPP,
+    "src/common/marlin_server.cpp": MARLIN_SERVER_CPP,
     "src/gui/MItem_mmu.cpp": MITEM_MMU_CPP,
+    "src/feature/openprinttag/request_manager.cpp": REQUEST_MANAGER_CPP,
+    "src/feature/openprinttag/tool_tag_buddy.cpp": TOOL_TAG_BUDDY_CPP,
+    "src/gui/screen_menu_filament_mmu.hpp": SCREEN_MENU_FILAMENT_MMU_HPP,
     read.IMAGES_FILE: PRESETS_JSON,
     read.PAUSE_SETTINGS_FILE: PAUSE_SETTINGS_HPP,
 }

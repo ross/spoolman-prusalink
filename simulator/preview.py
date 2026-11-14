@@ -147,7 +147,7 @@ def tool_mapping(mapping: bool, uses: dict[int, str | None], tools: dict[int, To
     "the tool mapping condition" guards).
 
     `mapping` says whether the printer has tool mapping at all: the toolchanger builds do,
-    and so do MMU builds with the MMU on, which the simulator never is. It applies when the
+    and so do MMU builds while the MMU is Active (`Mmu.maps_tools`). It applies when the
     print uses more than one tool, or when more than one tool is enabled and the print uses
     one. A file with no `filament used [g]`, such as the bridge's sync job, uses none
     (`UsedExtrudersCount` in `src/common/gcode/gcode_info.cpp`), so it never applies there.

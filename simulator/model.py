@@ -838,10 +838,15 @@ class SimPrinter:
         return MMU if self.mmu and self.mmu.on else FEED_SYSTEMS[self.model.feed]
 
     def listed(self, t: SimTool) -> bool:
-        """Whether `/api/v1/filament` lists `t`: an enabled tool, and on an MMU every slot
-        while the MMU is switched on, connecting too, and only slot 0 while it's off
-        (`VirtualToolIndex::is_enabled`, `src/common/tool_index.cpp:84-109`)."""
-        return t.enabled and (self.mmu is None or self.mmu.on or t.index == 0)
+        """Whether `/api/v1/filament` lists `t`: an enabled tool whose slot is on."""
+        return t.enabled and self._slot_on(t.index)
+
+    def _slot_on(self, index: int) -> bool:
+        """Whether the build has tool `index` now (`VirtualToolIndex::is_enabled`,
+        `src/common/tool_index.cpp:84-109`). An MMU build has every slot while the MMU is
+        switched on, connecting too, and slot 0 alone while it's off or there's no MMU, though
+        `M865` still writes the other slots."""
+        return index == 0 or not self.model.mmu or (self.mmu is not None and self.mmu.on)
 
     def _head_tool(self) -> SimTool | None:
         """The tool whose path the head's own moves run on, as the feed system says."""
@@ -1153,7 +1158,7 @@ class SimPrinter:
         tool = self.tools.get(index)
         if tool is None:
             raise Invalid(f"{self.name} has no tool {index!r}")
-        if tool.enabled and not self.listed(tool):
+        if not self._slot_on(index):
             raise Invalid(f"T{index} is an MMU slot, and the MMU is off")
         if enabled and not tool.enabled:
             raise Invalid(f"tool {index} is disabled")
@@ -1306,8 +1311,8 @@ class SimPrinter:
         tag_temps = self.model.preset_temperatures(name)
         if temps is not None:
             tag_temps = dict(zip(tag_temps, _check_temperatures(temps), strict=True))
-        if not self.model.holds_uuid(t.index):
-            return Material(name, color, **tag_temps)
+        # Only tool 0 can read a tag: the models with a reader are MMU builds, whose other
+        # slots are on only while the MMU is, and then the radio is off.
         # A real tag carries its product's UUIDs; derive stable ones from the name and color.
         return Material(
             name,
@@ -2225,10 +2230,14 @@ class SimPrinter:
 
     def _mmu_off(self) -> None:
         """`mmu_off`: the setting goes off, then slot 0 is cleared unless the extruder
-        sensor surely sees filament."""
-        path = self.mmu.path
+        sensor surely sees filament. `M709 S0` runs it with the MMU already off too
+        (`M707-9_parse.cpp:91-93`). A disabled sensor is never sure
+        (`filament_sensors_handler.hpp:80-84`), and the sensors are disabled when they're
+        switched off, unless the MMU was on and forced them on (`should_enable`,
+        `filament_sensors_handler.cpp:391-402`)."""
+        path, was_on = self.mmu.path, self.mmu.on
         self.mmu.on, self.mmu.connecting = False, 0.0
-        if not path.loaded or path.sensor_fault:
+        if not path.loaded or path.sensor_fault or not (self.sensors or was_on):
             self._count_unload(self.tools[0], "MMU off")
         self.selected_tool = 0
 
@@ -2498,7 +2507,7 @@ class SimPrinter:
             "set_sensor_fault": lambda: None,
             "set_stuck_write": lambda: None,
         }
-        if not self.listed(t) and t.enabled:
+        if not self._slot_on(t.index):
             unlisted = _refusal(lambda: self._tool(t.index, enabled=False))
             return {name: unlisted for name in [*checks, "set_tool_enabled"]}
         if not t.enabled:
@@ -2978,10 +2987,12 @@ class SimPrinter:
 
     def _tool_json(self, t: SimTool) -> dict:
         """The tool as the page shows it. On an MMU every slot shares the extruder's path,
-        so a slot reads loaded only when its filament is the one in it."""
+        so a slot reads loaded only when its filament is the one in it. With the MMU off,
+        the printer feeds slot 0 as a single-tool one, and slot 0 owns the path."""
         out = {**_tool_json(t), "listed": self.listed(t)}
         if self.mmu is not None:
-            out["loaded"] = t.path.loaded and self.mmu.fed == t.index
+            owner = self.mmu.fed if self.mmu.on else 0
+            out["loaded"] = t.path.loaded and t.index == owner
         return out
 
 
