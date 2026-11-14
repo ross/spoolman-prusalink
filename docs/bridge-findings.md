@@ -797,18 +797,27 @@ before workstream 5, and the scenarios have no MMU rows yet.
 
 ### BF20. MMU printers are on the supported list as single-tool models
 
-- **What happens**: With an MMU on, `/api/v1/filament` lists five tools,
-  one per slot (`tool_index.cpp:84-102`), and `/api/v1/info` reports
-  `mmu` as true (`basic_gets.cpp:229-253`). The bridge doesn't read
-  `/api/v1/info`. `PRINTER_MODELS` in `printer_sync.py` lists these types
-  as single-tool and writable, so `model_problem` lets writes through.
+- **Printers**: MK3.9, MK3.9S, MK4, MK4S, Core One and Core One L with an
+  MMU3.
+- **What happens**: `/api/v1/filament` lists the five slots as tools 0 to 4
+  while the MMU's setting is on, connected or not, and tool 0 alone while
+  it's off (`tool_index.cpp:84-109`). `/api/v1/info` reports `mmu` as the
+  setting, true while the MMU connects too (`basic_gets.cpp:229-247`). The
+  bridge doesn't read `/api/v1/info`. `PRINTER_MODELS` in `printer_sync.py`
+  lists these types as single-tool and writable, so `model_problem` lets
+  writes through, and the job's `M865 L1` to `L4` land on the slots
+  (`M865.cpp:64, 194-196`).
 - **Effect**: The bridge writes to an MMU printer as to a single-tool one,
   which leads to BF18 and BF19, and nothing tells the user an MMU isn't
   supported. Charging per slot follows the config's tool map.
-- **Evidence**: Read in the firmware source and `printer_sync.py`.
+- **Evidence**: Read in the firmware source and `printer_sync.py`, and
+  shown in the simulator.
 - **Scenario rows**: W10, T6.
-- **To reproduce**: Needs workstream 5. The simulator's `/api/v1/info`
-  always reports `mmu` as false today.
+- **To reproduce**:
+  `test_the_bridge_writes_to_an_mmu_printer_as_a_single_tool_model` in
+  `tests/test_mmu.py`: an MK4S with its MMU on reads `mmu` as true and lists
+  five tools. A drift write uploads one job with `L0` to `L4`, which runs and
+  sets every slot's type.
 - **Status**: Open.
 
 ## Minor
