@@ -1,12 +1,15 @@
 """The bridge against a printer with an MMU3: the MMU findings in docs/bridge-findings.md."""
 
-from harness import LOC, jobs, ledger, make, menu, spool_x, tool_locations
+import json
 
-from simulator.model import PrintSpec, Segment
-from simulator.prusalink import filament, info
+from harness import LOC, jobs, ledger, make, menu, poll_during_job, spool_x, tool_locations
+
+from simulator.model import PrintSpec, Reason, Segment
+from simulator.prusalink import filament, info, status
 from simulator.tool import SimTool
 
 MK4S = "1.4.1"
+CORE_ONE = "7.1.0"
 COLORS = ("ff0000", "00ff00", "0000ff", "ffff00", "00ffff")
 SHELF = "shelf"
 SWAPS = ("swap_staged", "unload", "swap_committed", "swap_unconfirmed", "swap_confirmed")
@@ -188,4 +191,77 @@ async def test_a_second_mmu_print_in_one_boot_counts_less_at_its_start(tmp_path)
     assert first == {1: 624, 2: 444}
     # 1275.3072 and 934.7672 mm counted: 1211 and 888.
     assert second == {1: 1211 - 624, 2: 888 - 444}
+    await bridge.aclose()
+
+
+async def test_a_sync_job_on_a_loaded_mmu_waits_on_the_unload_question(tmp_path):
+    # BF18: after Load To Nozzle, FINDA sees slot 0's filament, so the preview asks whether
+    # to unload it first, and the bridge's job waits in ATTENTION with its ID. The bridge
+    # uploads once and then only waits: no retry, no time-out and no flag, for as long as
+    # nobody answers. No runs the job with the filament in place, and its end leaves it
+    # there, so the next job would ask again.
+    locations = tool_locations(LOC, 5)
+    bridge, fake, station = make(
+        tmp_path,
+        [spool_x(10, locations[0], color="00ff00")],
+        model=MK4S,
+        tools=5,
+        mmu=True,
+        sync_drift=True,
+    )
+    p = station.printer
+    p.load_to_nozzle(0)
+    await station.run_until(lambda: p.tools[0].process is None, limit=120)
+    await bridge.poll()
+    assert len(jobs(station)) == 1
+    station.advance(1)
+    assert p.job.waits_for(Reason.MMU_LOADED) and p.job.id == 1
+    assert status(p)["printer"]["state"] == "ATTENTION" and status(p)["job"]["id"] == 1
+    for _ in range(40):  # 20 minutes
+        station.advance(30)
+        await poll_during_job(bridge)
+    assert len(jobs(station)) == 1 and p.job.waits_for(Reason.MMU_LOADED)
+    assert fake.flag(10) is None
+    p.tap_through()
+    station.finish_job()
+    await bridge.poll()
+    assert len(jobs(station)) == 1 and station.material(0)[1] == "#00ff00"
+    assert fake.flag(10) is None
+    assert p.mmu.fed == 0 and p.mmu.path.loaded and p.selected_tool == 0
+    await bridge.aclose()
+
+
+async def test_mmu_writes_land_on_every_slot_and_uuids_on_slot_0(tmp_path):
+    # BF19, on a Core One, which keeps tag UUIDs: the bridge mints and writes an instance
+    # UUID for tool 0's spool alone, `M865.1 I0`, and a type and color for every slot. Each
+    # lands, slots 1 to 4 keep no UUID, and the printer then matches every spool, so one
+    # job does it and nothing is flagged. A write to slots 1 to 4 that carried UUIDs would
+    # lose them, but the bridge sends none.
+    locations = tool_locations(LOC, 5)
+    spools = [spool_x(10 + i, locations[i], color=c) for i, c in enumerate(COLORS)]
+    bridge, fake, station = make(
+        tmp_path,
+        spools,
+        model=CORE_ONE,
+        tools=5,
+        mmu=True,
+        sync_drift=True,
+        uuid_field="instance_uuid",
+    )
+    p = station.printer
+    for i in range(1, 5):
+        station.tool_at(i).store(menu("PLA"))
+    await bridge.poll()
+    (gcode,) = jobs(station)
+    minted = json.loads(fake.spools[10]["extra"]["instance_uuid"])
+    assert [line for line in gcode.splitlines() if line.startswith("M865.1")] == [
+        f'M865.1 I0 C"{minted}"'
+    ]
+    assert all(fake.spools[10 + i]["extra"] == {} for i in range(1, 5))
+    station.finish_job()
+    await bridge.poll()
+    assert len(jobs(station)) == 1
+    assert [station.material(i)[1] for i in range(5)] == [f"#{c}" for c in COLORS]
+    assert [p.tools[i].material.instance_uuid for i in range(5)] == [minted] + [None] * 4
+    assert all(fake.flag(10 + i) is None for i in range(5))
     await bridge.aclose()
