@@ -647,11 +647,12 @@ written.
   (`spool_join.cpp:239-365`, `toolchanger_xl.cpp:505-571`,
   `nozzle_cleaner.cpp:87`). The bridge takes the old tool's unload as a
   runout during a started print: it records `unload` and
-  `swap_unconfirmed` there and flags the old spool, and with more than 5%
-  of its net weight left in Spoolman flags it as run out mid-print too
-  (M5a). The swap stays open after the print (P3). The join's tool's first
+  `swap_unconfirmed` there and flags the old spool (`unload` in
+  `accounting.py`), and with more than 5% of its net weight left in
+  Spoolman flags it as run out mid-print too (M5a; `_check_runout` and
+  `RUNOUT_LEFT` in `app.py`). The swap stays open after the print (P3). The join's tool's first
   count in the job is its purge, which the bridge takes as that tool's
-  print start, and the rest of the print is charged to the spool in its
+  print start (`print_start` in `accounting.py`), and the rest of the print is charged to the spool in its
   location, with no event.
 - **Effect**: Not settled. The charges follow the filament when each tool's
   location holds its spool. The old tool's swap and flags follow rules

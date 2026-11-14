@@ -1337,8 +1337,10 @@ class SimPrinter:
         """Refuse spool joins the firmware wouldn't set (`SpoolJoin::add_join` in
         `lib/Marlin/Marlin/src/module/prusa/spool_join.cpp:71-105`).
 
-        A join needs a toolchanger that changes tools and two enabled tools. A tool joins
-        on once, is joined to once, and no chain loops. The tools-mapping screen takes a
+        A join needs a toolchanger that changes tools and two enabled tools. A tool is
+        joined to once, and no chain loops. A second join from one tool is refused here,
+        which is the simulator's simplification: the firmware appends it to the end of
+        that tool's chain (`:76-79`). The tools-mapping screen takes a
         join's tool off any G-code tool first (`disconnect_virtual_tool` in
         `src/gui/screen/print/frame_tool_mapping.cpp`), and the simulator maps each G-code
         tool to its own tool, so a join's tool can't be one the print uses.
@@ -1617,10 +1619,11 @@ class SimPrinter:
         `FilamentType::for_tool_heuristic` (`M600.cpp:282-290`,
         `src/common/filament_tools.cpp:15-45`). The stored type; else the type the print's
         file names for the tool, when it's a preset of the build; else the type the last
-        unload left, or the ad-hoc slot."""
+        unload left, or the ad-hoc slot. The file's tools go through the tool mapping, so
+        after a spool join the file's type belongs to the join's tool."""
         if t.material is not None:
             return t.material
-        named = {s.tool: s.material for s in job.spec.segments}.get(t.index)
+        named = {job.mapped.get(s.tool, s.tool): s.material for s in job.spec.segments}.get(t.index)
         if named in self.model.presets:
             return self._new_material(t, "preset", named, None, None, None)
         return t.kept()

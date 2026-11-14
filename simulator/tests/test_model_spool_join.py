@@ -24,6 +24,7 @@ import pytest
 from simulator import prusalink
 from simulator.model import (
     Busy,
+    FilamentPath,
     Invalid,
     JobPhase,
     Join,
@@ -124,8 +125,10 @@ def test_a_runout_joins_the_next_tool_for_the_rest_of_the_print(model):
     assert [t.unload_count for t in p.tools.values()] == [1, 0, 0]
 
 
-def test_the_xl_join_s_purge_stores_its_retract_for_the_gap_restore():
+@pytest.mark.parametrize("high_flow", [False, True])
+def test_the_xl_join_s_purge_stores_its_retract_for_the_gap_restore(high_flow):
     sim, p = make(XL, [loaded(0), loaded(1)])
+    p.high_flow = high_flow  # `purge_tool` never doubles its 27 mm
     start(sim, p, [(0, 100)], [Join(0, 1)])
     sim.advance(1)
     p.runout(0)
@@ -336,6 +339,7 @@ def test_a_power_cut_after_the_join_resumes_on_the_join_s_tool():
         (XL, None, [0], [Join(0, 5)], "p has no tool 5"),
         (XL, None, [0], [Join(9, 1)], "p has no tool 9"),
         (XL, None, [0], [Join(0, 3)], "tool 3 is disabled"),
+        (XL, None, [0], [Join(3, 1)], "tool 3 is disabled"),
         (XL, None, [0], [Join(0, 0)], "T0 can't join itself"),
         (XL, None, [0, 1], [Join(0, 1)], "T1 prints in this file, so it can't be joined to"),
         (XL, None, [0], [Join(0, 1), Join(0, 2)], "T0 joins on twice"),
@@ -357,3 +361,30 @@ def test_a_join_s_tool_is_in_use_for_the_print():
     start(sim, p, [(0, 100)], [Join(0, 1), Join(1, 2)])
     with pytest.raises(Invalid, match="T2 is in use"):
         p.set_tool_enabled(2, False)
+
+
+def test_the_old_tool_s_gap_is_the_one_restored_on_the_join_s_tool():
+    sim, p = make(XL, [loaded(0), loaded(1)])
+    start(sim, p, [(0, 100)], [Join(0, 1)])
+    sim.advance(1)
+    p.tools[0].path.gap = 3.0
+    p.runout(0)
+    assert p.job.restore == (1, 3.0)
+    run_join(sim, p)
+    assert p.tools[1].path.gap == pytest.approx(3.0)
+
+
+def test_the_file_s_type_follows_the_join_to_its_tool():
+    """`for_tool_heuristic` finds the file's type through the tool mapping, which the join
+    changes (`filament_tools.cpp:26-35`, `spool_join.cpp:258-265`)."""
+    sim, p = make(XL, [loaded(0), SimTool(1, path=FilamentPath(loaded=True))])
+    start(sim, p, [(0, 100, "PLA")], [Join(0, 1)])
+    sim.advance(1)
+    p.runout(0)
+    run_join(sim, p)
+    assert p.job.mapped == {0: 1} and p.tools[1].material is None
+    # A change on the join's tool reloads the file's type, though the tool had none.
+    p.change_filament(1)
+    p.load(1)
+    sim.advance(60)
+    assert p.tools[1].material.name == "PLA"
