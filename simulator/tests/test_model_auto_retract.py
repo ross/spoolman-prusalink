@@ -422,6 +422,35 @@ def test_indx_rams_flexible_filament_with_its_flexible_sequence():
     assert counted(p, lambda: unload(sim, p)) == pytest.approx(2)
 
 
+def test_a_cancel_after_a_flexible_runout_doesnt_auto_retract():
+    sim, p = idle_loaded("8.1.0", name="FLEX")
+    p.start_print(PrintSpec([Segment(0, 100)], preheat_s=0))
+    sim.tick(0.8 + 2)
+    p.runout(0)  # clears the type: the unload's FLEX is the type the firmware falls back on
+    assert p.tools[0].material is None and p.tools[0].kept_type.name == "FLEX"
+    # From gap 40 an auto-retract would count 15 (+55 refills 40): 15 * 0.95 = 14.25. The
+    # firmware skips it for flexible filament, so nothing counts.
+    before = p.tools[0].extruded
+    p.cancel()
+    assert p.tools[0].extruded - before == 0
+    assert p.job.phase is JobPhase.PARKING
+
+
+def test_indx_unloads_a_cleared_flexible_tool_with_its_flexible_sequence():
+    sim, p = idle_loaded("8.10.0", name="FLEX")  # gap 0, nothing stored
+    p.set_sensor_fault(0, True)
+    sim.tick(1)
+    sim.tick(1)
+    p.set_sensor_fault(0, False)
+    assert p.tools[0].loaded and p.tools[0].material is None
+    # The 2 mm purge counts, and the flexible ramming only retracts: 2 * 550 / 576 = 1.91.
+    # The standard ramming would add its 17: 19 * 550 / 576 = 18.14.
+    before = p.tools[0].extruded
+    p.unload(0)
+    sim.advance(10)
+    assert p.tools[0].extruded - before == pytest.approx(1.91, abs=0.005)
+
+
 def test_a_snapshot_mid_unload_keeps_its_steps():
     sim, p = idle_loaded("8.1.0")
     p.extrude(0, 10)

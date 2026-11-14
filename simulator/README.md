@@ -226,6 +226,13 @@ Choices made where the firmware was silent or the plan left it open:
   to `manual_unload` in `pause.cpp`, with no ramming and no unload counted. The simulator rams and counts it as a runout.
 - The `M865` flexible flag isn't modeled: only the preset names in
   `FLEXIBLE_PRESETS` count as flexible.
+- The nozzle cleaning at a print's start isn't modeled. Before it,
+  `prepare_for_nozzle_cleaning` (`probe.cpp`) calls
+  `ensure_retracted_no_ramming` when the stored distance is known and under
+  5 mm and the filament isn't flexible, and `G29` calls it after an 8 mm
+  purge when a cleaning fails on a printer with a nozzle cleaner; it
+  retracts to the full distance with no ramming, whatever the switch says,
+  and stores that distance for the next feed to feed back.
 - Temperatures, `G12`, the mesh bed leveling retract and the MMU don't move
   filament in the simulator.
 - A power loss during a filament change drops the gap to restore: the

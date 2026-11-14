@@ -567,11 +567,18 @@ class SimPrinter:
         if abs(target - current) > EPSILON:
             self._track(tool, current - target)
 
+    @staticmethod
+    def _flexible(tool: SimTool) -> bool:
+        """Whether the type `FilamentType::for_tool_heuristic` finds is flexible: the stored
+        type, else the type the last unload left. The firmware checks the print's G-code
+        filament name between the two, which isn't modeled."""
+        return is_flexible(tool.material or tool.kept_type)
+
     def _sequence(self, case: str, tool: SimTool) -> Ramming:
         """The ramming sequence for `case`, or its flexible variant for flexible filament."""
         ramming = self.model.extruder.ramming
         flexible = f"{case}_flexible"
-        return ramming[flexible if is_flexible(tool.material) and flexible in ramming else case]
+        return ramming[flexible if self._flexible(tool) and flexible in ramming else case]
 
     @staticmethod
     def _ram_steps(sequence: Ramming) -> list[LoadStep]:
@@ -593,7 +600,7 @@ class SimPrinter:
             sequence is None
             or self._fully_retracted(tool)
             or (ex.auto_retract_switchable and not self.auto_retract)
-            or is_flexible(tool.material)
+            or self._flexible(tool)
         ):
             return []
         self._deretract(tool)

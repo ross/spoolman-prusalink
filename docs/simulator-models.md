@@ -119,9 +119,9 @@ Paths are in the firmware at `ff61540d4`.
 | Nozzle-cleaner sequences | On the iX and INDX, a file under `/usb/macros/nozzle_cleaner/` replaces a built-in sequence, the INDX purges included. The simulator assumes the built-in ones. | `gcode_loader.cpp:24-30, 105-115` |
 
 With the gap full, a Core One L menu load counts 20 mm before the type
-appears and 55 mm after, 75 mm commanded. The simulator's 36 and 40 came
-from a measured 76 mm, so the total agrees and the split may not. The F3
-trace settles it.
+appears and 63 mm after: the 40 mm purge and the auto-retract's 23. That's
+83 mm commanded, 78.85 mm at the 0.95 ratio. The F3 trace will confirm the
+split.
 
 ### The print preview
 
@@ -453,10 +453,20 @@ able to show it once the workstream named is built.
     sync job included. (2.)
 17. **`READY` in the bridge's `IDLE_STATES` never arrives** over PrusaLink.
     It's harmless.
+18. **A print cancelled in preheat can look started.** On a tool that
+    isn't auto-retracted, the end of the print rams about 22 mm (23
+    commanded × 0.95) while the job is still visible.
+    `accounting.print_start` takes the first counter rise in a new job as
+    the print's start, so it would take that ramming as one. No test covers
+    it: the P8 test's tool is already auto-retracted. (1.)
 
 ## Open questions
 
 Left to the work:
+
+- Three extruder numbers are copied by hand, and `script/firmware-check`
+  doesn't compare them yet: the auto-retract's fully-retracted threshold,
+  whether a build can unload cold, and the purge before an INDX unload.
 
 - Which menu setting governs the filament-type question, and whether it
   can be set to ignore or abort. Read it in Workstream 2.
