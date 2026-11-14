@@ -145,6 +145,14 @@ def multi_tool_print():
     return sim, p
 
 
+def panic_window():
+    """The XL's two-tool print cut mid-print: IDLE with no job until the resume."""
+    sim, p = multi_tool_print()
+    p.reboot(keep_job=True)
+    assert p.job is None and p.resuming is not None
+    return sim, p
+
+
 def multi_tool_unloading():
     """T1 unloads, so the printer reads BUSY for the other tools."""
     sim, p = make("3.1.0", [loaded(0), loaded(1), SimTool(2)])
@@ -245,6 +253,7 @@ SITUATIONS = [
     off_mid_print,
     cold_bed,
     multi_tool_print,
+    panic_window,
     multi_tool_idle,
     xl_picked_after_a_load,
     indx_docked,

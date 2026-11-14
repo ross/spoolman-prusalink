@@ -25,7 +25,9 @@
 # blip_seconds = 0.3
 # park_seconds = 1.0
 # sync_job_seconds = 3.0            # how long a sync job holds PRINTING after the blip
-# recover_seconds = 2.0             # BUSY after a power-panic boot
+# panic_idle_seconds = 1.5          # IDLE with no job after a power-panic boot, until
+#                                   # the resume starts; a menu load or unload delays it
+# recover_seconds = 2.0             # BUSY while a power-panic resume heats and homes
 # unpark_seconds = 1.0              # PAUSED while the head unparks on a power-panic resume
 # start_blip = true                 # the brief IDLE between scanning and preheating
 

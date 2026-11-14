@@ -120,6 +120,14 @@ firmware update.
   counts, the idle sensor clear doesn't run, and the end of a print neither
   retracts nor auto-retracts. An idle INDX after a menu load or unload has
   none, and so does either toolchanger after `park_tool`.
+- A power cut on a build with power panic boots the printer `IDLE` with no
+  job for 1.5 s before the resume starts, and the idle sensor clear runs in
+  that window on the picked tool. The firmware's autostart tries every
+  1.5 s and gives up after 100 s (`print_utils.cpp:67-82`); the simulator
+  resumes at the first try, delays the resume while a menu load or unload
+  runs, and drops it when a print starts in the window. A paused print
+  reads `BUSY`, then `PAUSED`, and a cold bed reads `ATTENTION` as soon as
+  the window ends.
 - An uploaded file's job is counted at once. When the scan ends, the
   print preview checks the file's `M862` lines: the model by compatibility
   group, the G-code level, input shaper, the INDX lock, the MMU3 feature
@@ -246,10 +254,14 @@ selected tool becomes none, and the Pick/park menu picks or parks a tool on
 either toolchanger. Where the picked tool rests after a pause or a print,
 and at boot, is still to come.
 
-One correction applies to every build. After a power cut, the firmware sits
-in `IDLE` for at least 1.5 s before the resume starts, and the idle sensor
-clear runs in that window. The simulator skips it for the whole resume
-(`print_utils.cpp:69-82`).
+After a power cut, the idle sensor clear in the window before the resume
+reads the picked tool too. On the XL that's the tool on the head. On INDX
+it's the EEPROM's last picked tool, which a pickup during a print
+invalidates unless a single-tool print's `G427` froze it, so a multi-tool
+INDX print boots with no tool picked and gets no clear
+(`toolchanger_indx.cpp:926-939`, `tool_offset_calibration.cpp:719-729`).
+The simulator keeps the picked tool across the cut, so its clear runs there
+too.
 
 ### MMU3
 

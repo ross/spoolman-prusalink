@@ -338,9 +338,12 @@ async def test_p12_power_panic_resume_keeps_the_job(world: World, caplog: pytest
 
     old_boot = w.printer.boot_id
     w.printer.set_power("on", resume=True)
+    # The printer boots IDLE with no job and resumes the print 1.5 s later.
+    assert w.printer.state is State.IDLE and w.printer.job is None
+    records = await w.run_until(lambda: w.printer.state is State.BUSY, poll_every=0.5)
     # Recovery: BUSY, PAUSED while unparking, PRINTING. The end of BUSY feeds back the 8 mm
     # the cut retracted, which counts 8 * 0.95 = 7.6 from 0.
-    records = await w.run_until(lambda: w.printer.state is not State.BUSY, poll_every=0.5)
+    records += await w.run_until(lambda: w.printer.state is not State.BUSY, poll_every=0.5)
     assert w.printer.state is State.PAUSED and w.counter == 7
     records += await w.run_until(lambda: w.printer.state is State.PRINTING, poll_every=0.5)
     assert w.printer.job.id == job

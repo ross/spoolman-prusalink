@@ -522,6 +522,9 @@ def test_power_loss_resume_keeps_the_job():
     p.start_print(one_segment(100, preheat_s=0))
     sim.tick(0.8 + 2)
     p.reboot(keep_job=True)
+    # IDLE with no job until the autostart resumes the print.
+    assert p.job is None and p.state is State.IDLE and tool0(p).extruded == 0
+    sim.tick(1.5)
     assert p.job.id == 1 and p.state is State.BUSY and tool0(p).extruded == 0
     sim.tick(1)
     assert p.state is State.BUSY and tool0(p).extruded == 0
@@ -963,9 +966,9 @@ def test_power_loss_with_a_cold_bed_waits_for_the_user():
     p.set_power("off")
     sim.tick(600)
     p.set_power("on", resume=True, cold_bed=True)
-    assert p.job.id == 1 and p.state is State.BUSY
-    sim.tick(2)
-    assert p.state is State.ATTENTION and prusalink.job(p)["state"] == "PAUSED"
+    assert p.job is None and p.state is State.IDLE
+    sim.tick(1.5)  # the resume waits for the user at once
+    assert p.job.id == 1 and p.state is State.ATTENTION and prusalink.job(p)["state"] == "PAUSED"
     assert tool0(p).extruded == 0  # nothing fed back before the user answers
     sim.tick(60)
     assert p.state is State.ATTENTION  # nothing happens until the user resumes
@@ -982,6 +985,7 @@ def test_cancel_during_the_power_panic_recovery_feeds_nothing_back():
     p.start_print(one_segment(100, preheat_s=0))
     sim.tick(0.8 + 2)
     p.reboot(keep_job=True)
+    sim.tick(1.5)
     assert p.state is State.BUSY and tool0(p).extruded == 0
     p.cancel()
     sim.tick(5)
@@ -992,20 +996,21 @@ def test_cancel_during_the_power_panic_recovery_feeds_nothing_back():
     assert p.job is None and p.state is State.STOPPED and tool0(p).extruded == 14.25
 
 
-def test_power_loss_resume_skips_the_idle_sensor_clear():
+def test_power_loss_resume_runs_the_idle_sensor_clear_first():
     sim, p = make()
     p.start_print(one_segment(100, preheat_s=0))
     sim.tick(0.8 + 2)
     p.set_power("off")
     p.unload(0)  # pulled out by hand while off
     p.set_power("on", resume=True)
-    assert p.job.id == 1 and p.state is State.BUSY
-    assert tool0(p).unload_count == 0 and tool0(p).material == PLA
-    # Recovered and unparked. The sensor never saw the filament go, so nothing stops the
-    # print: it counts on with no filament, and the type stays.
-    sim.tick(2 + 1 + 1)
+    # IDLE with no job before the resume, so the clear counts the unload.
+    assert p.job is None and p.state is State.IDLE
+    assert tool0(p).unload_count == 1 and tool0(p).material is None
+    # Resumed, recovered and unparked. The sensor never saw the filament go, so nothing
+    # stops the print: it counts on with no filament.
+    sim.tick(1.5 + 2 + 1 + 1)
     assert p.state is State.PRINTING and tool0(p).extruded > 0
-    assert tool0(p).unload_count == 0 and tool0(p).material == PLA
+    assert tool0(p).unload_count == 1 and tool0(p).material is None
 
 
 def test_power_loss_while_paused_comes_back_paused():
@@ -1014,6 +1019,7 @@ def test_power_loss_while_paused_comes_back_paused():
     sim.tick(0.8 + 2)
     p.pause()
     p.reboot(keep_job=True)
+    sim.tick(1.5 + 2)  # the window, then BUSY while the head parks
     assert p.job.id == 1 and p.state is State.PAUSED and tool0(p).extruded == 0
     p.resume()
     assert p.state is State.PRINTING

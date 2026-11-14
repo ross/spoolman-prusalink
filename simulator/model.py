@@ -124,7 +124,7 @@ class JobPhase(StrEnum):
     HOLD = "HOLD"  # ATTENTION until the user taps through or clears a jam
     RUN = "RUN"  # a sync job applying its G-code
     PARKING = "PARKING"
-    RECOVER = "RECOVER"  # BUSY after a power-panic boot, before the resume
+    RECOVER = "RECOVER"  # BUSY while a power-panic resume heats and homes
     AWAIT_RESUME = "AWAIT_RESUME"  # ATTENTION: the bed went cold during the outage
     UNPARK = "UNPARK"  # PAUSED briefly while the head unparks after a power-panic resume
     PREVIEW_LOAD = "PREVIEW_LOAD"  # BUSY with no job: the preview's filament-not-inserted load
@@ -443,7 +443,10 @@ class Settings:
     blip_seconds: float = 0.3
     park_seconds: float = 1.0
     sync_job_seconds: float = 3.0
-    recover_seconds: float = 2.0  # BUSY after a power-panic boot
+    # IDLE with no job after a power-panic boot, until the autostart resumes the print: it
+    # tries every 1.5 s (`rescan_delay` in `print_utils_loop`, `src/common/print_utils.cpp`).
+    panic_idle_seconds: float = 1.5
+    recover_seconds: float = 2.0  # BUSY while a power-panic resume heats and homes
     unpark_seconds: float = 1.0  # PAUSED while the head unparks on a power-panic resume
     start_blip: bool = True
 
@@ -541,7 +544,6 @@ class UserJob(SimJob):
     segment: int = 0
     pending_color_changes: list[float] = field(default_factory=list)
     paused_from: JobPhase | None = None  # where resume goes back to
-    cold_bed: bool = False  # a power-panic resume waits for the user when the bed went cold
     clean_at: float | None = None  # RECOVER time left when the nozzle clean purges
     restore_gap: float | None = None  # the tool's gap when a filament change began
     previewing: bool = True  # until the preview lets the print begin
@@ -645,6 +647,11 @@ class SimPrinter:
     # The screen with no job and no load running: IDLE, or FINISHED or STOPPED until dismissed.
     screen: State = State.IDLE
     job: UserJob | SyncJob | None = None
+    # The print a power cut stopped, held with no job until the autostart resumes it
+    # `resume_in` seconds from now. Its phase says how it comes back: RECOVER, PAUSED, or
+    # AWAIT_RESUME for a cold bed.
+    resuming: UserJob | None = None
+    resume_in: float = 0.0
     job_counter: int = 0
     # The picked tool, or None for a toolchanger with no tool picked: then no filament moves
     # and the idle sensor clear doesn't run (`SimPrinter.feed`). INDX docks its tool after a
@@ -1184,6 +1191,11 @@ class SimPrinter:
     def _start_job(self, job: UserJob | SyncJob) -> None:
         """Count the job and scan the file. A print from a file is counted before the preview
         asks anything (`init` in `src/common/marlin_print_preview.cpp`)."""
+        if self.resuming is not None:
+            # The printer is no longer idle, so the autostart gives the resume up
+            # (`print_utils_loop` in `src/common/print_utils.cpp`).
+            self._log("job", f"job {self.resuming.id}: resume dropped by the new job")
+            self.resuming = None
         self.homed = True  # a print starts by homing
         self.job_counter += 1
         job.id = self.job_counter
@@ -1210,8 +1222,7 @@ class SimPrinter:
         job = self.job
         if job.phase is JobPhase.AWAIT_RESUME:
             self._log("action", "resume after the power panic")
-            job.cold_bed = False
-            self._recover(job, clean=True)
+            self._recover(job)
             return
         self._log("action", "resume")
         if job.restore_gap is not None:
@@ -1346,11 +1357,12 @@ class SimPrinter:
 
     # Power and faults.
 
-    def boot(self, *, idle_clear: bool = True) -> None:
+    def boot(self) -> None:
         """Start the firmware: counters restart, types and the job counter survive.
 
-        The idle sensor clear runs at boot unless a print is resuming: the firmware skips it
-        while printing, and a power-panic resume counts as printing.
+        The idle sensor clear runs at boot, a power-panic boot too: the print it resumes
+        isn't running yet, so the printer isn't printing (`print_utils_loop` in
+        `src/common/print_utils.cpp`).
         """
         self.boot_id = new_boot_id()
         for t in self.tools.values():
@@ -1360,19 +1372,20 @@ class SimPrinter:
         self.homed, self.message = False, None
         self._log("boot", f"boot id {self.boot_id}")
         selected = self.feed.idle_clear_tool(self)
-        if idle_clear and selected is not None:
+        if selected is not None:
             self._idle_sensor_clear(selected, sensor_fault_counts=False)
 
     def reboot(self, *, keep_job: bool = False, cold_bed: bool = False) -> None:
         """Reboot. With keep_job a print in progress resumes with the same ID (power panic).
 
-        A print that wasn't paused retracts at the cut, except on the XL. The resume is BUSY
-        while the firmware recovers: INDX purges in its nozzle cleaner halfway through, and
-        every other model that retracted feeds the retract back at the end. Then PAUSED
+        A print that wasn't paused retracts at the cut, except on the XL. The printer boots
+        IDLE with no job, and the print resumes `panic_idle_seconds` later. The resume is
+        BUSY while the firmware recovers: INDX purges in its nozzle cleaner halfway through,
+        and every other model that retracted feeds the retract back at the end. Then PAUSED
         while the head unparks, then PRINTING. With `cold_bed` it waits in ATTENTION for
-        `resume()` before recovering. A print that was paused comes back paused, with no
-        filament moved. A model without power panic loses the print and boots idle, as a
-        plain reboot does.
+        `resume()` before recovering. A print that was paused comes back paused after the
+        BUSY, with no filament moved. A model without power panic loses the print and boots
+        idle, as a plain reboot does.
         """
         self._need_power()
         if not keep_job:
@@ -1384,7 +1397,7 @@ class SimPrinter:
         self._reboot(keep_job, cold_bed)
 
     def _reboot(self, keep_job: bool, cold_bed: bool = False) -> None:
-        job = self.job
+        job, held = self.job, self.resuming
         resumable = (JobPhase.PRINTING, JobPhase.PAUSED, JobPhase.PREHEAT, JobPhase.WAIT_LOAD)
         # A cut during the preview has nothing to resume: the firmware saves power-panic data
         # only once the print has begun (`power_panic::prepare` in
@@ -1396,33 +1409,71 @@ class SimPrinter:
             and not job.previewing
             and job.phase in resumable
         )
-        was_paused = keep and job.phase in (JobPhase.PAUSED, JobPhase.WAIT_LOAD)
-        if keep and not was_paused and self.model.extruder.panic_retract:
-            # The cut retracts through the planner, which forgets a stored auto-retract
-            # distance (`panic_loop` in `src/common/power_panic.cpp`). The counters restart
-            # at the boot.
-            self._track(self._job_tool(job), -self.model.extruder.lengths.retract_mm)
-        self.boot(idle_clear=not keep)
-        if not keep:
-            self.job, self.screen = None, State.IDLE
-            self._show_state()
-            return
-        job.restore_gap = None  # a power loss ends the filament change before its restore
-        if was_paused:
-            job.paused_from = JobPhase.PRINTING
-            job.enter(JobPhase.PAUSED)
-            self._show_state()
-            return
-        job.paused_from = None
-        job.cold_bed = cold_bed
-        self._recover(job, clean=not cold_bed)
+        if keep:
+            held = job
+            was_paused = job.phase in (JobPhase.PAUSED, JobPhase.WAIT_LOAD)
+            if not was_paused and self.model.extruder.panic_retract:
+                # The cut retracts through the planner, which forgets a stored auto-retract
+                # distance (`panic_loop` in `src/common/power_panic.cpp`). The counters
+                # restart at the boot.
+                self._track(self._job_tool(job), -self.model.extruder.lengths.retract_mm)
+            job.restore_gap = None  # a power loss ends the filament change before its restore
+            job.paused_from = JobPhase.PRINTING if was_paused else None
+            if was_paused:
+                job.enter(JobPhase.PAUSED)
+        elif held is not None and not keep_job:
+            self._log("job", f"job {held.id}: resume dropped by the reboot")
+            held = None
+        # A cut while the resume waits finds the printer idle, so it saves nothing new and
+        # the saved print waits again (`ac_fault_isr` in `src/common/power_panic.cpp`).
+        self.job, self.resuming, self.screen = None, None, State.IDLE
+        self.boot()
+        if held is not None:
+            # The bed decides at each boot (`auto_recover` in `resume_print`). A paused print
+            # stays PAUSED.
+            if held.paused_from is None and cold_bed:
+                held.enter(JobPhase.AWAIT_RESUME, Attention(Reason.COLD_BED))
+            elif held.paused_from is None:
+                held.enter(JobPhase.RECOVER)
+            self.resuming, self.resume_in = held, self.settings.panic_idle_seconds
+            self._log("job", f"job {held.id} resumes in {self.resume_in:g} s")
+        self._show_state()
 
-    def _recover(self, job: UserJob, *, clean: bool) -> None:
-        """BUSY while the firmware heats and homes. With `clean`, a model whose resume
-        purges does so halfway through."""
+    def _tick_resume(self, dt: float) -> float:
+        """Count down to the power-panic resume; return the time left once it starts.
+
+        The firmware's autostart tries every 1.5 s and resumes once the USB drive, the
+        temperatures and the screen are ready, which the simulator takes as at the first
+        try (`print_utils_loop` in `src/common/print_utils.cpp`). A menu load or unload
+        still running then makes it try again 1.5 s later: the firmware doesn't check for
+        one, and the resume's own moves wait for the queue to empty.
+        """
+        used = min(self.resume_in, dt)
+        self.resume_in -= used
+        if self.resume_in > EPSILON:
+            return 0.0
+        if self.state is not State.IDLE:
+            self.resume_in = self.settings.panic_idle_seconds
+            self._log("job", f"resume waits {self.resume_in:g} s: the printer is {self.state}")
+            return 0.0
+        job, self.resuming = self.resuming, None
+        self.job = job
+        self._log("job", f"job {job.id} resumes after the power panic")
+        if job.phase is JobPhase.AWAIT_RESUME:
+            # A cold bed waits for the user at once (`powerpanic_resume` in
+            # `src/common/marlin_server.cpp`).
+            self._show_state()
+        else:
+            self._recover(job)
+        return dt - used
+
+    def _recover(self, job: UserJob) -> None:
+        """BUSY while the firmware heats and homes. A model whose resume purges does so
+        halfway through, unless the print was paused: that resume only parks the head
+        (`ResumeState::ParkForPause` in `src/common/power_panic.cpp`)."""
         job.enter(JobPhase.RECOVER)
         job.remaining = self.settings.recover_seconds
-        purges = clean and self.model.extruder.panic_purge_mm is not None
+        purges = job.paused_from is None and self.model.extruder.panic_purge_mm is not None
         job.clean_at = self.settings.recover_seconds / 2 if purges else None
         self._show_state()
 
@@ -1572,7 +1623,7 @@ class SimPrinter:
             raise Busy("the filament sensors are off")
 
     def _check_disable(self, t: SimTool) -> None:
-        job = self.job
+        job = self.job or self.resuming
         in_print = isinstance(job, UserJob) and t.index in {s.tool for s in job.spec.segments}
         if t.index == self.selected_tool or in_print or t.process is not None:
             raise Invalid(f"T{t.index} is in use")
@@ -1671,6 +1722,9 @@ class SimPrinter:
             if t.process is not None:
                 active = True
                 self._tick_process(t, dt)
+        if self.resuming is not None:
+            active = True
+            dt = self._tick_resume(dt)
         if self.job is not None:
             active = True
             self._tick_job(dt)
@@ -1773,8 +1827,8 @@ class SimPrinter:
         elif job.phase is JobPhase.RUN:
             self._park(job, State.FINISHED)
         elif job.phase is JobPhase.RECOVER:
-            if job.cold_bed:
-                job.enter(JobPhase.AWAIT_RESUME, Attention(Reason.COLD_BED))
+            if job.paused_from is not None:
+                job.enter(JobPhase.PAUSED)  # `powerpanic_finish_pause`
                 self._show_state()
             else:
                 self._unpark(job)
@@ -2167,6 +2221,8 @@ def _printer_dict(p: SimPrinter) -> dict:
     d["tools"] = [_tool_dict(p.tools[i]) for i in sorted(p.tools)]
     if p.job is not None:
         d["job"]["kind"] = p.job.kind
+    if p.resuming is not None:
+        d["resuming"]["kind"] = p.resuming.kind
     return d
 
 
@@ -2180,6 +2236,7 @@ def _printer_from(d: dict) -> SimPrinter:
     d["checks"] = Severity(d["checks"])
     d["tools"] = {t["index"]: _tool_from(t) for t in d["tools"]}
     d["job"] = _job_from(d["job"])
+    d["resuming"] = _job_from(d["resuming"])
     return SimPrinter(**d)
 
 

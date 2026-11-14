@@ -287,6 +287,7 @@ def test_a_power_loss_after_a_reload_drops_the_restore():
     p.load(0)
     sim.advance(100)
     p.reboot(keep_job=True)  # the counters and gaps restart at 0
+    sim.advance(p.settings.panic_idle_seconds + p.settings.recover_seconds + 0.1)
     assert p.job.phase is JobPhase.PAUSED
     p.resume()  # the filament change never got to its restore, so nothing moves
     assert (p.tools[0].extruded, p.tools[0].path.gap) == (0, 0)

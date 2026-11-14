@@ -82,7 +82,8 @@ default) or `abort`, and it stands for every setting in the printer's menu
 that governs a check of a file's `M862` lines. The top-level settings are
 timing and lengths: the time scale, how fast loads and prints move filament,
 the purges of a tool change and a jam, the preheat and
-park times, and whether the start blip is on. The feed ratio and a load's slow, fast and purge
+park times, the power-panic resume's wait and phases, and whether the start
+blip is on. The feed ratio and a load's slow, fast and purge
 lengths are overrides: left out, each printer uses its model's value, which
 the page shows on the printer's card. On the page or through
 `/api/settings`, an empty value or `null` unsets an override. The purge
@@ -269,17 +270,26 @@ that trace. The points that matter for the bridge, in short:
   `no_endpoint` firmware mode answers 404, like stock firmware.
 
 - A power-panic resume (`reboot` with `keep_job`, or `set_power` on with
-  `resume`) keeps the job ID, restarts the counters, skips the idle sensor
-  clear, and goes through `BUSY`, then a short `PAUSED`, then `PRINTING`.
+  `resume`) keeps the job ID and restarts the counters. The printer boots
+  `IDLE` with no job for `panic_idle_seconds`, as the firmware does until
+  its autostart resumes the print, and the idle sensor clear runs then on
+  the picked tool. The resume then goes through `BUSY`, then a short
+  `PAUSED`, then `PRINTING`. A menu load or unload still running when the
+  wait ends delays the resume by another `panic_idle_seconds`, until the
+  printer is idle. A print started in the wait, an upload too, drops the
+  resume, and the event log says "resume dropped". A plain reboot drops it
+  too, and another power cut leaves it waiting.
   A print that wasn't paused retracts 8 mm at the cut on every model but
   the XL. INDX purges 25 mm in its nozzle cleaner halfway through `BUSY`,
   with no auto-retract after. Every other model that retracted feeds the
   8 mm back at the end of `BUSY`. Both count whether or not the tool holds
-  filament. The MINI and the XL dev kit build no power panic, so there a
-  cut drops the job and the printer boots idle, as a plain reboot does.
-  With `cold_bed`, a resuming printer waits in `ATTENTION` for `resume`
-  before recovering. The page's **Power-loss resume** sends `cold_bed` from
-  its **cold bed** checkbox, and **Resume** continues that wait.
+  filament. A print that was paused comes back `PAUSED` after the `BUSY`,
+  with no filament moved. The MINI and the XL dev kit build no power panic,
+  so there a cut drops the job and the printer boots idle, as a plain
+  reboot does. With `cold_bed`, the resume waits in `ATTENTION` for
+  `resume` before recovering. The page's **Power-loss resume** sends
+  `cold_bed` from its **cold bed** checkbox, and **Resume** continues that
+  wait.
 - An upload during the start blip is accepted and dropped: the firmware's
   state check passes while it reads `IDLE`, but the print start ignores it.
   The user's print goes on and the uploaded file never runs.
@@ -324,6 +334,17 @@ Choices made where the firmware was silent or the plan left it open:
   leveling retract and the MMU don't move filament in the simulator.
 - A power loss during a filament change drops the gap to restore: the
   resume after the reload doesn't move.
+- The power-panic resume starts at the autostart's first try, 1.5 s after
+  the boot: the firmware tries every 1.5 s until the USB drive, the
+  temperatures and the screen are ready, and gives up after 100 s, which the
+  simulator never reaches. The firmware doesn't wait for a menu load or
+  unload: it resumes and its moves queue behind the operation. The simulator
+  waits for the printer to be idle instead, trying again every 1.5 s. A print
+  started in the wait drops the resume, as the firmware's autostart does
+  when its next try finds the printer printing and not yet ready. When that
+  try finds everything ready, the firmware starts the resume over the new
+  print: its check that the printer is idle is a debug assertion
+  (`resume_print` in `power_panic.cpp`). The simulator doesn't model that.
 - One `checks` setting stands for the firmware's settings per kind of check
   (model, compatibility mode, G-code level, input shaper and firmware). The
   checks share one screen and the worst severity decides it, so one setting
