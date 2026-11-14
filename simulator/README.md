@@ -189,7 +189,9 @@ that trace. The points that matter for the bridge, in short:
   (a warning), a disabled used tool (Abort only) and a used tool with no
   filament (a warning). Then, for an empty tool, the job waits for a
   `load` of that tool, which answers Yes. The load reads `BUSY` with no
-  job, and it neither primes nor auto-retracts. Then a used tool whose
+  job. It neither primes nor runs an idle load's final auto-retract, but
+  the INDX cleaner's purge still ends with its own. A power cut while the
+  preview waits leaves nothing to resume. Then a used tool whose
   stored type isn't the segment's `material`, compared exactly, asks
   again. On the XL and INDX, a print that uses two tools, or any print with
   two tools enabled, asks one tools-mapping question with every per-tool

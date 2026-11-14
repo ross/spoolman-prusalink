@@ -152,6 +152,48 @@ def test_the_checks_setting_governs_nothing_on_a_print():
         assert p.job.waits_for(Reason.PREVIEW) and not p.job.attention.fatal
 
 
+def test_the_preview_s_load_on_an_indx_ends_with_the_cleaner_s_auto_retract():
+    # One tool enabled and a one-tool print: no tool mapping, so the preview asks for a
+    # load. From the full 27 mm gap the 15 slow and 25 fast count 13, then the cleaner's 25
+    # mm purge and its own auto-retract's 8: 46 * 550/576, as an idle load counts.
+    sim, p = make("8.10.0", [SimTool(0, gap=27.0, gap_valid=False)])
+    p.start_print(PrintSpec([Segment(0, 10)], preheat_s=0))
+    sim.tick(0.5)
+    p.tap_through()
+    p.load(0, source="preset", name="PLA")
+    while p.tools[0].process is not None:
+        sim.tick(0.1)
+    assert p.job.phase is JobPhase.BLIP  # the type check passed: the print begins
+    assert p.tools[0].extruded == pytest.approx(46 * 550 / 576)
+    assert p.tools[0].auto_retracted == 8
+
+
+def cut_at_the_wait(sim, p):
+    pass
+
+
+def cut_during_the_load(sim, p):
+    p.load(0, source="preset", name="PLA")
+    sim.tick(1)
+    assert p.job.phase is JobPhase.PREVIEW_LOAD
+
+
+@pytest.mark.parametrize("cut", [cut_at_the_wait, cut_during_the_load])
+@pytest.mark.parametrize("cold_bed", [False, True])
+def test_a_power_cut_at_the_preview_s_load_resumes_nothing(cut, cold_bed):
+    sim, p = make(tools=[empty()])
+    p.start_print(PrintSpec([Segment(0, 10)], preheat_s=0))
+    sim.tick(0.5)
+    p.tap_through()
+    assert p.job.phase is JobPhase.WAIT_LOAD and p.job.previewing
+    cut(sim, p)
+    p.reboot(keep_job=True, cold_bed=cold_bed)
+    assert p.job is None and seen(p) == ("IDLE", None, None) and p.job_counter == 1
+    assert p.tools[0].process is None
+    sim.tick(5)
+    assert p.state is State.IDLE
+
+
 def test_a_disabled_used_tool_can_only_be_declined():
     sim, p = make("3.1.0", [loaded(0), loaded(1, enabled=False)])
     p.start_print(PrintSpec([Segment(0, 10), Segment(1, 10)]))

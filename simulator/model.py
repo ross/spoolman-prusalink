@@ -1313,7 +1313,12 @@ class SimPrinter:
     def _reboot(self, keep_job: bool, cold_bed: bool = False) -> None:
         job = self.job
         resumable = (JobPhase.PRINTING, JobPhase.PAUSED, JobPhase.PREHEAT, JobPhase.WAIT_LOAD)
-        keep = keep_job and isinstance(job, UserJob) and job.phase in resumable
+        # A cut during the preview has nothing to resume: the firmware saves power-panic data
+        # only once the print has begun (`power_panic::prepare` in
+        # `src/common/power_panic.cpp`).
+        keep = (
+            keep_job and isinstance(job, UserJob) and not job.previewing and job.phase in resumable
+        )
         was_paused = keep and job.phase in (JobPhase.PAUSED, JobPhase.WAIT_LOAD)
         self.boot(idle_clear=not keep)
         if not keep:
