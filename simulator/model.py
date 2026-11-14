@@ -74,7 +74,8 @@ EVENT_LIMIT = 2000
 SNAPSHOT_NAME = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
 EPSILON = 1e-9
 # The shortest purge a load runs, whatever the override: `minimal_purge` in
-# `src/marlin_stubs/include/pause_settings.hpp`.
+# `src/marlin_stubs/include/pause_settings.hpp`. `script/firmware-check` compares it with
+# the firmware source.
 MINIMAL_PURGE_MM = 1.0
 # The iX's nozzle cleaner purges in steps of this until it has purged the purge length
 # (`nozzle_cleaner_purge_sequence` in `src/marlin_stubs/pause/pause.cpp`).

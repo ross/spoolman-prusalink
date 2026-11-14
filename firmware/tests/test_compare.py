@@ -120,6 +120,7 @@ def test_load_reads_every_build():
     assert firmware.builds.keys() == {b for b in compare.MODEL_BUILDS.values() if b}
     assert firmware.defaults == (215, 170, 60)
     assert firmware.aliases == {"TPU": "FLEX"}
+    assert firmware.minimal_purge_mm == 1.0
     assert firmware.built().keys() == {"1.4.0", "2.1.0", "7.1.0"}  # the MK3 isn't built
 
     mk4, mini, xl = (firmware.builds[b] for b in ("MK4", "MINI", "XL"))
@@ -230,6 +231,7 @@ def test_load_fails_on_a_build_printer_cant_name():
         read.CLEANER_FILE,
         read.AUTO_RETRACT_FILE,
         read.PAUSE_FILE,
+        read.PAUSE_SETTINGS_FILE,
     ],
 )
 def test_load_fails_on_a_missing_file(path):
@@ -282,6 +284,7 @@ def test_current_copies():
     assert copies.bridge_models["1.4.0"].name == "MK4"
     assert copies.sim_models["1.4.0"].name == "MK4"
     assert copies.sim_models["1.4.0"].extruder.e_steps == (380, 400)
+    assert copies.sim_minimal_purge == 1.0
 
 
 def fw_preset(nozzle, preheat, bed, chamber=None, filtration=None, flexible=False, door=None):
@@ -381,6 +384,7 @@ def synthetic():
         builds=builds,
         defaults=(215, 170, 60),
         aliases={"TPU": "FLEX"},
+        minimal_purge_mm=1.0,
     )
     copies = Copies(
         bridge_models={
@@ -437,6 +441,7 @@ def synthetic():
         sim_flexible=frozenset({"FLEX"}),
         sim_defaults=(215, 170, 60),
         sim_aliases={"TPU": "FLEX"},
+        sim_minimal_purge=1.0,
     )
     return firmware, copies
 
@@ -695,7 +700,7 @@ def test_retracted_distance_agrees_with_the_simulators():
     assert tool.retracted_distance(tool.INDX_RAMMING["auto_retract"]) == 8
 
 
-def test_default_and_alias_differences():
+def test_default_alias_and_minimal_purge_differences():
     firmware, copies = synthetic()
     copies = replace(
         copies,
@@ -704,6 +709,7 @@ def test_default_and_alias_differences():
         sim_defaults=(215, 170, 61),
         bridge_aliases={"TPU": "FLEX", "TPE": "FLEX"},
         sim_aliases={"TPU": "PLA"},
+        sim_minimal_purge=2.0,
     )
     assert compare.compare(firmware, copies) == [
         Difference("bridge DEFAULT_PREHEAT", None, None, "DEFAULT_PREHEAT", 170, 160),
@@ -718,6 +724,7 @@ def test_default_and_alias_differences():
         ),
         Difference("bridge PRESET_ALIASES", None, "TPE", "alias", MISSING, "FLEX"),
         Difference("simulator PRESET_ALIASES", None, "TPU", "alias", "FLEX", "PLA"),
+        Difference("simulator MINIMAL_PURGE_MM", None, None, "minimal_purge", 1.0, 2.0),
     ]
 
 

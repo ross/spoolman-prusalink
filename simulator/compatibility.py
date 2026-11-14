@@ -87,8 +87,10 @@ class GCodeChecks:
     # The names a file must declare, or the preview asks. This is code in
     # `CompatibilityReport::generate_without_toolmapping` in
     # `src/feature/compatibility_checks/gcode_compatibility.cpp`, which the check can't
-    # read: Input Shaper on every build but the iX's, and INDX lock on INDX builds. A
-    # watched region in `firmware/watch.py` guards it.
+    # read: Input Shaper on every build but the iX's, and INDX lock on INDX builds. That
+    # function tests flags, and `GCodeInfo::parse_m862` in `src/common/gcode/gcode_info.cpp`
+    # decides which name sets which. The `WATCHED` rows "the required features" and "the
+    # M862 parser" in `firmware/watch.py` guard the two functions.
     required: frozenset[str]
 
 

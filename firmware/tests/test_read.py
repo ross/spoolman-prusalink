@@ -561,6 +561,40 @@ def test_reset_defaults_fail_closed():
         read.reset_defaults("")
 
 
+def test_minimal_purge():
+    assert read.minimal_purge(fixtures.PAUSE_SETTINGS_HPP) == 1.0
+    two = "    static constexpr float minimal_purge = 2.5f; // mm\n"
+    assert read.minimal_purge(two) == 2.5
+
+
+@pytest.mark.parametrize(
+    "text, problem",
+    [
+        ("float purge_length() const;\n", "0 minimal_purge declarations"),
+        (
+            "static constexpr const float minimal_purge = 1;\n" * 2,
+            "2 minimal_purge declarations",
+        ),
+        (
+            "static constexpr const float minimal_purge = MINIMAL;\n",
+            "can't read 'static constexpr const float minimal_purge = MINIMAL;'",
+        ),
+        ("return std::max(r, minimal_purge);\n", "can't read 'return std::max"),
+        (
+            "#if HAS_X()\nstatic constexpr const float minimal_purge = 1;\n#endif\n",
+            "minimal_purge is declared inside an #if",
+        ),
+        (
+            "#if A()\n#else\nstatic constexpr const float minimal_purge = 1;\n#endif\n",
+            "minimal_purge is declared inside an #if",
+        ),
+    ],
+)
+def test_minimal_purge_fail_closed(text, problem):
+    with pytest.raises(Unreadable, match=rf"{read.PAUSE_SETTINGS_FILE}: {problem}"):
+        read.minimal_purge(text)
+
+
 def test_aliases():
     assert read.aliases(fixtures.DATA_UTILS_CPP) == {"TPU": "FLEX"}
 

@@ -1309,6 +1309,176 @@ void CompatibilityReport::generate_toolmapping_only(const ToolMappingArgs &args)
     generate_toolmapping_only_noclear(args);
 }
 
+void CompatibilityReport::generate_toolmapping_only_noclear([[maybe_unused]] const ToolMappingArgs &args) {
+#if HAS_MMU2()
+    const bool mmu_enabled = MMU2::mmu2.Enabled();
+#else
+    const bool mmu_enabled = false;
+#endif
+
+    // Do NOT skip disabled GCodeTools - these need to fail on GCodeToolCheck::tool_assigned if they are used
+    for (GcodeToolIndex gcode_tool : GcodeToolIndex::all()) {
+        auto &gcode_tool_fails = failed_gcode_tool_checks[gcode_tool];
+
+        const auto &extruder_info = args.gcode_info.get_extruder_info(gcode_tool);
+        if (!extruder_info.used()) {
+            continue;
+        }
+
+#if HAS_TOOL_MAPPING()
+        const auto base_virtual_tool_opt = gcode_tool.to_virtual(args.tool_mapper);
+#else
+        const auto base_virtual_tool_opt = gcode_tool.to_virtual();
+#endif
+
+        if (!std::holds_alternative<VirtualToolIndex>(base_virtual_tool_opt)) {
+            gcode_tool_fails.set(GCodeToolCheck::tool_assigned);
+            continue;
+        }
+        const VirtualToolIndex base_virtual_tool = std::get<VirtualToolIndex>(base_virtual_tool_opt);
+
+#if HAS_MMU2()
+        // Make sure that MMU gcode is sliced with the correct nozzle.
+        // Slicing with a non-HF nozzle while HF nozzle is installed results in unsufficient purging.
+        // Slicing for a HF nozzle without having it leads to extruder skipping.
+        // Note: Always checking first bit in the config store, since nozzle_is_high_flow is set per toolhead and MMU always uses first one.
+        if (extruder_info.requires_high_flow_nozzle == Tristate::yes
+            && !config_store().get_nozzle_is_high_flow(0)
+            && !args.gcode_info.is_singletool_gcode()
+            && mmu_enabled) {
+            failed_virtual_tool_checks[base_virtual_tool].set(VirtualToolCheck::nozzle_not_high_flow);
+        }
+#endif
+
+#if HAS_ANFC()
+        /// Sums remaining filament across the whole spool join chain
+        /// Is set to NAN if any of the spooljoined tools does not have an OPT assigned
+        float remaining_filament_g = 0;
+#endif
+
+        const auto virtual_tool_check = [&](VirtualToolIndex virtual_tool, [[maybe_unused]] std::optional<VirtualToolIndex> previous_virtual_tool) {
+            auto &virtual_tool_fails = failed_virtual_tool_checks[virtual_tool];
+
+            const PhysicalToolIndex physical_tool = virtual_tool.to_physical();
+
+            if (!physical_tool.is_enabled()) {
+                virtual_tool_fails.set(VirtualToolCheck::correct_tool);
+                return;
+            }
+
+#if HAS_TOOLCHANGER()
+            if (prusa_toolchanger.is_toolchanger_enabled() && !prusa_toolchanger.is_tool_info_valid(physical_tool)) {
+                virtual_tool_fails.set(VirtualToolCheck::dock_position_calibrated);
+            }
+#endif
+
+            const FilamentType loaded_filament_type = config_store().get_filament_type(virtual_tool);
+            const FilamentTypeParameters loaded_filament_params = loaded_filament_type.parameters();
+
+            // Check filament type and hotend compatibility
+            // Don't report errors if the gcode did not provide the filament type
+            if (const auto &fn = extruder_info.filament_name; !fn.empty() && fn != "---") {
+                if (fn != loaded_filament_params.name) {
+                    virtual_tool_fails.set(VirtualToolCheck::filament_type);
+                }
+
+                const auto gcode_filament = FilamentType::from_name(std::string_view(fn.data()));
+                if (gcode_filament != FilamentType::none) {
+                    const filament_compatibility::CompatibilityReportGenerateArgs args {
+                        .filament = gcode_filament.parameters(),
+                        .tools = virtual_tool,
+                        .assume_filament_already_inserted = true,
+                    };
+                    filament_check_reports[virtual_tool].generate_noclear(args);
+                }
+            }
+
+            if (auto dia = extruder_info.nozzle_diameter; dia.has_value() && std::abs(*dia - config_store().get_nozzle_diameter(physical_tool)) > 0.001f) {
+                virtual_tool_fails.set(VirtualToolCheck::nozzle_diameter);
+            }
+            if (extruder_info.requires_hardened_nozzle == Tristate::yes && !config_store().get_nozzle_is_hardened(physical_tool)
+                // These errors are +- duplicit, prevent showing the both
+                && !filament_check_reports[virtual_tool].failed_tool_checks.test(buddy::filament_compatibility::ToolCheck::abrasive)) {
+                virtual_tool_fails.set(VirtualToolCheck::nozzle_hardened);
+            }
+            if (extruder_info.requires_high_flow_nozzle == Tristate::yes && !config_store().get_nozzle_is_high_flow(physical_tool)) {
+                virtual_tool_fails.set(VirtualToolCheck::nozzle_high_flow);
+            }
+
+            // With MMU, the filaments are intentionally unloaded at the start of the print
+            if (!mmu_enabled) {
+                if (auto fs = GetExtruderFSensor(physical_tool); fs && fs->get_state() == FilamentSensorState::NoFilament) {
+                    virtual_tool_fails.set(VirtualToolCheck::filament_loaded);
+                }
+                if (auto fs = GetSideFSensor(physical_tool); !mmu_enabled && fs && fs->get_state() == FilamentSensorState::NoFilament) {
+                    virtual_tool_fails.set(VirtualToolCheck::filament_loaded);
+                }
+            }
+
+#if HAS_ANFC()
+            if (auto v = buddy::openprinttag::filament_usage_tracker().filament_report(virtual_tool)) {
+                remaining_filament_g += v->remaining_weight_g;
+            } else {
+                // At least one of the spools does not have an OPT
+                // We cannot rely on the remaining filament calculations
+                remaining_filament_g = NAN;
+            }
+#endif
+
+#if HAS_INDX()
+// TODO VirtualToolCheck::filament_calibrated
+#endif
+
+#if HAS_SPOOL_JOIN()
+            // Spooljoin related checks
+            if (previous_virtual_tool.has_value()) {
+                does_spool_join = true;
+
+                const auto previous_physical_tool = previous_virtual_tool->to_physical();
+                if (!is_fsensor_working_state(GetExtruderFSensor(previous_physical_tool)) && !is_fsensor_working_state(GetSideFSensor(previous_physical_tool))) {
+                    virtual_tool_fails.set(VirtualToolCheck::can_spool_join);
+                }
+            }
+#endif
+        };
+
+#if HAS_SPOOL_JOIN()
+        {
+            std::optional<VirtualToolIndex> previous_tool;
+            for (std::optional<VirtualToolIndex> tool = base_virtual_tool; tool.has_value();) {
+                virtual_tool_check(*tool, previous_tool);
+                previous_tool = tool;
+                tool = args.spool_join.get_spool_2(*tool);
+            }
+        }
+#else
+        virtual_tool_check(base_virtual_tool, std::nullopt);
+#endif
+
+#if HAS_ANFC()
+        // Note: Comparing NAN to anything is always FALSE, so if either of the values is unknown, we do not fail this check
+        // We want to fail this check only when we are certain that we don't have enough filament
+        if (extruder_info.filament_used_g.value_or(NAN) > remaining_filament_g) {
+            gcode_tool_fails.set(GCodeToolCheck::enough_filament);
+        }
+#endif
+    }
+}
+"""  # noqa: E501 (verbatim firmware lines)
+
+TOOLS_MAPPING_CPP = """\
+namespace tools_mapping {
+bool is_tool_mapping_possible() {
+#if HAS_TOOL_MAPPING()
+    #if HAS_MMU2()
+    if (!MMU2::mmu2.Enabled()) {
+        return false;
+    }
+    #endif
+    return GCodeInfo::getInstance().UsedExtrudersCount() > 1 || (get_num_of_enabled_tools() > 1 && GCodeInfo::getInstance().UsedExtrudersCount() > 0);
+#endif
+    return false;
+}
 """  # noqa: E501 (verbatim firmware lines)
 
 PAUSE_SETTINGS_CPP = """\
@@ -1329,6 +1499,193 @@ float pause::Settings::purge_length() const {
 
     return std::max<float>(std::abs(r), minimal_purge);
 }
+"""  # noqa: E501 (verbatim firmware lines)
+
+GCODE_INFO_CPP = """\
+void GCodeInfo::parse_m862(GcodeBuffer::String cmd) {
+    using Check = buddy::gcode_compatibility::GeneralCheck;
+
+    {
+        // format is M862.x, so remove dot
+        char dot = cmd.pop_front();
+        if (dot != '.') {
+            return;
+        }
+    }
+
+    char subcode = cmd.pop_front();
+    cmd.skip_ws();
+
+    const auto check_compatibility = [&](const PrinterModelInfo *gcode_printer) {
+        // Unknown gcode printer, sayonara!
+        if (!gcode_printer) {
+            info_.failed_gcode_checks.set(Check::printer_model);
+            return;
+        }
+        const PrinterGCodeCompatibilityReport compatibility = PrinterModelInfo::current().gcode_compatibility_report(*gcode_printer);
+
+        // If there isn't full compatibility of the gcode, report wrong printer model
+        if (compatibility != PrinterGCodeCompatibilityReport { .is_compatible = true }) {
+#if HAS_GCODE_COMPATIBILITY()
+            if (compatibility.is_compatible) {
+                info_.failed_gcode_checks.set(Check::gcode_compatibility_mode);
+            } else
+#endif
+            {
+                info_.failed_gcode_checks.set(Check::printer_model);
+            }
+        }
+    };
+
+    // Parse parameters
+    [[maybe_unused]] uint8_t tool = 0; // Default is first tool
+    std::optional<float> p_diameter;
+    std::optional<bool> requires_hardened_nozzle, requires_high_flow_nozzle;
+    while (!cmd.is_empty()) {
+        const char letter = cmd.pop_front();
+        if (letter == 'T') {
+            tool = cmd.get_uint(); // Check particular tool (only for M862.1)
+        } else if (letter == 'P') {
+            switch (subcode) {
+
+            case '1':
+                if (auto val = cmd.get_float(); std::isfinite(val)) {
+                    p_diameter = val; // Only store value in case Tx comes later
+                }
+                break;
+
+            case '3': {
+                const auto gcode_printer_str = cmd.get_string();
+                check_compatibility(PrinterModelInfo::from_id_str(std::string_view(gcode_printer_str.begin, gcode_printer_str.end)));
+                break;
+            }
+
+            case '4':
+                // Parse M862.4 for minimal required firmware version
+                if (!is_up_to_date(cmd.c_str())) {
+                    info_.failed_gcode_checks.set(Check::minimum_fw_version);
+                }
+                break;
+
+            case '2':
+                check_compatibility(PrinterModelInfo::from_gcode_check_code(cmd.get_uint()));
+                break;
+
+            case '5':
+                if (cmd.get_uint() > gcode_level) {
+                    info_.failed_gcode_checks.set(Check::gcode_level);
+                }
+                break;
+
+            case '6': {
+                auto compare = [](GcodeBuffer::String &a, const char *b) {
+                    for (char *c = a.begin;; ++c, ++b) {
+                        if (c == a.end || *b == '\\0') {
+                            return c == a.end && *b == '\\0';
+                        }
+                        if (toupper(*c) != toupper(*b)) {
+                            return false;
+                        }
+                    }
+                    return *b == '\\0';
+                };
+                auto feature = cmd.get_string();
+                feature.trim();
+
+#if HAS_MMU2()
+                if (compare(feature, gcode_info::m862_6_mmu)) {
+                    if (!MMU2::mmu2.Enabled()) {
+                        info_.failed_gcode_checks.set(Check::mmu);
+                    }
+                    break;
+                }
+#endif
+                if (compare(feature, gcode_info::m862_6_input_shaper)) {
+                    info_.sliced_with_input_shaper_ = true;
+                    break;
+                }
+#if HAS_INDX()
+                if (compare(feature, gcode_info::m862_6_indx_lock)) {
+                    info_.sliced_with_indx_lock_ = true;
+                    break;
+                }
+#endif
+#if HAS_HT_HOTEND()
+                if (compare(feature, gcode_info::m862_6_ht_hotend)) {
+                    info_.sliced_for_ht_hotend_ = true;
+                    break;
+                }
+#endif
+
+                log_error(Buddy, "Unsupported feature: %s", feature.c_str());
+                info_.failed_gcode_checks.set(Check::unsupported_features);
+                break;
+            }
+            }
+        } else if (letter == 'A') {
+            switch (subcode) {
+
+            case '1':
+                requires_hardened_nozzle = cmd.get_uint();
+                break;
+
+            default:
+                break;
+            }
+        } else if (letter == 'F') {
+            switch (subcode) {
+
+            case '1':
+                requires_high_flow_nozzle = cmd.get_uint();
+                break;
+
+            default:
+                break;
+            }
+        }
+        cmd.skip_nws();
+        cmd.skip_ws();
+    }
+
+    const auto visit_tool = [&](const auto &visitor) {
+#if HAS_MMU2()
+        // MMU-equipped printers have only one nozzle diameter for all tools/slots
+        // Makes the pre-print screen hide the nozzle sizes, which is both good and bad at the same time
+        // -> "?.??" is gone, but no actual diameter is shown anymore - that can be tweaked further on the visualization side.
+        // Here, we must set the correct nozzle diameter for all tools if specified.
+        for (int8_t e = 0; e < EXTRUDERS; e++) {
+            visitor(per_extruder_info[e]);
+        }
+#else
+        if (tool < per_extruder_info.size()) {
+            visitor(per_extruder_info[tool]);
+        }
+#endif
+    };
+
+    if (p_diameter.has_value()) {
+        visit_tool([&](auto &info) { info.nozzle_diameter = *p_diameter; });
+    }
+    if (requires_hardened_nozzle.has_value()) {
+        visit_tool([&](auto &info) { info.requires_hardened_nozzle = *requires_hardened_nozzle; });
+    }
+    if (requires_high_flow_nozzle.has_value()) {
+        visit_tool([&](auto &info) { info.requires_high_flow_nozzle = *requires_high_flow_nozzle; });
+    }
+}
+"""  # noqa: E501 (verbatim firmware lines)
+
+
+PAUSE_SETTINGS_HPP = """\
+class Pause; // forward declaration, so Settings does not think Pause is member of pause namespace
+
+namespace pause {
+
+class Settings {
+public:
+    Settings();
+    static constexpr const float minimal_purge = 1;
+
 """  # noqa: E501 (verbatim firmware lines)
 
 BOARD_H = """\
@@ -1359,6 +1716,24 @@ BOARD_H = """\
 #endif
 
 #ifndef BOARD_IS_BUDDY
+    #define BOARD_IS_BUDDY() 0
+#endif
+
+#ifndef BOARD_IS_XBUDDY
+    #define BOARD_IS_XBUDDY() 0
+#endif
+
+#ifndef BOARD_IS_XLBUDDY
+    #define BOARD_IS_XLBUDDY() 0
+#endif
+
+#ifndef BOARD_IS_XL_DEV_KIT_XLB
+    #define BOARD_IS_XL_DEV_KIT_XLB() 0
+#endif
+
+#ifndef BOARD_IS_DWARF
+    #define BOARD_IS_DWARF() 0
+#endif
 """
 
 FILES = {
@@ -1395,6 +1770,9 @@ FILES = {
     "src/feature/compatibility_checks/gcode_compatibility.cpp": GCODE_COMPATIBILITY_CPP,
     "src/marlin_stubs/pause/pause_settings.cpp": PAUSE_SETTINGS_CPP,
     "include/device/board.h": BOARD_H,
+    "src/common/gcode/gcode_info.cpp": GCODE_INFO_CPP,
+    "src/common/tools_mapping.cpp": TOOLS_MAPPING_CPP,
+    read.PAUSE_SETTINGS_FILE: PAUSE_SETTINGS_HPP,
 }
 
 

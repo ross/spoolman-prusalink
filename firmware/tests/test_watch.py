@@ -35,10 +35,11 @@ def test_a_function_runs_from_its_line_to_its_closing_brace():
 
 
 def test_a_call_isnt_a_definition():
-    # The fixture also calls the function, inside another function and a static_assert.
-    anchor = "CompatibilityReport::generate_full"
-    found = region(fixtures.GCODE_COMPATIBILITY_CPP, "function", anchor)
-    assert found.splitlines()[1] == "    generate_without_toolmapping(args.gcode_info);"
+    # The fixture also calls the function, inside a lambda, a return and a static_assert.
+    anchor = "gcode_compatibility_report_constexpr"
+    assert fixtures.PRINTER_MODEL_CPP.count(f"{anchor}(") == 4
+    found = region(fixtures.PRINTER_MODEL_CPP, "function", anchor)
+    assert found.startswith("constexpr PrinterGCodeCompatibilityReport " + anchor)
     text = "void f() {\n    if (g(x)) {\n        h();\n    }\n}\nvoid g(int x) {}\n"
     assert region(text, "function", "g") == "void g(int x) {}"
 
@@ -66,8 +67,9 @@ def test_a_function_found_other_than_once_fails(text, problem):
 
 
 def test_braces_in_literals_dont_count():
-    text = "void f() {\n    puts(\"}\");\n    char c = '}';\n    int n = 8'000;\n}\nint g;\n"
-    assert region(text, "function", "f").endswith("int n = 8'000;\n}")
+    # A digit separator isn't a literal's start, so the `'` after it opens the next one.
+    text = "void f() {\n    puts(\"}\");\n    int n = 8'000; char c = '}';\n}\nint g;\n"
+    assert region(text, "function", "f").endswith("int n = 8'000; char c = '}';\n}")
 
 
 def test_a_branch_runs_to_the_next_directive_of_its_conditional():

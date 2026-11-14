@@ -5,6 +5,10 @@ and turns what failed into a report in `CompatibilityReport::generate_without_to
 (`src/feature/compatibility_checks/gcode_compatibility.cpp`). Every failed check is a row on
 one screen, and the worst severity among them decides it
 (`src/feature/compatibility_checks/compatibility_checks_common.cpp`).
+
+`script/firmware-check` can't read the two functions. The `WATCHED` rows "the M862 parser"
+and "the required features" in `firmware/watch.py` guard them. The checks' severities, in
+the metadata tables of `gcode_compatibility.cpp`, aren't guarded.
 """
 
 from __future__ import annotations
@@ -137,7 +141,8 @@ class PrintChecks:
 
 def tool_mapping(max_tools: int, uses: dict[int, str | None], tools: dict[int, ToolView]) -> bool:
     """Whether the print goes through the tools-mapping screen
-    (`is_tool_mapping_possible` in `src/common/tools_mapping.cpp`).
+    (`is_tool_mapping_possible` in `src/common/tools_mapping.cpp`, which the `WATCHED` row
+    "the tool mapping condition" guards).
 
     The toolchanger builds have tool mapping, and so do MMU builds with the MMU on, which
     the simulator never is. It applies when the print uses more than one tool, or when more
@@ -159,7 +164,8 @@ def print_checks(
     `src/common/marlin_print_preview.cpp` use them. A print has no `M862` lines, so only
     these checks apply, and no setting governs any of them: more used tools than enabled
     ones warns, a disabled used tool aborts, and a used tool with no filament warns. The
-    type check is left out of the first screen.
+    type check is left out of the first screen. The `WATCHED` rows "the required features"
+    and "the tool checks" guard the two functions.
     """
     rows = []
     if len(uses) > sum(t.enabled for t in tools.values()):
@@ -184,7 +190,8 @@ def print_checks(
 def wrong_types(uses: dict[int, str | None], tools: dict[int, ToolView]) -> list[Failed]:
     """The used, enabled tools whose stored type isn't the one the file names: an exact,
     case-sensitive comparison of names. A tool the file names no type for, or `---`, isn't
-    checked."""
+    checked. This is code in `generate_toolmapping_only_noclear`, which the `WATCHED` row
+    "the tool checks" guards."""
     out = []
     for index in sorted(uses):
         want, t = uses[index], tools[index]

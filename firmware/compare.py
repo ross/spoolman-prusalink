@@ -11,7 +11,7 @@ filament change lengths, ramming sequences, the nozzle cleaner's purge, the auto
 threshold and cold unload, and the purge before an unload) and what its G-code checks know
 (the compatibility mode and the `M862.6` feature names), which the simulator's models
 copy. The simulator's `GROUPS` copies every name a file's `M862.3` can carry, with its
-compatibility group.
+compatibility group, and its `MINIMAL_PURGE_MM` copies the shortest purge a load runs.
 """
 
 from __future__ import annotations
@@ -72,8 +72,9 @@ PRINTER_IS = {
 # `include/device/board.h` maps a BOARD onto these macros. The XL's main board is the
 # XLBUDDY, and the dev kit's XL_DEV_KIT_XLB defines `BOARD_IS_XLBUDDY()` too. The DWARF is
 # the XL tool head's own firmware, not a printer build. A macro missing here fails the read.
-# Watched regions in `firmware/watch.py` guard the main-board condition and the two XL
-# boards' macros; `presets.json` isn't watched.
+# The `WATCHED` rows in `firmware/watch.py` that name `BOARD_IS` guard the buddy boards,
+# the main-board condition, the BUDDY, XBUDDY, XLBUDDY and dev kit boards' macros, and the
+# `BOARD_IS_XLBUDDY()` and `BOARD_IS_DWARF()` defaults; `presets.json` isn't watched.
 BOARD_IS: dict[str, set[str]] = {
     "XLBUDDY": {"XL", "XL_DEV_KIT"},
     "DWARF": set(),
@@ -187,6 +188,7 @@ class Firmware:
     builds: Mapping[str, Build]
     defaults: tuple[int, int, int]  # what `M865 R` resets nozzle, preheat and bed to
     aliases: Mapping[str, str]
+    minimal_purge_mm: float  # the shortest purge a load runs, on every build
 
     def groups(self) -> dict[str, str]:
         """Return every name a file's `M862.3` can carry, with its compatibility group.
@@ -295,6 +297,7 @@ def load(source: Source) -> Firmware:
         builds=builds,
         defaults=read.reset_defaults(source.read(read.FILAMENT_FILE)),
         aliases=read.aliases(source.read(read.ALIASES_FILE)),
+        minimal_purge_mm=read.minimal_purge(source.read(read.PAUSE_SETTINGS_FILE)),
     )
 
 
@@ -315,6 +318,7 @@ class Copies:
     sim_flexible: frozenset[str]
     sim_defaults: tuple[int, int, int]
     sim_aliases: Mapping[str, str]
+    sim_minimal_purge: float
 
     @classmethod
     def current(cls) -> Copies:
@@ -336,6 +340,7 @@ class Copies:
             sim_flexible=tool.FLEXIBLE_PRESETS,
             sim_defaults=tool.DEFAULT_TEMPERATURES,
             sim_aliases=tool.PRESET_ALIASES,
+            sim_minimal_purge=model.MINIMAL_PURGE_MM,
         )
 
 
@@ -379,6 +384,7 @@ TABLES = (
     "simulator presets",
     "simulator DEFAULT_TEMPERATURES",
     "simulator PRESET_ALIASES",
+    "simulator MINIMAL_PURGE_MM",
 )
 
 
@@ -449,6 +455,8 @@ def compare(firmware: Firmware, copies: Copies) -> list[Difference]:
                 firmware.aliases.get(name, MISSING),
                 aliases.get(name, MISSING),
             )
+    fw, copy = firmware.minimal_purge_mm, copies.sim_minimal_purge
+    differ("simulator MINIMAL_PURGE_MM", None, None, "minimal_purge", fw, copy)
     return found
 
 

@@ -55,20 +55,54 @@ WATCHED = (
         "UPGRADES in simulator/compatibility.py",
         "bf8dbaf2d07d79c5",
     ),
-    # The features a file must declare: `GCodeChecks.required` in simulator/compatibility.py.
-    # The Input Shaper and INDX lock conditions sit among other checks in this function, and
-    # nothing narrower can be found reliably.
+    # The next two guard `GCodeChecks.required` in simulator/compatibility.py. The first
+    # requires the Input Shaper and INDX lock flags; the conditions sit among other checks in
+    # this function, and nothing narrower can be found reliably. It also sets the "not enough
+    # tools" check that `print_checks` in simulator/preview.py copies.
     Watched(
         "the required features",
         "src/feature/compatibility_checks/gcode_compatibility.cpp",
         "function",
         "CompatibilityReport::generate_without_toolmapping",
-        "GCodeChecks.required in simulator/compatibility.py",
+        "GCodeChecks.required in simulator/compatibility.py and print_checks in"
+        " simulator/preview.py",
         "b3cf2415e667a40b",
     ),
-    # The next four guard `BOARD_IS` in firmware/compare.py. A main board is a buddy board or
-    # the dev kit's; the XL's and the dev kit's main boards define `BOARD_IS_XLBUDDY()`, and
-    # neither defines `BOARD_IS_DWARF()`.
+    # The second decides which `M862.6` name sets which flag. It parses every `M862` line, so
+    # it also trips on unrelated changes: 8 commits touched it in 2026 up to 7d8bf6858.
+    Watched(
+        "the M862 parser",
+        "src/common/gcode/gcode_info.cpp",
+        "function",
+        "GCodeInfo::parse_m862",
+        "GCodeChecks.required in simulator/compatibility.py",
+        "7e4c129c699f5571",
+    ),
+    # The per-tool checks of a print: the disabled tool, the missing filament and the wrong
+    # type in `print_checks` and `wrong_types` in simulator/preview.py. The function runs
+    # every per-tool check, nozzles and spool join among them, so it also trips on unrelated
+    # changes: about 20 commits touched it in 2026 up to 7d8bf6858.
+    Watched(
+        "the tool checks",
+        "src/feature/compatibility_checks/gcode_compatibility.cpp",
+        "function",
+        "CompatibilityReport::generate_toolmapping_only_noclear",
+        "print_checks and wrong_types in simulator/preview.py",
+        "57407f963fde6b8d",
+    ),
+    # When a print goes through the tools-mapping screen: `tool_mapping` in
+    # simulator/preview.py.
+    Watched(
+        "the tool mapping condition",
+        "src/common/tools_mapping.cpp",
+        "function",
+        "is_tool_mapping_possible",
+        "tool_mapping in simulator/preview.py",
+        "136be5698acb0b96",
+    ),
+    # The next eight guard `BOARD_IS` in firmware/compare.py. A main board is a buddy board or
+    # the dev kit's; of those, only the XL's and the dev kit's define `BOARD_IS_XLBUDDY()`,
+    # none defines `BOARD_IS_DWARF()`, and both macros are 0 where no board defines them.
     Watched(
         "the buddy boards",
         read.OPTIONS_FILE,
@@ -101,8 +135,41 @@ WATCHED = (
         "BOARD_IS in firmware/compare.py",
         "8d2733394e9e16e1",
     ),
+    Watched(
+        "the BUDDY board's macros",
+        "include/device/board.h",
+        "directive",
+        "#elif BOARD() == BOARD_BUDDY()",
+        "BOARD_IS in firmware/compare.py",
+        "34ada32dca12a264",
+    ),
+    Watched(
+        "the XBUDDY board's macros",
+        "include/device/board.h",
+        "directive",
+        "#elif BOARD() == BOARD_XBUDDY()",
+        "BOARD_IS in firmware/compare.py",
+        "b366077de8f45a00",
+    ),
+    Watched(
+        "the BOARD_IS_XLBUDDY default",
+        "include/device/board.h",
+        "directive",
+        "#ifndef BOARD_IS_XLBUDDY",
+        "BOARD_IS in firmware/compare.py",
+        "6bacb277dac47d33",
+    ),
+    Watched(
+        "the BOARD_IS_DWARF default",
+        "include/device/board.h",
+        "directive",
+        "#ifndef BOARD_IS_DWARF",
+        "BOARD_IS in firmware/compare.py",
+        "04c9261a6da4db2d",
+    ),
     # The load's purge: the high-flow doubling in `SimPrinter._load_lengths`, and the
-    # override and the 1 mm minimum in `SimPrinter._load_steps`, in simulator/model.py.
+    # override and that the minimum applies in `SimPrinter._load_steps`, in
+    # simulator/model.py. The minimum's value is compared as `MINIMAL_PURGE_MM`.
     Watched(
         "the purge length",
         "src/marlin_stubs/pause/pause_settings.cpp",

@@ -26,6 +26,7 @@ RAMMING_CMAKE_FILE = "src/feature/ramming/CMakeLists.txt"
 CLEANER_FILE = "src/feature/nozzle_cleaner/nozzle_cleaner.cpp"
 AUTO_RETRACT_FILE = "src/feature/auto_retract/auto_retract.hpp"
 PAUSE_FILE = "src/marlin_stubs/pause/pause.cpp"
+PAUSE_SETTINGS_FILE = "src/marlin_stubs/include/pause_settings.hpp"
 CONFIGURATION_FILE = "include/marlin/Configuration.h"
 ADVANCED_FILE = "include/marlin/Configuration_adv.h"
 
@@ -849,6 +850,35 @@ def unload_purge(text: str, macros: Macros) -> float:
     except ValueError as e:
         raise Unreadable(PAUSE_FILE, str(e)) from None
     return float(m.group(1))
+
+
+_MINIMAL_PURGE = re.compile(
+    rf"static\s+constexpr\s+(?:const\s+)?float\s+minimal_purge\s*=\s*{_MM}\s*;"
+)
+
+
+def minimal_purge(text: str) -> float:
+    """Return `pause::Settings::minimal_purge`, the shortest purge a load runs, in mm.
+
+    The one line that names it has to declare it to a plain number, outside any `#if`, so
+    it's the same for every build. Any other line that names it fails the read.
+    """
+    try:
+        found = []
+        for line, scope in _scoped(_strip_comments(text).replace("\\\n", " ")):
+            if not re.search(r"\bminimal_purge\b", line):
+                continue
+            m = _MINIMAL_PURGE.fullmatch(line.strip())
+            if not m:
+                raise ValueError(f"can't read {line.strip()!r}")
+            if scope != ["line"]:
+                raise ValueError("minimal_purge is declared inside an #if")
+            found.append(m.group(1))
+        if len(found) != 1:
+            raise ValueError(f"{len(found)} minimal_purge declarations")
+    except ValueError as e:
+        raise Unreadable(PAUSE_SETTINGS_FILE, str(e)) from None
+    return float(found[0])
 
 
 def _pause_body(text: str, name: str, macros: Macros) -> tuple[tuple[int, int], str] | None:
