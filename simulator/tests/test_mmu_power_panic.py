@@ -250,6 +250,22 @@ def test_an_mmu_active_before_the_resume_counts_nothing_until_the_tool_change():
     assert counts(p) == pytest.approx({0: 0, 1: PICK + 40 + PARK_OUT, 2: 0, 3: 0, 4: 0})
 
 
+def test_a_tool_change_while_the_mmu_connects_waits_for_it():
+    # Cut 35 mm in: the print reaches the change 1 s after it goes on, while the MMU still
+    # connects. Its last 5 mm count on slot 0, and slot 0's tower unload runs before the
+    # `T`, so it counts on slot 0 too: 35.9518 from gap 0, which leaves the gap at 40. The
+    # `T` waits for the MMU, then changes from none: no -80, and the feed counts on none,
+    # so the gap stays at 40. Slot 1's first pick then fills the 40 first: 46.63.
+    sim, p, _ = two_color_cut(35)
+    finish(sim, p)
+    assert counts(p) == pytest.approx(
+        {0: 8 + 5 + PARK_OUT, 1: PICK - 40 + 40 + PARK_OUT, 2: 0, 3: 0, 4: 0}
+    )
+    assert "T1 waits for the MMU to connect" in messages(sim, "job")
+    assert "tool change none -> T1" in messages(sim, "job")
+    assert messages(sim, "mmu").count("MMU active") == 1
+
+
 @pytest.mark.parametrize(("wait", "fed_back"), [(60, 0), (0, 8)])
 def test_a_cold_bed_waits_for_the_user_and_the_mmu_connects_meanwhile(wait, fed_back):
     # The resume's 8 mm counts on slot 0 only when the user resumes while the MMU still
