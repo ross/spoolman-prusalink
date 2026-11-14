@@ -567,8 +567,8 @@ tool:
 | 4, XL+ 2T | `Prusa XL+ 2T 0.4 nozzle` | `0.20mm Balanced ★ @XL+ 0.4` | `Prusament PLA @XL+` |
 | 5, INDX 4T and 8T | `Prusa CORE One INDX 4T HF0.4 nozzle`, `Prusa CORE One INDX 8T HF0.4 nozzle` | `0.20mm Balanced ★ @COREONEINDX HF0.4` | `Prusament PLA @COREONEINDX HF0.4` |
 
-The model is one 10 x 10 x 1 mm box per tool, which makes five layers at
-0.2 mm and one tool change per layer. The slices that vary one setting change
+The model is one 10 x 10 x 1 mm box per tool, side by side, which makes five
+layers at 0.2 mm and one tool change per extra tool on each layer. The slices that vary one setting change
 the wipe tower, the XL's multi-tool ramming, or the filament's
 `filament_minimal_purge_on_wipe_tower`.
 

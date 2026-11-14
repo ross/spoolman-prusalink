@@ -5,8 +5,8 @@ Usage: script/slicer/make3mf.py OUT.3mf EXTRUDERS [HEIGHT_MM]
 
 EXTRUDERS is a comma-separated list of 1-based extruder numbers, one box each:
 `1,2` makes two boxes, the first on tool 1 and the second on tool 2. HEIGHT_MM is
-the boxes' height and defaults to 1. Every box is the same shape, so each is one
-layer of a different tool.
+the boxes' height and defaults to 1. Every box has the same shape and height, so
+each layer prints every box's tool once.
 """
 
 import sys
