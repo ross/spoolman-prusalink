@@ -695,6 +695,12 @@ def test_ramming_fail_closed(old, new, problem):
         read.ramming(text.replace(old, new, 1), macros(HAS_AUTO_RETRACT=False), "r.cpp")
 
 
+def test_ramming_refuses_two_definitions():
+    text = fixtures.RAMMING_MK3_5_CPP
+    with pytest.raises(Unreadable, match="2 standard_ramming_sequence definitions"):
+        read.ramming(text + "\n" + text, macros(HAS_AUTO_RETRACT=False), "r.cpp")
+
+
 def test_ramming_needs_the_builds_cases():
     unload = fixtures.RAMMING_MK3_5_CPP.index("    case StandardRammingSequence::unload")
     text = fixtures.RAMMING_MK3_5_CPP[:unload] + "    }\n    bsod_unreachable();\n}\n"

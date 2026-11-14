@@ -285,6 +285,7 @@ class Copies:
     preset_preheat: int  # the `Preset` dataclass's preheat default
     sim_models: Mapping[str, Any]  # simulator.model.ModelInfo
     sim_presets: Mapping[str, tuple[int, int, int]]
+    sim_flexible: frozenset[str]
     sim_defaults: tuple[int, int, int]
     sim_aliases: Mapping[str, str]
 
@@ -305,6 +306,7 @@ class Copies:
             preset_preheat=preheat,  # type: ignore[arg-type]
             sim_models=model.MODELS,
             sim_presets=tool.PRESET_TEMPERATURES,
+            sim_flexible=tool.FLEXIBLE_PRESETS,
             sim_defaults=tool.DEFAULT_TEMPERATURES,
             sim_aliases=tool.PRESET_ALIASES,
         )
@@ -375,11 +377,13 @@ def compare(firmware: Firmware, copies: Copies) -> list[Difference]:
         build = built[code]
         for material, fw in build.presets.items():
             _compare_bridge_preset(code, material, fw, copies.bridge_presets, differ)
-            _compare_sim_preset(code, material, fw, copies.sim_presets, differ)
+            _compare_sim_preset(code, material, fw, copies, differ)
     for material in sorted(copies.bridge_presets.keys() - anywhere):
         differ("bridge PRESETS", None, material, "material", MISSING, PRESENT)
     for material in sorted(copies.sim_presets.keys() - anywhere):
         differ("simulator PRESET_TEMPERATURES", None, material, "material", MISSING, PRESENT)
+    for material in sorted(copies.sim_flexible - anywhere):
+        differ("simulator PRESET_TEMPERATURES", None, material, "flexible", MISSING, PRESENT)
     door = {
         m
         for code in supported
@@ -530,11 +534,11 @@ def _compare_sim_preset(
     code: str,
     material: str,
     fw: Mapping[str, read.Value],
-    presets: Mapping[str, Any],
+    copies: Copies,
     differ: Differ,
 ) -> None:
     table = "simulator PRESET_TEMPERATURES"
-    values = presets.get(material)
+    values = copies.sim_presets.get(material)
     if values is None:
         differ(table, code, material, "material", PRESENT, MISSING)
         return
@@ -542,6 +546,8 @@ def _compare_sim_preset(
     differ(table, code, material, "nozzle", fw["nozzle_temperature"], nozzle)
     differ(table, code, material, "preheat", fw["nozzle_preheat_temperature"], preheat)
     differ(table, code, material, "bed", fw["heatbed_temperature"], bed)
+    # `FLEXIBLE_PRESETS` sits beside the temperatures and is compared with them.
+    differ(table, code, material, "flexible", fw["is_flexible"], material in copies.sim_flexible)
 
 
 @dataclass(frozen=True)

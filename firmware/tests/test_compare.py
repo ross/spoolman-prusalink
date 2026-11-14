@@ -18,7 +18,8 @@ from firmware.compare import (
 )
 from firmware.source import Unreadable
 from firmware.tests import fixtures
-from simulator.model import ModelInfo
+from simulator import tool
+from simulator.model import MODELS, ModelInfo
 from simulator.tool import Extruder, Lengths
 from spoolman_prusalink.printer_sync import Preset, PrinterModel
 
@@ -359,6 +360,7 @@ def synthetic():
             "7.1.0": ModelInfo("7.1.0", "COREONE", EXTRUDER, uuids=True),
         },
         sim_presets={"PLA": (215, 170, 60), "FLEX": (240, 210, 50), "PPS": (320, 170, 105)},
+        sim_flexible=frozenset({"FLEX"}),
         sim_defaults=(215, 170, 60),
         sim_aliases={"TPU": "FLEX"},
     )
@@ -499,11 +501,36 @@ def test_flexible_and_unset_chamber_differences():
     presets["FLEX"] = {**presets["FLEX"], "is_flexible": False, "chamber_min_temperature": None}
     builds = {**firmware.builds, "COREONE": replace(core, presets=presets)}
     firmware = replace(firmware, builds=builds)
-    b = "bridge PRESETS"
+    b, s = "bridge PRESETS", "simulator PRESET_TEMPERATURES"
     assert compare.compare(firmware, copies) == [
         Difference(b, "7.1.0", "FLEX", "flexible", False, True),
         Difference(b, "7.1.0", "FLEX", "chamber", (25, None, 40), (25, 15, 40)),
+        Difference(s, "7.1.0", "FLEX", "flexible", False, True),
     ]
+
+
+def test_simulator_flexible_differences():
+    firmware, copies = synthetic()
+    copies = replace(copies, sim_flexible=frozenset({"PLA", "XYZ"}))
+    s = "simulator PRESET_TEMPERATURES"
+    assert compare.compare(firmware, copies) == [
+        Difference(s, "1.4.0", "PLA", "flexible", False, True),
+        Difference(s, "1.4.0", "FLEX", "flexible", True, False),
+        Difference(s, "7.1.0", "PLA", "flexible", False, True),
+        Difference(s, "7.1.0", "FLEX", "flexible", True, False),
+        Difference(s, None, "XYZ", "flexible", MISSING, PRESENT),
+    ]
+
+
+def test_retracted_distance_agrees_with_the_simulators():
+    sequences = {steps for model in MODELS.values() for steps in model.extruder.ramming.values()}
+    assert sequences
+    for steps in sequences:
+        assert compare.retracted_distance(steps) == tool.retracted_distance(steps)
+    # Nextruder's auto-retract and unload, INDX's auto-retract, as `RammingSequence::init`.
+    assert tool.retracted_distance(tool.NEXTRUDER_RAMMING["auto_retract"]) == 55
+    assert tool.retracted_distance(tool.NEXTRUDER_RAMMING["unload"]) == 105
+    assert tool.retracted_distance(tool.INDX_RAMMING["auto_retract"]) == 8
 
 
 def test_default_and_alias_differences():
