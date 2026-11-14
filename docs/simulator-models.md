@@ -270,15 +270,17 @@ counts, and print-after-upload goes through the same checks
   are intentionally unloaded at the start of the print"
   (`gcode_compatibility.cpp:505-513`).
 - **With an MMU and filament at FINDA, the preview asks to unload first**:
-  any slot's filament past the selector, not the extruder's sensor. It
-  doesn't ask with the filament sensors off, which turns the MMU off too.
+  any slot's filament past the selector, not the extruder's sensor. While
+  the MMU connects, FINDA's sensor isn't read yet, so it asks whatever
+  FINDA sees (`filament_sensor_mmu.cpp:10-23`). It doesn't ask with the
+  filament sensors off, which turns the MMU off too.
   A single-tool file of slot 0's type starts at once, with no question and
   no tools-mapping screen, when the extruder's sensor sees filament. Yes
   unloads into the MMU, reading `BUSY`, and turns the heaters off; then the
   tools-mapping screen or the print. No starts the print as it is, with no
   tools-mapping screen (`marlin_print_preview.cpp:228-257, 698-728`). The
   bridge's sync job has no metadata, so it stops at the question whenever
-  FINDA sees filament.
+  FINDA sees filament, and always while the MMU connects.
 
 The idle sensor clear runs while the preview opens and stops once a question
 shows, except on the tools-mapping screen (`marlin_server.cpp:1448-1460`).
