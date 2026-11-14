@@ -822,6 +822,9 @@ def test_snapshot_round_trip_mid_print_and_mid_load():
     p.runout(0)
     p.load(0)
     sim.tick(2)
+    # Path state that nothing above leaves at its default.
+    p.tools[1].path.sensor_fault = True
+    p.tools[2].path.auto_retracted = 8.0
 
     data = json.loads(json.dumps(sim.snapshot()))
     other = Simulation()
