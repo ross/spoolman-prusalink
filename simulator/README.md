@@ -138,6 +138,10 @@ that trace. The points that matter for the bridge, in short:
   material, but keeps it: a runout or `M600` reload restores the old name,
   color and UUID. A menu load replaces them with a preset, dropping color
   and UUID.
+- Each model has its build's presets. PPS and PPA exist only on the Core One
+  and Core One L. The PC and FLEX preheats differ on INDX, the MINI and the
+  MK3.5, and the PA temperatures on the MINI. A menu load of a preset the
+  build lacks answers 400, and an `M865` preset write of one stores nothing.
 - Every filament move counts as the firmware's filament tracker counts it.
   A retract grows the tool's gap up to the model's limit, 40 mm or 27 mm on
   INDX. A feed fills the gap first, and what goes past it counts times the

@@ -87,6 +87,9 @@ firmware update.
   the next feed. A printer's `auto_retract` switch turns it off where the
   build allows. Other lengths and times are one global `Settings`, and the
   feed ratio and load lengths there are overrides.
+- Each model has its build's preset table. A menu load and a preset write
+  report that build's temperatures, and neither takes a preset the build
+  doesn't have, such as PPS on an MK4S.
 - A tool has its own counters, material, gap and sensor. A print is a list
   of (tool, mm) segments with a fixed purge at each tool change. Picking a
   tool can trigger the idle sensor clear. A tool can be disabled.
@@ -114,7 +117,6 @@ Paths are in the firmware at `ff61540d4`.
 | Unload | A menu unload rams first. It counts about 23 mm on a Nextruder that isn't auto-retracted and about 19 mm on INDX, before the unload is recorded. | `pause.cpp` |
 | Power-panic resume | INDX purges 25 mm (`G750 E25`). The MK4 family, Core One, Core One L and iX feed back the 8 mm they retracted at the cut. The XL moves nothing. This reading disagrees with F12, which has the 25 mm on the single-tool Core One L: the F12 trace decides. | `power_panic.cpp:110-116, 480-521` |
 | Nozzle-cleaner sequences | On the iX and INDX, a file under `/usb/macros/nozzle_cleaner/` replaces a built-in sequence, the INDX purges included. The simulator assumes the built-in ones. | `gcode_loader.cpp:24-30, 105-115` |
-| Presets | PPS and PPA exist only with the high-temperature hotend (Core One and Core One L). The PC and FLEX preheat differ on INDX, and PA on the MINI. `firmware-check` already rebuilds these per build; the simulator still holds one table. | `filament_presets.cpp` |
 
 With the gap full, a Core One L menu load counts 20 mm before the type
 appears and 55 mm after, 75 mm commanded. The simulator's 36 and 40 came
