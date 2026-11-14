@@ -101,7 +101,8 @@ WATCHED = (
         "src/feature/compatibility_checks/gcode_compatibility.cpp",
         "function",
         "CompatibilityReport::generate_toolmapping_only_noclear",
-        "print_checks and wrong_types in simulator/preview.py",
+        "print_checks and wrong_types in simulator/preview.py, and the filament check the"
+        " MMU skips in SimPrinter._tool_views in simulator/model.py",
         "57407f963fde6b8d",
         UPSTREAM_7D8BF685,
     ),
@@ -284,7 +285,8 @@ WATCHED = (
         "lib/Marlin/Marlin/src/module/planner.cpp",
         "statement",
         "if(tools.virtual_tool.has_value())",
-        "SimPrinter._count in simulator/model.py",
+        "SimPrinter._count in simulator/model.py, which leaves an MMU print's start and its"
+        " first tool change uncounted (Mmu.prime in simulator/feed.py)",
         "ecec270c18660d34",
         UPSTREAM_7D8BF685,
     ),
@@ -333,7 +335,8 @@ WATCHED = (
         "lib/Marlin/Marlin/src/feature/prusa/MMU2/mmu2_mk4.cpp",
         "function",
         "MMU2::ToolChangeCommonOnce",
-        "_mmu_change_steps in simulator/model.py and change_feed in simulator/mmu.py",
+        "_mmu_change_steps in simulator/model.py, its -80 mm with a slot selected, and"
+        " change_feed and UNLOAD_FINISH_MM in simulator/mmu.py",
         "5f3fa79cacb9939c",
         UPSTREAM_7D8BF685,
     ),
@@ -523,14 +526,46 @@ WATCHED = (
         "4d2b4c8ab15e9e2d",
         UPSTREAM_7D8BF685,
     ),
-    # A print's end skips the auto-retract while the MMU is Active. The branch has an `else`.
+    # A print's end skips the auto-retract while the MMU is Active, and a stop or a
+    # single-tool file unloads instead. The branch has an `else`.
     Watched(
         "the end of a print with an MMU",
         "src/common/marlin_server.cpp",
         "function",
         "pre_finalize_print",
-        "SimPrinter._end_of_print in simulator/model.py",
+        "SimPrinter._end_of_print in simulator/model.py: the auto-retract skipped, and the"
+        " unload of a stopped job or a finished single-tool file",
         "12f5dc375c32c406",
+        UPSTREAM_7D8BF685,
+    ),
+    Watched(
+        "the end of a print's MMU unload",
+        "src/common/marlin_server.cpp",
+        "function",
+        "safely_unload_filament_from_nozzle_to_mmu",
+        "SimPrinter._end_of_print in simulator/model.py: no unload with the extruder empty",
+        "4833bcc6699b4461",
+        UPSTREAM_7D8BF685,
+    ),
+    # The firmware's load at the start of a file on tool 0 alone with no slot selected.
+    Watched(
+        "the single-tool file's start",
+        "src/common/marlin_server.cpp",
+        "statement",
+        "if (MMU2::mmu2.Enabled() && GCodeInfo::getInstance().is_singletool_gcode()",
+        "Mmu.prime in simulator/feed.py and SINGLE_TOOL_LOAD in simulator/mmu.py",
+        "6ece29d270dd8ac3",
+        UPSTREAM_7D8BF685,
+    ),
+    # A print's `T` to the slot already selected changes nothing. The name has two
+    # overloads, so the definition is read as a statement.
+    Watched(
+        "the MMU tool change in a print",
+        "lib/Marlin/Marlin/src/feature/prusa/MMU2/mmu2_mk4.cpp",
+        "statement",
+        "bool MMU2::tool_change(uint8_t slot)",
+        "SimPrinter._mmu_change in simulator/model.py",
+        "045f566761af0f0a",
         UPSTREAM_7D8BF685,
     ),
     # The menu turns the MMU on only with a working extruder sensor.

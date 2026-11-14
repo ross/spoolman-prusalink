@@ -25,6 +25,7 @@ from simulator import tool
 from simulator.compatibility import GCodeChecks
 from simulator.feed import Feed
 from simulator.model import MODELS, ModelInfo
+from simulator.slicer import MK4S_MMU_SLICER
 from simulator.tool import Extruder, Lengths
 from spoolman_prusalink.printer_sync import Preset, PrinterModel
 
@@ -32,6 +33,7 @@ NO_COUNTERS = "no counters"
 MULTI_TOOL = "multi-tool"
 MMU_LENGTHS = {
     "MMU2_TOOL_CHANGE_LOAD_LENGTH": 5.0,
+    "MMU2_RETRY_UNLOAD_FINISH_LENGTH": -80.0,
     "MMU2_FEED_DISTANCE": 50.0,
     "MMU2_EXTRUDER_HEATBREAK_LENGTH": 67.0,
     "MMU2_EXTRUDER_NOZZLE_LENGTH": 20.0,
@@ -265,7 +267,7 @@ def test_mmu_differences():
     sim = dict(copies.sim_models)
     # The MK4 takes an MMU in the simulator. The Core One's model has one but doesn't take
     # it, as the MK3.5's doesn't, so its try-load build isn't compared.
-    sim["1.4.0"] = replace(sim["1.4.0"], mmu=True, takes_mmu=True)
+    sim["1.4.0"] = replace(sim["1.4.0"], mmu=True, mmu_slicer=MK4S_MMU_SLICER)
     sim["7.1.0"] = replace(sim["7.1.0"], mmu=True)
     lengths = {k: v for k, v in MMU_LENGTHS.items() if k != "nominalEMotorFSOff"}
     copies = replace(copies, sim_models=sim, sim_mmu={**lengths, "extra": 1.0})

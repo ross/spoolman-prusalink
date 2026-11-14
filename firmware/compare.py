@@ -134,6 +134,7 @@ Ramming = tuple[read.Step, ...]
 MMU_CONSTANTS = {
     read.MMU_CONFIG_FILE: (
         "MMU2_TOOL_CHANGE_LOAD_LENGTH",
+        "MMU2_RETRY_UNLOAD_FINISH_LENGTH",
         "MMU2_FEED_DISTANCE",
         "MMU2_EXTRUDER_HEATBREAK_LENGTH",
         "MMU2_EXTRUDER_NOZZLE_LENGTH",
@@ -469,6 +470,7 @@ class Copies:
             main_boards=MAIN_BOARDS,
             sim_mmu={
                 "MMU2_TOOL_CHANGE_LOAD_LENGTH": mmu.EXTRA_LOAD_MM,
+                "MMU2_RETRY_UNLOAD_FINISH_LENGTH": mmu.UNLOAD_FINISH_MM,
                 "MMU2_FEED_DISTANCE": mmu.FEED_MM,
                 "MMU2_EXTRUDER_HEATBREAK_LENGTH": mmu.HEATBREAK_MM,
                 "MMU2_EXTRUDER_NOZZLE_LENGTH": mmu.NOZZLE_MM,

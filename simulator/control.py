@@ -236,6 +236,10 @@ def _print_spec(body: dict) -> PrintSpec:
             "start_print toolchange_purge_mm", body.get("toolchange_purge_mm"), float | None
         ),
         spool_join=_joins(body.get("spool_join")),
+        single_tool_file=_check(
+            "start_print single_tool_file", body.get("single_tool_file"), bool | None
+        )
+        or False,
     )
 
 

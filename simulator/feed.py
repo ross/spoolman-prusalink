@@ -12,9 +12,11 @@ from __future__ import annotations
 from enum import StrEnum
 from typing import TYPE_CHECKING, ClassVar
 
+from simulator.mmu import SINGLE_TOOL_LOAD
+
 if TYPE_CHECKING:
     from simulator.model import SimPrinter, UserJob
-    from simulator.slicer import Slicer
+    from simulator.slicer import MmuSlicer, Slicer
     from simulator.tool import SimTool
 
 
@@ -244,6 +246,67 @@ class Mmu(FeedSystem):
         writes no type, so nothing counts: the MMU's unload never reaches the write of none
         in `unload_process` (`pause.cpp:969-973, 1263-1278`)."""
         p._log("load", f"T{t.index} unloaded into the MMU: no type written")
+
+    def profile(self, p: SimPrinter) -> MmuSlicer | None:
+        """The model's stock MMU3 profile."""
+        return p.model.mmu_slicer
+
+    def prime(self, p: SimPrinter, job: UserJob, slicer: MmuSlicer | None) -> None:
+        """The print's start, before its first segment.
+
+        A file that uses tool 0 alone, by its filament use, gets the firmware's own load
+        first when the MMU is Active and no slot is selected: a `T0` through the tool
+        mapping, then 35 mm
+        (`PrintInit`, `marlin_server.cpp:2492-2518`). A single-tool file stops there, and
+        a one-color profile file for slot 0 goes on with its start, whose `T0` then finds
+        the slot selected. The profile's start retracts with no slot selected yet, so
+        uncounted, sends `T<first>`, whose feed counts on no slot either, and loads and
+        purges the first slot (`MmuSlicer`). Its second `T<first>` after the start changes
+        nothing: that it's a no-op in the firmware is unverified.
+        """
+        first = p.tools[p._seg_tool(job, 0)]
+        single = all(s.tool == 0 for s in job.spec.segments)
+        if p.mmu.active and p.selected_tool is None and single:
+            p._log("job", "a file on tool 0 alone: the firmware loads T0")
+            p._mmu_change(first)
+            p._print_moves(first, SINGLE_TOOL_LOAD)
+        if slicer is None:
+            return
+        p._print_moves(p._head_tool(), slicer.cleanup)
+        p._mmu_change(first)
+        p._print_moves(first, (*slicer.start_load, *slicer.purge_line))
+        p._mmu_change(first)
+        p._log("job", f"start G-code primed T{first.index}")
+
+    def tool_change(
+        self, p: SimPrinter, old: SimTool, new: SimTool, slicer: MmuSlicer, first: bool
+    ) -> None:
+        """A print's change from `old` to `new`: the wipe tower's unload of the old slot's
+        filament, the firmware's change, then the new slot's load and purge, those of its
+        first pick in the print when `first` is set (`MmuSlicer`, `SimPrinter._mmu_change`).
+
+        Each segment's filament is the type the file names for its tool. The firmware's
+        change pushes the new slot's filament, but it counts on the old slot.
+        """
+        segments, i = p.job.spec.segments, p.job.segment
+        p._print_moves(old, slicer.filament(segments[i - 1].material).park_out())
+        p._mmu_change(new)
+        p._print_moves(new, slicer.filament(segments[i].material).pick(first))
+
+    def end_moves(self, p: SimPrinter, job: UserJob, slicer: MmuSlicer | None) -> None:
+        """A finished print's end, when it was sliced with the profile: where it used several
+        slots, the wipe tower's last unload with no `T`, then the print's last retract, then
+        the end G-code's `M702`, which unloads the slot into the MMU on the selected slot
+        (`M701_2.cpp`, `MMU2::unload`)."""
+        if slicer is None:
+            return
+        t = p._head_tool()
+        filament = slicer.filament(job.spec.segments[-1].material)
+        if len({s.tool for s in job.spec.segments}) > 1:
+            p._print_moves(t, filament.park_out())
+        p._print_moves(t, (-filament.retract,))
+        p._log("job", "end G-code M702: unload into the MMU")
+        p._run_steps(t, p._mmu_unload_steps())
 
 
 # Outside `FEED_SYSTEMS`: a model's build decides its feed system, and an MMU is switched

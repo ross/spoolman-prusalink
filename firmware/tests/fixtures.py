@@ -2924,6 +2924,29 @@ bool MMU2::OnMMUProgressMsgSame(ProgressCode pc) {
     }
     return false;
 }
+
+bool MMU2::tool_change(uint8_t slot) {
+    if (!WaitForMMUReady()) {
+        return false;
+    }
+
+    if (slot != extruder) {
+        if (/*FindaDetectsFilament()*/
+            /*!IS_SD_PRINTING && !usb_timer.running()*/
+            !marlin_printingIsActive()) {
+            // If Tcodes are used manually through the serial
+            // we need to unload manually as well -- but only if FINDA detects filament
+            unload();
+        }
+
+        CommandInProgressGuard cipg(CommandInProgress::ToolChange, commandInProgressManager);
+        FSensorBlockRunout blockRunout;
+        BlockEStallDetection blockEStallDetection;
+        planner_synchronize();
+        ToolChangeCommon(slot);
+    }
+    return true;
+}
 """  # noqa: E501 (verbatim firmware lines)
 
 # `multi_filament_change.cpp`, excerpts.
@@ -3226,7 +3249,7 @@ bool should_enable(FilamentSensorID id) {
 }
 """  # noqa: E501 (verbatim firmware lines)
 
-# `pre_finalize_print`, the end of a print.
+# `marlin_server.cpp`, excerpts: `pre_finalize_print`, its unload, and the single-tool start.
 MARLIN_SERVER_CPP = """\
 static bool pre_finalize_print([[maybe_unused]] bool finished) {
 #if HAS_ANFC()
@@ -3294,6 +3317,47 @@ static bool pre_finalize_print([[maybe_unused]] bool finished) {
 
     return true;
 }
+
+void safely_unload_filament_from_nozzle_to_mmu() {
+    if (MMU2::WhereIsFilament() == MMU2::FilamentState::NOT_PRESENT) {
+        return; // no filament loaded, nothing to do
+    }
+    const uint16_t original_temp = thermalManager.degTargetHotend(active_extruder);
+    enqueue_gcode("M702 W2");
+    enqueue_gcode_printf("M104 S%" PRIu16, original_temp);
+}
+
+#if HAS_MMU2()
+            if (MMU2::mmu2.Enabled() && GCodeInfo::getInstance().is_singletool_gcode() && MMU2::mmu2.get_current_tool() == MMU2::FILAMENT_UNKNOWN) {
+                // POC: Handle singletool G-code which doesn't have T commands in it
+                // In case we don't have other filament loaded!
+                // Unfortunately we don't have the nozzle heated, an ugly workaround is to enqueue an M109 :(
+
+                const uint16_t preheat_temp = GCodeInfo::getInstance().get_hotend_preheat_temp().value_or(215U);
+                enqueue_gcode_printf("M109 S%" PRIu16, preheat_temp); // speculatively, use PLA temp for MMU prints, anything else is highly unprobable at this stage
+                enqueue_gcode("T0"); // tool change T0 (can be remapped to anything)
+                enqueue_gcode("G92 E0"); // reset extruder position to 0
+
+                bool is_relative = gcode.axis_is_relative(AxisEnum::E_AXIS);
+
+                enqueue_gcode("M82"); // set E to absolute positions
+    #if HAS_NEXTRUDER()
+                enqueue_gcode("G1 E25 F1860"); // push filament into the nozzle - load distance from fsensor into nozzle tuned (hardcoded) for now
+                enqueue_gcode("G1 E35 F300"); // slowly push another 10mm (absolute E)
+    #elif PRINTER_IS_PRUSA_MK3_5()
+                enqueue_gcode("G1 E50 F1860"); // push filament into the nozzle - load distance from fsensor into nozzle tuned (hardcoded) for now
+                enqueue_gcode("G1 E62 F300"); // slowly push another 12mm (absolute E)
+    #else
+        #error
+    #endif
+                if (is_relative) {
+                    enqueue_gcode("M83"); // set E back to relative positions
+                }
+
+                // In case of need, we can perform a custom purge line from the other end of the heatbed
+                // It would require homing the axes first, moving to [maxx-10, -4] and slowly purging while moving towards the origin
+            }
+#endif
 """  # noqa: E501 (verbatim firmware lines)
 
 # The tag radio's MMU condition.

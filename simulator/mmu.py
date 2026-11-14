@@ -9,7 +9,8 @@ The lengths are the load-cell builds', the MK4's, Core One's and Core One L's, w
 them: those builds feed with E-stall detection, not the MK3.5's try-load
 (`lib/Marlin/Marlin/src/feature/prusa/MMU2/mmu2_config.h:11-16`). `script/firmware-check`
 compares `MMU_SLOTS` with the MMU builds' `EXTRUDERS`, and the lengths and `MMU_RAMMING`
-with those builds' source.
+with those builds' source. `SINGLE_TOOL_LOAD` is code in `marlin_server.cpp`, which a
+`WATCHED` row in `firmware/watch.py` guards.
 """
 
 from __future__ import annotations
@@ -29,6 +30,10 @@ MMU_SLOTS = 5
 # (`MMU2_LOAD_TO_NOZZLE_SEQUENCE`).
 EXTRA_LOAD_MM = 5.0
 FEED_MM = 50.0
+# The retract a tool change makes on the selected slot before the feed, when a slot is
+# selected (`MMU2_RETRY_UNLOAD_FINISH_LENGTH`; `MMU2::ToolChangeCommonOnce`,
+# `mmu2_mk4.cpp:593-594`).
+UNLOAD_FINISH_MM = -80.0
 HEATBREAK_MM = 67.0
 NOZZLE_MM = 20.0
 # The longest move the firmware plans, which it plans to push the filament to the extruder's
@@ -46,6 +51,10 @@ RELIEVE_MM = -120.0
 # `Configuration_COREONE_adv.h` and `Configuration_COREONEL_adv.h:606-612`), in mm and
 # mm/min: the ramming an MMU unload runs when the filament isn't fully auto-retracted.
 MMU_RAMMING: Ramming = ((20, 1500), (-50, 2700), (-5, 50), (-50, 1500))
+# What the firmware feeds after the `T0` it sends at the start of a single-tool file with no
+# slot selected, on a Nextruder: `G1 E25`, then the absolute `G1 E35`
+# (`marlin_server.cpp:2492-2518`).
+SINGLE_TOOL_LOAD = (25.0, 10.0)
 
 
 def change_feed() -> tuple[float, ...]:

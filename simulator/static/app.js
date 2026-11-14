@@ -333,15 +333,22 @@ function renderPrinter(p) {
     '</div>';
 
   if (isOpen(p, 'start')) {
+    const mmuOn = Boolean(p.mmu && p.mmu.on);
     h += '<div class="form">' +
       '<label>segments (tool:mm or tool:mm:TYPE per line)<textarea data-k="start.segments">' + esc(getv(p.name, 'start.segments', '0:1000')) + '</textarea></label>' +
       '<label>duration s' + inp(p, 'start.duration', '', 'type="number" step="any"') + '</label>' +
       '<label>preheat s' + inp(p, 'start.preheat', '', 'type="number" step="any"') + '</label>' +
       '<label>color changes mm (a, b)' + inp(p, 'start.cc', '', 'type="text"') + '</label>' +
+      (p.toolchanger || mmuOn
+        ? '<label title="the slicer profile\'s prime; empty for the stock one">' + (mmuOn ? 'purge line mm' : 'prime mm') + inp(p, 'start.prime', '', 'type="number" step="any"') + '</label>' +
+          '<label title="the slicer profile\'s tool-change purge; empty for the stock one">tool-change purge mm' + inp(p, 'start.tcpurge', '', 'type="number" step="any"') + '</label>'
+        : '') +
       (p.toolchanger
-        ? '<label title="the slicer profile\'s prime; empty for the stock one">prime mm' + inp(p, 'start.prime', '', 'type="number" step="any"') + '</label>' +
-          '<label title="the slicer profile\'s tool-change purge; empty for the stock one">tool-change purge mm' + inp(p, 'start.tcpurge', '', 'type="number" step="any"') + '</label>' +
-          '<label title="when tool a runs out, the print goes on with tool b">spool joins (a&gt;b, c&gt;d)' + inp(p, 'start.joins', '', 'type="text"') + '</label>'
+        ? '<label title="when tool a runs out, the print goes on with tool b">spool joins (a&gt;b, c&gt;d)' + inp(p, 'start.joins', '', 'type="text"') + '</label>'
+        : '') +
+      (mmuOn
+        ? '<label title="a file sliced without the MMU profile: tool 0 alone, which the firmware loads and unloads"><input type="checkbox" data-k="start.single"' +
+          (getv(p.name, 'start.single', false) ? ' checked' : '') + '>single-tool file</label>'
         : '') +
       '<label>file name' + inp(p, 'start.name', 'part.bgcode', 'type="text"') + '</label>' +
       btn('Start', 'start_submit', {}) + '</div>';
@@ -457,6 +464,7 @@ function startBody(name) {
     joins.push({ tool: Number(m[1]), to: Number(m[2]) });
   }
   if (joins.length) body.spool_join = joins;
+  if (getv(name, 'start.single', false)) body.single_tool_file = true;
   const cc = String(getv(name, 'start.cc', '')).split(',').map((x) => x.trim()).filter(Boolean).map(Number);
   if (cc.some((x) => !Number.isFinite(x))) throw new Error('Color changes must be numbers');
   if (cc.length) body.color_changes_mm = cc;
