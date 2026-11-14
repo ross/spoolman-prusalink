@@ -14,6 +14,7 @@ from simulator.model import (
     Firmware,
     Invalid,
     Material,
+    ModelInfo,
     Settings,
     SimPrinter,
     SimTool,
@@ -21,7 +22,6 @@ from simulator.model import (
     check_color,
     check_name,
     check_uuid,
-    preset_temperatures,
 )
 
 _NAME_PATTERN = r"[A-Za-z0-9_.-]{1,64}"
@@ -35,6 +35,7 @@ _PRINTER_KEYS = {
     "firmware",
     "auto_accept_model_check",
     "high_flow",
+    "auto_retract",
     "tools",
 }
 _TOOL_KEYS = {"index", "enabled", "material", "extruded", "unload_count", "extruded_at_unload"}
@@ -67,6 +68,7 @@ class PrinterConfig:
     # None means the global setting.
     auto_accept_model_check: bool | None = None
     high_flow: bool = False
+    auto_retract: bool = True
     tools: tuple[ToolConfig, ...] = (ToolConfig(0),)
 
 
@@ -231,6 +233,11 @@ def _printer(entry: object, position: int, control_port: int) -> PrinterConfig:
         if firmware not in {f.value for f in Firmware}:
             known = ", ".join(f.value for f in Firmware)
             raise ConfigError(f"{prefix}.firmware must be one of {known}, got {firmware!r}")
+    auto_retract = _bool(entry.get("auto_retract", True), f"{prefix}.auto_retract")
+    if not auto_retract and not MODELS[model].extruder.auto_retract_switchable:
+        raise ConfigError(
+            f"{prefix}.auto_retract can't be false: model {model} has no auto-retract switch"
+        )
     auto_accept = None
     if "auto_accept_model_check" in entry:
         auto_accept = _bool(entry["auto_accept_model_check"], f"{prefix}.auto_accept_model_check")
@@ -242,6 +249,7 @@ def _printer(entry: object, position: int, control_port: int) -> PrinterConfig:
         firmware=firmware,
         auto_accept_model_check=auto_accept,
         high_flow=_bool(entry.get("high_flow", False), f"{prefix}.high_flow"),
+        auto_retract=auto_retract,
         tools=_tools(entry.get("tools"), prefix, model),
     )
 
@@ -298,10 +306,17 @@ def load(path: str | os.PathLike) -> SimConfig:
     return SimConfig(host, control_port, data_dir, settings, printers)
 
 
+def tool_location(name: str, index: int, tools: int) -> str:
+    """The Spoolman location of tool `index` on a printer named `name` with `tools` tools:
+    the name for one tool, else the name and the tool's number from 1, as `<name> T1`.
+
+    The test harnesses name their tools' locations by it too.
+    """
+    return name if tools == 1 else f"{name} T{index + 1}"
+
+
 def _location(printer: PrinterConfig, tool: ToolConfig) -> str:
-    if len(printer.tools) == 1:
-        return printer.name
-    return f"{printer.name} T{tool.index + 1}"
+    return tool_location(printer.name, tool.index, len(printer.tools))
 
 
 def locations(cfg: SimConfig) -> list[Location]:
@@ -357,7 +372,7 @@ def build(cfg: SimConfig) -> Simulation:
     for pc in cfg.printers:
         model = MODELS[pc.model]
         default = Firmware.FULL if model.counters else Firmware.NO_COUNTERS
-        tools = {tc.index: _sim_tool(tc) for tc in pc.tools}
+        tools = {tc.index: _sim_tool(model, tc) for tc in pc.tools}
         enabled = sorted(i for i, t in tools.items() if t.enabled)
         sim.add(
             SimPrinter(
@@ -368,6 +383,7 @@ def build(cfg: SimConfig) -> Simulation:
                 firmware=Firmware(pc.firmware) if pc.firmware else default,
                 auto_accept_model_check=pc.auto_accept_model_check,
                 high_flow=pc.high_flow,
+                auto_retract=pc.auto_retract,
                 tools=tools,
                 selected_tool=enabled[0] if enabled else min(tools),
             )
@@ -375,14 +391,14 @@ def build(cfg: SimConfig) -> Simulation:
     return sim
 
 
-def _sim_tool(tc: ToolConfig) -> SimTool:
+def _sim_tool(model: ModelInfo, tc: ToolConfig) -> SimTool:
     m = tc.material
     material = None
     if m:
         color, uuid_ = m["color"], m["instance_uuid"]
         # A configured color or UUID can only come from an ad-hoc type; a bare name is a preset.
         adhoc = bool(color or uuid_)
-        material = Material(m["name"], color, uuid_, adhoc, **preset_temperatures(m["name"]))
+        material = Material(m["name"], color, uuid_, adhoc, **model.preset_temperatures(m["name"]))
     return SimTool.loaded_with(
         tc.index,
         material,

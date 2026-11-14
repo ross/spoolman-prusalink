@@ -10,7 +10,6 @@ import pytest
 
 from integration.conftest import (
     ASA,
-    LOAD_MM,
     PETG,
     PLA,
     UUID_FIELD,
@@ -27,7 +26,7 @@ from integration.temperatures import TEMPERATURES, WRITTEN
 from simulator import prusalink
 from simulator.model import MODELS, JobPhase, Material, ModelInfo, State
 from simulator.prusalink import DROP, Answer, Reply
-from simulator.tool import MK4_EXTRUDER
+from simulator.tool import LOAD_CELL_PRESETS, MK4_EXTRUDER
 from spoolman_prusalink.printer_sync import PRINTER_MODELS, default_preamble
 
 COREONEL_PREAMBLE = default_preamble(PRINTER_MODELS["8.1.0"])
@@ -80,9 +79,11 @@ async def test_w1_write_after_swap(world: World):
     assert w.material() == (PETG[0], None, None)
     assert w.requests("PUT") == []
 
-    # Idle and different from B: the bridge uploads the sync job.
+    # Idle and different from B: the bridge uploads the sync job. 30 * 0.95 = 28.5 and the
+    # unload's 23 mm ram, 21.85, took the counter to 1050.35; LOADS["8.1.0"], 78.85, on
+    # top: 1129.20, so 1129 - 1050 = 79.
     records = await w.poll()
-    assert w.charged(records, "B") == LOAD_MM
+    assert w.charged(records, "B") == 79
     puts = w.requests("PUT")
     assert len(puts) == 1 and SYNC_FILE in puts[0].text
     w.advance(1.5)
@@ -399,36 +400,38 @@ async def test_w9_temperature_drift_is_flagged_unless_sync_drift(
     assert await w.flag("A") is None
 
 
-# The charge for the load and three 10 mm extrudes. The load leaves 8 mm of gap, so the
-# extrudes count 2 + 10 + 10 = 22 mm. The MK4 extruder loads 30 slow + 50 fast, 40 past
-# its 40 mm gap, and purges 27: (40 + 27 + 22) * 0.95 = 84.55. The Core One L's load is
-# LOADS["8.1.0"]: 57 + 22 * 0.95 = 77.9.
+# The charge for the load and three 10 mm extrudes. The unload rams 23 first, from 1000:
+# 1021.85. The load's auto-retract rams 23 and leaves the filament 55 mm retracted, so the
+# first extrude feeds 15 past the gap: the extrudes count 15 + 30 = 45 mm. The MK4
+# extruder loads 30 slow + 50 fast, 40 past its 40 mm gap, and purges 27:
+# 1021.85 + (40 + 27 + 23 + 45) * 0.95 = 1150.10, so 1150 - 1021 = 129. The Core One L's
+# load is LOADS["8.1.0"]: 1021.85 + 78.85 + 45 * 0.95 = 1143.45, so 1143 - 1021 = 122.
 @pytest.mark.parametrize(
     "model, preamble, problem, charged",
     [
         (
-            ModelInfo("99.1.0", "FUTURE", MK4_EXTRUDER),
+            ModelInfo("99.1.0", "FUTURE", MK4_EXTRUDER, LOAD_CELL_PRESETS),
             None,
             "printer type '99.1.0' isn't one the bridge knows",
-            84,
+            129,
         ),
         (
             MODELS["3.1.0"],
             None,
             "XL isn't supported: multi-tool printers aren't supported yet",
-            84,
+            129,
         ),
         (
             MODELS["1.4.0"],
             COREONEL_PREAMBLE,
             "gcode_preamble is for COREONEL but the printer is MK4",
-            84,
+            129,
         ),
         (
             MODELS["8.1.0"],
             ("M862.5 P2 ; level check", 'M862.6 P"Input shaper"'),
             "gcode_preamble has no M862.3 model check; set one for COREONEL",
-            77,
+            122,
         ),
     ],
     ids=["unknown", "unsupported", "mismatched", "no_model_check"],
@@ -525,9 +528,9 @@ async def test_w11_tag_is_not_written_back(world: World):
     await w.move("A", w.shelf)
     await w.move("B", w.tool_location)
     records = await w.poll()
-    assert event_fields(records, "swap_confirmed") == [
-        {"mm": LOAD_MM, "from_spool": a, "to_spool": b}
-    ]
+    # The unload rammed 23 from 1000: 1021.85. LOADS["8.1.0"], 78.85, on top: 1100.70, so
+    # 1100 - 1021 = 79.
+    assert event_fields(records, "swap_confirmed") == [{"mm": 79, "from_spool": a, "to_spool": b}]
     for _ in range(2):
         await w.poll()
         w.advance(2.0)
@@ -838,11 +841,12 @@ async def test_w10_model_unreadable_until_it_answers(
     w.before_request = no_version
     await write_due(w)
     records = await w.poll()
-    assert w.charged(records, "B") == LOAD_MM
-    # The counter reads 1085.5: 1000, the 28.5 before the unload and the load's 57. The
-    # first 10 mm count 2 past the load's 8 mm gap, then 10 each, times 0.95: 1087.4,
-    # 1096.9 and 1106.4.
-    for charged in (2, 9, 10):
+    # The counter reads 1129.20: 1000, the 28.5 before the unload, its 23 mm ram, 21.85,
+    # and LOADS["8.1.0"], 78.85; so 1129 - 1050 = 79.
+    assert w.charged(records, "B") == 79
+    # The first 10 mm feed back the load's 55 mm retraction first, 15 past the gap, then
+    # 10 each, times 0.95: (15 + 10) * 0.95 = 23.75 to 1152.95, then 1162.45 and 1171.95.
+    for charged in (23, 10, 9):
         w.advance(1.0)
         w.printer.extrude(0, 10)
         records = await w.poll()
@@ -903,14 +907,17 @@ async def test_w6_sync_job_gone_before_its_name_is_read(
     await w.poll()
     assert [e.text for e in w.requests("GET /api/v1/job")] == ["GET /api/v1/job 204"]
     assert not logged(caplog, logging.WARNING, "read failed")
-    # The load leaves 8 mm of gap, so the 10 mm count 2, 1.9 on top of the load's 1057.
+    # The unload rammed 23 from 1000, 21.85, and the load counted LOADS["8.1.0"], 78.85:
+    # 1100.70. The sync job found the filament already retracted, so its end counted
+    # nothing. The load left it 55 mm retracted, so the first 5 mm feed 15 past the gap
+    # first: (15 + 5 + 5) * 0.95 = 23.75, so 1124.45 and 1124 - 1100 = 24.
     for _ in range(2):
         w.advance(1.0)
         w.printer.extrude(0, 5)
         await w.poll()
     records = w.since(mark)
     assert events(records, "swap_assumed") == []
-    assert w.charged(records, "A") == 1
+    assert w.charged(records, "A") == 24
     flag = await w.flag("A")
     assert flag is not None and "unloaded with no Spoolman change" in flag
 

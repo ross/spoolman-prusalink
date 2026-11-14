@@ -6,8 +6,9 @@ models, the preset filaments, the reset defaults and the tag aliases. This modul
 the same tables from the firmware source for each firmware build and lists every place
 a copy differs. A difference on `EXPECTED` is reported but doesn't fail the check.
 
-Each build also carries its extruder numbers (steps per mm, filament change lengths,
-ramming sequences and the nozzle cleaner's purge), which the simulator's models copy.
+Each build also carries its preset filaments and its extruder numbers (steps per mm,
+filament change lengths, ramming sequences and the nozzle cleaner's purge), which the
+simulator's models copy.
 """
 
 from __future__ import annotations
@@ -268,7 +269,7 @@ class Copies:
     default_preheat: int
     preset_preheat: int  # the `Preset` dataclass's preheat default
     sim_models: Mapping[str, Any]  # simulator.model.ModelInfo
-    sim_presets: Mapping[str, tuple[int, int, int]]
+    sim_flexible: frozenset[str]
     sim_defaults: tuple[int, int, int]
     sim_aliases: Mapping[str, str]
 
@@ -288,7 +289,7 @@ class Copies:
             default_preheat=bridge.DEFAULT_PREHEAT,
             preset_preheat=preheat,  # type: ignore[arg-type]
             sim_models=model.MODELS,
-            sim_presets=tool.PRESET_TEMPERATURES,
+            sim_flexible=tool.FLEXIBLE_PRESETS,
             sim_defaults=tool.DEFAULT_TEMPERATURES,
             sim_aliases=tool.PRESET_ALIASES,
         )
@@ -330,7 +331,7 @@ TABLES = (
     "bridge DEFAULT_PREHEAT",
     "bridge PRESET_ALIASES",
     "simulator MODELS",
-    "simulator PRESET_TEMPERATURES",
+    "simulator presets",
     "simulator DEFAULT_TEMPERATURES",
     "simulator PRESET_ALIASES",
 )
@@ -348,22 +349,23 @@ def compare(firmware: Firmware, copies: Copies) -> list[Difference]:
     _compare_bridge_models(built, firmware.models, copies, differ)
     _compare_sim_models(built, firmware.models, copies, differ)
 
-    # The presets of each model the bridge writes to. Both copies hold one table for
-    # every model; a material only some builds have (PPS and PPA) may be in a copy.
+    # The presets of each model the bridge writes to. The bridge holds one table for
+    # every model; a material only some builds have (PPS and PPA) may be in it.
     supported = sorted(
         (c for c, m in copies.bridge_models.items() if m.unsupported is None and c in built),
         key=_version,
     )
     anywhere = {m for b in firmware.builds.values() for m in b.presets}
     for code in supported:
-        build = built[code]
-        for material, fw in build.presets.items():
+        for material, fw in built[code].presets.items():
             _compare_bridge_preset(code, material, fw, copies.bridge_presets, differ)
-            _compare_sim_preset(code, material, fw, copies.sim_presets, differ)
     for material in sorted(copies.bridge_presets.keys() - anywhere):
         differ("bridge PRESETS", None, material, "material", MISSING, PRESENT)
-    for material in sorted(copies.sim_presets.keys() - anywhere):
-        differ("simulator PRESET_TEMPERATURES", None, material, "material", MISSING, PRESENT)
+    # Each simulator model holds its own build's table.
+    for code in sorted(built.keys() & copies.sim_models.keys(), key=_version):
+        _compare_sim_presets(code, built[code], copies, differ)
+    for material in sorted(copies.sim_flexible - anywhere):
+        differ("simulator presets", None, material, "flexible", MISSING, PRESENT)
     door = {
         m
         for code in supported
@@ -510,22 +512,24 @@ def _compare_bridge_preset(
         differ(table, code, material, "filtration", fw["requires_filtration"], preset.filtration)
 
 
-def _compare_sim_preset(
-    code: str,
-    material: str,
-    fw: Mapping[str, read.Value],
-    presets: Mapping[str, Any],
-    differ: Differ,
-) -> None:
-    table = "simulator PRESET_TEMPERATURES"
-    values = presets.get(material)
-    if values is None:
-        differ(table, code, material, "material", PRESENT, MISSING)
-        return
-    nozzle, preheat, bed = values
-    differ(table, code, material, "nozzle", fw["nozzle_temperature"], nozzle)
-    differ(table, code, material, "preheat", fw["nozzle_preheat_temperature"], preheat)
-    differ(table, code, material, "bed", fw["heatbed_temperature"], bed)
+def _compare_sim_presets(code: str, build: Build, copies: Copies, differ: Differ) -> None:
+    """Compare one model's `presets` with its build's, both ways."""
+    table = "simulator presets"
+    presets = copies.sim_models[code].presets
+    for material, fw in build.presets.items():
+        values = presets.get(material)
+        if values is None:
+            differ(table, code, material, "material", PRESENT, MISSING)
+            continue
+        nozzle, preheat, bed = values
+        differ(table, code, material, "nozzle", fw["nozzle_temperature"], nozzle)
+        differ(table, code, material, "preheat", fw["nozzle_preheat_temperature"], preheat)
+        differ(table, code, material, "bed", fw["heatbed_temperature"], bed)
+        # `FLEXIBLE_PRESETS` is one set for every model, compared with each build's.
+        flexible = material in copies.sim_flexible
+        differ(table, code, material, "flexible", fw["is_flexible"], flexible)
+    for material in sorted(presets.keys() - build.presets.keys()):
+        differ(table, code, material, "material", MISSING, PRESENT)
 
 
 @dataclass(frozen=True)

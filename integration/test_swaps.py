@@ -11,7 +11,6 @@ import pytest
 from integration.conftest import (
     ASA,
     CLAIM_FIELD,
-    LOAD_MM,
     PETG,
     PLA,
     UUID_FIELD,
@@ -54,19 +53,21 @@ async def test_s1_spoolman_first_swap(world: World):
     assert len(events(records, "swap_staged")) == 1
     assert w.charged(records, "A") == 19
 
-    w.printer.extrude(0, 30)  # 28.5 more: 1047.5
+    # 28.5 more: 1047.5. The unload rams 23 first, 21.85 more: 1069.35.
+    w.printer.extrude(0, 30)
     await w.unload()
     records = await w.poll()
     assert len(events(records, "unload")) == 1
     assert event_fields(records, "swap_committed") == [{"from_spool": a, "to_spool": b}]
-    assert w.charged(records, "A") == 28
+    assert w.charged(records, "A") == 1069 - 1019
     assert await w.spoolman.location(w.spools["A"]) is None  # Evicted to no location.
 
-    before = w.tool.extruded
+    # LOADS["8.1.0"], 78.85, on top of 1069.35: 1148.2.
+    before = w.counter
     records = await w.swap_cycle(poll_every=0.3, source="tag", name=PETG[0], color=PETG[1])
     records += await w.poll()
-    assert w.tool.extruded - before == LOAD_MM
-    assert w.charged(records, "B") == LOAD_MM
+    assert w.counter - before == 1148 - 1069
+    assert w.charged(records, "B") == 1148 - 1069
     assert w.charged(records, "A") == 0
     assert await w.used("B") > 0
 
@@ -90,7 +91,8 @@ async def test_s1_matching_tag_writes_nothing(world: World):
     records += await w.poll()
     w.advance(2.0)
     records += await w.poll()
-    assert w.charged(records, "B") == LOAD_MM
+    # The unload rams 23, 21.85: 1021.85; LOADS["8.1.0"], 78.85, on top: 1100.7.
+    assert w.charged(records, "B") == 1100 - 1021
     assert w.requests("PUT") == []
     assert w.material() == (PETG[0], PETG[1], uuid_b)
 
@@ -113,7 +115,8 @@ async def test_s1_tag_with_other_values_is_left_alone(world: World):
     for _ in range(3):
         records += await w.poll()
         w.advance(2.0)
-    assert w.charged(records, "B") == LOAD_MM
+    # The unload rams 23, 21.85: 1021.85; LOADS["8.1.0"], 78.85, on top: 1100.7.
+    assert w.charged(records, "B") == 1100 - 1021
     assert w.requests("PUT") == []
     assert w.material() == (ASA[0], ASA[1], tag)
     assert w.printer.tools[0].material.temperatures() == temperatures
@@ -160,7 +163,8 @@ async def test_s1_tag_uuid_is_adopted(world: World):
     records += await w.poll()
     w.advance(2.0)
     records += await w.poll()
-    assert w.charged(records, "B") == LOAD_MM
+    # The unload rams 23, 21.85: 1021.85; LOADS["8.1.0"], 78.85, on top: 1100.7.
+    assert w.charged(records, "B") == 1100 - 1021
     assert await w.spoolman.extra(b, UUID_FIELD) == tag
     assert w.requests("PUT") == []
     assert w.material() == (PETG[0], PETG[1], tag)
@@ -266,7 +270,8 @@ async def test_s1_tag_uuid_of_an_archived_spool_is_refused(
         poll_every=0.3, source="tag", name=PETG[0], color=PETG[1], uuid=tag
     )
     records += await w.poll()
-    assert w.charged(records, "B") == LOAD_MM
+    # The unload rams 23, 21.85: 1021.85; LOADS["8.1.0"], 78.85, on top: 1100.7.
+    assert w.charged(records, "B") == 1100 - 1021
     refused = f"spool {b} can't take instance UUID {tag} from the printer: archived spool {c}"
     assert logged_once(caplog, logging.INFO, refused)
     assert len(archived_reads) == 1
@@ -290,11 +295,12 @@ async def test_s2_filament_first_swap(world: World):
     a, b = w.spools["A"], w.spools["B"]
     await baseline(w)
 
-    w.printer.extrude(0, 30)  # 30 * 0.95 = 28.5
+    # 30 * 0.95 = 28.5, then the unload rams 23, 21.85 more: 1050.35.
+    w.printer.extrude(0, 30)
     await w.unload()
     records = await w.poll()
     assert len(events(records, "swap_unconfirmed")) == 1
-    assert w.charged(records, "A") == 28
+    assert w.charged(records, "A") == 50
     flag = await w.flag("A")
     assert flag is not None and "unloaded" in flag
 
@@ -309,7 +315,8 @@ async def test_s2_filament_first_swap(world: World):
 
     records = await w.swap_cycle(poll_every=0.3, source="tag", name=PETG[0], color=PETG[1])
     records += await w.poll()
-    assert w.charged(records, "B") == LOAD_MM
+    # LOADS["8.1.0"], 78.85, on top of 1050.35: 1129.2.
+    assert w.charged(records, "B") == 1129 - 1050
     assert w.charged(records, "A") == 0
 
 
@@ -334,12 +341,14 @@ async def test_s14_several_swaps_between_polls(world: World):
     assert event_fields(records, "swap_committed") == [
         {"from_spool": w.spools["A"], "to_spool": w.spools["C"]}
     ]
-    # Everything up to the second unload, B's load included, is A's: 30 * 0.95 = 28.5, then
-    # the load.
-    assert w.charged(records, "A") == 28 + LOAD_MM
+    # Everything up to the second unload, B's load included, is A's: 30 * 0.95 = 28.5, the
+    # first unload's ram, 21.85, to 1050.35, and LOADS["8.1.0"], 78.85, to 1129.2. The load left
+    # the filament auto-retracted, so the second unload is cold and counts nothing.
+    assert w.charged(records, "A") == 1129 - 1000
 
+    # C's load, 78.85 on top of 1129.2: 1208.05.
     records += await w.poll()
-    assert w.charged(records, "C") == LOAD_MM
+    assert w.charged(records, "C") == 1208 - 1129
     assert w.charged(records, "B") == 0
     assert {r["spool_id"] for r in charges(records)} == {w.spools["A"], w.spools["C"]}
     assert await w.used("B") == 0
@@ -365,17 +374,19 @@ async def test_s5_claim_after_printing_on_the_wrong_spool(
     a, b = w.spools["A"], w.spools["B"]
     await baseline(w)
 
-    w.printer.extrude(0, 30)  # 30 * 0.95 = 28.5
+    # 30 * 0.95 = 28.5, then the unload rams 23, 21.85 more: 1050.35.
+    w.printer.extrude(0, 30)
     await w.unload()
     records = await w.poll()
     assert len(events(records, "swap_unconfirmed")) == 1
-    assert w.charged(records, "A") == 28
+    assert w.charged(records, "A") == 50
     unloaded = w.mark()
 
     # B goes in at the printer from the menu, Spoolman is forgotten, and a print starts.
+    # LOADS["8.1.0"], 78.85, on top of 1050.35: 1129.2.
     await w.swap_cycle(source="preset", name=PETG[0])
     records = await w.poll()
-    assert w.charged(records, "A") == LOAD_MM
+    assert w.charged(records, "A") == 1129 - 1050
     # A is still active and the printer shows B's type, so that poll wrote A back (W11).
     assert len(w.requests("PUT")) == 1
     await w.run_until(lambda: w.printer.job is None)
@@ -506,9 +517,12 @@ async def test_s13_staged_spool_claimed(world: World, caplog: pytest.LogCaptureF
     await w.run_until(lambda: w.printer.job is None)
     minted = await w.spoolman.extra(b, "instance_uuid")
     assert w.material() == (PETG[0], PETG[1], minted)
-    w.printer.extrude(0, 20)  # 20 * 0.95 = 19 on top of 1028.5: 1047.5
+    # The write's sync job ended with the auto-retract: its ram, 21.85 on top of 1028.5, to
+    # 1050.35, leaves 55 mm retracted. The 20 mm feed that back first, 15 past the gap:
+    # (15 + 20) * 0.95 = 33.25, to 1083.6.
+    w.printer.extrude(0, 20)
     records = await w.poll()
-    assert w.charged(records, "B") == 19
+    assert w.charged(records, "B") == 1083 - 1028
     assert w.charged(records, "A") == 0
 
 
@@ -555,19 +569,23 @@ async def test_s9_staged_spool_never_unloaded(world: World, caplog: pytest.LogCa
         {"spool": b, "replaced": a, "deleted_spool": None, "moved": [], "since": "reboot"}
     ]
     await w.run_until(lambda: w.printer.job is None)
-    w.printer.extrude(0, 20)  # The boot left no gap: 20 * 0.95 = 19
+    # The print's end left 55 mm retracted, which the boot keeps, so the sync job's end
+    # skips the auto-retract. The 20 mm feed the 55 back first, 15 past the gap:
+    # (15 + 20) * 0.95 = 33.25.
+    w.printer.extrude(0, 20)
     records = await w.poll()
-    assert w.charged(records, "B") == 19
+    assert w.charged(records, "B") == 33
     assert w.charged(records, "A") == 0
 
 
 async def unconfirmed_swap(w: World) -> int:
-    """Charge A 28 mm and unload with no Spoolman change; return the ledger mark after."""
-    w.printer.extrude(0, 30)  # 30 * 0.95 = 28.5: the counter reads 1028
+    """Charge A 50 mm and unload with no Spoolman change; return the ledger mark after."""
+    # 30 * 0.95 = 28.5, then the unload rams 23, 21.85 more: the counter reads 1050.
+    w.printer.extrude(0, 30)
     await w.unload()
     records = await w.poll()
     assert len(events(records, "swap_unconfirmed")) == 1
-    assert w.charged(records, "A") == 28
+    assert w.charged(records, "A") == 50
     return w.mark()
 
 
@@ -628,11 +646,12 @@ async def test_s3_old_spool_moved_back(world: World):
         poll_every=0.3, source="tag", name=PLA[0], color=PLA[1], uuid=w.uuids["A"]
     )
     records += await w.poll()
-    assert w.charged(records, "A") == LOAD_MM
+    # LOADS["8.1.0"], 78.85, on top of 1050.35: 1129.2.
+    assert w.charged(records, "A") == 1129 - 1050
 
     # Out and back between prints: as if A never left, the swap is still open.
-    # The counter reads 1085.5: 1000, the 28.5 before the unload and the load's 57. The
-    # 10 mm count 2 past the load's 8 mm gap, 1.9, to 1087.4.
+    # The 10 mm feed the load's 55 mm retraction back first, 15 past the gap:
+    # (15 + 10) * 0.95 = 23.75, to 1152.95.
     await w.move("A", w.shelf)
     await w.poll()
     w.printer.extrude(0, 10)
@@ -641,7 +660,7 @@ async def test_s3_old_spool_moved_back(world: World):
     await w.move("A", w.tool_location)
     records = await w.poll()
     assert event_fields(records, "active_reassigned") == [{"spool": a}]
-    assert w.charged(records, "A") == 2
+    assert w.charged(records, "A") == 1152 - 1129
     flag = await w.flag("A")
     assert flag is not None and "unloaded with no Spoolman change" in flag
 
@@ -676,7 +695,7 @@ async def test_s3_unload_while_the_location_is_empty(
     await w.swap_cycle(poll_every=0.3, source="tag", name=PETG[0], color=PETG[1])
     records = w.since(unloaded) + await w.poll()
     on_a = w.charged(records, "A")
-    assert on_a == LOAD_MM
+    assert on_a == 1129 - 1050  # LOADS["8.1.0"], 78.85, on top of 1050.35: 1129.2.
     # B was loaded from its tag, so A isn't written back over it (Q11).
     await w.run_until(lambda: w.printer.job is None)
     assert w.requests("PUT") == []
@@ -684,15 +703,16 @@ async def test_s3_unload_while_the_location_is_empty(
 
     await w.move("A", w.shelf)
     await w.poll()
-    # The 25 mm go past the load's 8 mm gap: 17 * 0.95 = 16.15 on top of 1085.5.
+    # The 25 mm feed the load's 55 mm retraction back first, 15 past the gap:
+    # (15 + 25) * 0.95 = 38, to 1167.2. The unload rams 23, 21.85 more: 1189.05.
     w.printer.extrude(0, 25)
     await w.unload()
     records = await w.poll()
-    msg = LostUnassigned(mm=16).message
-    assert event_fields(records, "lost_unassigned") == [{"mm": 16}]
+    msg = LostUnassigned(mm=1189 - 1129).message
+    assert event_fields(records, "lost_unassigned") == [{"mm": 1189 - 1129}]
     assert logged_once(caplog, logging.WARNING, f"[{w.tool_location}] {msg}")
     assert events(records, "swap_confirmed") == [] and charges(records) == []
-    assert charged(w.since(unloaded), a) == LOAD_MM  # The swap's usage stays on A.
+    assert charged(w.since(unloaded), a) == 1129 - 1050  # The swap's usage stays on A.
     assert await w.flag("A") is None
 
     # The next spool moved in takes only what came after the second unload.
@@ -700,7 +720,8 @@ async def test_s3_unload_while_the_location_is_empty(
     await w.swap_cycle(poll_every=0.3, source="tag", name=ASA[0], color=ASA[1])
     await w.move("C", w.tool_location)
     records = await w.poll()
-    assert w.charged(records, "C") == w.counter - after == LOAD_MM
+    # LOADS["8.1.0"], 78.85, on top of 1189.05: 1267.9.
+    assert w.charged(records, "C") == w.counter - after == 1267 - 1189
     assert w.charged(records, "A") == 0
 
 
@@ -726,14 +747,16 @@ async def test_s3_moved_after_the_write_back(world: World):
     await w.move("A", w.shelf)
     await w.move("B", w.tool_location)
     records = await w.poll()
+    # LOADS["8.1.0"], 78.85, on top of 1050.35: 1129.2. The load left the filament auto-retracted,
+    # so the write's sync job skips the auto-retract and counts nothing.
     assert event_fields(records, "swap_confirmed") == [
-        {"mm": LOAD_MM, "from_spool": a, "to_spool": b}
+        {"mm": 1129 - 1050, "from_spool": a, "to_spool": b}
     ]
     assert len(w.requests("PUT")) == 2  # Written in the poll that confirms the swap.
     await w.run_until(lambda: w.printer.job is None)
     name, color, uuid = w.material()
     assert (name, color) == PETG and uuid not in (None, w.uuids["A"])
-    assert charged(w.since(unloaded), b) == LOAD_MM
+    assert charged(w.since(unloaded), b) == 1129 - 1050
     assert charged(w.since(unloaded), a) == 0
 
 
@@ -786,12 +809,14 @@ async def test_s6_unload_with_nothing_assigned(world: World, caplog: pytest.LogC
     await w.unload()
     records = await w.poll()
     assert len(events(records, "unloaded_unassigned")) == 1
+    # The first unload rams 23, 21.85: 1021.85; LOADS["8.1.0"], 78.85, on top: 1100.7. The load
+    # left the filament auto-retracted, so the second unload is cold and counts nothing.
     await w.swap_cycle(poll_every=0.3, source="tag", name=PETG[0], color=PETG[1])
     await w.poll()
     await w.unload()
     records = await w.poll()
-    msg = LostUnassigned(mm=LOAD_MM).message
-    assert event_fields(records, "lost_unassigned") == [{"mm": LOAD_MM}]
+    msg = LostUnassigned(mm=1100 - 1021).message
+    assert event_fields(records, "lost_unassigned") == [{"mm": 1100 - 1021}]
     assert logged_once(caplog, logging.WARNING, f"[{w.tool_location}] {msg}")
     assert charges(records) == []
 
@@ -804,7 +829,7 @@ async def test_s6_unload_with_nothing_assigned(world: World, caplog: pytest.LogC
     c = w.spools["C"]
     assert event_fields(records, "assignment_changed") == [{"spool": c}]
     assert {r["spool_id"] for r in charges(records)} == {c}
-    assert w.charged(records, "C") == LOAD_MM
+    assert w.charged(records, "C") == 1179 - 1100  # 78.85 on top of 1100.7: 1179.55.
     assert await w.used("B") == 0
 
 
@@ -826,16 +851,18 @@ async def test_s7_old_spool_out_new_in_then_unload(world: World):
     assert event_fields(records, "swap_staged") == [{"staged": b, "active": a}]
     assert w.charged(records, "A") == 19
 
-    w.printer.extrude(0, 30)  # 28.5 more: 1057
+    # 28.5 more: 1057. The unload rams 23, 21.85 more: 1078.85.
+    w.printer.extrude(0, 30)
     await w.unload()
     records = await w.poll()
     assert event_fields(records, "swap_committed") == [{"from_spool": a, "to_spool": b}]
-    assert w.charged(records, "A") == 29
+    assert w.charged(records, "A") == 1078 - 1028
     assert await w.spoolman.location(a) == w.shelf  # Already out: nothing to evict.
 
     records = await w.swap_cycle(poll_every=0.3, source="tag", name=PETG[0], color=PETG[1])
     records += await w.poll()
-    assert w.charged(records, "B") == LOAD_MM
+    # LOADS["8.1.0"], 78.85, on top of 1078.85: 1157.7.
+    assert w.charged(records, "B") == 1157 - 1078
     assert w.charged(records, "A") == 0
 
 
@@ -882,10 +909,11 @@ async def test_s10_spool_moved_out_with_no_replacement(
     assert len(events(records, "active_unassigned")) == 1
     assert w.charged(records, "A") == 19
 
-    w.printer.extrude(0, 30)  # 28.5 more: 1047.5
+    # 28.5 more: 1047.5. The unload rams 23, 21.85 more: 1069.35.
+    w.printer.extrude(0, 30)
     await w.unload()
     records = await w.poll()
-    assert w.charged(records, "A") == 28
+    assert w.charged(records, "A") == 1069 - 1019
     assert event_fields(records, "unloaded_unassigned") == [{"spool": a}]
     assert events(records, "swap_unconfirmed") == []
     assert await w.flag("A") is None
@@ -900,7 +928,7 @@ async def test_s10_spool_moved_out_with_no_replacement(
     await w.move("B", w.tool_location)
     records = await w.poll()
     assert event_fields(records, "assignment_changed") == [{"spool": b}]
-    assert w.charged(records, "B") == LOAD_MM
+    assert w.charged(records, "B") == 1148 - 1069  # 78.85 on top of 1069.35: 1148.2.
     assert w.charged(records, "A") == 0
 
 
@@ -938,7 +966,8 @@ async def test_s12_spoolman_corrected_to_the_loaded_uuid(world: World):
     a, b = w.spools["A"], w.spools["B"]
     uuid_b = "0b7d4c6e-5f2a-4b8e-9c3d-2e1f0a9b8c7d"
 
-    # B went in before the bridge started, so its baseline wrongly takes A.
+    # B went in before the bridge started, so its baseline wrongly takes A. The unload rams
+    # 23, 21.85: 1021.85; LOADS["8.1.0"], 78.85, on top: 1100.7.
     await w.unload()
     await w.swap_cycle(source="tag", name=PETG[0], color=PETG[1], uuid=uuid_b)
     await baseline(w)
@@ -948,21 +977,22 @@ async def test_s12_spoolman_corrected_to_the_loaded_uuid(world: World):
     # The user gives B its UUID and moves it into the location, with no unload.
     await set_extra_text(w.spoolman.client, b, UUID_FIELD, uuid_b)
     await w.move("B", w.tool_location)
-    # The 20 mm go past the load's 8 mm gap: 12 * 0.95 = 11.4 on top of 1057.
+    # The 20 mm feed the load's 55 mm retraction back first, 15 past the gap:
+    # (15 + 20) * 0.95 = 33.25, to 1133.95.
     w.printer.extrude(0, 20)
     records = await w.poll()
     assert event_fields(records, "correction") == [
         {"spool": b, "from_spool": a, "moved": None, "since": None}
     ]
     assert events(records, "swap_staged") == []
-    assert w.charged(records, "B") == 11
+    assert w.charged(records, "B") == 1133 - 1100
     assert w.charged(records, "A") == 0
     assert await w.spoolman.location(a) is None  # Evicted, as for a swap.
     assert await w.flag("A") is None
 
-    w.printer.extrude(0, 15)  # 14.25 more: 1082.65
+    w.printer.extrude(0, 15)  # 14.25 more: 1148.2
     records = await w.poll()
-    assert w.charged(records, "B") == 14
+    assert w.charged(records, "B") == 1148 - 1133
     assert w.requests("PUT") == []  # The printer already shows B.
 
 
@@ -1050,12 +1080,15 @@ async def test_k1_claim_handled_once_when_clearing_fails(
     faults.restore()
     resp = await w.spoolman.client.patch(clear, json={"extra": {CLAIM_FIELD: "false"}})
     resp.raise_for_status()
-    await w.run_until(lambda: w.printer.job is None)  # The write of B queued at the claim.
-    w.printer.extrude(0, 10)  # 9.5 more: 1038
+    # The write of B queued at the claim. Its sync job ends with the auto-retract: the ram,
+    # 21.85 on top of 1028.5, to 1050.35, leaves 55 mm retracted. The 10 mm feed that back
+    # first, 15 past the gap: (15 + 10) * 0.95 = 23.75, to 1074.1.
+    await w.run_until(lambda: w.printer.job is None)
+    w.printer.extrude(0, 10)
     records = await w.poll()
     records += await w.poll()
     assert events(records, "claimed") == []
-    assert w.charged(records, "B") == 10
+    assert w.charged(records, "B") == 1074 - 1028
     assert w.charged(records, "A") == 0
     assert w.bridge.state.claimed == []
     assert logged_once(caplog, logging.INFO, f"spool {b} no longer needs its claim cleared")
@@ -1079,16 +1112,18 @@ async def test_k2_two_claims_in_one_tool(
     # S1 to C: C is active, charged its load and some printing.
     await w.move("C", w.tool_location)
     await w.poll()
+    # The unload rams 23, 21.85: 1021.85; LOADS["8.1.0"], 78.85, on top: 1100.7.
     await w.unload()
     records = await w.poll()
     assert len(events(records, "swap_committed")) == 1
     await w.swap_cycle(poll_every=0.3, source="tag", name=ASA[0], color=ASA[1])
     await w.poll()
-    # The 30 mm go past the load's 8 mm gap: 22 * 0.95 = 20.9 on top of 1057.
+    # The 30 mm feed the load's 55 mm retraction back first, 15 past the gap:
+    # (15 + 30) * 0.95 = 42.75, to 1143.45.
     w.printer.extrude(0, 30)
     records = await w.poll()
-    assert w.charged(records, "C") == 20
-    loaded = LOAD_MM + 20
+    assert w.charged(records, "C") == 1143 - 1100
+    loaded = 1143 - 1021  # Since the unload.
 
     # B goes into the location too, so it's staged. One of the two is used in Spoolman
     # after C's last charge, then both boxes are ticked before the next poll.
@@ -1136,17 +1171,19 @@ async def test_k2_two_claims_in_one_tool(
 
     # Later polls see both boxes clear: nothing else moves, and nothing is logged again.
     await w.run_until(lambda: w.printer.job is None)
-    w.printer.extrude(0, 10)  # 9.5 more: 1087.4
+    # The tag isn't written over (Q11), so no sync job rams. The 30 mm fed the
+    # retraction back already: 9.5 more: 1152.95.
+    w.printer.extrude(0, 10)
     await w.poll()
     await w.poll()
     records = w.since(mark)
     assert len(events(records, "claimed" if newer == "staged" else "claim_confirmed")) == 1
     assert w.bridge.printers[0].tools[0].active == winner
     if newer == "staged":
-        assert w.charged(records, "B") == loaded + 10
+        assert w.charged(records, "B") == loaded + 1152 - 1143
         assert w.charged(records, "C") == -loaded
     else:
-        assert w.charged(records, "C") == 10
+        assert w.charged(records, "C") == 1152 - 1143
         assert w.charged(records, "B") == 0
     assert w.bridge.state.claimed == []
     assert logged_once(caplog, logging.WARNING, "several spools claimed at once")
@@ -1318,13 +1355,14 @@ async def test_s11_reboots_while_the_tool_is_skipped(
     assert tool.held_mm == 0 and not tool.reboot_pending
 
     # Nothing is charged again, and the unload commits the swap to B with nothing held.
-    w.printer.extrude(0, 7)  # 6.65 more: 11.4
+    # 6.65 more: 11.4. The unload rams 23, 21.85 more: 33.25, so 33 - 4 = 29.
+    w.printer.extrude(0, 7)
     await w.unload()
     records = await w.poll()
-    assert [(r["spool_id"], r["use_length"]) for r in charges(records)] == [(a, 7.0)]
+    assert [(r["spool_id"], r["use_length"]) for r in charges(records)] == [(a, 29.0)]
     assert len(events(records, "swap_committed")) == 1
     assert events(records, "held_charged") == []
-    assert w.charged(w.since(0), "A") == 28 + 4 + 7
+    assert w.charged(w.since(0), "A") == 28 + 4 + 29
     assert w.charged(w.since(0), "B") == w.charged(w.since(0), "C") == 0
     assert logged_once(caplog, logging.WARNING, msg)
     assert logged_once(caplog, logging.WARNING, gone)

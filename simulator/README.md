@@ -82,7 +82,12 @@ power-panic resume, the preheat and park times, and whether the start blip
 and the model check are on. The feed ratio and a load's slow, fast and purge
 lengths are overrides: left out, each printer uses its model's value, which
 the page shows on the printer's card. On the page or through
-`/api/settings`, an empty value or `null` unsets an override.
+`/api/settings`, an empty value or `null` unsets an override. The purge
+override follows the firmware's `purge_length`: it replaces the model's
+length, a high-flow nozzle doesn't double it, and a purge is never shorter
+than 1 mm. The iX purges in 5 mm steps, so it rounds the length up to the
+next multiple of 5, and INDX ignores the override: its nozzle cleaner purges
+25 mm.
 
 ## The page and the control API
 
@@ -133,6 +138,10 @@ that trace. The points that matter for the bridge, in short:
   material, but keeps it: a runout or `M600` reload restores the old name,
   color and UUID. A menu load replaces them with a preset, dropping color
   and UUID.
+- Each model has its build's presets. PPS and PPA exist only on the Core One
+  and Core One L. The PC and FLEX preheats differ on INDX, the MINI and the
+  MK3.5, and the PA temperatures on the MINI. A menu load of a preset the
+  build lacks answers 400, and an `M865` preset write of one stores nothing.
 - Every filament move counts as the firmware's filament tracker counts it.
   A retract grows the tool's gap up to the model's limit, 40 mm or 27 mm on
   INDX. A feed fills the gap first, and what goes past it counts times the
@@ -142,11 +151,27 @@ that trace. The points that matter for the bridge, in short:
   reported, sets the material, then purges. The purge ends with an 8 mm
   retract, except on the iX and INDX, whose nozzle cleaners end it. A
   high-flow nozzle doubles the purge, except on INDX, whose cleaner purges a
-  fixed 25 mm. A reload during a print then primes 4 mm and retracts 8 mm,
-  and the resume puts the tool back at the gap it had when the change
-  started. From a full gap, a Core One L load
-  counts 20 mm before the material shows and 40 mm after, times the feed
-  ratio.
+  fixed 25 mm. An idle load then auto-retracts. A reload during a print
+  primes 4 mm and retracts 8 mm instead, and the resume puts the tool back at
+  the gap it had when the change began. From a full gap, a Core One L load
+  counts 20 mm before the material shows and 63 mm after, times the feed
+  ratio: 40 mm of purge and 23 mm of auto-retract ramming.
+- An auto-retract runs the model's `auto_retract` ramming sequence and stores
+  how far it left the filament retracted: 55 mm on a Nextruder, 8 mm on INDX.
+  It runs at the end of an idle load, after the INDX cleaner purge, and at a
+  print's end, and it skips a tool already retracted that far, flexible
+  filament, and a printer with `auto_retract = false`. The next forward move
+  feeds the stored distance back first. At boot, the stored distance sets
+  the tool's gap; with nothing stored, the gap starts at 0 and the tracker
+  reports no retracted distance until a feed reaches the nozzle. A Nextruder print's end counts 23
+  mm; an INDX print's end counts nothing, because the 8 mm park retract
+  already counts as retracted. The MINI, MK3.5 and the dev kit don't
+  auto-retract.
+- An unload or runout rams with the model's `unload` or `runout` sequence,
+  then retracts what's left of the unload length. INDX purges 2 mm first.
+  A menu unload of a Nextruder tool that auto-retracted skips the ramming
+  and counts nothing. An unload of a tool that fed since its auto-retract
+  counts 23 mm times the feed ratio; a Nextruder runout counts 7 mm.
 - Every print start shows `PRINTING`, then a brief `IDLE` with no job, then
   `PRINTING`. `FINISHED` and `STOPPED` persist until dismissed, and the job
   disappears from `/api/v1/status` and `/api/v1/job` as soon as a print ends.
@@ -180,13 +205,38 @@ Choices made where the firmware was silent or the plan left it open:
   every printer, single-tool included.
 - A `jam` with `unload` off goes to `ATTENTION` without counting anything and
   `clear_jam` resumes it. With `unload` on, it's a runout whose reload purges
-  more.
+  `jam_purge_mm` more, on top of the 1 mm minimum and before the iX's
+  rounding. The firmware has no extra jam purge: it stands for the user
+  picking Purge more.
 - The iX's assisted insertion before the slow load isn't modeled: the
   firmware source doesn't give its length. The iX purges its length in one
   move, not in 5 mm steps with a clean between.
 - A pause and resume with no filament change moves no filament. The
   firmware retracts at the pause and feeds the same length back at the
   unpark, which counts nothing unless the gap was near its limit.
+- `fill()` and a tool built loaded start with gap 0, the tracker valid and
+  nothing stored, on every model. A real printer that just loaded would
+  have auto-retracted.
+- Ramming, unload and auto-retract moves run at the load rate, not at the
+  sequence's feedrates.
+- The menu unload starts with a cold nozzle, so it gets no 8 mm park
+  retract. On INDX it counts 19 mm: the 2 mm purge and 17 mm of ramming.
+  With a hot nozzle the firmware's park would make it 17 mm.
+- An INDX tool has no extruder filament sensor, so the firmware sends a jam
+  to `manual_unload` in `pause.cpp`, with no ramming and no unload counted. The simulator rams and counts it as a runout.
+- The `M865` flexible flag isn't modeled: only the preset names in
+  `FLEXIBLE_PRESETS` count as flexible.
+- The nozzle cleaning at a print's start isn't modeled. Before it,
+  `prepare_for_nozzle_cleaning` (`probe.cpp`) calls
+  `ensure_retracted_no_ramming` when the stored distance is known and under
+  5 mm and the filament isn't flexible, and `G29` calls it with an 8 mm
+  purge when a cleaning fails on a printer with a nozzle cleaner; it
+  retracts to the full distance (20 mm on a Nextruder, 8 mm on INDX) with
+  no ramming, whatever the switch says, and stores that distance for the next feed to feed back.
+- Temperatures, `G12`, the mesh bed leveling retract and the MMU don't move
+  filament in the simulator.
+- A power loss during a filament change drops the gap to restore: the
+  resume after the reload doesn't move.
 
 ## Tests
 

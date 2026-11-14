@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Compare the bridge's and the simulator's copies of firmware tables with the firmware
-# source: printer models, preset filaments, reset defaults and tag aliases.
+# source: printer models, preset filaments, reset defaults and tag aliases, and each
+# simulator model's build: its presets, the flexible presets, steps per mm, filament
+# change lengths, ramming sequences and the nozzle cleaner's purge.
 #
 # It rebuilds each table from Prusa-Firmware-Buddy for every firmware build and lists each
 # difference; firmware/compare.py has the details and the list of expected differences.

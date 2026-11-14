@@ -6,6 +6,7 @@ it directly and the server calls it with scaled real time.
 
 from __future__ import annotations
 
+import math
 import random
 import re
 import sys
@@ -18,27 +19,47 @@ from typing import Any, ClassVar
 
 from simulator import gcode, sync
 from simulator.tool import (
+    AUTO_RETRACT_STEP,
     CORE_ONE_EXTRUDER,
+    CORE_ONE_PRESETS,
+    DEFAULT_TEMPERATURES,
+    DERETRACT_STEP,
     INDX_EXTRUDER,
+    INDX_PRESETS,
     IX_EXTRUDER,
+    LOAD_CELL_PRESETS,
+    MARKERS,
     MINI_EXTRUDER,
+    MINI_PRESETS,
     MK3_5_EXTRUDER,
+    MK3_5_PRESETS,
     MK4_EXTRUDER,
+    PRESET_ALIASES,
+    RETRACTED_STEP,
     TYPE_STEP,
     XL_DEV_KIT_EXTRUDER,
     Extruder,
     LoadProcess,
     LoadStep,
     Material,
+    Ramming,
     SimTool,
+    Temperatures,
     UnloadProcess,
     describe,
-    preset_temperatures,
+    is_flexible,
+    retracted_distance,
 )
 
 EVENT_LIMIT = 2000
 SNAPSHOT_NAME = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
 EPSILON = 1e-9
+# The shortest purge a load runs, whatever the override: `minimal_purge` in
+# `src/marlin_stubs/include/pause_settings.hpp`.
+MINIMAL_PURGE_MM = 1.0
+# The iX's nozzle cleaner purges in steps of this until it has purged the purge length
+# (`nozzle_cleaner_purge_sequence` in `src/marlin_stubs/pause/pause.cpp`).
+IX_PURGE_STEP_MM = 5.0
 UUID_TOOL = 0  # the one tool that keeps tag UUIDs, on a model that has them
 
 
@@ -163,6 +184,8 @@ class ModelInfo:
     code: str
     name: str
     extruder: Extruder
+    # The build's preset filaments. Left out of the hash so a `ModelInfo` stays hashable.
+    presets: dict[str, Temperatures] = field(hash=False)
     uuids: bool = False
     gap_mm: float = 40.0
     max_tools: int = 1
@@ -177,6 +200,17 @@ class ModelInfo:
         """
         return self.uuids and tool == UUID_TOOL
 
+    def preset_temperatures(self, name: str) -> dict[str, int]:
+        """Return the temperatures a material named `name` starts from, as `Material`
+        keywords.
+
+        A preset's name matches exactly, as `FilamentType::from_name` does. A name in
+        `PRESET_ALIASES`, such as TPU, starts from its preset. Anything else gets the
+        defaults, a preset only other builds have included.
+        """
+        values = self.presets.get(PRESET_ALIASES.get(name, name), DEFAULT_TEMPERATURES)
+        return dict(zip(("nozzle", "preheat", "bed"), values, strict=True))
+
 
 def _models(*infos: ModelInfo) -> dict[str, ModelInfo]:
     return {m.code: m for m in infos}
@@ -184,22 +218,22 @@ def _models(*infos: ModelInfo) -> dict[str, ModelInfo]:
 
 # The printer models, from the firmware: `script/firmware-check` compares them with its source.
 MODELS = _models(
-    ModelInfo("1.3.5", "MK3.5", MK3_5_EXTRUDER, counters=False, mmu=True),
-    ModelInfo("1.3.6", "MK3.5S", MK3_5_EXTRUDER, counters=False, mmu=True),
-    ModelInfo("1.3.9", "MK3.9", MK4_EXTRUDER, mmu=True),
-    ModelInfo("1.3.10", "MK3.9S", MK4_EXTRUDER, mmu=True),
-    ModelInfo("1.4.0", "MK4", MK4_EXTRUDER, mmu=True),
-    ModelInfo("1.4.1", "MK4S", MK4_EXTRUDER, mmu=True),
-    ModelInfo("2.1.0", "MINI", MINI_EXTRUDER, counters=False),
-    ModelInfo("3.1.0", "XL", MK4_EXTRUDER, max_tools=5),
-    ModelInfo("3.1.1", "XLP", MK4_EXTRUDER, max_tools=5),
-    ModelInfo("5.1.0", "XL", XL_DEV_KIT_EXTRUDER, max_tools=5, counters=False),
-    ModelInfo("4.1.0", "iX", IX_EXTRUDER),
-    ModelInfo("7.1.0", "COREONE", CORE_ONE_EXTRUDER, uuids=True, mmu=True),
-    ModelInfo("7.2.0", "COREONEOAK", CORE_ONE_EXTRUDER, uuids=True, mmu=True),
-    ModelInfo("8.1.0", "COREONEL", CORE_ONE_EXTRUDER, uuids=True, mmu=True),
-    ModelInfo("7.10.0", "COREONEINDX", INDX_EXTRUDER, gap_mm=27.0, max_tools=8),
-    ModelInfo("8.10.0", "COREONEL-INDX", INDX_EXTRUDER, gap_mm=27.0, max_tools=8),
+    ModelInfo("1.3.5", "MK3.5", MK3_5_EXTRUDER, MK3_5_PRESETS, counters=False, mmu=True),
+    ModelInfo("1.3.6", "MK3.5S", MK3_5_EXTRUDER, MK3_5_PRESETS, counters=False, mmu=True),
+    ModelInfo("1.3.9", "MK3.9", MK4_EXTRUDER, LOAD_CELL_PRESETS, mmu=True),
+    ModelInfo("1.3.10", "MK3.9S", MK4_EXTRUDER, LOAD_CELL_PRESETS, mmu=True),
+    ModelInfo("1.4.0", "MK4", MK4_EXTRUDER, LOAD_CELL_PRESETS, mmu=True),
+    ModelInfo("1.4.1", "MK4S", MK4_EXTRUDER, LOAD_CELL_PRESETS, mmu=True),
+    ModelInfo("2.1.0", "MINI", MINI_EXTRUDER, MINI_PRESETS, counters=False),
+    ModelInfo("3.1.0", "XL", MK4_EXTRUDER, LOAD_CELL_PRESETS, max_tools=5),
+    ModelInfo("3.1.1", "XLP", MK4_EXTRUDER, LOAD_CELL_PRESETS, max_tools=5),
+    ModelInfo("5.1.0", "XL", XL_DEV_KIT_EXTRUDER, LOAD_CELL_PRESETS, max_tools=5, counters=False),
+    ModelInfo("4.1.0", "iX", IX_EXTRUDER, LOAD_CELL_PRESETS),
+    ModelInfo("7.1.0", "COREONE", CORE_ONE_EXTRUDER, CORE_ONE_PRESETS, uuids=True, mmu=True),
+    ModelInfo("7.2.0", "COREONEOAK", CORE_ONE_EXTRUDER, CORE_ONE_PRESETS, uuids=True, mmu=True),
+    ModelInfo("8.1.0", "COREONEL", CORE_ONE_EXTRUDER, CORE_ONE_PRESETS, uuids=True, mmu=True),
+    ModelInfo("7.10.0", "COREONEINDX", INDX_EXTRUDER, INDX_PRESETS, gap_mm=27.0, max_tools=8),
+    ModelInfo("8.10.0", "COREONEL-INDX", INDX_EXTRUDER, INDX_PRESETS, gap_mm=27.0, max_tools=8),
 )
 
 
@@ -220,7 +254,9 @@ class Settings:
     unload_seconds: float = 3.0
     slow_load_mm: float | None = None
     fast_load_mm: float | None = None
-    purge_mm: float | None = None  # the whole purge: no doubling, no cleaner's fixed length
+    # The whole purge, not doubled for a high-flow nozzle. At least 1 mm, in 5 mm steps on
+    # the iX, and INDX ignores it: its cleaner purges a fixed length.
+    purge_mm: float | None = None
     toolchange_purge_mm: float = 30.0
     jam_purge_mm: float = 60.0
     preheat_seconds: float = 5.0
@@ -425,6 +461,9 @@ class SimPrinter:
     homed: bool = False
     auto_accept_model_check: bool | None = None
     high_flow: bool = False  # a high-flow nozzle, which doubles the load's purge
+    # The user's auto-retract switch. It has effect only on a model whose extruder has
+    # one; INDX always auto-retracts, and a build without the sequence never does.
+    auto_retract: bool = True
     tools: dict[int, SimTool] = field(default_factory=lambda: {0: SimTool(0)})
     files: dict[str, str] = field(default_factory=dict)
 
@@ -455,15 +494,177 @@ class SimPrinter:
         return self.model.extruder.feed_ratio if ratio is None else ratio
 
     def _track(self, tool: SimTool, mm: float) -> None:
-        """Move `tool`'s filament by `mm` commanded, signed, as the firmware's tracker counts it.
+        """Move `tool`'s filament by `mm` commanded, signed, as the firmware's planner does.
+
+        A feed first feeds back an auto-retracted distance, and a retract forgets it: the
+        auto-retract hook in `Planner::buffer_segment`
+        (`lib/Marlin/Marlin/src/module/planner.cpp`). Every move the simulator makes goes
+        through here.
+        """
+        if mm > 0:
+            self._deretract(tool)
+        elif mm < 0:
+            tool.auto_retracted = None
+        self._count(tool, mm)
+
+    def _count(self, tool: SimTool, mm: float) -> None:
+        """Count a move as the firmware's filament tracker does.
 
         A retract grows the gap up to the model's limit, a feed fills it first, and only what
-        goes past the gap counts, times the feed ratio (`track_extruder_move` in
+        goes past the gap counts, times the feed ratio. The gap becomes valid when it reaches
+        0 and invalid when it reaches the limit (`track_extruder_move` in
         `src/feature/filament_tracker/filament_tracker.cpp`).
         """
+        limit = self.model.gap_mm
         unclamped = tool.gap - mm
-        tool.gap = min(max(unclamped, 0.0), self.model.gap_mm)
+        tool.gap = min(max(unclamped, 0.0), limit)
+        # A move split into ticks can stop a rounding error short of either end.
+        if tool.gap <= EPSILON:
+            tool.gap, tool.gap_valid = 0.0, True
+        elif tool.gap >= limit - EPSILON:
+            tool.gap, tool.gap_valid = limit, False
         tool.extruded += max(-unclamped, 0.0) * self.feed_ratio
+
+    def _tracked(self, tool: SimTool) -> float:
+        """The tracker's gap when it's valid, else 0 (`get_retracted_distance`)."""
+        return tool.gap if tool.gap_valid else 0.0
+
+    def _deretract(self, tool: SimTool) -> None:
+        """Feed back an auto-retracted distance (`maybe_deretract_to_nozzle`).
+
+        On a Nextruder that's 55 mm into a gap that stops at 40, so 15 mm count that never
+        left the nozzle.
+        """
+        stored = tool.auto_retracted
+        if stored:
+            tool.auto_retracted = 0.0
+            self._count(tool, stored)
+            self._log("load", f"T{tool.index} deretracted {stored:g} mm")
+
+    def _fully_retracted(self, tool: SimTool) -> bool:
+        """`AutoRetract::is_fully_retracted`: the stored distance reaches the threshold."""
+        stored = tool.auto_retracted
+        return stored is not None and stored >= self.model.extruder.full_retract_mm
+
+    def _retract_to(self, tool: SimTool, target: float) -> None:
+        """Retract until the filament is `target` mm back, unless it already is
+        (`mapi::retract_to` in `src/common/mapi/motion.cpp`)."""
+        stored = tool.auto_retracted or 0.0
+        if stored >= target:
+            return
+        # A stored distance counts as retracted; the retract then forgets it.
+        current = stored or self._tracked(tool)
+        if target - current > EPSILON:
+            self._track(tool, current - target)
+
+    def _restore_to(self, tool: SimTool, target: float) -> None:
+        """Move the filament to `target` mm back, feeding or retracting
+        (`mapi::restore_retracted_distance` in `src/common/mapi/motion.cpp`)."""
+        stored = tool.auto_retracted or 0.0
+        current = stored or self._tracked(tool)
+        # The move takes a stored distance over, so a feed doesn't deretract it again.
+        tool.auto_retracted = None if stored else tool.auto_retracted
+        if abs(target - current) > EPSILON:
+            self._track(tool, current - target)
+
+    @staticmethod
+    def _flexible(tool: SimTool) -> bool:
+        """Whether the type `FilamentType::for_tool_heuristic` finds is flexible: the stored
+        type, else the type the last unload left. The firmware checks the print's G-code
+        filament name between the two, which isn't modeled."""
+        return is_flexible(tool.material or tool.kept_type)
+
+    def _sequence(self, case: str, tool: SimTool) -> Ramming:
+        """The ramming sequence for `case`, or its flexible variant for flexible filament."""
+        ramming = self.model.extruder.ramming
+        flexible = f"{case}_flexible"
+        return ramming[flexible if self._flexible(tool) and flexible in ramming else case]
+
+    @staticmethod
+    def _ram_steps(sequence: Ramming) -> list[LoadStep]:
+        """A ramming sequence as `RammingSequence::execute` runs it: one that starts with a
+        feed first feeds back what's retracted (`mapi::fully_deretract`)."""
+        first = [LoadStep(DERETRACT_STEP)] if sequence[0][0] > 0 else []
+        return first + [LoadStep("RAM", e) for e, _feedrate in sequence]
+
+    def _auto_retract_steps(self, tool: SimTool) -> list[LoadStep]:
+        """The auto-retract's steps, or none where the firmware skips it.
+
+        `AutoRetract::maybe_retract_from_nozzle` skips a tool that's fully retracted, a
+        printer with the switch off, and flexible filament. It feeds back what's stored,
+        runs the sequence, and stores the distance the sequence retracts.
+        """
+        ex = self.model.extruder
+        sequence = ex.ramming.get("auto_retract")
+        if (
+            sequence is None
+            or self._fully_retracted(tool)
+            or (ex.auto_retract_switchable and not self.auto_retract)
+            or self._flexible(tool)
+        ):
+            return []
+        self._deretract(tool)
+        stored = LoadStep(RETRACTED_STEP, retracted_distance(sequence))
+        return [*self._ram_steps(sequence), stored]
+
+    def _unload_steps(self, tool: SimTool, case: str) -> list[LoadStep]:
+        """The moves of an unload with the `case` ramming (`src/marlin_stubs/pause/pause.cpp`).
+
+        INDX purges 2 mm first. A Nextruder that's fully auto-retracted unloads cold, with
+        no ramming. The unload then retracts its length less what the ramming retracted.
+        """
+        ex = self.model.extruder
+        unload = ex.lengths.unload_mm
+        if ex.auto_retracts and ex.cold_unload and self._fully_retracted(tool):
+            return [LoadStep("UNLOAD", -max(unload - (tool.auto_retracted or 0.0), 0.0))]
+        sequence = self._sequence(case, tool)
+        return [
+            LoadStep("PURGE", ex.unload_purge_mm),
+            *self._ram_steps(sequence),
+            LoadStep("UNLOAD", -max(unload - retracted_distance(sequence), 0)),
+        ]
+
+    def _settle(self, tool: SimTool, steps: list[LoadStep], material: Material | None) -> None:
+        """Act on the markers at the head of `steps` and drop finished moves, so the head is
+        a move with something left, or `steps` is empty."""
+        while steps:
+            step = steps[0]
+            if step.phase not in MARKERS:
+                if abs(step.mm) > EPSILON:
+                    return
+                steps.pop(0)
+                continue
+            steps.pop(0)
+            if step.phase == TYPE_STEP:
+                tool.store(material if material is not None else tool.kept())
+                self._log("load", f"T{tool.index} type set to {describe(tool.material)}")
+            elif step.phase == AUTO_RETRACT_STEP:
+                steps[:0] = self._auto_retract_steps(tool)
+            elif step.phase == DERETRACT_STEP:
+                self._deretract(tool)
+                self._track(tool, self._tracked(tool))
+            else:  # RETRACTED_STEP
+                tool.auto_retracted = step.mm
+                self._log(
+                    "load",
+                    f"T{tool.index} auto-retracted {step.mm:g} mm: extruded {int(tool.extruded)}",
+                )
+
+    def _move(self, tool: SimTool, steps: list[LoadStep], most: float) -> float:
+        """Run the head move for up to `most` mm; return the mm moved."""
+        step = steps[0]
+        moved = min(abs(step.mm), most)
+        move = moved if step.mm > 0 else -moved
+        self._track(tool, move)
+        step.mm -= move
+        return moved
+
+    def _run_steps(self, tool: SimTool, steps: list[LoadStep]) -> None:
+        """Run `steps` at once, for moves the simulator doesn't time."""
+        self._settle(tool, steps, None)
+        while steps:
+            self._move(tool, steps, abs(steps[0].mm))
+            self._settle(tool, steps, None)
 
     def _load_lengths(self) -> tuple[float, float, float]:
         """The slow load, fast load and purge a load runs with no override set.
@@ -480,30 +681,47 @@ class SimPrinter:
     def _load_steps(self, purge: float | None, extra: float, printing: bool) -> list[LoadStep]:
         """The moves of a load (`src/marlin_stubs/pause/pause.cpp`), with the overrides.
 
-        `purge` is the load's own purge override, and `extra` is added to the purge.
+        `purge` is the load's own purge override, and `extra` is added to the purge. As
+        `Settings::purge_length` in `src/marlin_stubs/pause/pause_settings.cpp` does, an
+        override replaces the build's length, high-flow doubling included, and no purge is
+        shorter than 1 mm. INDX's cleaner G-code purges its fixed length whatever the
+        override, and the iX purges in 5 mm steps until it reaches the length.
 
         The type is written before the purge. Without a nozzle cleaner the purge ends with a
-        retract; the iX purges with no retract, and the INDX cleaner's auto-retract isn't
-        modeled. A reload during a print then primes and retracts again, and the resume
-        feeds that retract back.
+        retract; the iX purges with no retract, and the INDX cleaner's purge ends with an
+        auto-retract (`M1705`), in a print too. A load outside a print then auto-retracts
+        (`load_finalize_process`). A reload during a print primes and retracts again
+        instead, and the resume puts the tool back at the gap it had when the change began.
         """
         s, lengths = self.settings, self.model.extruder.lengths
         slow, fast, model_purge = self._load_lengths()
         slow = slow if s.slow_load_mm is None else s.slow_load_mm
         fast = fast if s.fast_load_mm is None else s.fast_load_mm
-        if purge is None:
-            purge = model_purge if s.purge_mm is None else s.purge_mm
+        ex = self.model.extruder
+        if ex.cleaner_purge_mm:
+            purge = ex.cleaner_purge_mm
+        else:
+            if purge is None:
+                purge = model_purge if s.purge_mm is None else s.purge_mm
+            purge = max(purge, MINIMAL_PURGE_MM)
+        purge += extra
+        if ex.cleaner_purge_mm == 0:  # the iX
+            purge = math.ceil(purge / IX_PURGE_STEP_MM - EPSILON) * IX_PURGE_STEP_MM
         steps = [
             LoadStep("SLOW", slow),
             LoadStep("FAST", fast),
             LoadStep(TYPE_STEP),
-            LoadStep("PURGE", purge + extra),
+            LoadStep("PURGE", purge),
         ]
-        if self.model.extruder.cleaner_purge_mm is None:
+        if ex.cleaner_purge_mm is None:
             steps.append(LoadStep("RETRACT", -lengths.retract_mm))
+        if ex.cleaner_auto_retract:
+            steps.append(LoadStep(AUTO_RETRACT_STEP))
         if printing:
             steps += [LoadStep("PRIME", lengths.prime_mm), LoadStep("RETRACT", -lengths.retract_mm)]
-        return [st for st in steps if st.phase == TYPE_STEP or st.mm]
+        else:
+            steps.append(LoadStep(AUTO_RETRACT_STEP))
+        return steps
 
     def _log(self, kind: str, text: str, data: dict | None = None) -> None:
         if self._sim:
@@ -544,7 +762,7 @@ class SimPrinter:
     def _physical_unload(self, tool: SimTool, why: str) -> None:
         self._count_unload(tool, why)
         tool.loaded = False
-        tool.gap = self.model.gap_mm
+        tool.gap, tool.gap_valid, tool.auto_retracted = self.model.gap_mm, False, None
 
     def _idle_sensor_clear(self, tool: SimTool, *, sensor_fault_counts: bool) -> None:
         empty = not tool.loaded or (sensor_fault_counts and tool.sensor_fault)
@@ -650,12 +868,17 @@ class SimPrinter:
         if source == "preset":
             if uuid or temps is not None:
                 raise Invalid("a preset load has no UUID or temperatures")
+            # The menu lists only the build's presets (`all_filament_types` in
+            # `src/common/filament_list.hpp`), so PPS can't be picked on an MK4S.
+            if name not in self.model.presets:
+                raise Invalid(f"{self.model.name} has no {name} preset")
+            temps = self.model.preset_temperatures(name)
             # Picking a color makes the preset ad-hoc, which replaces the ad-hoc slot.
-            return Material(name, color, adhoc=color is not None, **preset_temperatures(name))
+            return Material(name, color, adhoc=color is not None, **temps)
         if not self.model.uuids:
             raise Invalid(f"{self.model.name} has no tag reader")
         value = check_uuid(uuid)
-        tag_temps = preset_temperatures(name)
+        tag_temps = self.model.preset_temperatures(name)
         if temps is not None:
             tag_temps = dict(zip(tag_temps, _check_temperatures(temps), strict=True))
         if not self.model.holds_uuid(t.index):
@@ -685,7 +908,9 @@ class SimPrinter:
             t.loaded, t.gap = False, self.model.gap_mm
             return
         self._log("action", f"unload T{tool}")
-        t.process = UnloadProcess(self.settings.unload_seconds)
+        steps = self._unload_steps(t, "unload")
+        self._settle(t, steps, None)
+        t.process = UnloadProcess(steps, self.settings.unload_seconds)
         self.screen = State.IDLE  # using the menu dismisses a finished or stopped screen
         self._show_state()
 
@@ -766,8 +991,7 @@ class SimPrinter:
             # The unpark's feed and `restore_retracted_distance` put the filament back at
             # the gap it had when the change began (`Pause::filament_change` in
             # `src/marlin_stubs/pause/pause.cpp`).
-            tool = self.tools[self.selected_tool]
-            self._track(tool, tool.gap - job.restore_gap)
+            self._restore_to(self.tools[self.selected_tool], job.restore_gap)
             job.restore_gap = None
         if job.paused_from is JobPhase.PREHEAT:
             job.enter(JobPhase.PREHEAT)
@@ -841,7 +1065,12 @@ class SimPrinter:
         job = self.job
         # Only a print in progress runs out, so the phase is PRINTING or PREHEAT here.
         job.paused_from = job.phase
-        job.restore_gap = t.gap
+        # The filament change records the tracker's distance, parks with a retract, then
+        # rams and unloads (`Pause::filament_change` and `park_nozzle_and_notify` in
+        # `src/marlin_stubs/pause/pause.cpp`).
+        job.restore_gap = self._tracked(t)
+        self._retract_to(t, self.model.extruder.lengths.retract_mm)
+        self._run_steps(t, self._unload_steps(t, "runout"))
         self._physical_unload(t, str(reason))
         job.enter(JobPhase.WAIT_LOAD, Attention(reason, t.index))
         self._show_state()
@@ -873,13 +1102,25 @@ class SimPrinter:
         """
         self.boot_id = new_boot_id()
         for t in self.tools.values():
-            t.extruded, t.unload_count, t.extruded_at_unload, t.gap = 0.0, 0, 0, 0.0
+            t.extruded, t.unload_count, t.extruded_at_unload = 0.0, 0, 0
             t.process = None
+            self._boot_tracker(t)
         self.homed, self.message = False, None
         self._log("boot", f"boot id {self.boot_id}")
         selected = self.tools.get(self.selected_tool)
         if idle_clear and selected is not None:
             self._idle_sensor_clear(selected, sensor_fault_counts=False)
+
+    def _boot_tracker(self, t: SimTool) -> None:
+        """The tracker starts at gap 0 and invalid; a stored auto-retract distance then sets
+        it, valid below the gap's limit (`marlin_server::init` and
+        `FilamentTracker::assume_retracted_distance`). The stored distance survives."""
+        stored = t.auto_retracted
+        if stored is None:
+            t.gap, t.gap_valid = 0.0, False
+            return
+        t.gap = min(max(stored, 0.0), self.model.gap_mm)
+        t.gap_valid = t.gap != self.model.gap_mm
 
     def reboot(self, *, keep_job: bool = False, cold_bed: bool = False) -> None:
         """Reboot. With keep_job a print in progress resumes with the same ID (power panic).
@@ -1143,33 +1384,29 @@ class SimPrinter:
         while t.process is not None and dt > EPSILON:
             p = t.process
             if isinstance(p, UnloadProcess):
-                if p.remaining > dt:
-                    p.remaining -= dt
-                    return
-                t.process = None
-                self._physical_unload(t, "unload")
-                self._process_done()
+                self._unload_tick(t, p, dt)
                 return
-            dt -= self._load_step(t, p, rate * dt) / rate
-
-    def _load_step(self, t: SimTool, p: LoadProcess, most: float) -> float:
-        """Run the current move for up to `most` mm; return the mm moved."""
-        step = p.steps[0]
-        moved = min(abs(step.mm), most)
-        move = moved if step.mm > 0 else -moved
-        self._track(t, move)
-        step.mm -= move
-        if abs(step.mm) <= EPSILON:
-            p.steps.pop(0)
+            dt -= self._move(t, p.steps, rate * dt) / rate
             self._next_load_step(t, p)
-        return moved
+
+    def _unload_tick(self, t: SimTool, p: UnloadProcess, dt: float) -> None:
+        """Move the unload's share of its steps for dt; record the unload when time is up."""
+        left = sum(abs(st.mm) for st in p.steps if st.phase not in MARKERS)
+        most = left * min(dt / p.remaining, 1.0) if p.remaining > EPSILON else left
+        p.remaining = max(p.remaining - dt, 0.0)
+        while p.steps and most > EPSILON:
+            most -= self._move(t, p.steps, most)
+            self._settle(t, p.steps, None)
+        if p.remaining > EPSILON:
+            return
+        self._run_steps(t, p.steps)  # what rounding left
+        t.process = None
+        self._physical_unload(t, "unload")
+        self._process_done()
 
     def _next_load_step(self, t: SimTool, p: LoadProcess) -> None:
-        """Write the type when its step comes up, and end the load after its last step."""
-        if p.steps and p.steps[0].phase == TYPE_STEP:
-            p.steps.pop(0)
-            t.store(p.material if p.material is not None else t.kept())
-            self._log("load", f"T{t.index} type set to {describe(t.material)}")
+        """Act on the markers that come up, and end the load after its last step."""
+        self._settle(t, p.steps, p.material)
         if not p.steps:
             t.loaded, t.process = True, None
             self._log("load", f"T{t.index} loaded: extruded {int(t.extruded)}")
@@ -1259,11 +1496,31 @@ class SimPrinter:
         self._show_state()
 
     def _park(self, job: UserJob | SyncJob, end: State) -> None:
+        self._end_of_print()
         job.enter(JobPhase.PARKING)
         job.remaining, job.end_state = self.settings.park_seconds, end
         if isinstance(job, UserJob):
             job.paused_from = None
         self._show_state()
+
+    def _end_of_print(self) -> None:
+        """What a finished or stopped job does to the filament before it parks, a sync job
+        too (`marlin_server.cpp`).
+
+        It retracts the picked tool to 8 mm (`retract_and_lift`). Then `pre_finalize_print`
+        stores each tool's valid tracker gap as its auto-retracted distance and
+        auto-retracts the picked tool, which INDX skips: its 8 mm already counts as fully
+        retracted.
+        """
+        ex = self.model.extruder
+        t = self.tools[self.selected_tool]
+        self._retract_to(t, ex.lengths.retract_mm)
+        if not ex.auto_retracts:
+            return
+        for tool in self.tools.values():
+            if tool.gap_valid:
+                tool.auto_retracted = tool.gap
+        self._run_steps(t, [LoadStep(AUTO_RETRACT_STEP)])
 
     def _print_step(self, job: UserJob, dt: float) -> float:
         """Feed for dt, stopping at each segment end and color change. Return the time left."""
@@ -1377,9 +1634,12 @@ class SimPrinter:
                 "max_tools": m.max_tools,
                 # What an unset override falls back to on this printer.
                 "feed_ratio": m.extruder.feed_ratio,
+                "auto_retracts": m.extruder.auto_retracts,
+                "auto_retract_switchable": m.extruder.auto_retract_switchable,
                 **dict(zip(LOAD_LENGTHS, self._load_lengths(), strict=True)),
             },
             "high_flow": self.high_flow,
+            "auto_retract": self.auto_retract,
             "firmware": str(self.firmware),
             "power": str(self.power),
             "fault": str(self.fault),
@@ -1422,7 +1682,7 @@ def _tool_json(t: SimTool) -> dict:
     elif isinstance(p, LoadProcess):
         out["process"] = {"kind": "load", "phase": p.phase, "remaining_mm": p.remaining}
     else:
-        out["process"] = {"kind": "unload", "phase": "UNLOAD", "remaining_s": p.remaining}
+        out["process"] = {"kind": "unload", "phase": p.phase, "remaining_s": p.remaining}
     return out
 
 
@@ -1438,10 +1698,10 @@ def _process_from(d: dict | None) -> LoadProcess | UnloadProcess | None:
         return None
     d = dict(d)
     kind = d.pop("kind")
+    d["steps"] = [LoadStep(**st) for st in d["steps"]]
     if kind == "unload":
         return UnloadProcess(**d)
     d["material"] = _material_from(d["material"])
-    d["steps"] = [LoadStep(**st) for st in d["steps"]]
     return LoadProcess(**d)
 
 

@@ -23,6 +23,7 @@ import pytest
 from integration.faults import SpoolmanFaults
 from integration.printers import FIRST, PLA_WHITE, SECOND, Load, Spec, Station, start
 from integration.station import SETTINGS
+from simulator.config import tool_location
 from simulator.model import (
     MODELS,
     PrintSpec,
@@ -43,18 +44,21 @@ UUID_FIELD = "instance_uuid"
 CLAIM_FIELD = "bridge_claim"
 
 # What a menu load after an unload counts, by model: the slow and fast load past the full
-# retraction gap, then the purge under the new material, times the feed ratio.
+# retraction gap, then the purge under the new material, then the auto-retract, times the
+# feed ratio.
 LOADS = {
-    # Core One L: 40 mm gap; 40 slow + 20 fast, 20 past the gap; 40 purge; then an 8 mm
-    # retract leaves 8 mm of gap. (20 + 40) * 0.95 = 57.
-    "8.1.0": 57,
+    # Core One L: 40 mm gap; 40 slow + 20 fast, 20 past the gap; 40 purge; an 8 mm retract,
+    # which the auto-retract feeds back before its ramming counts 23 and leaves 55 mm
+    # retracted. (20 + 40 + 23) * 0.95 = 78.85, so the whole-mm counter moves by 78 or 79.
+    "8.1.0": (20 + 40 + 23) * 0.95,
     # Core One L INDX: 27 mm gap; 15 slow + 25 fast, 13 past the gap; the cleaner's 25 mm
-    # purge, leaving no gap. (13 + 25) * 550 / 576 = 36.28, so the whole-mm counter moves
-    # by 36 or 37.
-    "8.10.0": (13 + 25) * 550 / 576,
+    # purge, leaving no gap; its auto-retract counts its 8 mm feed and leaves 8 mm
+    # retracted. (13 + 25 + 8) * 550 / 576 = 43.92, so the counter moves by 43 or 44.
+    "8.10.0": (13 + 25 + 8) * 550 / 576,
+    # MK4S: 40 mm gap; 30 slow + 50 fast, 40 past the gap; 27 purge; an 8 mm retract,
+    # which the auto-retract feeds back before its 23. (40 + 27 + 23) * 0.95 = 85.5.
+    "1.4.1": (40 + 27 + 23) * 0.95,
 }
-# The single-tool world's Core One L, which most scenarios load.
-LOAD_MM = LOADS["8.1.0"]
 
 PLA = ("PLA", "#73737b")
 PETG = ("PETG", "#186bb5")
@@ -62,9 +66,9 @@ ASA = ("ASA", "#de3129")
 # Spool D's, in tool 1 of a multi-tool world: PETG in a color B doesn't share.
 PETG_GREEN = ("PETG", "#299c4a")
 
-# The printer `world` simulates, by how many tools it has: a Core One L, or a Core One L
-# INDX (no tag reader, no UUIDs, a 27 mm gap) with tools 0 and 1 docked.
-WORLD_MODELS = {1: "8.1.0", 2: "8.10.0"}
+# The printer `world` simulates unless a test names one: a Core One L with one tool, or a
+# Core One L INDX (no tag reader, no UUIDs, a 27 mm gap) with more.
+SINGLE_TOOL_MODEL, MULTI_TOOL_MODEL = "8.1.0", "8.10.0"
 
 
 @pytest.fixture(scope="session")
@@ -505,13 +509,13 @@ def world_config(request: pytest.FixtureRequest) -> dict:
 
 @pytest.fixture
 def world_tools(request: pytest.FixtureRequest) -> int:
-    """How many tools `world`'s printer has: 1 by default, or 2 for a multi-tool world.
+    """How many tools `world`'s printer has: 1 by default, up to the model's most.
 
     A test asks for two with
     `@pytest.mark.parametrize("world_tools", [2], indirect=True)`.
     """
     tools = getattr(request, "param", 1)
-    assert tools in WORLD_MODELS, f"world_tools must be one of {sorted(WORLD_MODELS)}"
+    assert isinstance(tools, int) and tools >= 1, "world_tools must be a count of tools"
     return tools
 
 
@@ -519,14 +523,18 @@ def world_tools(request: pytest.FixtureRequest) -> int:
 def world_model(request: pytest.FixtureRequest, world_tools: int) -> str:
     """The printer type code `world`'s printer reports, such as `1.4.0` for an MK4.
 
-    By default it follows `world_tools`. A test asks for a single-tool model that has no
-    tag reader, such as an MK4 (`1.4.0`) or an MK3.9 (`1.3.9`), with
-    `@pytest.mark.parametrize("world_model", ["1.4.0"], indirect=True)`. Neither the
-    printer nor spool A has a UUID then, as with `world_fields` "fresh".
+    By default it's a Core One L with one tool and a Core One L INDX with more. A test
+    asks for any model the simulator has, such as an MK4 (`1.4.0`), with
+    `@pytest.mark.parametrize("world_model", ["1.4.0"], indirect=True)`, and
+    `world_tools` can go up to the model's most. Spool A and the printer have a UUID
+    only on a model whose tool 0 keeps one, such as the Core One L, and not with
+    `world_fields` "fresh".
     """
-    code = getattr(request, "param", WORLD_MODELS[world_tools])
+    default = SINGLE_TOOL_MODEL if world_tools == 1 else MULTI_TOOL_MODEL
+    code = getattr(request, "param", default)
     assert code in MODELS, f"world_model {code!r} isn't a simulated model"
-    assert world_tools == 1 or code == WORLD_MODELS[world_tools]
+    most = MODELS[code].max_tools
+    assert world_tools <= most, f"{MODELS[code].name} has at most {most} tools"
     return code
 
 
@@ -597,20 +605,22 @@ async def world(
     runout always leaves plenty and trips the mid-print flag. The bridge's clock is the
     simulator's, so `sync_delay` counts simulated seconds.
 
-    With `world_tools` at 2 the printer is a Core One L INDX instead, which shows no
-    UUIDs, and tool 1 is loaded with spool D's green PETG, with D in `<prefix> T1`. The
-    bridge's config is the same apart from the second tool: the bridge decides from the
-    model whether to use UUIDs.
+    With `world_tools` above 1 the printer is a Core One L INDX unless `world_model`
+    names another, and tool 1 is loaded with spool D's green PETG, with D in tool 1's
+    location. Tools beyond the second start empty. A tool's location is named as
+    `bridge-config` names it: `<prefix>` on a single-tool printer, else `<prefix> T1`,
+    `<prefix> T2` and on. The bridge's config is the same apart from the tools: the
+    bridge decides from the model whether to use UUIDs.
 
     With `world_printers` at 2 a second Core One L, printer "b", shares the simulation:
     tool 0 loaded with spool E's white PLA and UUID, E in `<prefix> LB`. See
     integration/printers.py.
     """
-    tool_location, shelf = f"{prefix} T", f"{prefix} shelf"
+    locations = [tool_location(prefix, index, world_tools) for index in range(world_tools)]
+    shelf = f"{prefix} shelf"
     fresh = world_fields == "fresh"
-    # No UUID on spool A or the printer: a fresh Spoolman, or a model other than the
-    # defaults, which are the ones with a tag reader or a test of their own.
-    bare = fresh or world_model not in WORLD_MODELS.values()
+    # No UUID on spool A or the printer: a fresh Spoolman, or a tool that keeps none.
+    bare = fresh or not MODELS[world_model].holds_uuid(0)
     keys = {"uuid": UUID_FIELD, "flag": FLAG_FIELD, "claim": CLAIM_FIELD}
     if fresh:
         own = prefix.replace("-", "_")
@@ -622,15 +632,16 @@ async def world(
     it = Spec(
         FIRST,
         world_model,
-        [Load("A", PLA, tool_location, 1000.0, None if bare else str(uuid.uuid4()))],
+        [Load("A", PLA, locations[0], 1000.0, None if bare else str(uuid.uuid4()))],
         world_printer,
+        empty=locations[2:],
     )
-    if world_tools == 2:
-        it.loads.append(Load("D", PETG_GREEN, f"{prefix} T1", 500.0))
+    if world_tools > 1:
+        it.loads.append(Load("D", PETG_GREEN, locations[1], 500.0))
     specs = [it]
     if world_printers == 2:
         e = Load("E", PLA_WHITE, f"{prefix} LB", 2000.0, str(uuid.uuid4()))
-        specs.append(Spec(SECOND, WORLD_MODELS[1], [e]))
+        specs.append(Spec(SECOND, SINGLE_TOOL_MODEL, [e]))
 
     w = World(Simulation(Settings(**SETTINGS)), spoolman, shelf, fields=keys)
     # Spoolman's records: A in its tool, B and C on the shelf, then every other tool's spool.

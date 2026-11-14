@@ -2,14 +2,17 @@
 
 This is the plan for making the simulator behave like each printer the
 bridge can meet: every single-tool model, the toolchangers (XL and INDX),
-and printers with an MMU3. Today it copies one printer closely, the Core
-One L, and treats the rest as that printer with a different name, tool
-count and retraction gap.
+and printers with an MMU3. It started as a close copy of one printer, the
+Core One L, with the rest treated as that printer under a different name,
+tool count and retraction gap.
 
-Draft, 2026-11-13. Workstream 1 is in progress: each model has its profile
-data and the firmware readers check it, but the simulator's behavior hasn't
-changed yet. [Open questions](#open-questions) lists what the work still has
-to settle.
+Draft, 2026-11-13. Workstream 1 is built: each model has its profile and
+its build's presets, and `script/firmware-check` compares them with the
+source. The tracker counts with the model's gap and feed ratio, a load runs
+the model's lengths, the ramming and auto-retract run per build, and the
+tests run the bridge against each family. Workstreams 2 to 6 aren't
+started. [Open questions](#open-questions)
+lists what the work still has to settle.
 
 ## Goal and non-goals
 
@@ -81,10 +84,15 @@ firmware update.
 - Each model has its build's extruder profile. Every filament move counts
   through the tracker's arithmetic with the model's gap and feed ratio, and
   a menu load runs the model's slow, fast and purge lengths, with the
-  purge's end per build and the high-flow doubling. The ramming,
-  auto-retract and unload counts aren't modeled yet. Other lengths and
-  times are one global `Settings`, and the feed ratio and load lengths
-  there are overrides.
+  purge's end per build and the high-flow doubling. Each build's ramming
+  sequences run at an unload, a runout and an auto-retract, which follows
+  an idle load and a print's end and stores its distance for the boot and
+  the next feed. A printer's `auto_retract` switch turns it off where the
+  build allows. Other lengths and times are one global `Settings`, and the
+  feed ratio and load lengths there are overrides.
+- Each model has its build's preset table. A menu load and a preset write
+  report that build's temperatures, and neither takes a preset the build
+  doesn't have, such as PPS on an MK4S.
 - A tool has its own counters, material, gap and sensor. A print is a list
   of (tool, mm) segments with a fixed purge at each tool change. Picking a
   tool can trigger the idle sensor clear. A tool can be disabled.
@@ -93,9 +101,13 @@ firmware update.
   accepted.
 - It serves `/api/version`, `/api/v1/info`, `/api/v1/status`, `/api/v1/job`
   and `/api/v1/filament`. `/api/v1/info` always reports `mmu` as false.
-- Tests: the unit harness always builds one Core One L with one tool.
-  Integration runs T1 to T7 on a two-tool INDX, and a few rows on an MK4,
-  an MK3.9 and a MINI.
+- Tests: the unit harness and the integration fixtures take a model and a
+  tool count. `tests/test_families.py` runs one story (a print with a tool
+  change, a swap, a reboot) on the Core One L, MK4S, iX, XL, Core One L INDX
+  and MINI, with charges worked by hand from the firmware's numbers.
+  Integration runs T1 to T7 on a two-tool INDX, T1 on a five-tool XL, and a
+  few rows on an MK4, an MK4S, an MK3.9 and a MINI. The MMU families wait
+  for Workstream 5.
 
 ## What's missing
 
@@ -112,12 +124,11 @@ Paths are in the firmware at `ff61540d4`.
 | Unload | A menu unload rams first. It counts about 23 mm on a Nextruder that isn't auto-retracted and about 19 mm on INDX, before the unload is recorded. | `pause.cpp` |
 | Power-panic resume | INDX purges 25 mm (`G750 E25`). The MK4 family, Core One, Core One L and iX feed back the 8 mm they retracted at the cut. The XL moves nothing. This reading disagrees with F12, which has the 25 mm on the single-tool Core One L: the F12 trace decides. | `power_panic.cpp:110-116, 480-521` |
 | Nozzle-cleaner sequences | On the iX and INDX, a file under `/usb/macros/nozzle_cleaner/` replaces a built-in sequence, the INDX purges included. The simulator assumes the built-in ones. | `gcode_loader.cpp:24-30, 105-115` |
-| Presets | PPS and PPA exist only with the high-temperature hotend (Core One and Core One L). The PC and FLEX preheat differ on INDX, and PA on the MINI. `firmware-check` already rebuilds these per build; the simulator still holds one table. | `filament_presets.cpp` |
 
 With the gap full, a Core One L menu load counts 20 mm before the type
-appears and 55 mm after, 75 mm commanded. The simulator's 36 and 40 came
-from a measured 76 mm, so the total agrees and the split may not. The F3
-trace settles it.
+appears and 63 mm after: the 40 mm purge and the auto-retract's 23. That's
+83 mm commanded, 78.85 mm at the 0.95 ratio. The F3 trace will confirm the
+split.
 
 ### The print preview
 
@@ -449,10 +460,20 @@ able to show it once the workstream named is built.
     sync job included. (2.)
 17. **`READY` in the bridge's `IDLE_STATES` never arrives** over PrusaLink.
     It's harmless.
+18. **A print cancelled in preheat can look started.** On a tool that
+    isn't auto-retracted, the end of the print rams about 22 mm (23
+    commanded × 0.95) while the job is still visible.
+    `accounting.print_start` takes the first counter rise in a new job as
+    the print's start, so it would take that ramming as one. No test covers
+    it: the P8 test's tool is already auto-retracted. (1.)
 
 ## Open questions
 
 Left to the work:
+
+- Three extruder numbers are copied by hand, and `script/firmware-check`
+  doesn't compare them yet: the auto-retract's fully-retracted threshold,
+  whether a build can unload cold, and the purge before an INDX unload.
 
 - Which menu setting governs the filament-type question, and whether it
   can be set to ignore or abort. Read it in Workstream 2.

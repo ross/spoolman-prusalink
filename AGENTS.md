@@ -174,7 +174,10 @@ trace.
 ## Firmware tables
 
 `printer_sync.py` and the simulator hold copies of tables from the firmware: printer
-models, preset filaments, reset defaults, and tag aliases. `script/firmware-check`
+models, preset filaments, reset defaults, and tag aliases. The bridge keeps one preset
+table for every model. Each simulator model keeps its build's presets and extruder
+numbers: steps per mm, filament change lengths, ramming sequences, and the nozzle
+cleaner's purge. The simulator also lists the flexible presets. `script/firmware-check`
 rebuilds the tables from the firmware source and lists each difference. A weekly
 workflow runs it.
 

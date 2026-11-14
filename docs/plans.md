@@ -391,8 +391,7 @@ These aren't simulator work, but the simulator makes each one testable.
   bridge would write the wrong preheat, and a menu load of those presets
   that otherwise matches would still get a sync job. With printer sync off,
   every such menu load reports preheat drift. Check every preset value per
-  model, and the simulator's `PRESET_TEMPERATURES`, which has the same
-  values.
+  model. The simulator's models already hold their builds' values.
 
 ## Running it
 

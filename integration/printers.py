@@ -45,12 +45,16 @@ class Load:
 
 @dataclass
 class Spec:
-    """One printer for `world` to build: its name, model code, and tools in index order."""
+    """One printer for `world` to build: its name, model code, and tools in index order.
+
+    The loaded tools come first, then the empty ones.
+    """
 
     name: str
     model: str
     loads: list[Load]
     config: dict = field(default_factory=dict)  # Overrides for its `PrinterConfig`.
+    empty: list[str] = field(default_factory=list)  # Each empty tool's location.
 
 
 @dataclass(kw_only=True)
@@ -123,13 +127,15 @@ async def start(spec: Spec, world: World) -> tuple[Station, PrinterConfig]:
     Returns its station and the bridge's config for it. The spools its tools hold are
     `world`'s to create.
     """
-    tools = {}
+    tools, locations = {}, {}
     for index, load in enumerate(spec.loads):
         material = Material(*load.filament, load.uuid, **WRITTEN)
         tools[index] = SimTool.loaded_with(index, material, extruded=load.extruded)
+        locations[index] = load.location
+    for index, location in enumerate(spec.empty, start=len(spec.loads)):
+        tools[index], locations[index] = SimTool(index), location
     printer = SimPrinter(spec.name, 0, KEY, MODELS[spec.model], tools=tools)
     world.sim.add(printer)
-    locations = {index: load.location for index, load in enumerate(spec.loads)}
     made = Station(world.sim, printer, world=world, locations=locations)
     made.server = TestServer(made.app())
     await made.server.start_server()

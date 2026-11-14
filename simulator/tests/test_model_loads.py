@@ -39,29 +39,37 @@ def unloaded(model: str, **settings):
     return sim, p
 
 
-# From a full gap: (slow + fast - gap) before the type, then the purge.
+# A Nextruder's auto-retract from gap 0: +8 counts 8 (gap 0); -43, -8, -4 reach the
+# 40 mm limit (invalid); +20 gap 20; -20 gap 40; +55 refills 40 and counts 15 (gap 0,
+# valid); -55 gap 40 (invalid); +20 gap 20; -20 gap 40. 23 counted, 55 stored.
+NEXTRUDER_AUTO_RETRACT = 23
+
+# From a full gap: (slow + fast - gap) before the type; then the purge and the
+# auto-retract; then the gap, whether the tracker trusts it, and the stored distance.
 FULL_GAP = {
-    # MK4S: 40 mm gap; 30 slow + 50 fast = 80, 40 past the gap; 27 mm purge.
-    "1.4.1": (40 * 0.95, 27 * 0.95, 8),
+    # MK4S: 40 mm gap; 30 slow + 50 fast = 80, 40 past the gap; 27 mm purge; the 8 mm
+    # retract (gap 8), which the auto-retract feeds back first (gap 0), then 23.
+    "1.4.1": (40 * 0.95, (27 + 23) * 0.95, 40, False, 55),
     # XL: the MK4's numbers.
-    "3.1.0": (40 * 0.95, 27 * 0.95, 8),
-    # Core One L: 40 slow + 20 fast = 60, 20 past the gap; 40 mm purge.
-    "8.1.0": (20 * 0.95, 40 * 0.95, 8),
-    # iX: 40 slow + 45 fast = 85, 45 past the gap; 40 mm purge, no retract after.
-    "4.1.0": (45 * 0.95, 40 * 0.95, 0),
+    "3.1.0": (40 * 0.95, (27 + 23) * 0.95, 40, False, 55),
+    # Core One L: 40 slow + 20 fast = 60, 20 past the gap; 40 mm purge; retract, then 23.
+    "8.1.0": (20 * 0.95, (40 + 23) * 0.95, 40, False, 55),
+    # iX: 40 slow + 45 fast = 85, 45 past the gap; 40 mm purge, no retract, then 23.
+    "4.1.0": (45 * 0.95, (40 + 23) * 0.95, 40, False, 55),
     # Core One L INDX: 27 mm gap; 15 slow + 25 fast = 40, 13 past it; the cleaner's
-    # 25 mm purge, and the auto-retract after it isn't modeled.
-    "8.10.0": (13 * INDX_RATIO, 25 * INDX_RATIO, 0),
+    # 25 mm purge (gap 0); its M1705 auto-retract: +8 counts 8, -8 gap 8, +1 gap 7, -1
+    # gap 8, 8 stored. The load's own auto-retract then finds it fully retracted.
+    "8.10.0": (13 * INDX_RATIO, (25 + 8) * INDX_RATIO, 8, True, 8),
 }
 
 
 @pytest.mark.parametrize("model", FULL_GAP)
 def test_a_menu_load_from_a_full_gap(model):
-    before, after, gap = FULL_GAP[model]
+    before, after, gap, valid, stored = FULL_GAP[model]
     sim, p = unloaded(model)
     assert menu_load(sim, p) == pytest.approx((before, after))
-    # Without a nozzle cleaner the purge ends with an 8 mm retract, which opens the gap.
-    assert p.tools[0].gap == pytest.approx(gap)
+    t = p.tools[0]
+    assert (t.gap, t.gap_valid, t.auto_retracted) == (gap, valid, stored)
 
 
 @pytest.mark.parametrize(
@@ -82,10 +90,10 @@ def test_a_load_after_a_boot_counts_from_the_first_mm(model, before):
 @pytest.mark.parametrize(
     ("model", "after"),
     [
-        ("8.1.0", 80 * 0.95),  # the 40 mm purge doubled
-        ("1.4.1", 54 * 0.95),  # the 27 mm purge doubled
-        ("4.1.0", 80 * 0.95),  # the 40 mm purge doubled
-        ("8.10.0", 25 * INDX_RATIO),  # the cleaner's 25 mm, not doubled
+        ("8.1.0", (80 + 23) * 0.95),  # the 40 mm purge doubled, then the auto-retract
+        ("1.4.1", (54 + 23) * 0.95),  # the 27 mm purge doubled
+        ("4.1.0", (80 + 23) * 0.95),  # the 40 mm purge doubled
+        ("8.10.0", (25 + 8) * INDX_RATIO),  # the cleaner's 25 mm, not doubled
     ],
 )
 def test_a_high_flow_nozzle_doubles_the_purge_except_on_indx(model, after):
@@ -96,26 +104,69 @@ def test_a_high_flow_nozzle_doubles_the_purge_except_on_indx(model, after):
 
 def test_the_overrides_apply_and_unset_back_to_the_models():
     sim, p = unloaded("8.1.0", slow_load_mm=10, fast_load_mm=50, purge_mm=5, feed_ratio=1.0)
-    # 10 slow leaves 30 of the 40 mm gap, so 20 of the 50 fast count; the 5 mm purge.
-    assert menu_load(sim, p) == pytest.approx((20, 5))
+    # 10 slow leaves 30 of the 40 mm gap, so 20 of the 50 fast count; the 5 mm purge; the
+    # retract and the auto-retract's 23.
+    assert menu_load(sim, p) == pytest.approx((20, 5 + 23))
     assert p.feed_ratio == 1.0
     sim.settings.update(
         {"slow_load_mm": None, "fast_load_mm": None, "purge_mm": None, "feed_ratio": None}
     )
-    p.unload(0)
+    p.unload(0)  # auto-retracted: a cold unload, which counts nothing
     sim.advance(10)
-    assert menu_load(sim, p) == pytest.approx((20 * 0.95, 40 * 0.95))
+    assert menu_load(sim, p) == pytest.approx((20 * 0.95, (40 + 23) * 0.95))
     assert p.feed_ratio == 0.95
 
 
 def test_an_override_of_0_skips_the_step():
     sim, p = unloaded("8.1.0", slow_load_mm=0, fast_load_mm=0)
-    # Nothing feeds before the type; the 40 mm purge only fills the gap.
-    assert menu_load(sim, p) == (0, 0)
-    sim, p = unloaded("4.1.0", slow_load_mm=0, fast_load_mm=0, purge_mm=0)
-    p.load(0, source="preset", name="PETG")  # the iX's load is then only the type
-    assert p.tools[0].loaded and p.tools[0].material.name == "PETG"
-    assert p.tools[0].process is None and p.state is State.IDLE
+    # Nothing feeds before the type; the 40 mm purge only fills the gap, so only the
+    # auto-retract counts.
+    assert menu_load(sim, p) == pytest.approx((0, 23 * 0.95))
+
+
+@pytest.mark.parametrize(("setting", "call"), [(0, None), (None, 0.5)])
+def test_a_purge_is_never_shorter_than_1_mm(setting, call):
+    # 40 slow refills the full gap, so the purge counts all it feeds.
+    sim, p = unloaded("8.1.0", slow_load_mm=40, fast_load_mm=0, purge_mm=setting)
+    p.auto_retract = False
+    p.load(0, source="preset", name="PETG", purge_mm=call)
+    before = p.tools[0].extruded
+    sim.advance(100)
+    # The override, 0 or 0.5, is raised to 1; the 8 mm retract then only grows the gap.
+    assert p.tools[0].extruded - before == pytest.approx(1 * 0.95)
+
+
+@pytest.mark.parametrize(("setting", "call"), [(5, None), (None, 5)])
+def test_indx_purges_the_cleaners_25_mm_whatever_the_override(setting, call):
+    sim, p = unloaded("8.10.0", purge_mm=setting)
+    before = p.tools[0].extruded
+    p.load(0, source="preset", name="PETG", purge_mm=call)
+    sim.advance(100)
+    # 15 slow + 25 fast - 27 gap = 13 before the type; then the cleaner's 25, not 5, and
+    # its auto-retract's 8.
+    assert p.tools[0].extruded - before == pytest.approx((13 + 25 + 8) * INDX_RATIO)
+
+
+@pytest.mark.parametrize(("purge", "purged"), [(12, 15), (15, 15), (0, 5)])
+def test_the_ix_purges_in_5_mm_steps(purge, purged):
+    # 40 slow refills the full gap, and no auto-retract follows.
+    sim, p = unloaded("4.1.0", slow_load_mm=40, fast_load_mm=0, purge_mm=purge)
+    p.auto_retract = False
+    assert menu_load(sim, p) == pytest.approx((0, purged * 0.95))
+
+
+def test_a_jam_reload_purges_its_extra_on_top_of_the_minimum():
+    sim, p = make("8.1.0", [loaded(0, PLA)], slow_load_mm=40, fast_load_mm=0, purge_mm=0)
+    p.start_print(PrintSpec([Segment(0, 100)], preheat_s=0))
+    sim.tick(0.8 + 1)
+    p.jam(0)
+    before = p.tools[0].extruded
+    p.load(0)
+    sim.advance(100)
+    # The jam left the gap full and 40 slow refills it. The purge of 0 is raised to 1, and
+    # the jam adds its 60: 61 counted. The prime of 4 and retract of 8 only move the gap.
+    assert p.job.phase is JobPhase.PAUSED
+    assert p.tools[0].extruded - before == pytest.approx(61 * 0.95)
 
 
 def test_the_load_purge_override_wins_over_the_setting():
@@ -123,7 +174,9 @@ def test_the_load_purge_override_wins_over_the_setting():
     at = p.tools[0]
     p.load(0, source="preset", name="PETG", purge_mm=10)
     sim.advance(100)
-    assert at.extruded == pytest.approx((20 + 10) * 0.95)
+    # The unload rammed first and counted 23; then 20 of the fast load, the 10 mm purge
+    # and the auto-retract's 23.
+    assert at.extruded == pytest.approx((23 + 20 + 10 + 23) * 0.95)
 
 
 def test_manual_moves_count_past_the_gap_and_retracts_stop_at_its_limit():
@@ -190,19 +243,21 @@ def test_a_reload_resumes_at_the_gap_the_runout_found():
     p.start_print(PrintSpec([Segment(0, 100)], preheat_s=0))
     sim.tick(0.8 + 1)  # 5 mm printed into the 10 mm gap: gap 5, nothing counts
     assert (p.tools[0].gap, p.tools[0].extruded) == (5, 0)
+    # The park retracts 3 to gap 8; the runout ramming feeds 8 back and counts its 7.
     p.runout(0)
+    assert p.tools[0].extruded == pytest.approx(7 * 0.95)
     p.load(0)
     sim.advance(100)
     # As on the MK4 above: (40 + 27) counted, gap 12.
-    assert p.tools[0].extruded == pytest.approx((40 + 27) * 0.95)
+    assert p.tools[0].extruded == pytest.approx((7 + 40 + 27) * 0.95)
     assert p.tools[0].gap == pytest.approx(12)
     p.resume()  # 12 - 5 = 7 fed: gap 5, nothing counts
     assert p.tools[0].gap == pytest.approx(5)
-    assert p.tools[0].extruded == pytest.approx((40 + 27) * 0.95)
+    assert p.tools[0].extruded == pytest.approx((7 + 40 + 27) * 0.95)
     sim.tick(1)  # 5 mm printed refill the gap
-    assert p.tools[0].extruded == pytest.approx((40 + 27) * 0.95)
+    assert p.tools[0].extruded == pytest.approx((7 + 40 + 27) * 0.95)
     sim.tick(1)  # 5 mm printed, all counted
-    assert p.tools[0].extruded == pytest.approx((40 + 27 + 5) * 0.95)
+    assert p.tools[0].extruded == pytest.approx((7 + 40 + 27 + 5) * 0.95)
 
 
 def test_a_reload_in_the_preheat_resumes_at_its_gap():
@@ -211,14 +266,16 @@ def test_a_reload_in_the_preheat_resumes_at_its_gap():
     p.start_print(PrintSpec([Segment(0, 100)], preheat_s=5))
     sim.tick(0.8 + 1)
     assert p.job.phase is JobPhase.PREHEAT
-    p.runout(0)  # the gap is still the 10 mm retract
+    # The gap is still the 10 mm retract, past the park's 8, so the park doesn't move;
+    # the runout ramming feeds the 10 back and counts its 7.
+    p.runout(0)
     p.load(0)
     sim.advance(100)
     assert p.tools[0].gap == pytest.approx(12)
     p.resume()  # 12 - 10 = 2 fed: gap 10, back to the preheat
     assert p.job.phase is JobPhase.PREHEAT
     assert p.tools[0].gap == pytest.approx(10)
-    assert p.tools[0].extruded == pytest.approx((40 + 27) * 0.95)
+    assert p.tools[0].extruded == pytest.approx((7 + 40 + 27) * 0.95)
 
 
 def test_a_power_loss_after_a_reload_drops_the_restore():

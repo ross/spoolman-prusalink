@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from simulator import config, prusalink
-from simulator.model import Firmware, Material, Simulation, preset_temperatures
+from simulator.model import Firmware, Material, Simulation
 from simulator.tests.test_config import printer, tool, write
 from simulator.tests.test_model import shown
 
@@ -47,7 +47,7 @@ def test_tool_with_color_and_uuid_is_adhoc(tmp_path):
         "#186bb5",
         "7b3d2d5e-1f7a-4d8c-9a1e-2c3b4d5e6f70",
         True,
-        **preset_temperatures("PETG"),
+        **p.model.preset_temperatures("PETG"),
     )
     assert t.previous == t.material and t.previous is not t.material
     assert (p.api_key, p.port, p.model.code) == ("sim-p", 8001, "8.1.0")
@@ -56,7 +56,7 @@ def test_tool_with_color_and_uuid_is_adhoc(tmp_path):
 def test_bare_name_is_a_preset(tmp_path):
     p = sim_from(tmp_path, printer(tool('index = 0\nmaterial = { name = "ASA" }'))).printers["p"]
     t = p.tools[0]
-    assert t.material == Material("ASA", None, None, False, **preset_temperatures("ASA"))
+    assert t.material == Material("ASA", None, None, False, **p.model.preset_temperatures("ASA"))
     assert t.loaded and t.previous is None
     assert shown(p) == {"name": "ASA"}
 

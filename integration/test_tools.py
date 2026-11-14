@@ -118,6 +118,7 @@ async def test_t3_swap_on_one_tool_leaves_the_other(world: World):
     assert [(e["tool"], e["event"]) for e in events(records)] == [(1, "swap_staged")]
 
     w.printer.extrude(TOOL1, 20)  # 20 * 550 / 576 = 19.10: the counter reads 519
+    # The unload purges 2 and rams 17 first: 19 * 550 / 576 = 18.14, so 537.24.
     await w.unload(TOOL1)
     records = await w.poll()
     assert [(e["tool"], e["event"]) for e in events(records)] == [
@@ -125,13 +126,13 @@ async def test_t3_swap_on_one_tool_leaves_the_other(world: World):
         (1, "swap_committed"),
     ]
     assert event_fields(records, "swap_committed") == [{"from_spool": d, "to_spool": c}]
-    assert w.charged(records, "D") == 19
+    assert w.charged(records, "D") == 37
 
     # No tag reader on an INDX: the load is from the menu's preset. It counts
-    # LOADS["8.10.0"], 36.28, on top of 519.10: 555.38.
+    # LOADS["8.10.0"], 43.92, on top of 537.24: 581.16.
     records = await w.swap_cycle(tool=TOOL1, source="preset", name=ASA[0])
     records += await w.poll()
-    assert w.charged(records, "C") == 36
+    assert w.charged(records, "C") == 44
     assert charges(records, a) == []
 
     # Tool 0 saw none of it.
