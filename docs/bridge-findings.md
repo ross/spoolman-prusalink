@@ -307,18 +307,22 @@ written.
   `sync_delay` holds the job at the first idle poll after the boot. The
   job then runs at the first later poll after the printer has been idle
   that long, so whether it misses the window depends on when that poll
-  comes. `sync_delay` is 0 by default. With an MMU3, while the MMU still
-  connects after the boot, the job's end isn't the MMU's: it auto-retracts,
-  which counts on slot 0 (F45). Once the MMU is Active, the cut's slot is
-  still at FINDA, so the job waits at the unload question first (F43,
-  BF18) and reads `ATTENTION` until someone answers.
+  comes. `sync_delay` is 0 by default. With an MMU3, the sync job waits
+  at the preview's question to unload the MMU's filament first and reads
+  `ATTENTION` until someone answers (F43, BF18): while the MMU still
+  connects after the boot, whatever FINDA sees, and once it's Active
+  because the cut's slot is still at FINDA. If No runs the job while the
+  MMU still connects, its end isn't the MMU's: it auto-retracts, which
+  counts on slot 0 (F45).
 - **Effect**: The user's print is lost: it never resumes, and the printer
   ends the sync job `FINISHED`. If the autostart resumes anyway, the two
   jobs collide in a way the source doesn't define.
 - **Evidence**: Read in the firmware source. Shown in the simulator by
   `test_a_sync_job_in_the_window_drops_the_resume` in
   `tests/test_power_panic.py`, which pins it on a Core One L, and on an
-  MMU by the window tests in `simulator/tests/test_mmu_power_panic.py`. To be
+  MMU by `test_a_sync_job_in_the_window_on_a_connecting_mmu_waits_on_the_question`
+  in `tests/test_mmu.py` and the window tests in
+  `simulator/tests/test_mmu_power_panic.py`. To be
   confirmed on the printer: whether PrusaLink answers before the
   autostart's first try. The F12 trace shows the window, and has to be
   taken before the INDX upgrade.
@@ -517,8 +521,9 @@ written.
   usage because the tool reports no material (C7). When filament is next
   loaded in that tool, the bridge charges the held usage, with the load's
   own count, to the spool reported there. An MMU's runout writes no type,
-  so a cut while it waits holds nothing: the resumed print has no slot
-  selected and counts nothing at all (F44, BF17).
+  so a cut while it waits holds nothing: slot 0 keeps its type, and the
+  resumed print counts on slot 0 while the MMU connects and on no slot
+  after (F44, BF17).
 - **Effect**: The new spool is charged for filament that came from no
   spool: in the test, the held 84 mm on top of the load's own count.
 - **Evidence**: On a toolchanger, shown in the simulator by
@@ -777,7 +782,8 @@ panic (F38 to F46). The MMU's scenario rows are T12 to T17.
 - **Evidence**: Read in the firmware source and the stock slicer profile;
   shown in the simulator by
   `test_an_mmu_tool_change_charges_the_outgoing_slot_the_firmware_feed` in
-  `tests/test_mmu.py`. The feed's last move stops at the sensor, between
+  `tests/test_mmu.py`, and through a real Spoolman by
+  `integration/test_tools.py::test_t12_two_color_mmu_print`. The feed's last move stops at the sensor, between
   36 and 50 mm, which only hardware could tell.
 - **Scenario rows**: T12.
 - **To reproduce**: That test: a print on slots 0 and 1, 20 mm each, in the
@@ -807,8 +813,8 @@ panic (F38 to F46). The MMU's scenario rows are T12 to T17.
   leaves no slot selected, and only a tool change or a load selects one
   (`mmu2_mk4.cpp:155, 175, 674, 869-871, 913, 1013`). A power-panic resume
   is a boot, and the power-panic data holds nothing about the slot (F45).
-  The resume's 8 mm feed back, 3.5 s after the boot, counts on slot 0
-  while the MMU still connects, else on none. The resumed print counts on
+  The resume's 8 mm feed back counts on slot 0 while the MMU still
+  connects, else on none. The resumed print counts on
   slot 0 until the MMU is Active, whichever slot prints, then on none. Its
   next tool change runs from no slot: the old slot's wipe-tower unload,
   before the `T`, counts on slot 0 or on none, the firmware's feed counts
@@ -817,9 +823,12 @@ panic (F38 to F46). The MMU's scenario rows are T12 to T17.
   to slot 0's spool while the MMU connects, whichever slot printed, and
   isn't charged at all after. A resumed one-color print is charged nothing
   after its first seconds. In the simulator, with the MMU connecting for
-  10 s, a print cut in slot 1's segment counts 35.5 mm on slot 0 after the
-  boot, the 8 mm feed back and 27.5 mm of slot 1's filament, and nothing
-  on slot 1 to the print's end.
+  10 s and the test's print at 5 mm/s, a print cut in slot 1's segment
+  counts 35.5 mm commanded, 33.7 counted, on slot 0 after the boot, and
+  nothing on slot 1 to the print's end. That's the 8 mm feed back, 3.5 s
+  after the boot in the simulator's timing (its 1.5 s window and 2 s
+  recovery), and the 27.5 mm slot 1 prints from the print's restart, 4.5 s
+  after the boot, until the MMU is Active.
 - **Evidence**: Read in the firmware source; shown in the simulator by
   `test_an_mmu_print_resumed_after_a_cut_is_charged_nothing_until_a_tool_change`
   and `test_the_resume_feed_back_lands_on_slot_0_while_the_mmu_connects`
@@ -841,8 +850,9 @@ panic (F38 to F46). The MMU's scenario rows are T12 to T17.
 - **What happens**: With the MMU Active and FINDA seeing filament, any
   slot's filament past the selector, the preview asks to unload it first
   (F43). That's most often after Load To Nozzle: a stock MMU3 print ends
-  with `M702`, which clears FINDA. The shortcut for a single-tool file
-  doesn't apply, since the sync job has no filament use
+  with `M702`, which clears FINDA. While the MMU connects after a boot, it
+  asks whatever FINDA sees (BF26). The shortcut for a single-tool file
+  doesn't apply, since the sync job's metadata names no tool
   (`gcode_info.cpp:611-625`). The job waits in `ATTENTION` with its ID.
   Yes unloads into the MMU, reading `BUSY`, then turns the heaters off and
   runs the job. No runs it with the filament in place
@@ -854,7 +864,8 @@ panic (F38 to F46). The MMU's scenario rows are T12 to T17.
 - **Effect**: Each write after Load To Nozzle holds the printer at a
   question until someone answers, with no flag and no time-out: the bridge
   never uploads again and never tells the user. Answering Yes unloads the
-  filament for a job that moves none. Declining goes the way of BF5.
+  filament for a job that moves none. A stop at the question goes the way
+  of BF5.
 - **Evidence**: Read in the firmware source; shown in the simulator by
   `test_a_sync_job_on_a_loaded_mmu_waits_on_the_unload_question` in
   `tests/test_mmu.py`.

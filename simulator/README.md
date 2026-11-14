@@ -271,7 +271,7 @@ that trace. The points that matter for the bridge, in short:
   ramming counts on the slot, the unit ejects it, and the printer waits in
   `ATTENTION` for the filament to be loaded into the MMU. No type is
   written, so no unload counts. `load` with no source then reloads the same
-  slot: the feed counts nothing, the load to the nozzle counts 7 mm past
+  slot, reading `PRINTING` while it runs: the feed counts nothing, the load to the nozzle counts 7 mm past
   the 40 mm gap and the prime 4, and the print waits `PAUSED` for the
   resume, which feeds the 8 mm back. With a spool join from the slot, the
   join unloads the slot into the MMU, changes to the join's slot from no
@@ -287,7 +287,9 @@ that trace. The points that matter for the bridge, in short:
   checked for filament, and a print always gets the tools-mapping screen.
   When FINDA sees filament, a slot fed past the selector, the preview first
   asks to unload it, holding the job in `ATTENTION` with its ID: a print
-  from the page and a sync job alike. A `single_tool_file` of slot 0's type
+  from the page and a sync job alike. While the MMU connects, FINDA's
+  sensor isn't read yet, so the question asks whatever FINDA sees; only an
+  upload's sync job can start then. A `single_tool_file` of slot 0's type
   with filament at the extruder's sensor skips the question and the
   mapping screen and prints at once. `tap_through` answers No, which prints
   with the filament in place and no mapping screen. `unload_first` answers
@@ -517,8 +519,8 @@ Choices made where the firmware was silent or the plan left it open:
   purge when a cleaning fails on a printer with a nozzle cleaner; it
   retracts to the full distance (20 mm on a Nextruder, 8 mm on INDX) with
   no ramming, whatever the switch says, and stores that distance for the next feed to feed back.
-- Temperatures, `G12` other than INDX's power-panic purge, the mesh bed
-  leveling retract and the MMU don't move filament in the simulator.
+- Temperatures, `G12` other than INDX's power-panic purge and the mesh bed
+  leveling retract don't move filament in the simulator.
 - A power cut during a runout's or a jam's dialog retracts 8 mm, as any
   cut in a print does. The firmware skips that retract when the runout or
   jam interrupted a move, which runs it through the crash recovery
@@ -535,6 +537,15 @@ Choices made where the firmware was silent or the plan left it open:
   try finds everything ready, the firmware starts the resume over the new
   print: its check that the printer is idle is a debug assertion
   (`resume_print` in `power_panic.cpp`). The simulator doesn't model that.
+- A second power cut during the resume's recovery or unpark loses the print
+  in the simulator, on every model, where the firmware keeps the saved state
+  through the resume and resumes again (`power_panic.cpp:228-237, 270-279,
+  732, 946-983`).
+- A `T` while the MMU connects waits for it on every model. The Core
+  One's MMU, on MODBUS, connects that way. The MK4 family's, on UART, first
+  runs its bootloader for up to 10 s, where the firmware's `T` doesn't
+  wait: its feed can count on slot 0, and the slot is set though the MMU
+  never changed slots. The bootloader phase isn't modeled.
 - One `checks` setting stands for the firmware's settings per kind of check
   (model, compatibility mode, G-code level, input shaper and firmware). The
   checks share one screen and the worst severity decides it, so one setting
@@ -562,6 +573,11 @@ Choices made where the firmware was silent or the plan left it open:
 - A print's end auto-retracts the picked tool even when it has no
   filament, as the simulator does for a loaded one. The source doesn't
   say otherwise, but a trace hasn't shown it.
+- What the preview's Yes unloads while the MMU connects, or once it's
+  connected with FINDA clear after a question asked while it connected,
+  isn't in the source: `SelectorSlot()` assumes the MMU is up
+  (`marlin_print_preview.cpp:709-711`). `unload_first` is refused then;
+  No and Cancel work.
 - The tools-mapping screen doesn't check a spool join's tools. The
   firmware checks each tool in a join's chain for filament and type, and
   refuses a join whose earlier tool has no working sensor, so the sensors

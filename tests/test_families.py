@@ -25,6 +25,9 @@ The INDX profile: `G427` purges each used tool 25 and auto-retracts it (8 counte
 8 stored). T0 deretracts, primes 1.6 + 5.4907 and retracts 0.8, fed back. At the change T0
 retracts 0.8 + 8; T1 deretracts, counts 1.6 + 4.1596 on its first pick and retracts 0.8,
 fed back. At the end T1 retracts 0.8.
+
+On a family with an MMU3 the story is the same, with the MMU's own operations, and the
+expectations are in `MMU_FAMILIES`.
 """
 
 from __future__ import annotations
@@ -47,7 +50,8 @@ from harness import (
 )
 
 from integration.station import Station
-from simulator.model import MODELS, PrintSpec, Segment, SimTool
+from simulator.mmu import MMU_SLOTS
+from simulator.model import MODELS, PrintSpec, Segment, SimTool, State
 
 SHELF = "shelf"
 SWAP_TOOL = 0
@@ -160,15 +164,52 @@ FAMILIES = {
 }
 
 
+# On an MMU3 the story's steps are the MMU's: each print loads its slots itself and its end
+# G-code's `M702` unloads into the MMU, and the swap is Eject From MMU, then Preload To MMU
+# with PETG on slot 0. Slot 0 starts at 1000 and slot 1 at 500, and nothing is in the
+# extruder. The counts follow the tracker's rules: a move counts past the gap, which stops at
+# 40 mm, times 0.95, and with no slot selected nothing counts and the gap stays put. The
+# profile's moves are in simulator/tests/test_mmu_prints.py: a start of -2 and a `T0`, both
+# on no slot, then 17 and the purge line, 53 on the MK4S; at the change, slot 0's ramming
+# and stamping, 20.9518 + 15 = 35.9518, and the firmware's feed of slot 1's filament,
+# 206.9 on slot 0 (BF16); then slot 1's 32 mm load and 54.63 purge; at the end, slot 1's
+# tower unload, 35.9518, and the `M702`, which counts nothing from gap 40.
+MMU_FAMILIES = {
+    "1.4.1": {  # MK4S
+        # Slot 0: 70 + 100 + 35.9518 + 206.9 = 412.8518 * 0.95 = 392.21, 1392.21. Slot 1:
+        # 32 + 54.63 + 50 + 35.9518 = 172.5818 * 0.95 = 163.95, 663.95.
+        "print 1": {1: 392, 2: 163},
+        # Neither Eject nor Preload writes none, so no unload counts and spool 3 stays
+        # staged (BF15). The bridge flags spool 1 for the printer's PETG.
+        "swap": {},
+        # The `M702` left the gap at 40, and the `T0` on no slot leaves it there, so the
+        # start counts 30 of its 70 (BF29): 372.8518 * 0.95 = 354.21, 1746.42, charged to
+        # spool 1, still the active spool (BF15). Slot 1 as in print 1: 827.90.
+        "print 2": {1: 354, 2: 164},
+        "reboot": {},
+        # From 0 after the boot: 70 + 10 + 242.8518 = 322.8518 * 0.95 = 306.71 on slot 0,
+        # and 32 + 54.63 + 10 + 35.9518 = 132.5818 * 0.95 = 125.95 on slot 1.
+        "print 3": {1: 306, 2: 125},
+    },
+    "7.1.0": {  # Core One: a 51 mm purge line, so each start counts 2 mm less.
+        "print 1": {1: 390, 2: 163},  # 410.8518 * 0.95 = 390.31
+        "swap": {},
+        "print 2": {1: 352, 2: 164},  # 370.8518 * 0.95 = 352.31, 1742.62
+        "reboot": {},
+        "print 3": {1: 304, 2: 125},  # 320.8518 * 0.95 = 304.81
+    },
+}
+
+
 def segments(tools: int, plan: list[tuple[int, float]]) -> PrintSpec:
     used = plan if tools > 1 else plan[:1]
     return PrintSpec([Segment(t, mm) for t, mm in used], duration_s=2, preheat_s=0.5)
 
 
-async def story(tmp_path, model: str) -> tuple[dict, FakeSpoolman, Station]:
-    """Run the story on `model`; return each stage's charges by spool, the fake Spoolman
-    and the station."""
-    count = MODELS[model].max_tools
+async def story(tmp_path, model: str, mmu: bool = False) -> tuple[dict, FakeSpoolman, Station]:
+    """Run the story on `model`, with an MMU3 if `mmu`; return each stage's charges by
+    spool, the fake Spoolman and the station."""
+    count = MMU_SLOTS if mmu else MODELS[model].max_tools
     tools = [SimTool.loaded_with(0, PLA, extruded=1000.0)]
     if count > 1:
         tools.append(SimTool.loaded_with(1, PLA, extruded=500.0))
@@ -177,7 +218,9 @@ async def story(tmp_path, model: str) -> tuple[dict, FakeSpoolman, Station]:
     spools = [spool(1, locations[0]), spool_x(3, SHELF, material="PETG", color="186bb5")]
     if count > 1:
         spools.append(spool(2, locations[1]))
-    bridge, fake, station = make(tmp_path, spools, model=model, tools=tools, auto_retract=True)
+    bridge, fake, station = make(
+        tmp_path, spools, model=model, tools=tools, auto_retract=True, mmu=mmu
+    )
     station.poll = lambda: bridge.poll()
     printer = station.printer
 
@@ -195,6 +238,15 @@ async def story(tmp_path, model: str) -> tuple[dict, FakeSpoolman, Station]:
     async def swap():
         fake.spools[1]["location"], fake.spools[3]["location"] = SHELF, locations[SWAP_TOOL]
         await poll()
+        if mmu:
+            # Eject From MMU, then Preload To MMU with the new spool's type.
+            printer.eject(SWAP_TOOL)
+            await station.run_until(lambda: printer.tools[SWAP_TOOL].process is None)
+            await poll()
+            printer.change_all([SWAP_TOOL], name="PETG")
+            await station.run_until(lambda: not printer.queue and printer.state is State.IDLE)
+            await poll()
+            return
         await station.unload(SWAP_TOOL)
         await poll()
         await station.swap_cycle(tool=SWAP_TOOL, source="preset", name="PETG")
@@ -202,6 +254,8 @@ async def story(tmp_path, model: str) -> tuple[dict, FakeSpoolman, Station]:
 
     async def reboot():
         printer.reboot()
+        if mmu:  # The user waits for the MMU to connect before the next print.
+            await station.run_until(lambda: printer.mmu.active)
         await poll()
 
     def totals():
@@ -269,3 +323,35 @@ async def test_family_without_counters(tmp_path, caplog):
     assert ledger(tmp_path) == []
     assert levels(caplog, "has no usage counters") == ["ERROR"]
     assert jobs(station) == [] and not fake.flag(3)
+
+
+@pytest.mark.parametrize("model", MMU_FAMILIES, ids=lambda code: f"{MODELS[code].name}-MMU3")
+async def test_mmu_family_story(tmp_path, model):
+    """With an MMU3, each print charges what each slot counts, the swap goes unseen (BF15),
+    and the second print's start counts 40 mm less (BF29)."""
+    charged, fake, station = await story(tmp_path, model, mmu=True)
+    assert charged == MMU_FAMILIES[model]
+
+    locations = tool_locations(LOC, MMU_SLOTS)
+    records = ledger(tmp_path)
+    # No unload anywhere: the swap is only a type change, and the bridge stages spool 3
+    # and keeps charging spool 1 (BF15).
+    assert [e for e in station.sim.events if e.kind == "unload"] == []
+    swaps = ("unload", "swap_staged", "swap_committed")
+    assert [(r["tool"], r["event"]) for r in records if r.get("event") in swaps] == [
+        (SWAP_TOOL, "swap_staged")
+    ]
+    staged = [r["event"] for r in records if r.get("event", "").startswith("staged_at")]
+    assert staged == ["staged_at_print", "staged_at_reboot", "staged_at_print"]
+    reboots = [r for r in records if r.get("event") == "reboot"]
+    assert [(r["tool"], r["kept_mm"]) for r in reboots] == [(t, 0) for t in range(MMU_SLOTS)]
+    assert fake.spools[1]["location"] == SHELF
+    assert fake.spools[2]["location"] == locations[1] and not fake.flag(2)
+    assert "name printer='PETG' spoolman='PLA'" in fake.flag(1)
+    assert "spool 3 is staged but not loaded; charging spool 1" in fake.flag(3)
+    # Spool 3 is never active, so the bridge writes nothing: slot 0 keeps Preload's PETG
+    # with no color or UUID. Each print's end unloads into the MMU, so no slot is left at
+    # FINDA, and a sync job would meet no unload question (BF18).
+    assert jobs(station) == [] and fake.spools[3]["extra"].keys() == {"bridge_flag"}
+    assert station.material(SWAP_TOOL) == ("PETG", None, None)
+    assert station.printer.selected_tool is None and not station.printer.mmu.path.loaded

@@ -71,7 +71,10 @@ def test_a_runout_reloads_the_same_slot_through_the_mmu():
     unchanged(p)
 
     p.load(0)  # the reload keeps the slot's type
-    assert p.state is State.ATTENTION and p.tools[0].process is not None
+    # The reload's moves read PRINTING, as the MMU's own phases do, and the page shows no
+    # question while they run.
+    assert p.state is State.PRINTING and p.tools[0].process is not None
+    assert p.job.phase is JobPhase.WAIT_LOAD and p.to_json()["job"]["attention"] is None
     sim.advance(24)
     # The feed counts nothing, and the slot isn't selected until it ends.
     assert counts(p)[0] == pytest.approx(START + fed + RAM_AFTER_PARK)

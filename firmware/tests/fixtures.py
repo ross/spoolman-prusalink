@@ -99,6 +99,11 @@ inline constexpr const char *m115 = "M115";
 inline constexpr const char *total_toolchanges = "total toolchanges";
 #endif
 }; // namespace gcode_info
+
+        /// @brief Value for this extruder was given in G-code
+        inline bool given() const {
+            return filament_used_g.has_value();
+        }
 """
 
 OPTIONS_CMAKE = """\
@@ -241,6 +246,20 @@ set_feature_for_printers(HAS_NOZZLE_CLEANER "iX" "COREONE_INDX" "COREONEL_INDX")
 set_feature_for_printers(HAS_NOZZLE_CLEANER_LITE "XL" "COREONE" "COREONEL")
 if(HAS_TOOLCHANGER OR HAS_MMU2)
   define_boolean_option(HAS_TOOL_MAPPING yes)
+endif()
+
+if(${BOARD} STREQUAL "XBUDDY" AND HAS_MMU2)
+  # for XBUDDY based printers, UART6 is being used either for puppies/MODBUS or directly for the MMU
+  if(HAS_PUPPIES)
+    # UART already occupied by the puppies/MODBUS
+    set(HAS_MMU2_OVER_UART NO)
+  else()
+    # UART used for the MMU
+    set(HAS_MMU2_OVER_UART YES)
+  endif()
+else()
+  # other boards: set to NO, whatever new edge cases that may bring...
+  set(HAS_MMU2_OVER_UART NO)
 endif()
 """
 
@@ -2595,6 +2614,17 @@ MMU2_MK4_H = """\
     float nominalEMotorFSOffReg = nominalEMotorFSOff;
     /// A record of the last E-motor position when fsensor turned off while unloading
     float unloadEPosOnFSOff = nominalEMotorFSOff;
+
+#ifdef UNITTEST
+    // Unit tests - avoid talking to the bootloader on the serial
+    #define MMU_USE_BOOTLOADER() 0
+#elif HAS_MMU2_OVER_UART()
+    // Only MK4 with MMU over UART may try to talk to the bootloader on the serial
+    #define MMU_USE_BOOTLOADER() 1
+#else
+    // CORE One with MMU over MODBUS - avoid talking to the bootloader on the serial
+    #define MMU_USE_BOOTLOADER() 0
+#endif
 """  # noqa: E501 (verbatim firmware lines)
 
 # `mmu2_mk4.cpp`, excerpts.
@@ -3117,6 +3147,29 @@ bool MMU2::WaitForMMUReady() {
         return true;
     }
 }
+
+void __attribute__((noinline)) MMU2::mmu_loop_inner(bool reportErrors) {
+    mmu2Serial.check_recovery();
+
+    #if MMU_USE_BOOTLOADER()
+    if (state == xState::Bootloader) {
+        bootloader->loop();
+
+        if (!bootloader->is_active()) {
+            bootloader_result_ = bootloader->result();
+            bootloader.reset();
+            state = xState::Connecting;
+            logic.Start();
+        }
+
+    } else
+    #endif
+    {
+        logicStepLastStatus = LogicStep(reportErrors); // it looks like the mmu_loop doesn't need to be a blocking call
+    }
+
+    CheckErrorScreenUserInput();
+}
 """  # noqa: E501 (verbatim firmware lines)
 
 # `multi_filament_change.cpp`, excerpts.
@@ -3519,7 +3572,9 @@ bool should_enable(FilamentSensorID id) {
 }
 """  # noqa: E501 (verbatim firmware lines)
 
-# `marlin_server.cpp`, excerpts: `pre_finalize_print`, its unload, and the single-tool start.
+# `marlin_server.cpp`, excerpts: `pre_finalize_print`, its unload, the single-tool start,
+# the preview's Print and Inactive results, and the G-code queue's length as a client
+# reads it.
 MARLIN_SERVER_CPP = """\
 static bool pre_finalize_print([[maybe_unused]] bool finished) {
 #if HAS_ANFC()
@@ -3628,6 +3683,31 @@ void safely_unload_filament_from_nozzle_to_mmu() {
                 // It would require homing the axes first, moving to [maxx-10, -4] and slowly purging while moving towards the origin
             }
 #endif
+
+        case PrintPreview::Result::Print:
+        case PrintPreview::Result::Inactive:
+            did_not_start_print = false;
+            server.print_state = State::PrintInit;
+            break;
+
+    marlin_vars().gqueue = queue.length;
+
+static bool _process_server_request(const Request &request) {
+    const uint8_t client_id = request.client_id;
+    if (client_id >= MARLIN_MAX_CLIENTS) {
+        return true;
+    }
+
+    const bool processed = _process_server_valid_request(request);
+
+    // force update of marlin variables after proecssing request -> to ensure client can read latest variables after request completion
+    _server_update_vars();
+
+    if (request.response_required) {
+        marlin_client::marlin_client_events[client_id].set(make_mask(processed ? Event::Acknowledge : Event::NotAcknowledge));
+    }
+    return processed;
+}
 """  # noqa: E501 (verbatim firmware lines)
 
 # The tag radio's MMU condition.
@@ -4234,6 +4314,266 @@ PrintPreview::Result PrintPreview::Loop() {
 }
 """  # noqa: E501 (verbatim firmware lines)
 
+# `protocol_logic.cpp`, excerpt.
+PROTOCOL_LOGIC_CPP = """\
+void ProtocolLogic::PlanGenericRequest(RequestMsg rq) {
+    plannedRq = rq;
+    if (!ExpectsResponse()) {
+        ActivatePlannedRequest();
+    } // otherwise wait for an empty window to activate the request
+}
+
+bool ProtocolLogic::ActivatePlannedRequest() {
+    switch (plannedRq.code) {
+    case RequestMsgCodes::Button:
+        // only issue the button to the MMU and do not restart the state machines
+        SendButton(plannedRq.value);
+        plannedRq = RequestMsg(RequestMsgCodes::unknown, 0);
+        return true;
+    case RequestMsgCodes::Read:
+        SendReadRegister(plannedRq.value, ScopeState::ReadRegisterSent);
+        plannedRq = RequestMsg(RequestMsgCodes::unknown, 0);
+        return true;
+    case RequestMsgCodes::Write:
+        SendWriteRegister(plannedRq.value, plannedRq.value2, ScopeState::WriteRegisterSent);
+        plannedRq = RequestMsg(RequestMsgCodes::unknown, 0);
+        return true;
+    case RequestMsgCodes::unknown:
+        return false;
+    default: // commands
+        currentScope = Scope::Command;
+        SetRequestMsg(plannedRq);
+        plannedRq = RequestMsg(RequestMsgCodes::unknown, 0);
+        CommandRestart();
+        return true;
+    }
+}
+"""
+
+SPOOL_JOIN_CPP = """\
+bool SpoolJoin::do_join(VirtualToolIndex current_virtual_tool) {
+    std::unique_lock lock(mutex);
+    auto new_raw_virtual_tool = spool_join.get_spool_2_unlocked(current_virtual_tool.to_raw());
+    if (!new_raw_virtual_tool.has_value()) {
+        return false;
+    }
+    const auto new_virtual_tool = VirtualToolIndex::from_raw(new_raw_virtual_tool.value());
+
+    log_info(Marlin, "Spool join from %d to %d (z=%f)", current_virtual_tool.to_raw(), new_virtual_tool.to_raw(), planner.get_axis_position_mm(AxisEnum::Z_AXIS));
+    PrintStatusMessageGuard statusGuard;
+    statusGuard.update<PrintStatusMessage::joining_spool>({});
+
+    planner.synchronize();
+
+    
+    [[maybe_unused]] const XYZval<float, LogicalPosTag> return_pos = current_position.asLogical().xyz();
+
+    
+    
+    const auto gcode_tool = stdext::get_optional<GcodeToolIndex>(tool_mapper.to_gcode(current_virtual_tool));
+    if (!gcode_tool.has_value()) {
+        return false;
+    }
+    if (!tool_mapper.set_mapping(*gcode_tool, new_virtual_tool)) {
+        return false;
+    }
+    tool_mapper.set_enable(true);
+
+    static_assert((HAS_INDX() + HAS_DWARF() + HAS_MMU2()) == 1, "This code assumes exactly one of these toolchanger types");
+
+#if HAS_TOOLCHANGER()
+    const auto current_physical_tool = current_virtual_tool.to_physical();
+    const auto new_physical_tool = new_virtual_tool.to_physical();
+
+    const auto nozzle_temp = thermalManager.degTargetHotend(current_physical_tool);
+
+    const auto orig_e_pos = current_position.e;
+
+    bool should_park = true;
+    #if HAS_CRASH_DETECTION()
+    
+    
+    should_park &= (crash_s.get_state() != Crash_s::RECOVERY);
+    #endif
+
+    const float target_retracted_distance = buddy::filament_tracker().get_retracted_distance(current_physical_tool).value_or(0);
+
+    
+    thermalManager.setTargetHotend(nozzle_temp, new_physical_tool);
+
+    if (should_park) {
+        
+        mapi::park(mapi::ParkingPosition { .z = mapi::ParkingPosition::AtLeast { .above_print = TOOLCHANGE_ZRAISE } });
+    }
+
+    
+    {
+        FS_EventAutolock fs_lock;
+        BlockEStallDetection estall_lock;
+
+        pause::Settings settings;
+        settings.SetExtruder(current_virtual_tool);
+
+        
+        settings.SetRetractLength(0.f);
+
+        settings.SetParkPoint(mapi::get_parking_position(mapi::ParkPosition::unload));
+
+        
+        Pause::Instance().perform(Pause::LoadType::unload_spool_join, settings);
+    }
+
+    
+    thermalManager.setTargetHotend(0, current_physical_tool);
+
+    const auto wait_for_temp = [&] {
+        if (nozzle_temp != 0) {
+            thermalManager.wait_for_hotend(new_physical_tool, { .no_wait_for_cooling = false, .fan_cooling = true });
+        }
+    };
+
+    #if !HAS_INDX()
+    
+    tool_change(NoTool {}, tool_return_t::no_return, tool_change_lift_t::no_lift, false);
+
+    
+    wait_for_temp();
+    #endif
+
+    
+    tool_change(new_virtual_tool, tool_return_t::no_return, tool_change_lift_t::no_lift, false);
+
+    #if HAS_NOZZLE_CLEANER()
+    nozzle_cleaner::load_and_execute(nozzle_cleaner::Sequence::enter_cleaner);
+
+    wait_for_temp();
+
+    nozzle_cleaner::load_and_execute(nozzle_cleaner::Sequence::purge_clean);
+    nozzle_cleaner::load_and_execute(nozzle_cleaner::Sequence::clean);
+    nozzle_cleaner::load_and_execute(nozzle_cleaner::Sequence::exit_cleaner);
+
+    #else
+    wait_for_temp();
+    prusa_toolchanger.purge_tool(new_physical_tool);
+
+    #endif
+
+    if (should_park) {
+        
+        do_blocking_move_to(return_pos.asNative());
+    }
+
+    
+    mapi::restore_retracted_distance(target_retracted_distance, buddy::standard_feedrates::current_extruder(buddy::standard_feedrates::Extruder::retract));
+
+    
+    sync_e_position_to(orig_e_pos);
+
+#elif HAS_MMU2()
+    MMU2::mmu2.tool_change_full(new_virtual_tool.to_raw());
+#else
+    #error "unknown printer"
+#endif
+
+    print_status_message().show_temporary<PrintStatusMessage::spool_joined>({});
+    return true;
+}
+"""  # noqa: E501 (verbatim firmware lines)
+
+FILAMENT_SENSOR_MMU_CPP = """\
+void FSensorMMU::cycle() {
+    
+    switch (mmu2.State()) {
+    case xState::Active:
+        state = mmu2.FindaDetectsFilament() ? FilamentSensorState::HasFilament : FilamentSensorState::NoFilament;
+        break;
+    case xState::Connecting:
+    case xState::Bootloader:
+        state = FilamentSensorState::NotInitialized;
+        break;
+    case xState::Stopped:
+        state = FilamentSensorState::Disabled;
+        break;
+    }
+}
+"""  # noqa: E501 (verbatim firmware lines)
+
+PRINTER_STATE_CPP = """\
+optional<ErrCode> load_unload_attention_while_printing([[maybe_unused]] const fsm::BaseData &data) {
+#if HAS_MMU2()
+    if (config_store().mmu2_enabled.get()) {
+        
+        switch (GetEnumFromPhaseIndex<PhasesLoadUnload>(data.GetPhase())) {
+        case PhasesLoadUnload::MMU_ERRWaitingForUser:
+            return ErrCode::CONNECT_MMU_LOAD_UNLOAD_ERROR;
+            
+        case PhasesLoadUnload::LoadFilamentIntoMMU:
+        case PhasesLoadUnload::IsColor:
+        case PhasesLoadUnload::IsColorPurge:
+            return ErrCode::CONNECT_FILAMENT_RUNOUT;
+    #if HAS_LOADCELL()
+        case PhasesLoadUnload::FilamentStuck:
+            return ErrCode::ERR_MECHANICAL_STUCK_FILAMENT_DETECTED;
+    #endif
+    #if HAS_SIDE_FSENSOR()
+        case PhasesLoadUnload::LoadingObstruction_stoppable:
+        case PhasesLoadUnload::LoadingObstruction_unstoppable:
+            return ErrCode::ERR_MECHANICAL_LOADING_OBSTRUCTION;
+    #endif
+        default:
+            return nullopt;
+        }
+    }
+#endif
+    
+    switch (GetEnumFromPhaseIndex<PhasesLoadUnload>(data.GetPhase())) {
+#if HAS_LOADCELL() && HAS_EXTRUDER_FSENSOR()
+    case PhasesLoadUnload::FilamentStuck:
+        return ErrCode::ERR_MECHANICAL_STUCK_FILAMENT_DETECTED;
+#endif
+#if HAS_SIDE_FSENSOR() && HAS_EXTRUDER_FSENSOR()
+    case PhasesLoadUnload::LoadingObstruction_stoppable:
+    case PhasesLoadUnload::LoadingObstruction_unstoppable:
+        return ErrCode::ERR_MECHANICAL_LOADING_OBSTRUCTION;
+#endif
+    default:
+        return ErrCode::CONNECT_FILAMENT_RUNOUT;
+    }
+}
+"""
+
+# `queue.cpp`, excerpt.
+GCODE_QUEUE_CPP = """\
+/**
+ * Get the next command in the queue, optionally log it to SD, then dispatch it
+ */
+void GCodeQueue::advance() {
+
+  // Process immediate commands
+  if (process_injected_command()) {
+    delay(1); // Safety measure to avoid locking async job in inject queue (buffering a file)
+    return;
+  }
+
+  // Return if the G-code buffer is empty
+  if (!length) {
+    delay(1);
+    return;
+  }
+
+  last_executed_sdpos = queue.get_current_sdpos();
+  gcode.process_next_command();
+  executed_commmand_count++;
+
+  // The queue may be reset by a command handler or by code invoked by idle() within a handler
+  if (length) {
+    --length;
+    if (++index_r >= BUFSIZE) index_r = 0;
+  }
+
+}
+"""
+
 FILES = {
     read.MODELS_FILE: MODELS_HPP,
     read.GCODE_INFO_FILE: GCODE_INFO_HPP,
@@ -4292,8 +4632,13 @@ FILES = {
     "src/gui/screen_menu_filament_mmu.hpp": SCREEN_MENU_FILAMENT_MMU_HPP,
     "src/marlin_stubs/pause/M600.cpp": M600_CPP,
     "src/gui/screen/screen_m600.cpp": SCREEN_M600_CPP,
+    "lib/Marlin/Marlin/src/module/prusa/spool_join.cpp": SPOOL_JOIN_CPP,
+    "src/feature/filament_sensor/filament_sensor_mmu.cpp": FILAMENT_SENSOR_MMU_CPP,
+    "src/state/printer_state.cpp": PRINTER_STATE_CPP,
     read.IMAGES_FILE: PRESETS_JSON,
     read.PAUSE_SETTINGS_FILE: PAUSE_SETTINGS_HPP,
+    "lib/Marlin/Marlin/src/gcode/queue.cpp": GCODE_QUEUE_CPP,
+    "lib/Marlin/Marlin/src/feature/prusa/MMU2/protocol_logic.cpp": PROTOCOL_LOGIC_CPP,
 }
 
 

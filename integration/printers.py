@@ -18,6 +18,7 @@ from aiohttp.test_utils import TestServer
 
 from integration import station
 from integration.temperatures import TEMPERATURES, WRITTEN
+from simulator.mmu import MmuUnit
 from simulator.model import MODELS, Material, PrintSpec, SimPrinter, SimTool
 from spoolman_prusalink.accounting import ToolState
 from spoolman_prusalink.config import PrinterConfig
@@ -47,7 +48,9 @@ class Load:
 class Spec:
     """One printer for `world` to build: its name, model code, and tools in index order.
 
-    The loaded tools come first, then the empty ones.
+    The loaded tools come first, then the empty ones. With `mmu` the printer has an MMU3,
+    switched on and Active, with no slot selected and nothing in the extruder: its tools are
+    the slots, and a load is only the type stored for its slot.
     """
 
     name: str
@@ -55,6 +58,7 @@ class Spec:
     loads: list[Load]
     config: dict = field(default_factory=dict)  # Overrides for its `PrinterConfig`.
     empty: list[str] = field(default_factory=list)  # Each empty tool's location.
+    mmu: bool = False
 
 
 @dataclass(kw_only=True)
@@ -135,8 +139,9 @@ async def start(spec: Spec, world: World) -> tuple[Station, PrinterConfig]:
     for index, location in enumerate(spec.empty, start=len(spec.loads)):
         tools[index], locations[index] = SimTool(index), location
     model = MODELS[spec.model]
-    picked = model.first_tool(len(tools))
-    printer = SimPrinter(spec.name, 0, KEY, model, tools=tools, selected_tool=picked)
+    picked = None if spec.mmu else model.first_tool(len(tools))
+    unit = MmuUnit() if spec.mmu else None
+    printer = SimPrinter(spec.name, 0, KEY, model, tools=tools, selected_tool=picked, mmu=unit)
     world.sim.add(printer)
     made = Station(world.sim, printer, world=world, locations=locations)
     made.server = TestServer(made.app())
