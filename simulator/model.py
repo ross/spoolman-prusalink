@@ -38,6 +38,7 @@ from simulator.preview import (
     tool_mapping,
     wrong_types,
 )
+from simulator.slicer import INDX_SLICER, XL_SLICER, Moves, Slicer
 from simulator.tool import (
     AUTO_RETRACT_STEP,
     CORE_ONE_EXTRUDER,
@@ -253,6 +254,10 @@ class ModelInfo:
     checks: GCodeChecks = field(kw_only=True)  # its build's
     # Its feed system: XL on HAS_TOOLCHANGER builds, INDX on HAS_INDX ones, else direct.
     feed: Feed = field(default=Feed.DIRECT, kw_only=True)
+    # The stock PrusaSlicer profile's moves outside the model on a toolchanger, which a
+    # print can override; None on a direct printer. Not firmware, so `script/firmware-check`
+    # doesn't compare it.
+    slicer: Slicer | None = field(default=None, kw_only=True)
 
     def first_tool(self, enabled: int) -> int | None:
         """The tool picked when the config names none, on a printer with `enabled` tools
@@ -346,6 +351,7 @@ MODELS = _models(
         group="xl",
         checks=XL_CHECKS,
         feed=Feed.XL,
+        slicer=XL_SLICER,
     ),
     ModelInfo(
         "3.1.1",
@@ -356,6 +362,7 @@ MODELS = _models(
         group="xls",
         checks=XL_CHECKS,
         feed=Feed.XL,
+        slicer=XL_SLICER,
     ),
     ModelInfo(
         "5.1.0",
@@ -368,6 +375,7 @@ MODELS = _models(
         group="xl",
         checks=PLAIN_CHECKS,
         feed=Feed.XL,
+        slicer=XL_SLICER,
     ),
     ModelInfo("4.1.0", "iX", IX_EXTRUDER, LOAD_CELL_PRESETS, group="ix", checks=IX_CHECKS),
     ModelInfo(
@@ -410,6 +418,7 @@ MODELS = _models(
         group="coreone_indx",
         checks=INDX_CHECKS,
         feed=Feed.INDX,
+        slicer=INDX_SLICER,
     ),
     ModelInfo(
         "8.10.0",
@@ -421,6 +430,7 @@ MODELS = _models(
         group="coreonel_indx",
         checks=INDX_CHECKS,
         feed=Feed.INDX,
+        slicer=INDX_SLICER,
     ),
 )
 
@@ -448,7 +458,6 @@ class Settings:
     # The whole purge, not doubled for a high-flow nozzle. At least 1 mm, in 5 mm steps on
     # the iX, and INDX ignores it: its cleaner purges a fixed length.
     purge_mm: float | None = None
-    toolchange_purge_mm: float = 30.0
     jam_purge_mm: float = 60.0
     preheat_seconds: float = 5.0
     scan_seconds: float = 0.5
@@ -512,6 +521,10 @@ class PrintSpec:
     preheat_s: float | None = None
     color_changes_mm: list[float] = field(default_factory=list)
     name: str = "part.bgcode"
+    # A toolchanger print's own prime and tool-change purge, in place of the stock
+    # profile's (`Slicer.overridden`); None keeps the profile's.
+    prime_mm: float | None = None
+    toolchange_purge_mm: float | None = None
 
     @property
     def total_mm(self) -> float:
@@ -579,6 +592,8 @@ class UserJob(SimJob):
     # change dialog, which parks nothing (`Pause::filament_change`).
     parked: bool = False
     previewing: bool = True  # until the preview lets the print begin
+    # Whether the start G-code has run its moves, so a resume doesn't run them again.
+    primed: bool = False
     # The tools-mapping screen and the questions its Print asks, set when the screen opens.
     mapping: list[Attention] = field(default_factory=list)
 
@@ -747,22 +762,29 @@ class SimPrinter:
         ratio = self.settings.feed_ratio
         return self.model.extruder.feed_ratio if ratio is None else ratio
 
-    def _track(self, tool: SimTool, mm: float) -> None:
+    def _track(self, tool: SimTool, mm: float, *, printing: bool = False) -> None:
         """Move `tool`'s filament by `mm` commanded, signed, as the firmware's planner does.
 
         A feed first feeds back an auto-retracted distance, and a retract forgets it: the
         auto-retract hook in `Planner::buffer_segment`
-        (`lib/Marlin/Marlin/src/module/planner.cpp`). Every move the simulator makes goes
-        through here.
+        (`lib/Marlin/Marlin/src/module/planner.cpp:2223-2240`). A `printing` move, a print
+        file's `G0` or `G1`, that retracts while a distance is stored doesn't move the
+        filament and keeps the distance, though the tracker has counted it. Every move the
+        simulator makes goes through here.
 
         Every caller picks `tool` first, as the firmware does: a toolchanger's E move with
         no tool picked is a `bsod("E move without tool")` in the same function.
         """
         if mm > 0:
             self._deretract(tool)
-        elif mm < 0:
+        elif mm < 0 and not (printing and tool.path.auto_retracted):
             tool.path.auto_retracted = None
         self._count(tool, mm)
+
+    def _print_moves(self, tool: SimTool, moves: Moves) -> None:
+        """Run a slicer profile's moves on `tool`, the picked tool, as the print's own."""
+        for mm in moves:
+            self._track(tool, mm, printing=True)
 
     def _count(self, tool: SimTool, mm: float) -> None:
         """Count a move as the firmware's filament tracker does: only what goes past the
@@ -1278,6 +1300,14 @@ class SimPrinter:
             _positive(spec.duration_s, "duration_s")
         if spec.preheat_s is not None and spec.preheat_s < 0:
             raise Invalid("preheat_s can't be negative")
+        for key in ("prime_mm", "toolchange_purge_mm"):
+            value = getattr(spec, key)
+            if value is None:
+                continue
+            if self.profile is None:
+                raise Invalid(f"{key} needs a multi-tool slicer profile, which this printer lacks")
+            if isinstance(value, bool) or not isinstance(value, int | float) or value < 0:
+                raise Invalid(f"{key} must be a number of at least 0, got {value!r}")
         total = spec.total_mm
         changes = sorted(x for x in spec.color_changes_mm if 0 < x < total)
         self._start_job(UserJob(name=spec.name, spec=spec, pending_color_changes=changes))
@@ -1374,16 +1404,22 @@ class SimPrinter:
 
     def _unpark_prime(self, job: UserJob) -> None:
         """Resume from a pause: INDX picks the tool it docked at the pause, then purges it
-        in the nozzle cleaner, `G750 E25` and the `M1705 N` auto-retract, still `PAUSED`
-        (`resuming_begin` and `unpark_prime` in `src/common/marlin_server.cpp:3298-3307,
-        2662-2674, 3423-3434`). The unpark then feeds nothing back: the purge syncs E to
-        the position the pause saved."""
+        in the nozzle cleaner, still `PAUSED` (`resuming_begin` and `unpark_prime` in
+        `src/common/marlin_server.cpp:3298-3307, 2662-2674, 3423-3434`). The unpark then
+        feeds nothing back: the purge syncs E to the position the pause saved."""
         t = self._job_tool(job)
         self._pick(t)
         if self._primes_at_resume():
+            self._purge_clean(t)
             purge = self.model.extruder.cleaner_purge_mm
-            self._run_steps(t, [LoadStep("PURGE", purge), LoadStep(AUTO_RETRACT_STEP)])
             self._log("job", f"T{t.index} purged {purge:g} mm at the resume")
+
+    def _purge_clean(self, t: SimTool) -> None:
+        """The nozzle cleaner's `purge_clean` on the picked tool: `G750 E25`, then the
+        `M1705 N` auto-retract (`src/feature/nozzle_cleaner/nozzle_cleaner.cpp:76-94`,
+        `src/marlin_stubs/M1705.cpp:28-46`)."""
+        purge = self.model.extruder.cleaner_purge_mm
+        self._run_steps(t, [LoadStep("PURGE", purge), LoadStep(AUTO_RETRACT_STEP)])
 
     @staticmethod
     def _at_preview(job: UserJob | SyncJob) -> bool:
@@ -2177,17 +2213,67 @@ class SimPrinter:
         self._show_state()
 
     def _begin_feeding(self, job: UserJob) -> None:
+        if not job.primed:
+            job.primed = True
+            self._prime(job)
         self.selected_tool = job.spec.segments[job.segment].tool
         job.enter(JobPhase.PRINTING)
         self._show_state()
 
+    @property
+    def profile(self) -> Slicer | None:
+        """The multi-tool slicer profile the printer prints with, on a toolchanger only. An
+        XL with one tool isn't one (`toolchanger`), and its single-tool profiles inherit
+        `*commonXL*`, whose end G-code doesn't park, so it prints as a direct printer does."""
+        return self.model.slicer if self.toolchanger else None
+
+    def _slicer(self, job: UserJob) -> Slicer | None:
+        """The print's slicer profile, with the print's overrides."""
+        slicer, spec = self.profile, job.spec
+        return slicer and slicer.overridden(spec.prime_mm, spec.toolchange_purge_mm)
+
+    def _prime(self, job: UserJob) -> None:
+        """The start G-code's moves outside the model, on a toolchanger (`Slicer`).
+
+        `G427` picks each used tool in ascending order and purges it in the nozzle cleaner
+        (`run` and `prepare_tool` in
+        `src/feature/tool_offset_calibration/tool_offset_calibration.cpp:186-233, 663-850`).
+        """
+        slicer = self._slicer(job)
+        if slicer is None:
+            return
+        segments = job.spec.segments
+        first = self.tools[segments[0].tool]
+        used = [self.tools[i] for i in sorted({s.tool for s in segments})]
+        self._pick(first)
+        self._print_moves(first, slicer.cleanup)
+        if slicer.calibrates:
+            for t in used:
+                self._pick(t)
+                self._purge_clean(t)
+        if slicer.prime_others is not None:
+            for t in used:
+                if t is not first:
+                    self._pick(t)
+                    self._print_moves(t, slicer.prime_others.moves())
+        self._pick(first)
+        self._print_moves(first, slicer.prime.moves())
+        self._log("job", f"start G-code primed {', '.join(f'T{t.index}' for t in used)}")
+
     def _park(self, job: UserJob | SyncJob, end: State) -> None:
-        """End a job: a finished print's end G-code parks the tool on a toolchanger, then the
+        """End a job: a finished print's end G-code on a toolchanger runs the profile's last
+        moves and parks the tool (`P0 S1`, `src/marlin_stubs/P.cpp:35-48`), then the
         firmware's own end runs, and INDX docks what's still picked (`pre_finalize_print`).
         A stopped print and a sync job keep the tool to the firmware's end."""
-        parks = self.feed.end_parks and self.toolchanger
-        if isinstance(job, UserJob) and end is State.FINISHED and parks:
-            self._log("job", f"end G-code parks T{self.selected_tool}")
+        slicer = None
+        if isinstance(job, UserJob) and end is State.FINISHED:
+            slicer = self._slicer(job)
+        if slicer is not None:
+            t = self.tools[self.selected_tool]
+            if len({s.tool for s in job.spec.segments}) > 1:
+                self._print_moves(t, slicer.tower_end)
+            self._print_moves(t, slicer.end)
+            self._log("job", f"end G-code parks T{t.index}")
             self.selected_tool = None
         self._end_of_print()
         self.feed.rest(self)
@@ -2261,7 +2347,9 @@ class SimPrinter:
         new = segments[job.segment].tool
         if new == old:
             return
-        self.feed.tool_change(self, self.tools[old], self.tools[new])
+        # A tool's first pick in the print stands for the first layer's tool changes.
+        first = all(s.tool != new for s in segments[: job.segment])
+        self.feed.tool_change(self, self.tools[old], self.tools[new], self._slicer(job), first)
 
     # The sync job.
 

@@ -1,7 +1,18 @@
 """Where a toolchanger's picked tool rests after a print, a pause and a boot (F32).
 
 A finished print's end G-code parks the tool on both toolchangers (`P0 S1` in the stock
-profiles), so the firmware's end retracts and auto-retracts nothing. A stopped XL print
+profiles), so the firmware's end retracts and auto-retracts nothing.
+
+The counts include the stock profiles' moves (`simulator.slicer`), on fresh tools at gap 0:
+
+- XL: T0, the first tool, retracts 2 (gap 2) before T1 primes 39 and retracts 20 (gap 20).
+  T0 then primes 39, of which 37 count, retracts 0.8 and feeds it back. A change rams 4.1575
+  on the old tool and retracts 20; the new one feeds 20 back and purges 9.238 on its first
+  pick. The end rams 4.1575 on the last tool and retracts 0.8.
+- INDX: each used tool purges 25 and auto-retracts (8 count, gap 8, 8 stored). T0 primes
+  1.6 + 5.4907 after its deretract, retracts 0.8 and feeds it back. A change retracts the
+  old tool 0.8 + 8 (gap 8.8); on its first pick the new one deretracts its 8, counts 1.6 +
+  4.1596, retracts 0.8 and feeds it back. The end retracts 0.8. A stopped XL print
 keeps its tool; INDX docks it after the end (`pre_finalize_print`). INDX docks at a pause
 and the resume picks the tool again and purges it in the nozzle cleaner. A boot keeps the
 picked tool, except on INDX after a cut during a print that used several tools.
@@ -40,15 +51,24 @@ def start(sim, p, spec: PrintSpec) -> None:
 # A print's end.
 
 
-@TOOLCHANGERS
-def test_a_finished_print_parks_its_tool_first_so_the_end_moves_nothing(model):
+# Each tool's count: its start moves, the change and 10 printed, with no end retract or
+# auto-retract from the firmware.
+@pytest.mark.parametrize(
+    ("model", "counted"),
+    [
+        (XL, [37 + 10 + 4.1575, 39 + 9.238 + 10 + 4.1575]),
+        (INDX, [25 + 8 + 1.6 + 5.4907 + 10, 25 + 8 + 1.6 + 4.1596 + 10]),
+    ],
+)
+def test_a_finished_print_parks_its_tool_first_so_the_end_moves_nothing(model, counted):
     sim, p = make(model, [loaded(0), loaded(1)])
     start(sim, p, print_spec((0, 10), (1, 10)))
     sim.advance(10)
     assert p.state is State.FINISHED and p.selected_tool is None
-    # T1: the pickup's 30 mm purge and 10 printed, with no end retract or auto-retract.
-    assert counts(p) == pytest.approx([10, 40])
-    assert p.tools[1].path.gap == 0 and p.tools[1].path.auto_retracted == 0
+    assert counts(p) == pytest.approx(counted)
+    # The end G-code's 0.8 mm retract, which `pre_finalize_print` stores.
+    assert p.tools[1].path.gap == pytest.approx(0.8)
+    assert p.tools[1].path.auto_retracted == pytest.approx(0.8)
     assert "end G-code parks T1" in [e.text for e in sim.events]
 
 
@@ -115,7 +135,7 @@ def test_the_xl_keeps_its_tool_through_a_pause():
     p.resume()
     assert counts(p) == before and p.state is State.PRINTING
     sim.advance(60)
-    assert counts(p) == pytest.approx([100, 40])
+    assert counts(p) == pytest.approx([37 + 100 + 4.1575, 39 + 9.238 + 10 + 4.1575])
 
 
 def test_indx_docks_at_a_pause_and_the_resume_picks_and_purges():
@@ -133,10 +153,10 @@ def test_indx_docks_at_a_pause_and_the_resume_picks_and_purges():
     assert p.tools[0].path.auto_retracted == 8
     assert p.state is State.PRINTING
     texts = [e.text for e in sim.events]
-    assert texts.index("dock T0") < texts.index("pick T0")
+    assert "pick T0" in texts[texts.index("dock T0") :]  # the start G-code picked it too
     sim.advance(60)
     # The print's feed takes the stored 8 back into the gap, and counts the rest.
-    assert counts(p) == pytest.approx([100 + 25, 40])
+    assert counts(p) == pytest.approx([33 + 1.6 + 5.4907 + 100 + 25, 33 + 1.6 + 4.1596 + 10])
 
 
 def test_an_indx_pause_in_preheat_resumes_to_preheat_after_the_purge():

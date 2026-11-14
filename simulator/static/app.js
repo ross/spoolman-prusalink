@@ -316,6 +316,10 @@ function renderPrinter(p) {
       '<label>duration s' + inp(p, 'start.duration', '', 'type="number" step="any"') + '</label>' +
       '<label>preheat s' + inp(p, 'start.preheat', '', 'type="number" step="any"') + '</label>' +
       '<label>color changes mm (a, b)' + inp(p, 'start.cc', '', 'type="text"') + '</label>' +
+      (p.model.max_tools > 1
+        ? '<label title="the slicer profile\'s prime; empty for the stock one">prime mm' + inp(p, 'start.prime', '', 'type="number" step="any"') + '</label>' +
+          '<label title="the slicer profile\'s tool-change purge; empty for the stock one">tool-change purge mm' + inp(p, 'start.tcpurge', '', 'type="number" step="any"') + '</label>'
+        : '') +
       '<label>file name' + inp(p, 'start.name', 'part.bgcode', 'type="text"') + '</label>' +
       btn('Start', 'start_submit', {}) + '</div>';
   }
@@ -411,6 +415,11 @@ function startBody(name) {
   if (Number.isNaN(dur) || Number.isNaN(pre)) throw new Error('Duration and preheat must be numbers');
   if (dur != null) body.duration_s = dur;
   if (pre != null) body.preheat_s = pre;
+  const prime = numOrNull(getv(name, 'start.prime', ''));
+  const tcpurge = numOrNull(getv(name, 'start.tcpurge', ''));
+  if (Number.isNaN(prime) || Number.isNaN(tcpurge)) throw new Error('Prime and purge must be numbers');
+  if (prime != null) body.prime_mm = prime;
+  if (tcpurge != null) body.toolchange_purge_mm = tcpurge;
   const cc = String(getv(name, 'start.cc', '')).split(',').map((x) => x.trim()).filter(Boolean).map(Number);
   if (cc.some((x) => !Number.isFinite(x))) throw new Error('Color changes must be numbers');
   if (cc.length) body.color_changes_mm = cc;

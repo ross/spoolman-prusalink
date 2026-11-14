@@ -199,6 +199,10 @@ def _print_spec(body: dict) -> PrintSpec:
         )
         or [],
         name=_check("start_print name", body.get("name"), str | None) or "part.bgcode",
+        prime_mm=_check("start_print prime_mm", body.get("prime_mm"), float | None),
+        toolchange_purge_mm=_check(
+            "start_print toolchange_purge_mm", body.get("toolchange_purge_mm"), float | None
+        ),
     )
 
 

@@ -2,7 +2,10 @@
 single-tool printer's.
 
 The charges are worked as in `tests/test_families.py`: on INDX a move counts past the
-tool's 27 mm gap, times 550/576, and a tool change purges 30 on the new tool.
+tool's 27 mm gap, times 550/576, with the stock slicer profile's moves. From gap 0, a print
+of 100 mm on T0 then 50 on T1 counts on T0 the start's 25 mm purge and 8 mm auto-retract,
+its 1.6 + 5.4907 mm prime and 100: 140.0907 * 550/576 = 133.77. On T1 the same 25 + 8, its
+first pick's 1.6 + 4.1596 and 50: 88.7596 * 550/576 = 84.75.
 """
 
 from __future__ import annotations
@@ -58,9 +61,9 @@ async def test_a_print_waiting_on_the_tools_mapping_screen(tmp_path):
     printer.tap_through()  # Print
     await station.run_until(lambda: printer.job is None, poll_every=0.3)
     await bridge.poll()
-    # T0 100 * 550/576 = 95.49. T1 30 + 50 = 80 * 550/576 = 76.39. The end G-code parks
-    # T1 first, so the firmware's end retracts and auto-retracts nothing.
-    assert totals(fake) == {1: 95, 2: 76}
+    # T0 133.77 and T1 84.75. The end G-code parks T1 first, so the firmware's end
+    # retracts and auto-retracts nothing.
+    assert totals(fake) == {1: 133, 2: 84}
     records = ledger(tmp_path)[mark:]
     assert [r for r in records if "event" in r] == []
     assert {r["tool"] for r in records if r.get("spool_id") == 1} == {0}
@@ -87,21 +90,21 @@ async def test_a_print_through_an_empty_tool_holds_its_usage(tmp_path, caplog):
     printer.tap_through()  # turn the filament sensors off
     await station.run_until(lambda: printer.job is None, poll_every=0.3)
     await bridge.poll()
-    # T0 100 * 550/576 = 95.49. T1 counts 30 + 50 = 80 * 550/576 = 76.39 with no material.
-    assert station.counter_at(1) == 576 and station.material(1) == (None, None, None)
-    assert totals(fake) == {1: 95}
+    # T0 133.77. T1 counts 84.75 with no material.
+    assert station.counter_at(1) == 584 and station.material(1) == (None, None, None)
+    assert totals(fake) == {1: 133}
     assert levels(caplog, "holding usage until filament is reported") == ["WARNING"]
     records = ledger(tmp_path)[mark:]
     assert [r for r in records if "event" in r] == []
     assert fake.flag(1) is None and fake.flag(2) is None
 
-    # A known fault, BF24 in docs/bridge-findings.md: the held 76 mm never left a spool,
+    # A known fault, BF24 in docs/bridge-findings.md: the held 84 mm never left a spool,
     # yet the bridge charges it to the next spool reported in T1, with the load's own
     # count, once T1 is loaded. A fix changes this line.
     await station.swap_cycle(tool=1, source="preset", name="PLA")
     await bridge.poll()
-    load = station.counter_at(1) - 576
-    assert totals(fake)[2] == 576 - 500 + load
+    load = station.counter_at(1) - 584
+    assert totals(fake)[2] == 584 - 500 + load
     await bridge.aclose()
 
 
@@ -202,7 +205,8 @@ async def test_a_change_on_a_tool_the_print_has_not_used_looks_like_its_print_st
     events = [(r["tool"], r["event"]) for r in ledger(tmp_path)[mark:] if r.get("event") in swaps]
     assert events == [(1, "swap_staged")]
     # The reload counts 50 more: 67 * 550/576 = 63.98 reads 563, all on spool 2. T0's 100
-    # * 550/576 = 95.49 goes to spool 1, and spool 3 gets nothing.
+    # and its priming, G427's 25 + 8 and the profile's 1.6 + 5.4907, make 140.0907 *
+    # 550/576 = 133.77 on spool 1, and spool 3 gets nothing.
     assert station.counter_at(1) == 563
-    assert totals(fake) == {1: 95, 2: 63}
+    assert totals(fake) == {1: 133, 2: 63}
     await bridge.aclose()

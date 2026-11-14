@@ -305,8 +305,19 @@ def test_a_stream_queue_drops_the_oldest():
         ),
         (
             "start_print",
+            {"segments": [{"tool": 0, "slicer_mm": 1}], "prime_mm": "9"},
+            "start_print prime_mm must be a finite number, got '9'",
+        ),
+        (
+            "start_print",
+            {"segments": [{"tool": 0, "slicer_mm": 1}], "toolchange_purge_mm": 5},
+            "toolchange_purge_mm needs a multi-tool slicer profile, which this printer lacks",
+        ),
+        (
+            "start_print",
             {"segments": [], "speed": 2},
-            "start_print takes color_changes_mm, duration_s, name, preheat_s, segments, not speed",
+            "start_print takes color_changes_mm, duration_s, name, preheat_s, prime_mm, segments,"
+            " toolchange_purge_mm, not speed",
         ),
     ],
 )

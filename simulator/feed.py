@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, ClassVar
 
 if TYPE_CHECKING:
     from simulator.model import SimPrinter
+    from simulator.slicer import Slicer
     from simulator.tool import SimTool
 
 
@@ -26,22 +27,24 @@ class FeedSystem:
     selectable: ClassVar[bool]  # the user can pick a tool (select_tool)
     tool_mapping: ClassVar[bool]  # the preview's tools-mapping screen applies (HAS_TOOL_MAPPING)
     docks: ClassVar[bool] = False  # whether the picked tool goes back to a dock (INDX)
-    # Whether a finished print's end G-code parks the picked tool. The stock PrusaSlicer
-    # profiles of the toolchangers end with `P0 S1 ; park tool` (vendor bundle
-    # PrusaResearch.ini 2.5.16: `[printer:*XLMULTI*]`, and `[printer:*C1_INDX_8T_common*]`,
-    # which the 4T inherits), and `P0` is `tool_change(NoTool {})` (`src/marlin_stubs/P.cpp`).
-    # The slicer's profile isn't modeled yet, so this stands for it.
-    end_parks: ClassVar[bool] = False
 
-    def tool_change(self, p: SimPrinter, old: SimTool, new: SimTool) -> None:
-        """A print's change from `old` to `new`: pick `new` and count what the change moves."""
+    def tool_change(
+        self, p: SimPrinter, old: SimTool, new: SimTool, slicer: Slicer, first: bool
+    ) -> None:
+        """A print's change from `old` to `new`: the profile's moves on `old` before and
+        during its park, the pick of `new`, then the profile's moves on `new`, those of its
+        first pick in the print when `first` is set.
+
+        The pick and the park move no counted filament (`_pick`). Nothing checks for
+        filament at a pickup, and a runout needs the sensor to go from filament to none, so
+        an empty tool prints on and counts what it would have fed (`check_runout` in
+        `src/feature/filament_sensor/filament_sensors_handler.cpp`, `check_for_events` in
+        `filament_sensor.cpp`).
+        """
+        p._print_moves(old, slicer.park_out)
         p.selected_tool = new.index
         p._log("job", f"tool change T{old.index} -> T{new.index}")
-        # Nothing checks for filament at a pickup, and a runout needs the sensor to go from
-        # filament to none, so an empty tool prints on and counts what it would have fed
-        # (`check_runout` in `src/feature/filament_sensor/filament_sensors_handler.cpp`,
-        # `check_for_events` in `filament_sensor.cpp`).
-        p._track(new, p.settings.toolchange_purge_mm)
+        p._print_moves(new, (slicer.first_pick if first else slicer.later_pick).moves())
 
     def credited(self, p: SimPrinter, tool: SimTool) -> SimTool | None:
         """The tool a move on `tool`'s path counts on; None when the move can't be made.
@@ -83,7 +86,6 @@ class Toolchanger(FeedSystem):
 
     selectable = True
     tool_mapping = True
-    end_parks = True
 
     def pick(self, p: SimPrinter, tool: SimTool) -> None:
         """Pick `tool` up, parking the picked one first. Neither moves counted filament."""

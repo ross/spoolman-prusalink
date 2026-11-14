@@ -412,7 +412,7 @@ def test_color_change_in_one_large_tick():
 
 def test_multi_tool_print_attributes_extrusion_and_purges():
     tools = [loaded(0, PETG), loaded(1, PETG), SimTool(2), loaded(3, PETG, enabled=False)]
-    sim, p = make("8.10.0", tools, toolchange_purge_mm=30)
+    sim, p = make("8.10.0", tools)
     with pytest.raises(Invalid, match="has no tool 5"):
         p.start_print(PrintSpec([Segment(5, 10)]))
     p.start_print(PrintSpec([Segment(3, 10)]))  # disabled: the preview refuses it
@@ -426,20 +426,35 @@ def test_multi_tool_print_attributes_extrusion_and_purges():
     p.tap_through()  # Print
     sim.tick(0.3 + 20 + 1)  # 105 mm in: the change to T1 and its purge happened
     assert p.selected_tool == 1
-    # INDX feeds 550/576 of each mm commanded, purges included.
-    assert p.tools[1].extruded == pytest.approx((30 + 5) * 550 / 576)
+    # INDX feeds 550/576 of each mm commanded, the profile's moves included
+    # (`simulator.slicer`). The start purges both used tools, 25 mm and the auto-retract's
+    # 8 (gap 8, 8 stored). T1's first pick deretracts the 8, then counts 1.6 and the
+    # 4.1596 mm purge; its retract and restore cancel. Then 5 printed.
+    start, first = 25 + 8, 1.6 + 4.1596
+    assert p.tools[1].extruded == pytest.approx((start + first + 5) * 550 / 576)
     sim.tick(1000)
     assert p.state is State.FINISHED
-    assert p.tools[0].extruded == pytest.approx((200 + 30) * 550 / 576)
-    assert p.tools[1].extruded == pytest.approx((200 + 30) * 550 / 576)
+    # T0 primes 1.6 + 5.4907 after its deretract. Its park at the change to T1 retracts
+    # 0.8 + 8 (gap 8.8); its later pick feeds 1.6 + 8 + 0.8 back, 1.6 past the gap, then
+    # purges 4.1596.
+    prime = 1.6 + 5.4907
+    assert p.tools[0].extruded == pytest.approx((start + prime + 200 + first) * 550 / 576)
+    assert p.tools[1].extruded == pytest.approx((start + first + 200) * 550 / 576)
     assert p.tools[2].extruded == 0
     assert all(t.unload_count == 0 for t in p.tools.values())
 
 
-# T1's count: the pickup's 30 mm purge and 10 printed. The end G-code parks T1 first, so
-# the firmware's end retracts and auto-retracts nothing.
+# T1's count: the profile's moves (`simulator.slicer`) and 10 printed. On the XL its 39 mm
+# prime, its first pick's 9.238 mm purge after the 20 mm fed back, and the end's 4.1575 mm
+# ramming. On INDX the start's 25 mm purge and the auto-retract's 8, then its first pick's
+# 1.6 and 4.1596 mm purge. The end G-code parks T1, so the firmware's end retracts and
+# auto-retracts nothing.
 @pytest.mark.parametrize(
-    ("model", "counted"), [("3.1.0", (30 + 10) * 0.95), ("8.10.0", 40 * 550 / 576)]
+    ("model", "counted"),
+    [
+        ("3.1.0", (39 + 9.238 + 10 + 4.1575) * 0.95),
+        ("8.10.0", (25 + 8 + 1.6 + 4.1596 + 10) * 550 / 576),
+    ],
 )
 def test_a_print_goes_on_through_an_empty_tool_with_the_sensors_off(model, counted):
     sim, p = make(model, [loaded(0, PETG), SimTool(1)])
@@ -453,7 +468,7 @@ def test_a_print_goes_on_through_an_empty_tool_with_the_sensors_off(model, count
     assert not p.sensors and p.job.phase is JobPhase.BLIP
     sim.tick(0.3 + 3)
     # Nothing checks a picked tool for filament, so T1 prints with none: its counter counts
-    # the pickup's 30 mm purge and what it feeds, and no type appears.
+    # the profile's moves and what it feeds, and no type appears.
     assert "tool change T0 -> T1" in [e.text for e in sim.events if e.kind == "job"]
     assert p.state is State.PRINTING and p.tools[1].extruded > 0
     assert "material" not in prusalink.filament(p)["tools"][1]

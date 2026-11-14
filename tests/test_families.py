@@ -10,9 +10,21 @@ simulator/README.md. A move counts only past the tool's gap, times the feed rati
 with a 40 mm gap on a Nextruder, 550/576 with a 27 mm gap on INDX. A Nextruder's
 auto-retract feeds back what's retracted, counts 23 and leaves 55 stored; the next feed
 deretracts the 55 and counts 15 that fill the gap. INDX's counts 8 and leaves 8, which
-the next feed fills. A tool change purges 30 on the new tool, and a toolchanger's
-finished print parks its tool before the firmware's end, which then moves nothing. The
-counters read whole millimetres, so each charge is a difference of whole numbers.
+the next feed fills. A toolchanger's print adds its stock slicer profile's moves
+(`simulator.slicer`), and its end G-code parks the tool before the firmware's end, which
+then moves nothing but stores each tool's valid gap. The counters read whole millimetres,
+so each charge is a difference of whole numbers.
+
+The XL profile: T0 retracts 2 first; T1 primes 39 and retracts 20; T0 primes 39 and
+retracts 0.8, which its first move feeds back. At the change T0 rams 4.1575 and retracts
+20; T1 feeds the 20 back and purges 9.238 on its first pick. At the end T1 rams 4.1575 and
+retracts 0.8. A print's own retract while a distance is stored doesn't move the filament
+and keeps the distance, though the tracker counts it.
+
+The INDX profile: `G427` purges each used tool 25 and auto-retracts it (8 counted, gap 8,
+8 stored). T0 deretracts, primes 1.6 + 5.4907 and retracts 0.8, fed back. At the change T0
+retracts 0.8 + 8; T1 deretracts, counts 1.6 + 4.1596 on its first pick and retracts 0.8,
+fed back. At the end T1 retracts 0.8.
 """
 
 from __future__ import annotations
@@ -103,39 +115,44 @@ FAMILIES = {
     ),
     "3.1.0": Family(  # XL: the MK4's lengths on five tools; tool 1 starts at 500.
         {
-            # T0 100 * 0.95 = 95. T1 the 30 purge and 50: 80 * 0.95 = 76, 576. The end
-            # G-code parks T1 first, so the end retracts and auto-retracts nothing, and
-            # stores each tool's valid gap, 0.
-            "print 1": {1: 95, 2: 76},
-            # The menu picks T0, whose unload rams from gap 0: 23 * 0.95 = 21.85, 1095 to
-            # 1116.85. Then the load as on the MK4S, 85.5: 1202.35. T0 stays picked.
-            "swap": {1: 21, 3: 86},
-            # T0: 15 deretracted + 100 = 115 * 0.95 = 109.25, 1311.6. T1 from gap 0: 30 +
-            # 50 = 80 * 0.95 = 76, 652.
-            "print 2": {3: 109, 2: 76},
+            # From gap 0. T0: -2 (gap 2), 39 of which 37 count, 100, the 4.1575 ramming:
+            # 141.1575 * 0.95 = 134.10, 1134.10. T1: 39, the 20 back, the 9.238 purge, 50,
+            # the end's 4.1575: 102.3955 * 0.95 = 97.28, 597.28. The end leaves T0 at gap
+            # 20 and T1 at 0.8, which it stores.
+            "print 1": {1: 134, 2: 97},
+            # The menu picks T0, 20 mm stored: fully retracted, so the unload is cold and
+            # counts nothing. Then the load as on the MK4S, 85.5: 1219.60. T0 stays picked.
+            "swap": {3: 85},
+            # T0, 55 stored: the -2 keeps them (gap 40), the prime deretracts them and
+            # counts 15, then 39, 100 and 4.1575: 158.1575 * 0.95 = 150.25, 1369.85. T1,
+            # 0.8 stored: 102.3955 * 0.95 = 97.28, 694.55.
+            "print 2": {3: 150, 2: 97},
             "reboot": {},
-            # Both tools boot at gap 0, with 0 stored. T0 10 * 0.95 = 9.5. T1 30 + 10 = 40 *
-            # 0.95 = 38.
-            "print 3": {3: 9, 2: 38},
+            # T0 boots at gap 20 with 20 stored: the -2 keeps them (gap 22), the deretract
+            # leaves gap 2, then 37 + 10 + 4.1575 = 51.1575 * 0.95 = 48.60. T1, 0.8 stored:
+            # 39 + 9.238 + 10 + 4.1575 = 62.3955 * 0.95 = 59.28.
+            "print 3": {3: 48, 2: 59},
         },
         f"XL isn't supported: {MULTI_TOOL}",
         uuids=False,
     ),
     "8.10.0": Family(  # Core One L INDX on eight tools: 15 slow, 25 fast, the cleaner's 25.
         {
-            # T0 100 * 550/576 = 95.49. T1 30 + 50 = 80 * 550/576 = 76.39: 576.39. The end
-            # G-code parks T1 first, so the end retracts and auto-retracts nothing.
-            "print 1": {1: 95, 2: 76},
-            # T0's unload purges 2 and rams 17: 19 * 550/576 = 18.14, 1113.63. The load
-            # from gap 27: 13 fast past it, the 25 purge, the cleaner's auto-retract 8:
-            # 46 * 550/576 = 43.92, 1157.55.
+            # T0: 25 + 8, 1.6 + 5.4907, 100: 140.0907 * 550/576 = 133.77, 1133.77. T1: 25 +
+            # 8, 1.6 + 4.1596, 50: 88.7596 * 550/576 = 84.75, 584.75. The end leaves T0 at
+            # gap 8.8 and T1 at 0.8, which it stores.
+            "print 1": {1: 133, 2: 84},
+            # T0's unload purges 2 after the 8.8 fed back, and rams 17: 19 * 550/576 =
+            # 18.14, 1151.91. The load from gap 27: 13 fast past it, the 25 purge, the
+            # cleaner's auto-retract 8: 46 * 550/576 = 43.92, 1195.83.
             "swap": {1: 18, 3: 44},
-            # T0's deretract refills the cleaner's 8 mm gap and counts nothing. T0 95.49:
-            # 1253.04. T1 from gap 0: 76.39, 652.78.
-            "print 2": {3: 96, 2: 76},
+            # Each tool's stored distance fills its gap before the start's purge, so both
+            # count as in print 1: T0 133.77, 1329.60; T1 84.75, 669.51.
+            "print 2": {3: 134, 2: 85},
             "reboot": {},
-            # T0 10 * 550/576 = 9.55. T1 40 * 550/576 = 38.19.
-            "print 3": {3: 9, 2: 38},
+            # T0: 33 + 7.0907 + 10 = 50.0907 * 550/576 = 47.83. T1: 33 + 5.7596 + 10 =
+            # 48.7596 * 550/576 = 46.56.
+            "print 3": {3: 47, 2: 46},
         },
         f"COREONEL-INDX isn't supported: {MULTI_TOOL}",
         uuids=False,

@@ -87,7 +87,11 @@ def test_a_change_on_another_xl_tool_counts_on_that_tool_and_changes_back(high_f
     assert counts(p) == pytest.approx([before, 7 + 40 + purge])
     assert p.state is State.PRINTING
     sim.advance(60)
-    assert counts(p) == pytest.approx([100, 7 + 40 + purge])
+    # T0 also counts 37 of the start's priming: -2 for the cleanup (gap 2), then 39 refill
+    # the 2 and count 37, and the -0.8 +0.8 and the end's -0.8 count nothing. T1 gets
+    # none of the profile's tool-change moves.
+    assert counts(p) == pytest.approx([100 + 37, 7 + 40 + purge])
+    assert not any("tool change" in e.text for e in sim.events)
 
 
 def test_a_change_on_another_indx_tool_counts_on_that_tool_with_no_resume_purge():
@@ -117,8 +121,12 @@ def test_a_change_on_another_indx_tool_counts_on_that_tool_with_no_resume_purge(
     assert counts(p) == pytest.approx([before, 67])
     assert not any("purged 25 mm at the resume" in e.text for e in sim.events)
     sim.advance(60)
-    # 67 * 550/576 = 63.98 on T1.
-    assert counts(p) == pytest.approx([100, 67])
+    # T0 also counts the start's priming: G427's cleaner purge, 25 then the auto-retract's
+    # 8, then 1.6 + 5.4907 after the stored 8 comes back; its -0.8 +0.8 and the end's -0.8
+    # count nothing. 67 * 550/576 = 63.98 on T1, with none of the profile's tool-change
+    # moves.
+    assert counts(p) == pytest.approx([100 + 25 + 8 + 1.6 + 5.4907, 67])
+    assert not any("tool change" in e.text for e in sim.events)
     assert p.tools[1].extruded == pytest.approx(63.98, abs=0.01)
 
 

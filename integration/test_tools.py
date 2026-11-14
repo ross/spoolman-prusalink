@@ -64,7 +64,7 @@ async def test_t1_tool_changes_charge_each_tool(world: World):
     start0, start1 = w.counter_at(0), w.counter_at(1)
 
     # One tool change, T0 to T1, so only T1 is picked up: the purge must land on D, and
-    # a purge counted on the tool put down would show up as 30 mm more on A.
+    # a purge counted on the tool put down would show up as about 4 mm more on A.
     mark = w.mark()
     await w.start_print(PrintSpec([Segment(0, 300), Segment(1, 100)], duration_s=4, preheat_s=0.5))
     await finish(w)
@@ -73,13 +73,17 @@ async def test_t1_tool_changes_charge_each_tool(world: World):
     changes = [e.text for e in w.sim.events if e.text.startswith("tool change")]
     assert changes == ["tool change T0 -> T1"]
 
-    # The pickup purges toolchange_purge_mm on T1. At INDX's feed ratio, 550/576, the
-    # 300 mm of T0 moves count 286.46, and T1's purge and 100 mm count 124.13. The
+    # The stock profile's moves count too (`simulator.slicer`). The start purges each
+    # used tool 25 mm in the nozzle cleaner, and its auto-retract counts 8. T0 then primes
+    # 1.6 + 5.4907 mm; T1's pickup counts 1.6, then purges 4.1596 mm. At INDX's feed ratio,
+    # 550/576, T0's 340.0907 mm count 324.74, and T1's 138.7596 mm count 132.50. The
     # counters read whole millimetres, from 1000 on T0 and 500 on T1.
-    purge = w.sim.settings.toolchange_purge_mm
-    assert (int(counted(w, 300)), int(counted(w, purge + 100)), purge) == (286, 124, 30)
-    assert w.charged(records, "A") == 286 == w.counter_at(0) - start0
-    assert w.charged(records, "D") == 124 == w.counter_at(1) - start1
+    slicer = w.printer.model.slicer
+    prime, purge = slicer.prime.mm, slicer.first_pick.mm
+    t0, t1 = 25 + 8 + 1.6 + prime + 300, 25 + 8 + 1.6 + purge + 100
+    assert (int(counted(w, t0)), int(counted(w, t1)), purge) == (324, 132, 4.1596)
+    assert w.charged(records, "A") == 324 == w.counter_at(0) - start0
+    assert w.charged(records, "D") == 132 == w.counter_at(1) - start1
     assert {r["tool"] for r in charges(records, w.spools["A"])} == {0}
     assert {r["tool"] for r in charges(records, w.spools["D"])} == {1}
 

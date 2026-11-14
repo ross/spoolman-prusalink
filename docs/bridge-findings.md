@@ -493,8 +493,8 @@ written.
   question follows, which Ignore answers (F28, F29). A single-tool printer's
   filament-not-inserted screen offers the same, and the print goes on
   alike (F29). The print then runs through the empty tool, and the tracker
-  counts every move on that tool with no material, a toolchanger's pickup
-  purge included. A power-panic resume gets there a second way: when the
+  counts every move on that tool with no material, a toolchanger's
+  priming and purges included. A power-panic resume gets there a second way: when the
   filament was pulled out while the power was off, the idle sensor clear
   in the window before the resume counts the unload and clears the type,
   and the resumed print goes on through the empty tool, since a runout
@@ -504,11 +504,11 @@ written.
   charges the held usage, with the load's own count, to the spool
   reported there.
 - **Effect**: The new spool is charged for filament that came from no
-  spool: in the test, the held 76 mm on top of the load's own count.
+  spool: in the test, the held 84 mm on top of the load's own count.
 - **Evidence**: On a toolchanger, shown in the simulator by
   `test_a_print_through_an_empty_tool_holds_its_usage` in
   `tests/test_toolchanger_prints.py`, on an INDX, which pins the charge:
-  the held 76 mm plus the load's 70. On a single-tool
+  the held 84 mm plus the load's 70. On a single-tool
   printer, read in the firmware source (F29): the simulator doesn't model
   that path. After a power cut, shown in the simulator on a Core One L by
   `test_an_unload_in_the_window_then_printing_on_an_empty_tool` in

@@ -83,7 +83,7 @@ toolchanger has none. `checks` is `ignore`, `warn` (the
 default) or `abort`, and it stands for every setting in the printer's menu
 that governs a check of a file's `M862` lines. The top-level settings are
 timing and lengths: the time scale, how fast loads and prints move filament,
-the purges of a tool change and a jam, the preheat and
+the extra purge of a jam, the preheat and
 park times, the power-panic resume's wait and phases, and whether the start
 blip is on. The feed ratio and a load's slow, fast and purge
 lengths are overrides: left out, each printer uses its model's value, which
@@ -121,8 +121,11 @@ and name the parameter.
 `start_print` takes the fields of `PrintSpec`: `segments`, each
 `{"tool": T, "slicer_mm": MM}` with an optional `"material"`, the filament
 type the file names for that tool, and the optional `duration_s`,
-`preheat_s`, `color_changes_mm` and `name`. The page's start form takes a
-segment per line as `tool:mm` or `tool:mm:TYPE`.
+`preheat_s`, `color_changes_mm` and `name`. On a printer with a multi-tool
+slicer profile, `prime_mm` and `toolchange_purge_mm` replace the profile's
+prime and tool-change purge; elsewhere they answer 400. The page's start
+form takes a segment per line as `tool:mm` or `tool:mm:TYPE`, and on a
+toolchanger the two overrides.
 
 The state lists each printer's and each tool's actions under `actions`, each
 with null when the printer would take it now or the reason it would refuse
@@ -178,8 +181,9 @@ that trace. The points that matter for the bridge, in short:
   the path's gap; with nothing stored, the gap starts at 0 and the tracker
   reports no retracted distance until a feed reaches the nozzle. A
   single-tool Nextruder print's end counts 23 mm. A toolchanger's finished
-  print counts nothing at its end, because its end G-code parks the tool
-  first. A stopped XL print counts the 23 mm on its picked tool, and a
+  print counts only its slicer profile's last moves at its end, because its
+  end G-code parks the tool first. A stopped XL print counts the 23 mm on
+  its picked tool, and a
   stopped INDX print counts nothing, because the 8 mm park retract already
   counts as retracted. The MINI, MK3.5 and the dev kit don't auto-retract.
 - An unload or runout rams with the model's `unload` or `runout` sequence,
@@ -243,9 +247,35 @@ that trace. The points that matter for the bridge, in short:
   print started from the page too. A line with no `P`, such as the query
   form `M862.3 Q`, checks nothing.
 - INDX and XL printers are several tools with their own counters. A tool
-  change isn't an unload; the incoming tool gets a purge. Neither stores
-  UUIDs, so `M865.1` does nothing there. Disabled tools don't appear in
-  `/api/v1/filament`.
+  change isn't an unload. Neither stores UUIDs, so `M865.1` does nothing
+  there. Disabled tools don't appear in `/api/v1/filament`.
+- A print on INDX, or on an XL with more than one enabled tool, adds the
+  stock PrusaSlicer profile's moves outside the model (`slicer.py`), each
+  counted on the picked tool through the tracker. They're profile data from
+  PrusaSlicer 2.9.7 with the PrusaResearch vendor bundle 2.5.16, not
+  firmware, so `script/firmware-check` doesn't compare them. The bundle has
+  no Core One L INDX, so both INDX models use the Core One INDX numbers.
+  - XL: the first tool retracts 2 mm; each other used tool, in ascending
+    order, primes 39 mm and retracts 20; then the first tool primes 39 mm
+    and retracts 0.8, which its first move feeds back. At a tool change
+    the old tool rams 4.1575 mm and retracts 20; the new tool feeds the 20
+    back and purges 9.238 mm on its first pick in the print, which stands
+    for the first layer, and 7.0076 mm on later ones. At the end the last
+    tool rams 4.1575 mm when the print uses several tools, then retracts
+    0.8.
+  - INDX: `G427` purges every used tool, in ascending order, in the nozzle
+    cleaner: 25 mm, then the auto-retract. The first tool then primes 1.6
+    + 5.4907 mm and retracts 0.8, fed back. At a tool change the old tool
+    retracts 0.8 mm, then 8 in its park (`G27 R8`). The new tool's first
+    pick moves 1.6 mm, purges 4.1596 and retracts 0.8, fed back; a later
+    pick first moves 1.6 (the lock move), 8 and 0.8 back. At the end the
+    last tool retracts 0.8.
+
+  Unused tools aren't picked. A print's own retract while an auto-retract
+  distance is stored doesn't move the filament and keeps the distance,
+  though the tracker counts it. The priming runs once, when the print
+  first starts feeding, so a pause, a power-panic resume or a filament
+  change doesn't run it again.
 - A model's feed system, direct, XL or INDX, holds the rules that differ
   between them (`feed.py`). The XL and INDX feed systems are the two
   toolchangers, and the rest of the models are direct. `ModelInfo.feed` names
@@ -295,12 +325,13 @@ that trace. The points that matter for the bridge, in short:
   moves or counts, the idle sensor clear doesn't run, and a print's end
   neither retracts nor auto-retracts. The page shows the tool as "none".
   An XL with one tool enabled isn't a toolchanger in any of this: its
-  toolchanger is off in the firmware, so the tool stays picked, a print's
-  end doesn't park it, and `select_tool` and `park_tool` are refused.
-- Where the picked tool rests. A finished print on the XL or INDX ends with
-  the stock profiles' `P0 S1`, which parks the tool before the firmware's
-  end retract and auto-retract, so those find no tool. The simulator takes
-  that end G-code as fixed until the slicer's profile is modeled. A stopped
+  toolchanger is off in the firmware, so the tool stays picked, a print
+  runs no profile moves and its end doesn't park, and `select_tool` and
+  `park_tool` are refused.
+- Where the picked tool rests. A finished print with a multi-tool slicer
+  profile ends with the stock profiles' `P0 S1`, which parks the tool
+  before the firmware's end retract and auto-retract, so those find no
+  tool. A stopped
   XL print and a sync job keep the tool, and INDX docks whatever is picked
   at a job's end. INDX docks the tool at a pause, after an 8 mm retract,
   and the resume picks it again and purges it in the nozzle cleaner: 25 mm,

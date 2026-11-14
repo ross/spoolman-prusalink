@@ -286,10 +286,13 @@ async def test_t1_tool_changes_charge_each_tool_on_an_xl(world: World):
     spec = PrintSpec([Segment(0, 300), Segment(1, 100)], duration_s=4, preheat_s=0.5)
     records = await w.start_print(spec)
     records += await w.finish_print()
-    # T0: 300 * 0.95 = 285, from 1000. T1: the pickup's 30 mm purge and 100: 130 * 0.95 =
-    # 123.5, from 500. The end G-code parks T1 first, so the firmware's end retract and
+    # The stock profile's moves count too (`simulator.slicer`). T0: a 2 mm retract, then
+    # a 39 mm prime of which 37 count, 300, and the change's 4.1575 mm ramming: 341.1575 *
+    # 0.95 = 324.10, from 1000. T1: a 39 mm prime, the 20 mm it retracts fed back at the
+    # pickup, the 9.238 mm purge, 100, and the end's 4.1575 mm ramming: 152.3955 * 0.95 =
+    # 144.78, from 500. The end G-code parks T1, so the firmware's end retract and
     # auto-retract find no tool and count nothing.
-    assert w.charged(records, "A") == 285 and w.charged(records, "D") == 123
+    assert w.charged(records, "A") == 324 and w.charged(records, "D") == 144
     assert {r["tool"] for r in charges(records, a)} == {0}
     assert {r["tool"] for r in charges(records, d)} == {1}
     assert events(records) == []
