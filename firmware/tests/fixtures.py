@@ -1556,6 +1556,13 @@ void Pause::mmu_unload_start_process([[maybe_unused]] Response response) {
 
     return;
 }
+
+void Pause::mmu_load_process([[maybe_unused]] Response response) {
+    MMU2::mmu2.load_filament(settings.virtual_tool().to_raw());
+    MMU2::mmu2.load_filament_to_nozzle(settings.virtual_tool().to_raw());
+
+    set(LoadState::color_correct_ask);
+}
 """
 
 PRINTER_MODEL_CPP = """\
@@ -3047,6 +3054,40 @@ bool MMU2::tool_change(uint8_t slot) {
     }
     return true;
 }
+
+bool MMU2::tool_change_full(uint8_t slot) {
+    if (!WaitForMMUReady()) {
+        return false;
+    }
+
+    if (slot != extruder) {
+        planner_synchronize();
+
+        pos3d resume_pos = planner_current_position();
+
+        if (all_axes_homed()) {
+            nozzle_park();
+        }
+
+        unload();
+
+        CommandInProgressGuard cipg(CommandInProgress::ToolChange, commandInProgressManager);
+        FSensorBlockRunout blockRunout;
+        BlockEStallDetection blockEStallDetection;
+        planner_synchronize();
+        ToolChangeCommon(slot);
+
+        execute_load_to_nozzle_sequence();
+
+        if (all_axes_homed()) {
+            // Unpark the nozzle
+            motion_do_blocking_move_to_xy(resume_pos.xyz[0], resume_pos.xyz[1], feedRate_t(NOZZLE_PARK_XY_FEEDRATE));
+            motion_do_blocking_move_to_z(resume_pos.xyz[2], feedRate_t(NOZZLE_PARK_Z_FEEDRATE));
+        }
+    }
+
+    return true;
+}
 """  # noqa: E501 (verbatim firmware lines)
 
 # `multi_filament_change.cpp`, excerpts.
@@ -3299,6 +3340,100 @@ void FilamentSensors::reconfigure_sensors_if_needed(bool force) {
     ls[LFS::closest_to_nozzle_independent] = (extruder_fs && extruder_fs_independent) ? extruder_fs : side_fs;
 }
 
+void FilamentSensors::process_events() {
+    if (isEvLocked()) {
+        return;
+    }
+
+    const auto check_runout = [&](LogicalFilamentSensor s) {
+        auto sen = sensor(s);
+        if (sen == nullptr) {
+            return false;
+        }
+
+        const auto event = sen->last_event();
+        if (m600_sent || event != IFSensor::Event::filament_removed) {
+            return false;
+        }
+
+#if HAS_CRASH_DETECTION()
+        if (crash_s.get_state() != Crash_s::PRINTING) {
+            // Only allow runouts in print and outside of crash recovery
+            return false;
+        }
+#endif
+
+        m600_sent = true;
+
+        const auto tool = VirtualToolIndex::currently_selected_opt();
+
+        if (tool.has_value()) {
+            marlin_server::gcode_interrupt(GCodeLiteral { .gcode = "M600 A P T%.0f", .parameter = static_cast<float>(tool->to_raw()) });
+            log_info(FSensor, "Injected runout for T: %u", tool->to_raw());
+        } else {
+            return false;
+        }
+
+        return true;
+    };
+
+    const auto check_autoload = [&]() {
+        const auto is_insert_event = [&](LogicalFilamentSensor s) {
+            const auto si = sensor(s);
+            return si && si->last_event() == IFSensor::Event::filament_inserted;
+        };
+
+        if (!(
+                (
+                    // Trigger autoload from extruder FS only if the filament is not missing in the side FS
+                    (is_insert_event(LogicalFilamentSensor::extruder) && !no_filament_surely(LogicalFilamentSensor::side)
+                        // On the MMU rework, the "FS autoload" configuration item is hidden (BFW-4290)
+                        // So there's no way to enable it when it has been disabled in prior.
+                        // Keep the option enabled for power users, in the spirit of the OG task assignment
+                        && (config_store().fs_autoload_enabled.get() || !extruder_fs_independent))
+
+                    // Trigger autoload from side FS only if there is no filament in the extruder
+                    || (is_insert_event(LogicalFilamentSensor::side) && !has_filament_surely(LogicalFilamentSensor::extruder) && config_store().fs_autoload_enabled.get())
+                    //
+                    )
+                && !has_mmu
+                && !autoload_sent
+                && !marlin_server::is_processing()
+                && !isAutoloadLocked())
+            //
+        ) {
+            return false;
+        }
+
+        autoload_sent = true;
+
+#if HAS_ANFC()
+        const auto opt_uid_hash = buddy::openprinttag::autoload_auto_assign_tool_tag_hash.load();
+        const auto opt_tag = VirtualToolIndex::currently_selected_opt().and_then(buddy::openprinttag::ToolTag::for_tool_ephemeral);
+        if (opt_tag.has_value() && opt_tag->uid_hash() == opt_uid_hash) {
+            // Make sure we don't lose any data when casting to float
+            static_assert(std::numeric_limits<float>::digits >= std::numeric_limits<decltype(opt_uid_hash)>::digits);
+            marlin_server::inject(GCodeLiteral { .gcode = "M1701 G%.0f", .parameter = (float)opt_uid_hash });
+        } else
+#endif
+        {
+            marlin_server::inject(GCodeLiteral { .gcode = "M1701" });
+        }
+
+        log_info(FSensor, "Injected autoload");
+
+        return true;
+    };
+
+    if (marlin_server::is_printing()) {
+        if (check_runout(LogicalFilamentSensor::primary_runout)) {
+            return;
+        }
+
+        // With an MMU, don't check for runout on the extruder sensor, it would be too late for anything
+        if (!has_mmu && check_runout(LogicalFilamentSensor::extruder)) {
+            return;
+        }
     } else {
         // During MMU standard operation, there is no filament loaded to the nozzle when not printing.
         // So it's not a good idea to reset what filament types we have stored.
@@ -3309,6 +3444,12 @@ void FilamentSensors::reconfigure_sensors_if_needed(bool force) {
                 config_store().set_filament_type(*virtual_tool, FilamentType::none);
             }
         }
+
+        if (check_autoload()) {
+            return;
+        }
+    }
+}
 
 void FilamentSensors::process_enable_state_update() {
     enable_state_update_processing = true;
@@ -3502,6 +3643,70 @@ using ScreenMenuFilamentMMU__ = ScreenMenu<GuiDefaults::MenuFooter, MI_RETURN,
     MI_FILAMENT_MANAGEMENT>;
 """  # noqa: E501 (verbatim firmware lines)
 
+M600_CPP = """\
+void M600_manual(const GCodeParser2 &p) {
+    const std::optional<VirtualToolIndex> virtual_tool = stdext::get_optional<VirtualToolIndex>(PrusaGcodeSuite::get_target_virtual_from_command_p(p));
+    if (!virtual_tool.has_value()) {
+        return;
+    }
+    VirtualToolIndex target_tool = *virtual_tool;
+
+    XYZval<float, LogicalPosTag> logical_park_point { NAN, NAN, NAN };
+
+    // Lift Z axis
+    p.store_option_if_present('Z', logical_park_point.z);
+
+    // Move XY axes to filament change position or given position
+    p.store_option_if_present('X', logical_park_point.x);
+    p.store_option_if_present('Y', logical_park_point.y);
+
+    const auto park_point = logical_park_point.asNative();
+
+    auto park_position = mapi::get_parking_position(mapi::ParkPosition::filament_change);
+    if (!std::isnan(park_point.x)) {
+        park_position.x = park_point.x;
+    }
+    if (!std::isnan(park_point.y)) {
+        park_position.y = park_point.y;
+    }
+    if (!std::isnan(park_point.z)) {
+        park_position.z = park_point.z;
+    }
+
+    const xyze_float_t no_return = { { { NAN, NAN, NAN, current_position.e } } };
+
+    M600_execute(park_position,
+        target_tool,
+        p.option<bool>('N') ? no_return : current_position,
+        p.option<float>('U'),
+        p.option<float>('L'),
+        p.option<float>('E').transform(fabsf),
+        p.option<Color>('C'),
+        p.option<FilamentType>('S'),
+        false);
+}
+"""  # noqa: E501 (verbatim firmware lines)
+
+SCREEN_M600_CPP = """\
+void MI_M600::click([[maybe_unused]] IWindowMenu &window_menu) {
+#if HAS_TOOLCHANGER()
+    if (prusa_toolchanger.is_toolchanger_enabled()) {
+        const auto tool = select_tool_dialog({
+            .allow_return = true,
+        });
+        if (tool.has_value() && inject(*tool)) {
+            Screens::Access()->close_screen();
+        }
+        return;
+    }
+#endif
+    match(
+        VirtualToolIndex::currently_selected(),
+        [](VirtualToolIndex virtual_tool) { inject(virtual_tool); },
+        [](NoTool) { debug_assert(false); /* theoretically reachable edge case - do nothing */ });
+}
+"""
+
 FILES = {
     read.MODELS_FILE: MODELS_HPP,
     read.GCODE_INFO_FILE: GCODE_INFO_HPP,
@@ -3557,6 +3762,8 @@ FILES = {
     "src/feature/openprinttag/request_manager.cpp": REQUEST_MANAGER_CPP,
     "src/feature/openprinttag/tool_tag_buddy.cpp": TOOL_TAG_BUDDY_CPP,
     "src/gui/screen_menu_filament_mmu.hpp": SCREEN_MENU_FILAMENT_MMU_HPP,
+    "src/marlin_stubs/pause/M600.cpp": M600_CPP,
+    "src/gui/screen/screen_m600.cpp": SCREEN_M600_CPP,
     read.IMAGES_FILE: PRESETS_JSON,
     read.PAUSE_SETTINGS_FILE: PAUSE_SETTINGS_HPP,
 }
