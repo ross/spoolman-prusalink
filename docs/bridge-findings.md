@@ -5,7 +5,9 @@ charge the wrong amount or the wrong spool, miss a spool swap, or fail to
 write to the printer. They turned up while the simulator was made to follow
 each printer family ([simulator-models.md](simulator-models.md)). This list
 tracks them in a proposed order of work, so they can be taken one stage at
-a time.
+a time. [bridge-fixes.md](bridge-fixes.md) plans the fixes as workstreams,
+with the decisions they wait on. This list stays the record of each
+finding: a fix sets its Status here.
 
 ## Reading an entry
 
@@ -105,8 +107,8 @@ written.
   `test_indx_asks_about_the_lock_under_any_setting` in
   `simulator/tests/test_model.py` uploads a job with no lock line to an
   INDX, and it asks under every `checks` setting. The bridge's side can't
-  be reached: its sync job never gets to the question until the per-tool
-  write (BF14) is built.
+  be reached: its sync job never gets to the question while writes to
+  multi-tool models are refused (BF14).
 - **Status**: Open.
 
 ### BF2. The bridge refuses a preamble the printer accepts
@@ -257,14 +259,14 @@ written.
   hasn't passed refuses every print, the sync job included: the check
   `nozzle_cleaner_not_calibrated` is an abort whatever the settings
   (`gcode_compatibility.cpp:143-152, 392-396`). Unreachable today, as BF1,
-  until the per-tool write (BF14).
+  while writes to multi-tool models are refused (BF14).
 - **Effect**: Every write fails and goes the way of BF5. The "didn't take"
   flag lists the differences, not the cause.
 - **Evidence**: Read in the firmware source.
 - **Scenario rows**: W5, T6.
 - **To reproduce**: Can't be shown. The simulator's preview doesn't model
   an uncalibrated nozzle cleaner (`simulator/README.md`), and the bridge
-  uploads nothing to an INDX until the per-tool write (BF14).
+  uploads nothing to an INDX while it refuses multi-tool writes (BF14).
 - **Status**: Open.
 
 ### BF8. INDX presets differ from the bridge's table
@@ -702,14 +704,15 @@ written.
 - **What happens**: `model_problem` refuses every multi-tool type in
   `PRINTER_MODELS` ("multi-tool printers aren't supported yet"). A due
   write flags the spool "can't write to the printer" and uploads nothing.
-  The per-tool write isn't built: `M865 L<n>` per tool (F22), with no
-  `M865.1`, since these models keep no UUIDs (F21). The tools-mapping
+  The job itself already writes per tool: `M865 L<n>` for each tool due
+  (F22), and `M865.1` only on tool 0 of a model that keeps UUIDs, which
+  these don't (F21). Only the refusal stops it. The tools-mapping
   screen won't stand in its way: the sync job names no filament used, so
   the screen doesn't apply (F28), and on INDX only the lock question asks
   (BF1).
 - **Effect**: After the INDX upgrade the owner's printer gets no writes. A
   menu load keeps the preset's name and temperatures, and each write that
-  would be due leaves a flag. Charging isn't affected. Building the write
+  would be due leaves a flag. Charging isn't affected. Lifting the refusal
   makes BF1, BF7 and BF8 reachable.
 - **Evidence**: Shown in the simulator by
   `test_t6_writes_on_a_multi_tool_model_are_refused` in
