@@ -8,7 +8,6 @@ import pytest
 
 from integration.conftest import (
     ASA,
-    LOAD_MM,
     PLA,
     World,
     baseline,
@@ -30,12 +29,15 @@ async def test_c1_reboot_keeps_usage_held_at_the_reboot(world: World):
     b = w.spools["B"]
     await baseline(w)
     # Leave the tool with no active spool: A moves out, then the printer unloads it (S10).
+    # The unload rams 23 first, 23 * 0.95 = 21.85 from 1000, which A, active until the
+    # unload, takes.
     await w.move("A", w.shelf)
     await w.unload()
     records = await w.poll()
     assert [e["event"] for e in events(records)][-1] == "unloaded_unassigned"
 
-    # A load with no spool assigned is held, by not charging it.
+    # A load with no spool assigned is held, by not charging it. The unload rammed 23 from
+    # 1000: 1021.85; LOADS["8.1.0"], 78.85, on top: 1100.70, so 1100 - 1021 = 79 held.
     await w.swap_cycle(source="preset", name=ASA[0])
     records = await w.poll()
     assert charges(records) == []
@@ -46,32 +48,35 @@ async def test_c1_reboot_keeps_usage_held_at_the_reboot(world: World):
     records = await w.poll()
     reboots = events(records, "reboot")
     assert len(reboots) == 1
-    assert reboots[0]["kept_mm"] == LOAD_MM
+    assert reboots[0]["kept_mm"] == 79
     assert charges(records) == []
 
-    # An unload with no spool active first: the held load is reported lost, as in S6.
+    # An unload with no spool active first: the held load is reported lost, as in S6. The
+    # load left the filament 55 mm retracted, which the boot keeps, so the unload is cold
+    # and counts nothing.
     await w.unload()
     records = await w.poll()
-    assert event_fields(records, "lost_unassigned") == [{"mm": LOAD_MM}]
+    assert event_fields(records, "lost_unassigned") == [{"mm": 79}]
     assert charges(records) == []
 
-    # Held again through another reboot, then B is assigned: B takes it, logged then.
+    # Held again through another reboot, then B is assigned: B takes it, logged then. The
+    # load from 0 counts 78.85, so 78 held.
     await w.swap_cycle(source="preset", name=ASA[0])
     await w.poll()
     w.printer.reboot()
     records = await w.poll()
     assert len(events(records, "reboot")) == 1 and charges(records) == []
     await w.move("B", w.tool_location)
-    w.printer.extrude(0, 10)  # The boot left no gap: 10 * 0.95 = 9.5
+    # The boot kept the load's 55 mm retraction, so the extrude feeds it back first, 15
+    # past the gap: (15 + 10) * 0.95 = 23.75.
+    w.printer.extrude(0, 10)
     records = await w.poll()
-    assert event_fields(records, "held_charged") == [
-        {"spool": b, "mm": LOAD_MM, "deleted_spool": None}
-    ]
+    assert event_fields(records, "held_charged") == [{"spool": b, "mm": 78, "deleted_spool": None}]
     assert [(r["use_length"], r["reason"]) for r in charges(records)] == [
-        (LOAD_MM, "held before the printer restarted"),
-        (9, "extruded"),
+        (78, "held before the printer restarted"),
+        (23, "extruded"),
     ]
-    assert w.charged(w.since(0), "A") == 0
+    assert w.charged(w.since(0), "A") == 21
 
 
 async def test_c1_usage_held_over_a_reboot_joins_the_open_swap(world: World):
@@ -180,14 +185,15 @@ async def test_c1_usage_held_over_a_reboot_joins_the_provisional_charge(
     assert count(caplog, logging.WARNING, hold_ended) == ends + 1
 
     # The next unload keeps all of it on A, held part included; B was never involved. The
-    # boot left no gap, so the 10 mm count 9.5 from 0.
+    # print fed back the load's retraction, so the boot left no gap: the 10 mm and the
+    # unload's 23 mm ram count (10 + 23) * 0.95 = 31.35 from 0.
     w.printer.extrude(0, 10)
     await w.unload()
     records = await w.poll()
-    assert event_fields(records, "provisional_kept") == [{"mm": provisional + 9, "spool": a}]
+    assert event_fields(records, "provisional_kept") == [{"mm": provisional + 31, "spool": a}]
     since_unload = w.since(unloaded)
     assert all(c["spool_id"] == a and c["use_length"] > 0 for c in charges(since_unload))
-    assert w.charged(since_unload, "A") == provisional + 9
+    assert w.charged(since_unload, "A") == provisional + 31
     assert w.charged(w.since(0), "B") == 0
     assert w.bridge.printers[0].tools[0].provisional is None
     assert a not in w.bridge.state.runouts
@@ -244,15 +250,16 @@ async def test_c3_reboot_and_unload_in_one_poll(world: World):
     await w.poll()
     assert w.tool.unload_count == 1
 
+    # The extrude fed back the load's retraction, so the boot leaves no gap.
     w.printer.reboot()
     w.printer.extrude(0, 15)  # 15 * 0.95 = 14.25 from 0
-    await w.unload()
+    await w.unload()  # It rams 23 first: 14.25 + 23 * 0.95 = 36.1.
     records = await w.poll()
     assert [e["event"] for e in events(records)] == ["reboot", "unload", "swap_unconfirmed"]
     assert event_fields(records, "unload") == [
-        {"unloads": 1, "mm": 14, "spool": a, "deleted_spool": None}
+        {"unloads": 1, "mm": 36, "spool": a, "deleted_spool": None}
     ]
-    assert [(r["use_length"], r["reason"]) for r in charges(records)] == [(14, "before unload")]
+    assert [(r["use_length"], r["reason"]) for r in charges(records)] == [(36, "before unload")]
 
 
 async def test_c4_counter_goes_backward(world: World):
@@ -289,7 +296,7 @@ async def test_c5_extruded_at_unload_out_of_range(world: World):
     await w.poll()
 
     w.printer.extrude(0, 30)  # 28.5 more: 1076
-    await w.unload()
+    await w.unload()  # It rams 23 first: 1076 + 23 * 0.95 = 1097.85.
     w.printer.set_extruded_at_unload(0, w.counter + 500)
     records = await w.poll()
     assert [e["event"] for e in events(records)] == [
@@ -300,7 +307,7 @@ async def test_c5_extruded_at_unload_out_of_range(world: World):
     anomaly = events(records, "counter_anomaly")[0]
     assert anomaly["at_unload"] == w.counter + 500
     # Clamped to the counter: everything since the last poll is before the unload.
-    assert [(r["use_length"], r["reason"]) for r in charges(records)] == [(29, "before unload")]
+    assert [(r["use_length"], r["reason"]) for r in charges(records)] == [(50, "before unload")]
 
 
 async def test_c6_manual_extrude_and_retract(world: World):
@@ -351,8 +358,9 @@ async def test_c7_tool_reports_no_filament(world: World):
     await w.run_until(lambda: w.tool.process is None)
     records = await w.swap_cycle(source="tag", name="PLA", color="#73737b", uuid=w.uuids["A"])
     records += await w.poll()
-    # The held 20 and 15 mm count 33.25, then the 57 mm load: 1090.25.
-    assert [(r["spool_id"], r["use_length"]) for r in charges(records)] == [(a, 90)]
+    # The held 20 and 15 mm count 33.25, the unload's 23 mm ram 21.85, then the 78.85
+    # load: 1133.95.
+    assert [(r["spool_id"], r["use_length"]) for r in charges(records)] == [(a, 133)]
     assert w.printer.state is State.IDLE
 
 

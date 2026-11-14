@@ -9,7 +9,6 @@ from dataclasses import replace
 import pytest
 
 from integration.conftest import (
-    LOAD_MM,
     PETG,
     UUID_FIELD,
     World,
@@ -174,13 +173,14 @@ async def test_p8_cancelled_during_preheat_is_not_a_print_start(
     a, b = w.spools["A"], w.spools["B"]
     await baseline(w)
 
-    w.printer.extrude(0, 30)
-    await w.unload()
+    w.printer.extrude(0, 30)  # 30 * 0.95 = 28.5
+    await w.unload()  # It rams 23 first: 1028.5 + 23 * 0.95 = 1050.35.
     records = await w.poll()
     assert len(events(records, "swap_unconfirmed")) == 1
     await w.swap_cycle(source="tag", name=PETG[0], color=PETG[1])
     records = await w.poll()
-    assert w.charged(records, "A") == LOAD_MM
+    # LOADS["8.1.0"], 78.85, on top of 1050.35: 1129.20, so 1129 - 1050 = 79.
+    assert w.charged(records, "A") == 79
     # A is still active and the printer shows B's tag, so that poll wrote A back.
     await w.run_until(lambda: w.printer.job is None)
 
@@ -200,11 +200,9 @@ async def test_p8_cancelled_during_preheat_is_not_a_print_start(
     await w.move("A", w.shelf)
     await w.move("B", w.tool_location)
     records = await w.poll()
-    assert event_fields(records, "swap_confirmed") == [
-        {"mm": LOAD_MM, "from_spool": a, "to_spool": b}
-    ]
-    assert w.charged(records, "B") == LOAD_MM
-    assert w.charged(records, "A") == -LOAD_MM
+    assert event_fields(records, "swap_confirmed") == [{"mm": 79, "from_spool": a, "to_spool": b}]
+    assert w.charged(records, "B") == 79
+    assert w.charged(records, "A") == -79
 
     w.printer.cancel()
     records = await finish(w, State.STOPPED)
@@ -301,15 +299,19 @@ async def test_p10_spoolman_changed_mid_print_is_staged(world: World):
     assert w.charged(records, "B") == 0
     w.printer.dismiss()
 
-    w.printer.extrude(0, 10)  # 10 * 0.95 = 9.5 on top of 1380: 1000 and the print's 380
+    # 1000, the print's 380 and its end's 23 mm ram, 21.85: 1401.85. The ram left the
+    # filament 55 mm retracted, so the extrude feeds 15 past the gap first, and the unload
+    # rams 23: (15 + 10 + 23) * 0.95 = 45.6, so 1447.45.
+    w.printer.extrude(0, 10)
     await w.unload()
     records = await w.poll()
     assert event_fields(records, "swap_committed") == [{"from_spool": a, "to_spool": b}]
-    assert w.charged(records, "A") == 9
+    assert w.charged(records, "A") == 46
 
     records = await w.swap_cycle(poll_every=0.3, source="tag", name=PETG[0], color=PETG[1])
     records += await w.poll()
-    assert w.charged(records, "B") == LOAD_MM
+    # LOADS["8.1.0"], 78.85, on top of 1447.45: 1526.30, so 1526 - 1447 = 79.
+    assert w.charged(records, "B") == 79
     assert w.charged(records, "A") == 0
 
 

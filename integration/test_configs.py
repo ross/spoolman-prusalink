@@ -18,7 +18,6 @@ import pytest
 from integration.conftest import (
     CLAIM_FIELD,
     FLAG_FIELD,
-    LOAD_MM,
     PETG,
     PLA,
     UUID_FIELD,
@@ -133,7 +132,9 @@ async def test_s1_tag_uuid_is_not_adopted_without_uuids(world: World):
     tag = str(uuid.uuid4())
     seen = record_patches(w)
     records = await load_tag(w, tag)
-    assert w.charged(records, "B") == LOAD_MM
+    # The unload rams 23 from 1000: 1021.85. LOADS["8.1.0"], 78.85, on top: 1100.70, so
+    # 1100 - 1021 = 79.
+    assert w.charged(records, "B") == 79
     assert await w.spoolman.extra(b, UUID_FIELD) is None
     assert wrote(seen, UUID_FIELD) == []
     assert w.requests("PUT") == []

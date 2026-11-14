@@ -15,7 +15,6 @@ from pathlib import Path
 import pytest
 
 from integration.conftest import (
-    LOAD_MM,
     PETG,
     PLA,
     World,
@@ -84,10 +83,10 @@ async def test_b4_database_lost(world: World):
     a = w.spools["A"]
     await w.poll()
     w.printer.extrude(0, 20)  # 20 * 0.95 = 19
-    await w.unload()
+    await w.unload()  # It rams 23 first: 23 * 0.95 = 21.85, so 1040.85.
     records = await w.poll()
     assert len(events(records, "swap_unconfirmed")) == 1
-    assert w.charged(records, "A") == 19
+    assert w.charged(records, "A") == 40
     flag = await w.flag("A")
     assert flag is not None and "unloaded" in flag
 
@@ -109,7 +108,7 @@ async def test_b4_database_lost(world: World):
     records = await w.poll()
     assert [e["event"] for e in events(records)] == ["swap_staged"]
     assert charges(records) == []
-    assert w.charged(lost + w.since(0), "A") == 19
+    assert w.charged(lost + w.since(0), "A") == 40
     assert await w.used("B") == 0
     # With the swap forgotten, B's tag on the printer is drift on A, the active spool: its
     # UUID isn't A's. The tag's name and color aren't compared, since it isn't written.
@@ -141,10 +140,10 @@ async def test_b5_fields_registered_on_a_fresh_spoolman(
 
     # An unconfirmed swap's flag goes in the new field.
     w.printer.extrude(0, 30)  # 30 * 0.95 = 28.5: the counter reads 1028
-    await w.unload()
+    await w.unload()  # It rams 23 first: 1028.5 + 23 * 0.95 = 1050.35.
     records = await w.poll()
     assert len(events(records, "swap_unconfirmed")) == 1
-    assert w.charged(records, "A") == 28
+    assert w.charged(records, "A") == 50
     flag = await w.flag("A")
     assert flag is not None and "unloaded with no Spoolman change" in flag
 
@@ -154,7 +153,8 @@ async def test_b5_fields_registered_on_a_fresh_spoolman(
     await w.poll()
     await w.swap_cycle(source="preset", name=PETG[0])
     records = await w.poll()
-    assert w.charged(records, "B") == LOAD_MM
+    # LOADS["8.1.0"], 78.85, on top of 1050.35: 1129.20, so 1129 - 1050 = 79.
+    assert w.charged(records, "B") == 79
     w.advance(1.5)
     fields = await w.spoolman.fields_by_key()
     assert fields[keys["uuid"]] == "text"
@@ -200,9 +200,11 @@ async def test_b5_field_with_the_wrong_type(world: World, caplog: pytest.LogCapt
     for _ in range(3):
         w.printer.extrude(0, 10)
         await w.poll()
-    # 30 * 0.95 = 28.5, the 57 mm load, then the 30 mm extruded past the load's 8 mm gap:
-    # 28.5 + 57 + 22 * 0.95 = 106.4.
-    assert w.charged(w.since(0), "A") == w.counter - 1000 == 106
+    # 30 * 0.95 = 28.5, the unload's 23 mm ram, the 78.85 load and the 30 mm extruded,
+    # after the first extrude feeds back the load's 55 mm retraction, 15 past the gap (the
+    # write's sync job skips its auto-retract, already retracted):
+    # 28.5 + 23 * 0.95 + 78.85 + (15 + 30) * 0.95 = 171.95.
+    assert w.charged(w.since(0), "A") == w.counter - 1000 == 171
     assert await w.used("A") > 0
 
     # The bridge would flag A, but leaves the field alone, and says so once.
@@ -230,10 +232,10 @@ async def test_b5_field_setup_fails_then_recovers(world: World, caplog: pytest.L
     records = await w.poll()
     assert len(events(records, "baseline")) == 1
     w.printer.extrude(0, 30)  # 30 * 0.95 = 28.5
-    await w.unload()
+    await w.unload()  # It rams 23 first: 1028.5 + 23 * 0.95 = 1050.35.
     records = await w.poll()
     assert len(events(records, "swap_unconfirmed")) == 1
-    assert w.charged(records, "A") == 28
+    assert w.charged(records, "A") == 50
     await w.poll()
     assert key not in await w.spoolman.fields_by_key()
     assert "unloaded with no Spoolman change" in " | ".join(

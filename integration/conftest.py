@@ -43,18 +43,18 @@ UUID_FIELD = "instance_uuid"
 CLAIM_FIELD = "bridge_claim"
 
 # What a menu load after an unload counts, by model: the slow and fast load past the full
-# retraction gap, then the purge under the new material, times the feed ratio.
+# retraction gap, then the purge under the new material, then the auto-retract, times the
+# feed ratio.
 LOADS = {
-    # Core One L: 40 mm gap; 40 slow + 20 fast, 20 past the gap; 40 purge; then an 8 mm
-    # retract leaves 8 mm of gap. (20 + 40) * 0.95 = 57.
-    "8.1.0": 57,
+    # Core One L: 40 mm gap; 40 slow + 20 fast, 20 past the gap; 40 purge; an 8 mm retract,
+    # which the auto-retract feeds back before its ramming counts 23 and leaves 55 mm
+    # retracted. (20 + 40 + 23) * 0.95 = 78.85, so the whole-mm counter moves by 78 or 79.
+    "8.1.0": (20 + 40 + 23) * 0.95,
     # Core One L INDX: 27 mm gap; 15 slow + 25 fast, 13 past the gap; the cleaner's 25 mm
-    # purge, leaving no gap. (13 + 25) * 550 / 576 = 36.28, so the whole-mm counter moves
-    # by 36 or 37.
-    "8.10.0": (13 + 25) * 550 / 576,
+    # purge, leaving no gap; its auto-retract counts its 8 mm feed and leaves 8 mm
+    # retracted. (13 + 25 + 8) * 550 / 576 = 43.92, so the counter moves by 43 or 44.
+    "8.10.0": (13 + 25 + 8) * 550 / 576,
 }
-# The single-tool world's Core One L, which most scenarios load.
-LOAD_MM = LOADS["8.1.0"]
 
 PLA = ("PLA", "#73737b")
 PETG = ("PETG", "#186bb5")

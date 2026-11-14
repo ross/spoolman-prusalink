@@ -121,7 +121,9 @@ script/integration --cov=spoolman_prusalink --cov-fail-under=0
   times its feed ratio. The printer's counter reads whole millimetres, so a
   charge is the difference of two whole numbers. `LOADS` in `conftest.py`
   holds what a load after an unload counts on each model. A Core One L load
-  counts 57 mm and leaves 8 mm of gap, so the next 8 mm fed count nothing.
+  counts 78.85 mm and leaves the filament 55 mm retracted, so the next feed
+  counts 15 mm more than it feeds. A menu unload right after a load counts
+  nothing. An unload after a feed rams 23 mm first.
 
 ## The scenarios
 
