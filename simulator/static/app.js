@@ -209,6 +209,11 @@ function renderTool(p, t) {
   h += '<tr class="sub"><td colspan="9"><div class="toolbtns">' + procTxt + flags + (flags ? ' ' : '') +
     btn('Load', 'load_form', Object.assign({ tool: i, cls: isOpen(p, 'load' + i) ? 'on' : '' }, loadGate)) +
     btn('Unload', 'unload', gate(a, 'unload', { tool: i })) +
+    (p.mmu
+      ? btn('Load to nozzle', 'load_to_nozzle', gate(a, 'load_to_nozzle', { tool: i })) +
+        btn('Eject', 'eject', gate(a, 'eject', { tool: i })) +
+        btn('Cut', 'cut', gate(a, 'cut', { tool: i }))
+      : '') +
     btn('Extrude', 'extrude', gate(a, 'extrude', { tool: i })) +
     btn('Retract', 'retract', gate(a, 'retract', { tool: i })) +
     btn('Runout', 'runout', gate(a, 'runout', { tool: i })) +
@@ -303,6 +308,7 @@ function renderPrinter(p) {
     btn('Home', 'home', gate(a, 'home')) +
     btn('Park tool', 'park_tool', gate(a, 'park_tool', { title: 'the Pick/park menu: park the picked tool' })) +
     btn('Change all', 'toggle', gate(a, 'change_all', { form: 'changeall', cls: isOpen(p, 'changeall') ? 'on' : '' })) +
+    (p.mmu ? btn('Preload all', 'toggle', gate(a, 'preload_all', { form: 'preloadall', cls: isOpen(p, 'preloadall') ? 'on' : '' })) : '') +
     btn('Reboot', 'reboot', gate(a, 'reboot')) +
     btn('Power-loss resume', 'power_loss', gate(a, 'reboot', { title: 'reboot, keeping the job' })) +
     '<label title="the bed cools during the outage, so the print waits for Resume"><input type="checkbox" data-k="cold"' +
@@ -341,7 +347,12 @@ function renderPrinter(p) {
       '<label>tools (a, b)' + inp(p, 'changeall.tools', p.tools.filter((t) => t.enabled).map((t) => t.index).join(', '), 'type="text"') + '</label>' +
       '<label>preset' + inp(p, 'changeall.name', 'PLA') + '</label>' +
       '<label>color' + inp(p, 'changeall.color', '', 'type="text" placeholder="#rrggbb"') + '</label>' +
+      (p.mmu ? '<label title="the slots whose type the dialog clears">unload (a, b)' + inp(p, 'changeall.unload', '', 'type="text"') + '</label>' : '') +
       btn('Change', 'changeall_submit', {}) + '</div>';
+  }
+  if (isOpen(p, 'preloadall')) {
+    h += '<div class="form"><label>preset' + inp(p, 'preloadall.name', 'PLA') + '</label>' +
+      btn('Preload all', 'preloadall_submit', {}) + '</div>';
   }
   if (isOpen(p, 'eau')) {
     h += '<div class="form"><label>tool' + toolSel('eau.tool') + '</label>' +
@@ -457,11 +468,18 @@ function loadBody(name, i) {
   return body;
 }
 
+function toolList(s) {
+  const tools = String(s).split(',').map((x) => x.trim()).filter(Boolean).map(Number);
+  if (tools.some((x) => !Number.isInteger(x))) throw new Error('Tools must be whole numbers');
+  return tools;
+}
+
 function changeAllBody(name, p) {
   const all = p.tools.filter((t) => t.enabled).map((t) => t.index).join(', ');
-  const tools = String(getv(name, 'changeall.tools', all)).split(',').map((x) => x.trim()).filter(Boolean).map(Number);
-  if (tools.some((x) => !Number.isInteger(x))) throw new Error('Tools must be whole numbers');
+  const tools = toolList(getv(name, 'changeall.tools', all));
   const body = { tools, name: String(getv(name, 'changeall.name', 'PLA')).trim() };
+  const unload = p.mmu ? toolList(getv(name, 'changeall.unload', '')) : [];
+  if (unload.length) body.unload = unload;
   const color = String(getv(name, 'changeall.color', '')).trim();
   if (color) body.color = color;
   return body;
@@ -493,9 +511,13 @@ function onClick(e) {
         return go('start_print', startBody(name), () => { pst(name).open.start = false; renderCard(name); });
       case 'changeall_submit':
         return go('change_all', changeAllBody(name, p), () => { pst(name).open.changeall = false; renderCard(name); });
+      case 'preloadall_submit':
+        return go('preload_all', { name: String(getv(name, 'preloadall.name', 'PLA')).trim() },
+          () => { pst(name).open.preloadall = false; renderCard(name); });
       case 'load_submit':
         return go('load', loadBody(name, tool), () => { pst(name).open['load' + tool] = false; renderCard(name); });
       case 'unload': case 'runout': case 'select_tool': case 'change_filament':
+      case 'load_to_nozzle': case 'eject': case 'cut':
         return go(act, { tool });
       case 'extrude': case 'retract': {
         const mm = numOrNull(getv(name, 'mm', '10'));

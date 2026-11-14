@@ -111,8 +111,8 @@ curl -X POST -H 'Content-Type: application/json' \
   http://127.0.0.1:8000/api/printers/core-one-l/load
 ```
 
-Actions: `load`, `unload`, `extrude`, `retract`, `select_tool`,
-`park_tool`, `change_all`, `start_print`, `pause`, `resume`, `cancel`, `dismiss`, `home`, `runout`, `jam`,
+Actions: `load`, `unload`, `load_to_nozzle`, `eject`, `cut`, `extrude`, `retract`,
+`select_tool`, `park_tool`, `change_all`, `preload_all`, `start_print`, `pause`, `resume`, `cancel`, `dismiss`, `home`, `runout`, `jam`,
 `change_filament`, `clear_jam`, `reboot`, `set_power`, `set_fault`, `set_firmware`,
 `set_sensor_fault`, `set_stuck_write`, `set_tool_enabled`,
 `set_checks`, `set_sensors`, `set_mmu`, `counter_step_back`,
@@ -245,9 +245,21 @@ that trace. The points that matter for the bridge, in short:
   connected, moves count on the selected slot; with none selected they
   count nothing, the gap stays where it was, and `/api/v1/status` reads
   `flow` 0. The idle sensor clear and the tag reader are off while the MMU
-  is on, and a print's end with it connected doesn't auto-retract. The
-  MMU's own operations and its prints aren't modeled yet: an MMU printer
-  refuses a print, a load and an unload, and takes the sync job.
+  is on, and a print's end with it connected doesn't auto-retract. An MMU
+  printer refuses a print and the menu's plain load, and takes the sync job.
+- The MMU menu's operations need the MMU on and connected and the printer
+  idle, and each reads `BUSY` until it's done (F41).
+  `load_to_nozzle` is Load To Nozzle: it unloads the selected slot, feeds
+  the new slot to the extruder with no slot selected, selects it, and loads
+  17 and then 30 mm, which count on the slot, then writes back the slot's
+  own type. `unload` takes the selected slot's filament back into the MMU:
+  it rams, or only relieves the pressure when the filament is fully
+  auto-retracted, and leaves no slot selected. It writes no type, so no
+  unload counts. `eject`, `cut` and each preload take `unload_seconds` and
+  move nothing the bridge counts. `eject`, `cut` and `change_all` refuse while
+  the extruder holds filament. `preload_all` stores the preset `name` on
+  every slot, then preloads each in turn. A power cut keeps the types and
+  drops the preloads left.
 - Every print start shows `PRINTING`, then a brief `IDLE` with no job, then
   `PRINTING`. `FINISHED` and `STOPPED` persist until dismissed, and the job
   disappears from `/api/v1/status` and `/api/v1/job` as soon as a print ends.
@@ -315,7 +327,8 @@ that trace. The points that matter for the bridge, in short:
   the preview waits for picks its tool inside the dialog, with no clear,
   and INDX docks it after too. A reload in a print neither picks nor docks.
   `park_tool` parks the picked tool, as the Pick/park menu does.
-- `change_all` is the Filament menu's Change all on a toolchanger. It takes
+- `change_all` is the Filament menu's Change all on a toolchanger, and its
+  Preload To MMU on an MMU. It takes
   `tools`, a list of enabled tools, and the preset `name` with an optional
   `color`, the same for every chosen tool; the other tools keep their
   filament. The tools change one at a time in index order, and the printer
@@ -325,7 +338,10 @@ that trace. The points that matter for the bridge, in short:
   inside the dialog, so no idle sensor clear runs at the pick. INDX docks
   each tool after its load, and the XL ends with the last tool picked. A
   reboot or power cut drops what's left, and a power-panic resume waits
-  until the last tool is done. The page's **Change all** opens the form.
+  until the last tool is done. On an MMU, each chosen slot preloads and
+  then stores the new type, with no unload counted, and `unload` lists the
+  slots whose type the dialog clears, which counts an unload. A power cut
+  mid-preload writes no type. The page's **Change all** opens the form.
 - `change_filament` is the Tune menu's Change filament, `M600 T<n>`, on any
   enabled tool once a print is printing. On the picked tool it's the
   filament change a runout runs. On another tool it picks that tool, runs
