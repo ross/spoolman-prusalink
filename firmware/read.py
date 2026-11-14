@@ -24,6 +24,8 @@ ALIASES_FILE = "src/feature/openprinttag/data_utils.cpp"
 TRACKER_FILE = "src/feature/filament_tracker/filament_tracker.hpp"
 RAMMING_CMAKE_FILE = "src/feature/ramming/CMakeLists.txt"
 CLEANER_FILE = "src/feature/nozzle_cleaner/nozzle_cleaner.cpp"
+AUTO_RETRACT_FILE = "src/feature/auto_retract/auto_retract.hpp"
+PAUSE_FILE = "src/marlin_stubs/pause/pause.cpp"
 CONFIGURATION_FILE = "include/marlin/Configuration.h"
 ADVANCED_FILE = "include/marlin/Configuration_adv.h"
 
@@ -713,6 +715,103 @@ def cleaner_purge(text: str, macros: Macros) -> tuple[float, bool]:
     except ValueError as e:
         raise Unreadable(CLEANER_FILE, str(e)) from None
     return extruded, retract is not None
+
+
+_MM = r"(\d+(?:\.\d*)?)[fF]?"
+_AUTO_RETRACT_CONSTANTS = {
+    "full_retract_distance": re.compile(
+        rf"static\s+constexpr\s+float\s+full_retract_distance\s*=\s*{_MM}\s*;"
+    ),
+    "supports_cold_unload": re.compile(
+        r"static\s+constexpr\s+bool\s+supports_cold_unload\s*=\s*(true|false)\s*;"
+    ),
+}
+
+
+def auto_retract(text: str, macros: Macros) -> tuple[float, bool]:
+    """Return one build's `AutoRetract::full_retract_distance` and `supports_cold_unload`.
+
+    Only the `#if` branches around the two constants and any `#error` are evaluated. Each
+    has to be declared exactly once for the build, and the build may not reach an `#error`.
+    Any other line that names one fails the read.
+    """
+    try:
+        found: dict[str, str] = {}
+        for line, scope in _scoped(_strip_comments(text).replace("\\\n", " ")):
+            names = [n for n in _AUTO_RETRACT_CONSTANTS if re.search(rf"\b{n}\b", line)]
+            error = re.match(r"\s*#\s*error\b", line)
+            if not names and not error:
+                continue
+            m = None
+            if len(names) == 1:
+                m = _AUTO_RETRACT_CONSTANTS[names[0]].fullmatch(line.strip())
+            if names and not m:
+                raise ValueError(f"can't read {line.strip()!r}")
+            if not active_lines(scope, macros):
+                continue
+            if error:
+                raise ValueError(f"the build reaches {line.strip()}")
+            if names[0] in found:
+                raise ValueError(f"{names[0]} is declared twice for the build")
+            found[names[0]] = m.group(1)  # type: ignore[union-attr]
+        missing = [n for n in _AUTO_RETRACT_CONSTANTS if n not in found]
+        if missing:
+            raise ValueError(f"no {', '.join(missing)} for the build")
+    except ValueError as e:
+        raise Unreadable(AUTO_RETRACT_FILE, str(e)) from None
+    return float(found["full_retract_distance"]), found["supports_cold_unload"] == "true"
+
+
+_UNLOAD_PURGE = re.compile(rf"static\s+constexpr\s+float\s+unload_purge_length\s*=\s*{_MM}\s*;")
+_UNLOAD_PURGE_MOVE = re.compile(
+    r"\bdo_e_move_notify_progress_hotextrude\s*\(\s*unload_purge_length\s*,"
+)
+_UNLOAD_PURGE_STATE = re.compile(r"\bLoadState::unload_purge\b")
+_UNLOAD_PURGE_ENTRY = re.compile(r"\bset\s*\(\s*LoadState::unload_purge\s*\)\s*;")
+
+
+def unload_purge(text: str, macros: Macros) -> float:
+    """Return how far one build purges before an unload's ramming, in mm: the
+    `unload_purge_length` of `Pause::unload_purge_process`, or 0 where the build doesn't
+    compile it.
+
+    The constant has to be declared once, on a line of its own, and used once, as the
+    length of a purge move. The purge's only way in, `set(LoadState::unload_purge);`, has
+    to be on a line of its own, once, and compiled for exactly the builds that compile the
+    constant. Only the `#if` branches around those two lines are evaluated.
+    """
+    try:
+        text = _strip_comments(text).replace("\\\n", " ")
+        uses = len(re.findall(r"\bunload_purge_length\b", text))
+        if uses != 2:
+            raise ValueError(f"unload_purge_length appears {uses} times, not 2")
+        if len(_UNLOAD_PURGE_MOVE.findall(text)) != 1:
+            raise ValueError("unload_purge_length isn't the length of a purge move")
+        declared, entered = [], []
+        for line, scope in _scoped(text):
+            if re.search(r"\bunload_purge_length\s*=", line):
+                m = _UNLOAD_PURGE.fullmatch(line.strip())
+                if not m:
+                    raise ValueError(f"can't read {line.strip()!r}")
+                declared.append((m.group(1), bool(active_lines(scope, macros))))
+            elif re.search(r"\bset\s*\(\s*LoadState::", line) and _UNLOAD_PURGE_STATE.search(line):
+                if not _UNLOAD_PURGE_ENTRY.fullmatch(line.strip()):
+                    raise ValueError(f"can't read {line.strip()!r}")
+                entered.append(bool(active_lines(scope, macros)))
+        if len(declared) != 1:
+            raise ValueError("no declaration of unload_purge_length")
+        if len(entered) != 1:
+            raise ValueError(f"{len(entered)} set(LoadState::unload_purge) calls, not 1")
+        (value, compiled), [reached] = declared[0], entered
+        if compiled != reached:
+            raise ValueError(
+                "the build compiles unload_purge_length but not set(LoadState::unload_purge)"
+                if compiled
+                else "the build compiles set(LoadState::unload_purge) but not unload_purge_length"
+            )
+    except ValueError as e:
+        raise Unreadable(PAUSE_FILE, str(e)) from None
+    return float(value) if compiled else 0.0
 
 
 def _tokens(code: str) -> str:

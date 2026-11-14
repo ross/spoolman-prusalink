@@ -8,6 +8,7 @@ from firmware import compare, read
 from firmware.compare import (
     MISSING,
     PRESENT,
+    AutoRetract,
     Build,
     CleanerPurge,
     Copies,
@@ -151,6 +152,32 @@ def test_load_reads_every_builds_extruder(name):
     assert build.cleaner_purge == cleaner_purge
 
 
+NEXTRUDER_RETRACT = AutoRetract(20.0, True)
+INDX_RETRACT = AutoRetract(8.0, False)
+
+
+@pytest.mark.parametrize(
+    ("name", "retract", "purge"),
+    [
+        ("MK4", NEXTRUDER_RETRACT, 0.0),
+        ("XL", NEXTRUDER_RETRACT, 0.0),
+        ("iX", NEXTRUDER_RETRACT, 0.0),
+        ("COREONE", NEXTRUDER_RETRACT, 0.0),
+        ("COREONEL", NEXTRUDER_RETRACT, 0.0),
+        ("COREONE_INDX", INDX_RETRACT, 2.0),
+        ("COREONEL_INDX", INDX_RETRACT, 2.0),
+        # Without HAS_AUTO_RETRACT. The dev kit's header would say 20 mm, and the MINI's and
+        # MK3.5's would stop at its #error.
+        ("XL_DEV_KIT", None, 0.0),
+        ("MK3.5", None, 0.0),
+        ("MINI", None, 0.0),
+    ],
+)
+def test_load_reads_every_builds_auto_retract_and_unload_purge(name, retract, purge):
+    build = compare.load(fixtures.FakeSource()).builds[name]
+    assert (build.auto_retract, build.unload_purge_mm) == (retract, purge)
+
+
 def test_feed_ratio():
     builds = compare.load(fixtures.FakeSource()).builds
     assert builds["MK4"].feed_ratio == 0.95
@@ -201,6 +228,8 @@ def test_load_fails_on_a_build_printer_cant_name():
         read.configuration_file("XL_DEV_KIT"),
         read.ramming_file("mk3_5"),
         read.CLEANER_FILE,
+        read.AUTO_RETRACT_FILE,
+        read.PAUSE_FILE,
     ],
 )
 def test_load_fails_on_a_missing_file(path):
@@ -293,6 +322,8 @@ def build(name, features, tools, gap_mm, presets):
         pause=NEXTRUDER_PAUSE,
         ramming=NEXTRUDER,
         cleaner_purge=None,
+        auto_retract=AutoRetract(20.0, True),
+        unload_purge_mm=0.0,
         feature_names=INPUT_SHAPER,
     )
 
@@ -499,6 +530,26 @@ def test_extruder_differences():
     ]
     assert str(found[3]) == "1.4.0 lengths.purge_mm: firmware 27, copy 28"
     assert str(found[5]) == "1.4.0 ramming.extra: firmware missing, copy ((1, 1),)"
+
+
+def test_auto_retract_and_unload_purge_differences():
+    firmware, copies = synthetic()
+    builds = {**firmware.builds, "MINI": replace(firmware.builds["MINI"], auto_retract=None)}
+    firmware = replace(firmware, builds=builds)
+    sim = dict(copies.sim_models)
+    wrong = replace(EXTRUDER, full_retract_mm=8.0, cold_unload=False, unload_purge_mm=2.0)
+    sim["1.4.0"] = replace(sim["1.4.0"], extruder=wrong)
+    # A build without HAS_AUTO_RETRACT has no constants to compare; its purge still counts.
+    sim["2.1.0"] = replace(sim["2.1.0"], extruder=wrong)
+    s = "simulator MODELS"
+    found = compare.compare(firmware, replace(copies, sim_models=sim))
+    assert found == [
+        Difference(s, "1.4.0", None, "full_retract_mm", 20.0, 8.0),
+        Difference(s, "1.4.0", None, "cold_unload", True, False),
+        Difference(s, "1.4.0", None, "unload_purge_mm", 0.0, 2.0),
+        Difference(s, "2.1.0", None, "unload_purge_mm", 0.0, 2.0),
+    ]
+    assert str(found[0]) == "1.4.0 full_retract_mm: firmware 20.0, copy 8.0"
 
 
 def test_gcode_check_differences():

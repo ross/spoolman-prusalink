@@ -974,3 +974,85 @@ def test_cleaner_purge_sums_the_e_moves(gcode, purge):
 def test_cleaner_purge_fail_closed(text, problem):
     with pytest.raises(Unreadable, match=f"can't read {read.CLEANER_FILE}: {problem}"):
         read.cleaner_purge(text, macros())
+
+
+NEXTRUDER = {"HAS_NEXTRUDER": True, "HAS_INDX_HEAD": False}
+
+
+@pytest.mark.parametrize(
+    ("values", "constants"),
+    [(NEXTRUDER, (20.0, True)), ({"HAS_NEXTRUDER": False, "HAS_INDX_HEAD": True}, (8.0, False))],
+)
+def test_auto_retract(values, constants):
+    assert read.auto_retract(fixtures.AUTO_RETRACT_HPP, macros(**values)) == constants
+
+
+COLD_UNLOAD = "    static constexpr bool supports_cold_unload = true;\n"
+
+
+@pytest.mark.parametrize(
+    ("old", "new", "problem"),
+    [
+        ("= 20.f;", "= 20.f * 2;", "can't read 'static constexpr float full_retract_distance"),
+        ("unload = true;", "unload = HAS_X();", "can't read 'static constexpr bool supports_cold"),
+        (COLD_UNLOAD, "    bool supports_cold_unload = full_retract_distance > 0;\n", "can't read"),
+        (COLD_UNLOAD, "", "no supports_cold_unload for the build"),
+        (COLD_UNLOAD, COLD_UNLOAD * 2, "supports_cold_unload is declared twice for the build"),
+        ("#if HAS_NEXTRUDER()", "#if HAS_NEW()", r"unknown macro HAS_NEW\(\)"),
+    ],
+)
+def test_auto_retract_fail_closed(old, new, problem):
+    text = fixtures.AUTO_RETRACT_HPP
+    assert old in text
+    with pytest.raises(Unreadable, match=f"can't read {read.AUTO_RETRACT_FILE}: {problem}"):
+        read.auto_retract(text.replace(old, new, 1), macros(**NEXTRUDER))
+
+
+def test_auto_retract_fails_on_a_build_the_header_stops():
+    values = macros(HAS_NEXTRUDER=False, HAS_INDX_HEAD=False)
+    with pytest.raises(Unreadable, match="the build reaches #error"):
+        read.auto_retract(fixtures.AUTO_RETRACT_HPP, values)
+
+
+@pytest.mark.parametrize(("indx", "purge"), [(True, 2.0), (False, 0.0)])
+def test_unload_purge(indx, purge):
+    assert read.unload_purge(fixtures.PAUSE_CPP, macros(HAS_INDX=indx)) == purge
+
+
+ENTRY = "    set(LoadState::unload_purge);\n"
+DECLARATION = "static constexpr float unload_purge_length = 2.0f;"
+
+
+@pytest.mark.parametrize(
+    ("old", "new", "problem"),
+    [
+        ("= 2.0f;", "= 2.0f * k;", "can't read 'static constexpr float unload_purge_length"),
+        (DECLARATION, "float unload_purge_length{2};", "no declaration of unload_purge_length"),
+        ("unload_purge_length, standard", "2.0f, standard", "unload_purge_length appears 1 times"),
+        (DECLARATION, f"{DECLARATION} f(unload_purge_length);", "unload_purge_length appears 3"),
+        ("do_e_move_notify_progress_hotextrude(", "move(", "unload_purge_length isn't the length"),
+        (ENTRY, "    set(LoadState::ram_sequence);\n", r"0 set\(LoadState::unload_purge\) calls"),
+        (ENTRY, ENTRY * 2, r"2 set\(LoadState::unload_purge\) calls"),
+        (ENTRY, "    set(LoadState::unload_purge); f();\n", "can't read 'set"),
+        ("#if HAS_INDX()", "#if HAS_NEW()", r"unknown macro HAS_NEW\(\)"),
+    ],
+)
+def test_unload_purge_fail_closed(old, new, problem):
+    text = fixtures.PAUSE_CPP
+    assert old in text
+    with pytest.raises(Unreadable, match=f"can't read {read.PAUSE_FILE}: {problem}"):
+        read.unload_purge(text.replace(old, new, 1), macros(HAS_INDX=True))
+
+
+@pytest.mark.parametrize(
+    ("indx", "problem"),
+    [
+        (True, "compiles unload_purge_length but not set"),
+        (False, r"compiles set\(LoadState::unload_purge\) but not unload_purge_length"),
+    ],
+)
+def test_unload_purge_needs_its_way_in(indx, problem):
+    # The way in is compiled for the builds that don't compile the purge.
+    text = fixtures.PAUSE_CPP.replace("#if HAS_INDX()", "#if !HAS_INDX()", 1)
+    with pytest.raises(Unreadable, match=problem):
+        read.unload_purge(text, macros(HAS_INDX=indx))

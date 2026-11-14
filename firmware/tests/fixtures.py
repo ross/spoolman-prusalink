@@ -1046,6 +1046,124 @@ else()
 endif()
 """
 
+AUTO_RETRACT_HPP = """\
+/// @file
+#pragma once
+
+#include "tool_index.hpp"
+#include <optional>
+#include <bitset>
+#include <inplace_function.hpp>
+#include <option/has_indx.h>
+#include <option/has_wastebin.h>
+#include <option/has_nextruder.h>
+
+namespace buddy {
+
+namespace auto_retract_detail {
+    using ProgressCallback = stdext::inplace_function<void(float progress_0_100)>;
+
+    struct RetractFromNozzleParams {
+        /// Callback for reporting progress of the retraction, called with values from 0 to \
+100. Optional.
+        ProgressCallback progress_callback = nullptr;
+#if HAS_WASTEBIN()
+        /// Whether to park over the wastebin for the ramming sequence
+        bool park_over_wastebin = true;
+#endif
+    };
+} // namespace auto_retract_detail
+
+/// Class for managing automatic retraction after print or load, so that the printer keeps \
+the nozzle empty for MBL and non-printing to prevent oozing.
+/// Only to be managed from the marlin thread
+class AutoRetract {
+    friend AutoRetract &auto_retract();
+
+public:
+    using ToolVariant = std::variant<PhysicalToolIndex, NoTool>;
+
+#if HAS_NEXTRUDER()
+    /// Minimum retract distance for the filament to be considered auto-retracted. \
+Auto-retracted filaments can be unloaded without heating.
+    static constexpr float full_retract_distance = 20.f; // mm
+    static constexpr bool supports_cold_unload = true;
+
+#elif HAS_INDX_HEAD()
+    /// Retraction distance for a standard auto retract sequence
+    static constexpr float full_retract_distance = 8.f; // mm
+
+    /// In parked tools, the only thing holding the filament is the nozzle
+    /// Thus we cannot auto-retract to the level that would allow cold unload
+    static constexpr bool supports_cold_unload = false;
+#else
+    #error
+#endif
+
+    /// @returns whether the specified \\param tool is retracted (some amount > 0.0f) and is \
+a known value -> will deretract on positive Z move
+    bool will_deretract(ToolVariant tool = PhysicalToolIndex::currently_selected()) const;
+
+    /// @returns true if the filament retracted from the \\param tool's nozzle for at least \
+full_retract_distance
+    bool is_fully_retracted(ToolVariant tool = PhysicalToolIndex::currently_selected()) const;
+
+    /// @returns true if the filament is retracted enough for a cold unload (unloading \
+without heating up the nozzle)
+    bool can_cold_unload(PhysicalToolIndex physical_tool) const;
+};
+
+} // namespace buddy
+"""
+
+# Three pieces of the file, the last cut out of the middle of a switch.
+PAUSE_CPP = """\
+void Pause::unload_wait_temp_process([[maybe_unused]] Response response) {
+    if (!ensureSafeTemperatureNotifyProgress()) {
+        return;
+    }
+
+#if HAS_INDX()
+    set(LoadState::unload_purge);
+#else
+    set(LoadState::ram_sequence);
+#endif
+}
+
+#if HAS_INDX()
+void Pause::unload_purge_process([[maybe_unused]] Response response) {
+    setPhase(PhasesLoadUnload::Purging_unstoppable);
+
+    static constexpr float unload_purge_length = 2.0f; // mm
+    std::ignore = do_e_move_notify_progress_hotextrude(
+        unload_purge_length, standard_feedrates::extruder(standard_feedrates::Extruder::\
+advanced_pause_purge, FilamentType::for_tool_heuristic(settings.virtual_tool())), \
+StopConditions::UserStopped);
+
+    set(LoadState::ram_sequence);
+}
+#endif
+
+    case LoadType::unload:
+    case LoadType::unload_confirm:
+#if HAS_SPOOL_JOIN() && HAS_TOOLCHANGER()
+    case LoadType::unload_spool_join:
+#endif
+    case LoadType::filament_stuck: {
+        constexpr static ProgressMapperWorkflowArray workflow { \
+std::to_array<WorkflowStep>({
+            { LoadState::unload_wait_temp, 3 },
+#if HAS_INDX()
+                { LoadState::unload_purge, 1 },
+#endif
+                { LoadState::ram_sequence, 2 },
+                { LoadState::unload, 1 },
+        }) };
+        result = &workflow;
+        break;
+    }
+"""
+
 FILES = {
     read.MODELS_FILE: MODELS_HPP,
     read.GCODE_INFO_FILE: GCODE_INFO_HPP,
@@ -1074,6 +1192,8 @@ FILES = {
     read.ramming_file("mini"): RAMMING_MINI_CPP,
     read.ramming_file("mk3_5"): RAMMING_MK3_5_CPP,
     read.CLEANER_FILE: NOZZLE_CLEANER_CPP,
+    read.AUTO_RETRACT_FILE: AUTO_RETRACT_HPP,
+    read.PAUSE_FILE: PAUSE_CPP,
 }
 
 

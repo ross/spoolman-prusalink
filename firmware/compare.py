@@ -7,10 +7,11 @@ the same tables from the firmware source for each firmware build and lists every
 a copy differs. A difference on `EXPECTED` is reported but doesn't fail the check.
 
 Each build also carries its preset filaments, its extruder numbers (steps per mm,
-filament change lengths, ramming sequences and the nozzle cleaner's purge) and what its
-G-code checks know (the compatibility mode and the `M862.6` feature names), which the
-simulator's models copy. The simulator's `GROUPS` copies every name a file's `M862.3` can
-carry, with its compatibility group.
+filament change lengths, ramming sequences, the nozzle cleaner's purge, the auto-retract's
+threshold and cold unload, and the purge before an unload) and what its G-code checks know
+(the compatibility mode and the `M862.6` feature names), which the simulator's models
+copy. The simulator's `GROUPS` copies every name a file's `M862.3` can carry, with its
+compatibility group.
 """
 
 from __future__ import annotations
@@ -137,6 +138,14 @@ class CleanerPurge:
 
 
 @dataclass(frozen=True)
+class AutoRetract:
+    """A build's `AutoRetract` constants in `auto_retract.hpp`."""
+
+    full_retract_mm: float  # `full_retract_distance`
+    cold_unload: bool  # `supports_cold_unload`
+
+
+@dataclass(frozen=True)
 class Build:
     name: str
     features: frozenset[str]
@@ -149,6 +158,8 @@ class Build:
     # gets another sequence.
     ramming: Mapping[str, Ramming]
     cleaner_purge: CleanerPurge | None  # None without HAS_NOZZLE_CLEANER
+    auto_retract: AutoRetract | None  # None without HAS_AUTO_RETRACT
+    unload_purge_mm: float  # what an unload purges before the ramming
     feature_names: frozenset[str]  # the `M862.6` names it knows
 
     @property
@@ -256,6 +267,11 @@ def load(source: Source) -> Firmware:
         cleaner = None
         if "HAS_NOZZLE_CLEANER" in has:
             cleaner = CleanerPurge(*read.cleaner_purge(text(read.CLEANER_FILE), values))
+        # `src/feature/CMakeLists.txt` compiles the auto-retract only with HAS_AUTO_RETRACT,
+        # and the header stops the other builds without a Nextruder or INDX with `#error`.
+        retract = None
+        if "HAS_AUTO_RETRACT" in has:
+            retract = AutoRetract(*read.auto_retract(text(read.AUTO_RETRACT_FILE), values))
         builds[name] = Build(
             name=name,
             features=has,
@@ -266,6 +282,8 @@ def load(source: Source) -> Firmware:
             pause=Pause(*read.pause_lengths(text(advanced), values, advanced)),
             ramming=read.ramming(text(ramming), values, ramming),
             cleaner_purge=cleaner,
+            auto_retract=retract,
+            unload_purge_mm=read.unload_purge(text(read.PAUSE_FILE), values),
             feature_names=read.feature_names(gcode_info, values),
         )
     return Firmware(
@@ -527,6 +545,15 @@ def _compare_extruder(table: str, code: str, build: Build, extruder: Any, differ
     fw_mm, fw_retract = (None, False) if purge is None else (purge.e_mm, purge.auto_retract)
     differ(table, code, None, "cleaner_purge_mm", fw_mm, extruder.cleaner_purge_mm)
     differ(table, code, None, "cleaner_auto_retract", fw_retract, extruder.cleaner_auto_retract)
+    # A build without HAS_AUTO_RETRACT has no such constants. The simulator uses its model's
+    # only when the model auto-retracts, and the ramming above already checks that it
+    # doesn't: it has no `auto_retract` sequence.
+    retract = build.auto_retract
+    if retract is not None:
+        threshold = retract.full_retract_mm
+        differ(table, code, None, "full_retract_mm", threshold, extruder.full_retract_mm)
+        differ(table, code, None, "cold_unload", retract.cold_unload, extruder.cold_unload)
+    differ(table, code, None, "unload_purge_mm", build.unload_purge_mm, extruder.unload_purge_mm)
 
 
 def _compare_bridge_preset(
