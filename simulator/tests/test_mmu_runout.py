@@ -1,4 +1,4 @@
-"""Runouts and filament changes on an MMU3 (F44).
+"""Runouts, filament changes and spool joins on an MMU3 (F44).
 
 The counts follow the tracker's rules on an MK4S, as in `test_mmu_prints.py`: a move counts
 what passes the gap, which stops at 40 mm, times 0.95, and with no slot selected nothing
@@ -13,22 +13,34 @@ counts and the gap stays where it was.
   nozzle's 17 fills 17 (gap 23) and its 30 fills the 23 and counts 7; the prime +4 counts 4;
   the retract -8 (gap 8). So 11. The resume feeds the 8 back to the change's gap 0,
   counting nothing.
+- A join from a at gap 0 to b: the ramming's +20 counts 20 on a, and the gap ends at 40;
+  the change to b from no slot counts nothing; the load to the nozzle counts 7 on b.
 """
 
 from __future__ import annotations
 
 import pytest
 
-from simulator.model import Busy, Invalid, JobPhase, Reason, Simulation, State
+from simulator.model import Busy, Invalid, JobPhase, Join, Reason, Simulation, State
 from simulator.tests.test_mmu_prints import FEED, PARK_OUT, START, booted, counts, spec, start
 from simulator.tests.test_model_edges import messages
+from simulator.tests.util import PLA
 
 RELOAD = 7 + 4  # the load to the nozzle past the 40 mm gap, and the prime
 RAM_AFTER_PARK = 20 - 8  # the MMU's ramming after the park's retract to 8
+JOIN_LOAD = 47 - 40  # the load to the nozzle past the 40 mm gap the ramming left
 FIRST_PICK = 32 + 54.63  # a slot's first pick in the print, PLA
 # A print on slot 0 alone: the firmware's `T0` from no slot and its 35 mm, then the
 # profile's -2 (gap 2) and 17 + 53, which count 15 + 53 (`test_a_one_color_print`).
 ONE_SLOT = 35 + 15 + 53
+
+
+def three_slots():
+    """`booted`, with slots 0 to 3 typed PLA."""
+    sim, p = booted()
+    for i in (2, 3):
+        p.tools[i].store(PLA)
+    return sim, p
 
 
 def printing(sim, p, print_spec, seconds: float = 3.0) -> float:
@@ -91,6 +103,79 @@ def test_a_runout_reloads_the_same_slot_through_the_mmu():
         }
     )
     unchanged(p)
+
+
+def test_a_join_changes_slots_while_printing():
+    sim, p = three_slots()
+    fed = printing(sim, p, spec((0, 40), (1, 20), (0, 20), spool_join=[Join(0, 2)]))
+    p.runout(0)
+    # No dialog: it reads PRINTING throughout, and the print goes on with slot 2.
+    assert p.state is State.PRINTING and p.job.phase is JobPhase.PRINTING
+    assert p.job.attention is None and p.job.restore is None
+    assert p.job.mapped == {0: 2}
+    assert p.selected_tool == 2 and p.mmu.fed == 2 and p.mmu.path.loaded
+    assert p.mmu.path.gap == 0
+    assert counts(p) == pytest.approx({0: START + fed + 20, 1: 0, 2: JOIN_LOAD, 3: 0, 4: 0})
+    assert "tool change none -> T2" in messages(sim, "job")
+    unchanged(p)
+
+    sim.advance(100)
+    assert p.state is State.FINISHED
+    # Slot 2 prints the rest of G-code tool 0's first segment, changes away to slot 1, and
+    # comes back for the third segment, a later pick of G-code tool 0. The print's end
+    # unloads slot 2: the tower's last unload, then `M702`, which counts nothing at gap 40.
+    assert counts(p) == pytest.approx(
+        {
+            0: START + fed + 20,
+            1: FIRST_PICK + 20 + PARK_OUT + FEED,
+            2: JOIN_LOAD + (40 - fed) + PARK_OUT + FEED + 32 + 29.95 + 20 + PARK_OUT,
+            3: 0,
+            4: 0,
+        }
+    )
+    assert messages(sim, "job").count("tool change T1 -> T2") == 1
+    assert p.selected_tool is None and not p.mmu.path.loaded
+    unchanged(p)
+
+
+def test_a_join_chain_goes_on_to_the_next_slot():
+    sim, p = three_slots()
+    fed = printing(sim, p, spec((0, 40), spool_join=[Join(0, 2), Join(2, 3)]))
+    p.runout(0)
+    sim.advance(1)
+    on_2 = p.job.fed_mm - fed
+    p.runout(2)
+    assert p.job.mapped == {0: 3} and p.selected_tool == 3
+    # Slot 2 printed from gap 0, so its ramming counts 20 too.
+    assert counts(p) == pytest.approx(
+        {0: ONE_SLOT + fed + 20, 1: 0, 2: JOIN_LOAD + on_2 + 20, 3: JOIN_LOAD, 4: 0}
+    )
+    sim.advance(100)
+    assert p.state is State.FINISHED
+    # One slot in the print, so no tower: its -0.7, then `M702`'s +20 counts 19.3.
+    assert counts(p)[3] == pytest.approx(JOIN_LOAD + 40 - fed - on_2 + 19.3)
+    unchanged(p)
+
+
+def test_a_join_that_maps_no_gcode_tool_changes_the_filament():
+    # Slot 1 is loaded before a print on slot 0, so in the preheat it's selected but no
+    # G-code tool maps to it: the join gives up, and `M600` changes slot 1's filament.
+    sim, p = three_slots()
+    p.load_to_nozzle(1)
+    sim.advance(60)
+    p.start_print(spec((0, 20), preheat_s=5, spool_join=[Join(1, 2)]))
+    sim.tick(0.5)
+    p.tap_through()
+    sim.advance(1)
+    assert p.job.phase is JobPhase.PREHEAT and p.selected_tool == 1
+    p.runout(1)
+    assert p.job.waits_for(Reason.RUNOUT) and p.job.wait_tool == 1 and p.job.mapped == {}
+    p.load(1)
+    sim.advance(60)
+    p.resume()
+    assert p.job.phase is JobPhase.PREHEAT and p.selected_tool == 1
+    sim.advance(100)
+    assert p.state is State.FINISHED and counts(p)[2] == 0
 
 
 def test_a_runout_with_no_slot_selected_injects_nothing():
@@ -281,3 +366,15 @@ def test_reload_guards():
     p.set_power("off")
     with pytest.raises(Busy, match="p is off"):
         p.load(0)
+
+
+def test_a_spool_join_needs_an_mmu_switched_on():
+    sim, p = booted()
+    p.set_mmu(False)
+    with pytest.raises(Invalid, match="a spool join needs a toolchanger"):
+        p.start_print(spec((0, 10), spool_join=[Join(0, 1)]))
+    sim2, q = booted()
+    with pytest.raises(Invalid, match="T1 prints in this file, so it can't be joined to"):
+        q.start_print(spec((0, 10), (1, 10), spool_join=[Join(0, 1)]))
+    with pytest.raises(Invalid, match="T0 joins on twice"):
+        q.start_print(spec((0, 10), spool_join=[Join(0, 1), Join(0, 2)]))

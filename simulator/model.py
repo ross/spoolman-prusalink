@@ -1683,16 +1683,16 @@ class SimPrinter:
         """Refuse spool joins the firmware wouldn't set (`SpoolJoin::add_join` in
         `lib/Marlin/Marlin/src/module/prusa/spool_join.cpp:71-105`).
 
-        A join needs a toolchanger that changes tools and two enabled tools. A tool is
-        joined to once, and no chain loops. A second join from one tool is refused here,
-        which is the simulator's simplification: the firmware appends it to the end of
-        that tool's chain (`:76-79`). The tools-mapping screen takes a
+        A join needs a toolchanger that changes tools, or an MMU switched on, and two
+        enabled tools. A tool is joined to once, and no chain loops. A second join from one
+        tool is refused here, which is the simulator's simplification: the firmware appends
+        it to the end of that tool's chain (`:76-79`). The tools-mapping screen takes a
         join's tool off any G-code tool first (`disconnect_virtual_tool` in
         `src/gui/screen/print/frame_tool_mapping.cpp`), and the simulator maps each G-code
         tool to its own tool, so a join's tool can't be one the print uses.
         """
         joins = spec.spool_join
-        if joins and not self.toolchanger:
+        if joins and not self.toolchanger and self.feed is not MMU:
             raise Invalid(f"a spool join needs a toolchanger, which {self.name} isn't")
         used = {s.tool for s in spec.segments}
         nexts: dict[int, int] = {}
@@ -1890,8 +1890,32 @@ class SimPrinter:
         join = next((j for j in job.spec.spool_join if j.tool == t.index), None)
         if join is None:
             self._filament_change(t, Reason.RUNOUT)
+        elif self.feed is MMU:
+            self._mmu_join(job, t, self.tools[join.to])
         else:
             self._spool_join(job, t, self.tools[join.to])
+
+    def _mmu_join(self, job: UserJob, old: SimTool, new: SimTool) -> None:
+        """A spool join on an MMU from the selected slot `old` to `new` (`SpoolJoin::do_join`,
+        `spool_join.cpp:239-365`; `MMU2::tool_change_full`, `mmu2_mk4.cpp:704-736`).
+
+        It maps the G-code tool that prints on `old` to `new`, then unloads `old` into the
+        MMU, changes to `new` from no slot, so the feed counts nothing, and loads it to the
+        nozzle. It runs inside the print with no dialog, so it reads `PRINTING`; nothing is
+        purged, no gap is restored and no type is written. When no G-code tool of the print
+        maps to `old`, as for a slot loaded before a print that doesn't use it, the join
+        gives up and `M600` changes the filament instead (`M600.cpp:139-147`).
+        """
+        tools = (s.tool for s in job.spec.segments)
+        g = next((g for g in tools if job.mapped.get(g, g) == old.index), None)
+        if g is None:
+            self._filament_change(old, Reason.RUNOUT)
+            return
+        job.mapped[g] = new.index
+        self._log("job", f"spool join T{old.index} -> T{new.index}")
+        self._run_steps(old, self._mmu_unload_steps())
+        self._mmu_change(new)
+        self._run_steps(new, [LoadStep("LOAD", mm) for mm in nozzle_load()])
 
     def _spool_join(self, job: UserJob, old: SimTool, new: SimTool) -> None:
         """Start a spool join from the picked tool `old` to `new` (`SpoolJoin::do_join` in
