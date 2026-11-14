@@ -19,9 +19,12 @@ An ID stays with its finding when the finding moves stage or is fixed.
   the bridge does with it today. Firmware paths are at `ff61540d4`, as in
   simulator-models.md.
 - **Effect**: what's charged wrong, missed or not written.
-- **Evidence**: read in the firmware source, inferred from the source,
-  shown in the simulator (with the test), or to be confirmed. Facts about
-  the bridge itself name the bridge's file.
+- **Evidence**: one or more of these labels. Read in the firmware source.
+  Inferred from the source. Shown in the simulator, with the test that
+  shows it. Reproduced, no test kept: a run through the unit harness or
+  the integration suite showed it, and no kept test repeats it. To be
+  confirmed: the claim is still open. Facts about the bridge itself name
+  the bridge's file.
 - **Scenario rows**: the rows in scenarios.md it touches.
 - **To reproduce**: how to show it in the simulator today, or what keeps
   it out of reach, such as a workstream in simulator-models.md not yet
@@ -32,7 +35,8 @@ An ID stays with its finding when the finding moves stage or is fixed.
 ## Priorities
 
 A proposed order, for the owner to change. Each finding sits in the
-earliest stage that has a printer it affects. Within a stage, findings
+earliest stage that has a printer it affects, except a minor or harmless
+one, which sits in stage 5 whatever the printer. Within a stage, findings
 that change what's charged come first, then those that change what's
 written.
 
@@ -43,8 +47,9 @@ written.
    traces listed in simulator-models.md under "Before the INDX upgrade"
    have to be taken before it: F3, F5, F12, F26, F27, F28 and F29, which
    stage 1 depends on, and F4 and F24's tag rows, which no finding does.
-3. **Other multi-tool printers (XL).** No finding is the XL's alone: BF9,
-   BF12, BF13, BF14, BF24 and BF25 cover it and sit in stages 1 and 2.
+3. **Other multi-tool printers (XL).** No finding is the XL's alone:
+   every finding whose Printers line includes the XL sits in stages 1
+   and 2.
 4. **MMU3.**
 5. **Minor or harmless**, whatever the printer.
 
@@ -72,7 +77,7 @@ written.
 | 4 | BF17 | MMU: nothing is counted after a boot until a tool change or load |
 | 4 | BF20 | MMU printers are on the supported list as single-tool models |
 | 4 | BF18 | MMU: the sync job can wait on a question and unload the filament |
-| 4 | BF19 | MMU: writes reach slot 0 only |
+| 4 | BF19 | MMU: slots 1 to 4 keep no UUIDs |
 | 5 | BF6 | A failed `M865` is silent |
 | 5 | BF21 | `READY` in `IDLE_STATES` never arrives |
 | 5 | BF22 | The unit harness runs with the auto-retract off |
@@ -108,7 +113,7 @@ written.
   a Core One L takes Core One G-code as its own, a Core One takes Core One
   Oak, and an MK4 takes MK3.9. Older models' G-code is "compatibility
   mode", which asks. INDX builds take only their own name
-  (`printer_model.cpp:124-198`). `model_problem` accepts only the exact
+  (`printer_model.cpp:140-198`). `model_problem` accepts only the exact
   name or its MMU3 variant.
 - **Effect**: A custom preamble for another model in the group is refused,
   and waiting spools are flagged (W10), though the printer would run the
@@ -162,11 +167,13 @@ written.
   in the printer's menu: ignore, warn (the default on every build) or
   abort. Every failed check shows on one screen, and the worst severity
   decides. A warning waits for a tap; an abort can only be declined
-  (`gcode_compatibility.cpp:48-150`,
+  (`gcode_compatibility.cpp:48-153`,
   `marlin_print_preview.cpp:921-971`). README.md, under "Requirements for
   a write", describes only the warning. The INDX lock question (BF1)
-  always asks. The checks of a print's tools have fixed severities, and
-  the sync job, which names no filament used, raises none of them (F28).
+  always asks. Of the checks of a print's tools, the nozzle checks follow
+  a setting and the rest have fixed severities
+  (`gcode_compatibility.cpp:155-243`). The sync job, which names no
+  filament used, raises none of them (F28).
 - **Effect**: Set to abort, a job that fails a check is refused instead of
   held, and goes the way of BF5. Set to ignore, it runs. The default
   preamble passes every check on a supported model, so this matters only
@@ -191,7 +198,7 @@ written.
   `/api/v1/status` has the job with its new ID, and `/api/v1/job` answers
   `PAUSED`. Declining goes to `IDLE`, not `STOPPED` or `FINISHED`, with
   the ID used up (`wui_api.cpp:291`, `marlin_print_preview.cpp:414-425`,
-  `marlin_server.cpp:1113-1136, 2300-2316`). The bridge waits while the
+  `marlin_server.cpp:1113-1136, 2300-2331`). The bridge waits while the
   printer reads `ATTENTION` and knows the job by its file name (W6). After
   a declined job the printer still differs, so the bridge uploads once
   more. After two jobs (`MAX_SYNC_ATTEMPTS` in `app.py`) it flags the
@@ -215,11 +222,14 @@ written.
 
 - **Printers**: All the bridge writes to.
 - **What happens**: An `M865` the firmware can't take prints a serial
-  error, stores nothing, and the job still ends `FINISHED`. A filament name
-  outside 1 to 7 of `a-zA-Z0-9_-` does it (`filament_common.cpp:27-42`),
-  and so does a preset name the build lacks (`FilamentType::from_name` in
-  `src/common/filament_common.cpp`). `printer_name` in `printer_sync.py`
-  keeps the bridge's names inside that rule.
+  error, and the job still ends `FINISHED`. A name that's empty, `---` or
+  has a character outside `a-zA-Z0-9_-` stores nothing
+  (`filament_common.cpp:27-42`), and nor does a preset name the build
+  lacks (`FilamentType::from_name` in `src/common/filament_common.cpp`).
+  A name longer than 7 characters overflows the parse buffer
+  (`M865.cpp:132`, `filament_name_buffer_size` in `filament.hpp:32`).
+  `printer_name` in `printer_sync.py` keeps the bridge's names inside
+  these rules.
 - **Effect**: A late flag only. The printer still differs, so the bridge
   flags the spool "didn't take" after the second job (W5).
 - **Evidence**: Read in the firmware source. The simulator models the
@@ -233,9 +243,10 @@ written.
 ### BF7. An INDX with an uncalibrated nozzle cleaner refuses every print
 
 - **Printers**: Core One INDX, Core One L INDX.
-- **What happens**: An INDX whose nozzle cleaner isn't calibrated refuses
-  every print, the sync job included
-  (`gcode_compatibility.cpp:92-101, 372-376`). Unreachable today, as BF1,
+- **What happens**: An INDX whose nozzle-cleaner calibration selftest
+  hasn't passed refuses every print, the sync job included: the check
+  `nozzle_cleaner_not_calibrated` is an abort whatever the settings
+  (`gcode_compatibility.cpp:143-152, 392-396`). Unreachable today, as BF1,
   until the per-tool write (BF14).
 - **Effect**: Every write fails and goes the way of BF5. The "didn't take"
   flag lists the differences, not the cause.
@@ -279,7 +290,8 @@ written.
   8 mm feed that leaves the nozzle and 15 mm that never does. The next
   forward move counts 15 mm more that never leaves the nozzle (F26;
   `standard_ramming_sequence_nextruder.cpp`, `ramming_sequence.cpp`,
-  `mapi/motion.cpp`, `marlin_server.cpp:763-770, 1045-1080`). It's off for
+  `mapi/motion.cpp`, `marlin_server.cpp:763-770, 1045-1080`,
+  `pause.cpp:1041-1044`). It's off for
   flexible filament and when the user turns it off. The bridge charges what
   the counter says.
 - **Effect**: About 30 mm commanded, 28.5 mm counted at the 0.95 feed
@@ -307,15 +319,21 @@ written.
 - **Effect**: A print cancelled before it extruded counts as started. An
   open unconfirmed swap closes as "assumed same spool" with a provisional
   charge (S4, Q1), and a staged spool is flagged (S9, Q2). A Spoolman fix
-  made during the preheat no longer confirms the swap, against what P8
-  promises.
-- **Evidence**: Inferred from the source and `accounting.py`. No test
-  covers it: the P8 test's tool is already auto-retracted.
+  made after the cancel's ramming no longer confirms the swap, against
+  what P8 promises. A fix the bridge polls during the preheat, before the
+  cancel, still confirms it.
+- **Evidence**: Inferred from the source and `accounting.py`. Reproduced,
+  no test kept: the bridge records `swap_assumed`, a provisional 22 mm
+  charge and `swap_staged`. The P8 test doesn't show it: its tool is
+  already auto-retracted, it fixes Spoolman before the cancel, and its
+  `finish()` polls every 1 s while the job parks for 0.2 s.
 - **Scenario rows**: P8, Q4, S4, Q1, S9, Q2.
-- **To reproduce**: The simulator has what it needs today:
+- **To reproduce**: Start from
   `test_p8_cancelled_during_preheat_is_not_a_print_start` in
-  `integration/test_prints.py`, with the tool fed (`extrude`) between the
-  load and the print. The test already cancels after the blip.
+  `integration/test_prints.py`. Open an unconfirmed swap as it does, then
+  feed the tool (`extrude`) after the load. Start the print, `cancel` in
+  the preheat, and poll every 0.1 s while the job parks. Fix Spoolman only
+  after the cancel. Expect `swap_assumed` for the job.
 - **Status**: Open.
 
 ### BF11. A power-panic resume loses usage and counts a purge
@@ -334,8 +352,11 @@ written.
   never charged. The purge is charged to the active spool, which is right
   if it leaves the nozzle; its size is unsettled.
 - **Evidence**: Read in the firmware source, with two readings that
-  disagree. The F12 trace on the Core One L decides, and has to be taken
-  before the INDX upgrade.
+  disagree. The purge at `power_panic.cpp:484-488` sits under
+  `HAS_NOZZLE_CLEANER`, which only the iX and the INDX builds set
+  (`ProjectOptions.cmake:755`), so the source favors simulator-models.md's
+  reading. The size on the Core One L is to be confirmed: the F12 trace
+  decides, and has to be taken before the INDX upgrade.
 - **Scenario rows**: P12, Q5, C1.
 - **To reproduce**: `test_p12_power_panic_resume_keeps_the_job` in
   `integration/test_prints.py` shows the loss and a 25 mm purge today. The
@@ -348,31 +369,52 @@ written.
 - **Printers**: Single-tool models with counters. A toolchanger's
   tools-mapping screen loads nothing.
 - **What happens**: A print started on a tool with no filament asks for a
-  load at the preview (F28). The load counts while the printer reads
-  `BUSY` with no job: 57 mm on a Core One L, (20 + 40) × 0.95. A file
-  that names another type than the one loaded then asks again, and the
-  user can decline there. `accounting.print_start` takes a new job as
-  started when a later poll of the same job sees the counter past where
-  the first poll saw it. With one poll at the preview's first question,
-  the next at the wrong-filament question and none during the load, the
-  load's count reads as the print's first extrusion. The load takes about
-  11 s at the simulator's load rate, and `poll_printing` defaults to 30 s,
-  so a poll usually misses it.
+  load at the preview (F28). Yes queues `M701 S"<the file's type>" T<n>
+  W2`, and the load preheats for and stores the file's type, so the type
+  check after it passes (`marlin_print_preview.cpp:307-309, 326-335`,
+  `M701_2.cpp:66-98`). Only when the file's type is a name the build
+  doesn't know does the load ask for a type. No pick can match that name,
+  so the wrong-filament question follows, and the user can decline there.
+  The load counts while the printer reads `BUSY` with no job: 57 mm on a
+  Core One L, (20 + 40) × 0.95. `accounting.print_start` takes a new job
+  as started when a later poll of the same job sees the counter past
+  where the first poll saw it. With one poll at the preview's first
+  question and none during the load, the next poll of the job takes the
+  load's count as the print's first extrusion: at the wrong-filament
+  question, or in the preheat once the print goes on. A cancel in that
+  preheat then ends a job already taken as started. That's BF10's outcome
+  without the cancel's ramming, so an auto-retracted tool gets it too.
 - **Effect**: A job that never printed counts as started. An open
   unconfirmed swap closes as "assumed same spool" with a provisional
-  charge (S4, Q1), and a staged spool is flagged (S9, Q2), as in BF10.
-- **Evidence**: Reproduced through the unit harness, with no test kept. A
-  poll during the load avoids it: the bridge sees no job then, and takes
-  the job's counter afresh when the job comes back.
+  charge (S4, Q1), and a staged spool is flagged (S9, Q2), as in BF10. It
+  takes a print started on an empty tool, no poll during the load, and
+  then a cancel in the preheat or a declined file whose type the build
+  doesn't know. The simulator's load is 108 mm at 10 mm/s, about 11 s. A
+  Core One L moves 40 mm at 6 mm/s, 20 mm at 25 mm/s and a 40 mm purge at
+  3 mm/s, then retracts 8 mm: about 21 s
+  (`standard_feedrates_nextruder.cpp:15-18`). It also reads `BUSY` while
+  it heats to the load temperature and waits for the filament to go in,
+  so a 30 s `poll_printing` lands in the load far more often than in the
+  simulator, and that poll avoids the finding. The live check will tell.
+- **Evidence**: The preview's load is read in the firmware source.
+  Reproduced, no test kept, for both paths: a decline at the
+  wrong-filament question and a cancel in the preheat each give
+  `swap_assumed`. The simulator reaches the wrong-filament question for
+  any type, because its preview load is the user's free choice of preset
+  (`simulator/README.md`). A poll during the load avoids it: the bridge
+  sees no job then, and takes the job's counter afresh when the job comes
+  back. The printer's timing is to be confirmed.
 - **Scenario rows**: P8, Q4, S4, Q1, S9, Q2.
-- **To reproduce**: Unload the tool's spool. Start a print whose segment
-  names another type on the empty tool, and poll at the "no filament"
-  question. `tap_through`, then `load` the tool with a preset of a
-  different type from the segment's, with no poll during the load. Poll
-  at the wrong-filament question, then `cancel`. The ledger shows
-  `swap_assumed` for the job. On the Core One L, the live check
-  `F28-load-then-decline` confirms it with the production bridge: sitting
-  D in printer-behaviors.md, under "Capture plan".
+- **To reproduce**: Unload the tool's spool and poll, to open an
+  unconfirmed swap. Start a print on the empty tool, and poll at the "no
+  filament" question. `tap_through`, then `load` the tool, with no poll
+  during the load. For the decline, load another type than the segment
+  names, poll at the wrong-filament question, then `cancel`. For the
+  cancel, load the segment's type, poll in the preheat, then `cancel`.
+  Either way the ledger shows `swap_assumed` for the job. On the Core One
+  L, the live check `F28-load-then-decline` confirms it with the
+  production bridge: sitting D in printer-behaviors.md, under "Capture
+  plan".
 - **Status**: Open.
 
 ### BF24. Usage counted on an empty tool lands on the next spool
@@ -393,7 +435,7 @@ written.
   charges the held usage, with the load's own count, to the spool
   reported there.
 - **Effect**: The new spool is charged for filament that came from no
-  spool: 76 mm in the test, on top of its load.
+  spool: in the test, the held 76 mm on top of the load's own count.
 - **Evidence**: On a toolchanger, shown in the simulator by
   `test_a_print_through_an_empty_tool_holds_its_usage` in
   `tests/test_toolchanger_prints.py`, on an INDX, which pins the charge:
@@ -443,7 +485,8 @@ written.
 - **What happens**: The idle sensor clear runs only on the picked tool
   (`filament_sensors_handler.cpp:294-312`). An INDX docks its tool after a
   load, an unload, a pause and a print, so an idle INDX has none picked
-  (`marlin_server.cpp:1098, 2561`, `toolchanger_indx.cpp:222-262`). An XL
+  (`M701_2.cpp:135-140, 194-197, 339-342`, `pause.cpp:1395-1402`,
+  `marlin_server.cpp:1098, 2561`). An XL
   has whichever tool is on the head. A docked tool emptied by hand keeps
   its type and counts no unload, and nothing sweeps the tools at boot or at
   a print start. On an idle INDX only a menu unload counts. At a print
@@ -467,7 +510,8 @@ written.
 - **What happens**: A runout with a spool join counts an unload on the old
   tool, and the print goes on with the join's tool. The new tool's type
   isn't set or copied, and its purge counts on it: 27 mm on the XL, 25 mm
-  on INDX (`spool_join.cpp:258-342`, `toolchanger_xl.cpp:505-549`). No
+  on INDX (`spool_join.cpp:258-342`, `toolchanger_xl.cpp:505-549`,
+  `nozzle_cleaner.cpp:87`). No
   scenario row covers a join. The bridge takes the old tool's unload as a
   runout during a started print: it opens an unconfirmed swap there (P3)
   and may raise the runout flag (M5a). The rest of the print is charged to
@@ -531,9 +575,13 @@ before workstream 5, and the scenarios have no MMU rows yet.
 ### BF16. MMU: each tool change over-charges the outgoing slot
 
 - **What happens**: At a tool change the firmware plans about 190 mm to
-  reach the filament sensor, then up to 57 mm more, while the old slot is
-  still selected. The planner counts at plan time, so the old slot is
-  credited with it (`mmu2_mk4.cpp:524-701`).
+  reach the filament sensor (`maximumAllowedExtruderMove`,
+  `mmu2_mk4.cpp:55, 1528, 1590`), then up to 57 mm more, while the old
+  slot is still selected. The 57 mm is 7 mm past the sensor
+  (`mmu2_mk4.cpp:1583`, `MMU2_TOOL_CHANGE_LOAD_LENGTH` in
+  `mmu2_config.h:35`) and 50 mm of feed (`MMU2_FEED_DISTANCE`,
+  `mmu2_config.h:69`, `mmu2_mk4.cpp:524-533`). The planner counts at plan
+  time, so the old slot is credited with it (`mmu2_mk4.cpp:674`).
 - **Effect**: Roughly 200 mm, less the gap, charged to the outgoing slot's
   spool per change, and more on a retry. That's about 0.6 g of 1.75 mm PLA
   per change.
@@ -560,8 +608,9 @@ before workstream 5, and the scenarios have no MMU rows yet.
 ### BF18. MMU: the sync job can wait on a question and unload the filament
 
 - **What happens**: With an MMU and filament at the nozzle, the preview
-  asks to unload first, whatever the settings. Yes unloads; no starts the
-  job as it is (`marlin_print_preview.cpp:228-256, 699-704`). The stock
+  asks to unload first, unless the filament sensors are off. Yes unloads;
+  no starts the job as it is
+  (`marlin_print_preview.cpp:228-256, 699-708`). The stock
   MMU3 end G-code unloads after every print, so this needs a printer left
   loaded by hand.
 - **Effect**: The sync job waits in `ATTENTION` and goes the way of BF5.
@@ -572,19 +621,24 @@ before workstream 5, and the scenarios have no MMU rows yet.
   question.
 - **Status**: Open.
 
-### BF19. MMU: writes reach slot 0 only
+### BF19. MMU: slots 1 to 4 keep no UUIDs
 
-- **What happens**: A sync job's write lands only on slot 0. An ad-hoc
-  write to slots 1 to 4 does nothing on release firmware
-  (`filament.cpp:396-402`). The tag reader is off with an MMU on, so slot
-  0 can keep UUIDs from an earlier tag load but gets no new ones
-  (`request_manager.cpp:263-266`). The bridge writes `M865 L<n>` for each
-  configured tool, and `M865.1` on tool 0 of a model that keeps UUIDs.
-- **Effect**: A write to slots 1 to 4 never takes, so the bridge flags the
-  spool "didn't take" after two jobs (W5). Slot 0 is written, UUID
-  included, but never reports a new tag.
-- **Evidence**: Read in the firmware source; the bridge's side is
-  inferred.
+- **What happens**: `M865` takes `L` from 0 to 4 on an MMU build, and
+  stores the type for that slot (`M865.cpp:194-196`,
+  `store_definition.cpp:243-279`). An ad-hoc write stores the name,
+  temperatures and color for any slot, but the UUIDs only for slot 0. For
+  another slot it skips them, behind a `debug_assert` that fires on a
+  debug build (`filament.cpp:380-402`). The tag reader is off with an MMU
+  on, so slot 0 can keep UUIDs from an earlier tag load but gets no new
+  ones from a tag (`request_manager.cpp:263-266`). The bridge writes
+  `M865 L<n>` for each configured tool, and `M865.1` on tool 0 of a model
+  that keeps UUIDs.
+- **Effect**: Writes to every slot land, apart from UUIDs, which the
+  bridge writes on tool 0 only. Slot 0 is written, UUID included, but
+  never reports a new tag. What the bridge makes of UUIDs slot 0 kept
+  from an earlier tag load is to be confirmed.
+- **Evidence**: Read in the firmware source. The bridge's side is to be
+  confirmed.
 - **Scenario rows**: W1, W5, Q10, Q11.
 - **To reproduce**: Needs workstream 5.
 - **Status**: Open.

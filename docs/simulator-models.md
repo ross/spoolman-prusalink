@@ -139,7 +139,7 @@ Paths are in the firmware at `ff61540d4`.
 | Load lengths | Slow and fast feed, then the purge: Core One and Core One L 40, 20, 40; MK4 and XL 30, 50, 27; iX 40, 45, 40; INDX 15, 25, 25. A high-flow nozzle doubles the purge, except on INDX. | `include/marlin/Configuration_*_adv.h`, `pause.cpp:688-866`, `nozzle_cleaner.cpp:76-92` |
 | The purge's end | Most builds retract 8 mm after the purge. The iX purges in 5 mm steps with no retract. INDX runs `G750 E25` once, then the auto-retract. | `pause.cpp:817-888` |
 | Feed ratio | E steps over calibrated E steps: 380/400 on every build but INDX, which is 550/576. | `planner.cpp:2210-2218`, `Configuration_COREONE.h:476-484` |
-| Auto-retract | After an idle load and at the end of a print, a Nextruder's sequence leaves the filament 55 mm retracted, but the tracker's gap stops at 40. The sequence first feeds back whatever the tracker says is retracted, so it starts from a gap of 0 and counts 23 mm: its 8 mm feed, which does leave the nozzle, and 15 mm that never does. When the tracker has lost the distance (the gap at its limit), only the 15 mm counts. The next forward move counts 15 mm more that never left the nozzle. INDX is exact. Off for flexible filament and when the user turns it off. | `standard_ramming_sequence_nextruder.cpp`, `ramming_sequence.cpp`, `mapi/motion.cpp`, `marlin_server.cpp:763-770, 1045-1080` |
+| Auto-retract | After an idle load and at the end of a print, a Nextruder's sequence leaves the filament 55 mm retracted, but the tracker's gap stops at 40. The sequence first feeds back whatever the tracker says is retracted, so it starts from a gap of 0 and counts 23 mm: its 8 mm feed, which does leave the nozzle, and 15 mm that never does. When the tracker has lost the distance (the gap at its limit), only the 15 mm counts. The next forward move counts 15 mm more that never left the nozzle. INDX is exact. Off for flexible filament and when the user turns it off. | `standard_ramming_sequence_nextruder.cpp`, `ramming_sequence.cpp`, `mapi/motion.cpp`, `marlin_server.cpp:763-770, 1045-1080`, `pause.cpp:1041-1044` |
 | Unload | A menu unload rams first. It counts about 23 mm on a Nextruder that isn't auto-retracted and about 19 mm on INDX, before the unload is recorded. | `pause.cpp` |
 | Power-panic resume | INDX purges 25 mm (`G750 E25`). The MK4 family, Core One, Core One L and iX feed back the 8 mm they retracted at the cut. The XL moves nothing. This reading disagrees with F12, which has the 25 mm on the single-tool Core One L: the F12 trace decides. | `power_panic.cpp:110-116, 480-521` |
 | Nozzle-cleaner sequences | On the iX and INDX, a file under `/usb/macros/nozzle_cleaner/` replaces a built-in sequence, the INDX purges included. The simulator assumes the built-in ones. | `gcode_loader.cpp:24-30, 105-115` |
@@ -161,31 +161,34 @@ counts, and print-after-upload goes through the same checks
   `/api/v1/job` answers 200 with `PAUSED`. The upload itself answers 201.
   Declining goes to `IDLE`, not `STOPPED`, with the ID used up and the file
   kept (`wui_api.cpp:291`, `marlin_print_preview.cpp:414-425`,
-  `marlin_server.cpp:1113-1136, 2300-2316`).
+  `marlin_server.cpp:1113-1136, 2300-2331`).
 - **Severity is a user setting** per kind of check, picked in the printer's
   menu and kept in its config store, not compiled in: ignore, warn (the
   default on every build) or abort. Every failed check shows on one screen, and the worst
   severity decides: a warning waits for a tap, an abort can only be
-  declined (`gcode_compatibility.cpp:48-150`,
+  declined (`gcode_compatibility.cpp:48-153`,
   `marlin_print_preview.cpp:921-971`).
 - **The model check compares groups, not names.** A Core One L takes Core
   One G-code as its own. A Core One takes Core One Oak. An MK4 takes MK3.9.
   An MMU3 name resolves to its base model whether or not an MMU is on.
   Older models' G-code is "compatibility mode", which asks. INDX builds
-  take only their own name (`printer_model.cpp:124-198`).
+  take only their own name (`printer_model.cpp:140-198`).
 - **INDX asks about a file with no `M862.6 P"INDX lock"`**, and no setting
-  turns that off. An INDX whose nozzle cleaner isn't calibrated refuses
-  every print (`gcode_compatibility.cpp:92-101, 372-376`).
+  turns that off (`gcode_compatibility.cpp:92-101, 372-376`). An INDX
+  whose nozzle-cleaner calibration selftest hasn't passed refuses every
+  print: `nozzle_cleaner_not_calibrated` is a fixed abort
+  (`gcode_compatibility.cpp:143-152, 392-396`).
 - **A file sliced for an MMU3 is refused or asked about when the MMU is
   off**, under the firmware setting.
 - **The per-tool checks need the file's filament-used metadata**: a tool
-  with no filament or another type asks, and a disabled tool refuses. No
-  menu setting governs them: their severities are fixed. The bridge's sync
+  with no filament or another type asks, and a disabled tool refuses.
+  Those severities are fixed; only the nozzle checks follow a menu
+  setting (`gcode_compatibility.cpp:155-243`). The bridge's sync
   job has no such metadata, so it raises none of them (`gcode_info.hpp:95-98`,
   `gcode_compatibility.cpp:156-205, 420-423`).
 - **With an MMU and filament at the nozzle, the preview asks to unload
-  first**, whatever the settings. Yes unloads. No starts the print as it is
-  (`marlin_print_preview.cpp:228-256, 699-704`).
+  first**, unless the filament sensors are off. Yes unloads. No starts the
+  print as it is (`marlin_print_preview.cpp:228-256, 699-708`).
 
 The idle sensor clear runs while the preview opens and stops once a question
 shows, except on the tools-mapping screen (`marlin_server.cpp:1448-1460`).
@@ -207,9 +210,9 @@ builds that can take one and false elsewhere (`basic_gets.cpp:229-253`).
 | Tool change in a print | No unload and no firmware E move on the XL. The INDX head-lock moves are excluded from counting. The slicer's ramming counts on whichever tool is picked. | `toolchanger_indx.cpp:365-376`, `planner.cpp:2194` |
 | Menu load or unload of another tool | Picks that tool first. INDX docks it again afterwards; the XL leaves it picked. | `M701_2.cpp:136-139` |
 | No tool picked | Extrusion isn't counted and the idle sensor clear doesn't run. | `planner.cpp:2207` |
-| The picked tool at rest | INDX docks its tool after a load, an unload, a pause and a print, so an idle INDX has none picked. At boot it has one only if a tool is physically on the head. An XL has whichever tool is physically on the head, which after a print depends on the end G-code; the stock profile parks it. | `marlin_server.cpp:1098, 2561`, `toolchanger_indx.cpp:222-262`, `toolchanger_xl.cpp:582-597` |
+| The picked tool at rest | INDX docks its tool after a load, an unload, a pause and a print, so an idle INDX has none picked. At boot it has one only if a tool is physically on the head. An XL has whichever tool is physically on the head, which after a print depends on the end G-code; the stock profile parks it. | `M701_2.cpp:135-140, 194-197, 339-342`, `pause.cpp:1395-1402`, `marlin_server.cpp:1098, 2561`, `toolchanger_indx.cpp:222-262`, `toolchanger_xl.cpp:582-597` |
 | Idle sensor clear | Only the picked tool. So it never runs on an idle INDX, and rarely on an XL. A tool emptied by hand while docked keeps its type. Nothing sweeps the tools at boot or at a print start. | `filament_sensors_handler.cpp:294-312` |
-| Runout with a spool join | Counts an unload on the old tool, and the print goes on with the join's tool. The new tool's type isn't set or copied. Its purge counts on it: 27 mm on the XL, 25 mm on INDX. | `spool_join.cpp:258-342`, `toolchanger_xl.cpp:505-549` |
+| Runout with a spool join | Counts an unload on the old tool, and the print goes on with the join's tool. The new tool's type isn't set or copied. Its purge counts on it: 27 mm on the XL, 25 mm on INDX. | `spool_join.cpp:258-342`, `toolchanger_xl.cpp:505-549`, `nozzle_cleaner.cpp:87` |
 | Runout without one | `M600` on the same tool, as on a single-tool printer. | `filament_sensors_handler.cpp:237` |
 | `M600 T<n>` | Picks tool `n`, changes its filament, and goes back. | `M600.cpp:223-241, 319` |
 | Change all, from the XL menu | For each enabled tool: an unload, the new type, a purge. | `multi_filament_change.cpp:186-233` |
@@ -245,11 +248,13 @@ One L (and the MK3.5, which has no counters). With it on:
   unload and after every boot. Extrusion with no slot selected isn't
   counted (`mmu2_mk4.cpp:175, 674`, `planner.cpp:2207`).
 - **A tool change credits the outgoing slot with feed that isn't its
-  own.** The firmware plans about 190 mm to reach the filament sensor, then
-  up to 57 mm more, while the old slot is still selected. Less the gap,
-  that's roughly 200 mm on the old slot per change, and more on a retry.
-  This is inferred from the planner counting at plan time
-  (`mmu2_mk4.cpp:524-701`).
+  own.** The firmware plans about 190 mm to reach the filament sensor
+  (`mmu2_mk4.cpp:55, 1528, 1590`), then up to 57 mm more: 7 mm past the
+  sensor (`mmu2_mk4.cpp:1583`, `mmu2_config.h:35`) and 50 mm of feed
+  (`mmu2_config.h:69`, `mmu2_mk4.cpp:524-533`), while the old slot is
+  still selected (`mmu2_mk4.cpp:674`). Less the gap, that's roughly
+  200 mm on the old slot per change, and more on a retry. This is
+  inferred from the planner counting at plan time.
 - **An idle load counts 47 mm less the gap** on the new slot. An idle
   unload counts up to 20 mm (`mmu2_config.h:70-84`,
   `Configuration_MK4_adv.h:573`).
@@ -259,8 +264,11 @@ One L (and the MK3.5, which has no counters). With it on:
   (`printer_state.cpp:152-176, 238-247`).
 - **The tag reader is off**, so slot 0 can keep UUIDs from an earlier tag
   load but gets no new ones (`request_manager.cpp:263-266`).
-- **A sync job's write lands only on slot 0.** An ad-hoc write to slots 1
-  to 4 is a no-op on release firmware (`filament.cpp:396-402`).
+- **Slots 1 to 4 keep no UUIDs.** `M865 L<n>` takes every slot and
+  stores its type (`M865.cpp:194-196`, `store_definition.cpp:243-279`).
+  An ad-hoc write stores the name, temperatures and color for any slot,
+  and the UUIDs for slot 0 only; for another slot it skips them, behind a
+  `debug_assert` that fires on a debug build (`filament.cpp:380-402`).
 
 The simulator has none of this.
 
