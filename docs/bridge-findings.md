@@ -1,14 +1,15 @@
 # Bridge findings
 
-Places where the firmware source shows the bridge would charge the wrong
-amount or the wrong spool, miss a spool swap, or fail to write to the
-printer. They turned up while the simulator was made to follow each printer
-family ([simulator-models.md](simulator-models.md)). This list tracks them
-in a proposed order of work, so they can be taken one stage at a time.
+Places where the firmware source or the simulator shows the bridge would
+charge the wrong amount or the wrong spool, miss a spool swap, or fail to
+write to the printer. They turned up while the simulator was made to follow
+each printer family ([simulator-models.md](simulator-models.md)). This list
+tracks them in a proposed order of work, so they can be taken one stage at
+a time.
 
 ## Reading an entry
 
-Each finding has an ID from BF1 to BF22, for "bridge finding". The single
+Each finding has an ID from BF1 to BF25, for "bridge finding". The single
 letters are taken by the scenario rows in [scenarios.md](scenarios.md) and
 the printer behaviors (F) in [printer-behaviors.md](printer-behaviors.md).
 An ID stays with its finding when the finding moves stage or is fixed.
@@ -22,8 +23,9 @@ An ID stays with its finding when the finding moves stage or is fixed.
   shown in the simulator (with the test), or to be confirmed. Facts about
   the bridge itself name the bridge's file.
 - **Scenario rows**: the rows in scenarios.md it touches.
-- **To reproduce**: how to show it in the simulator today, or the
-  workstream in simulator-models.md that has to be built first.
+- **To reproduce**: how to show it in the simulator today, or what keeps
+  it out of reach, such as a workstream in simulator-models.md not yet
+  built.
 - **Status**: Open until it's fixed, or Accepted when the owner decides to
   live with it.
 
@@ -41,7 +43,7 @@ written.
    traces stage 1 depends on (F3, F5 and F12, listed in simulator-models.md
    under "Before the INDX upgrade") have to be taken before it.
 3. **Other multi-tool printers (XL).** No finding is the XL's alone: BF9,
-   BF12, BF13 and BF14 cover it and sit in stages 1 and 2.
+   BF12, BF13, BF14, BF24 and BF25 cover it and sit in stages 1 and 2.
 4. **MMU3.**
 5. **Minor or harmless**, whatever the printer.
 
@@ -50,12 +52,15 @@ written.
 | 1 | BF9 | The auto-retract charges filament that wasn't used |
 | 1 | BF10 | A print cancelled in preheat can look started |
 | 1 | BF11 | A power-panic resume loses usage and counts a purge |
-| 1 | BF3 | A custom preamble without the input-shaper check may stop every sync job |
+| 1 | BF23 | A print declined after the preview's load can count as started |
+| 1 | BF3 | A custom preamble without the input-shaper check makes every sync job wait |
 | 1 | BF2 | The bridge refuses a preamble the printer accepts |
 | 1 | BF4 | The printer's check settings change what a failed check does |
 | 1 | BF5 | A declined or refused sync job uses up a job ID and never finishes |
 | 2 | BF12 | Hand swaps on a toolchanger can be missed |
 | 2 | BF13 | A spool join counts an unload in the middle of a print |
+| 2 | BF24 | Usage counted on an empty tool lands on the next spool |
+| 2 | BF25 | Printing past an empty tool leaves the filament sensors off |
 | 2 | BF14 | Writes are refused on multi-tool models |
 | 2 | BF1 | INDX: every sync job waits for a tap |
 | 2 | BF8 | INDX presets differ from the bridge's table |
@@ -80,14 +85,18 @@ written.
   `M862.6 P"INDX lock"`, and no setting turns the question off
   (`gcode_compatibility.cpp:92-101, 372-376`). `default_preamble` in
   `printer_sync.py` has no such line, so the job would wait in `ATTENTION`
-  until someone taps through. It's unreachable today: `model_problem`
-  refuses writes on every multi-tool model (BF14). Building the per-tool
-  write makes it reachable.
+  until someone taps through. `model_problem` refuses writes on every
+  multi-tool model (BF14), so the bridge never uploads that job today.
 - **Effect**: No write lands without someone at the printer. An unanswered
   or declined job then goes the way of BF5.
 - **Evidence**: Read in the firmware source.
 - **Scenario rows**: W1, T6.
-- **To reproduce**: Needs workstream 2.
+- **To reproduce**: The printer's side, today:
+  `test_indx_asks_about_the_lock_under_any_setting` in
+  `simulator/tests/test_model.py` uploads a job with no lock line to an
+  INDX, and it asks under every `checks` setting. The bridge's side can't
+  be reached: its sync job never gets to the question until the per-tool
+  write (BF14) is built.
 - **Status**: Open.
 
 ### BF2. The bridge refuses a preamble the printer accepts
@@ -103,27 +112,46 @@ written.
 - **Effect**: A custom preamble for another model in the group is refused,
   and waiting spools are flagged (W10), though the printer would run the
   job. The default preamble names the model exactly, so it isn't affected.
-- **Evidence**: Read in the firmware source.
+- **Evidence**: Read in the firmware source. The printer's side is shown
+  in the simulator by
+  `test_the_preview_takes_a_group_and_asks_in_compatibility_mode` in
+  `simulator/tests/test_model.py`: a Core One L runs a Core One job with
+  no question.
 - **Scenario rows**: W1, W10.
-- **To reproduce**: Needs workstream 2. The simulator checks the exact name
-  today.
+- **To reproduce**: Give a Core One L a `gcode_preamble` whose `M862.3`
+  names `COREONE`. `model_problem` refuses it, though the simulator's
+  preview takes the job. No bridge test runs that pairing.
 - **Status**: Open.
 
-### BF3. A custom preamble without the input-shaper check may stop every sync job
+### BF3. A custom preamble without the input-shaper check makes every sync job wait
 
 - **Printers**: Every model the bridge writes to: MK3.9, MK3.9S, MK4, MK4S,
   Core One, Core One Oak, Core One L.
 - **What happens**: `model_problem` checks a custom `gcode_preamble` for
-  its `M862.3` line only. The docstring of `default_preamble` says a job
-  without its checks stops on the printer's "G-code isn't fully compatible"
-  warning, and README.md repeats it. If that holds for a missing
-  `M862.6 P"Input shaper"`, every sync job from such a preamble waits in
-  `ATTENTION` for a tap. No firmware citation in the repo backs it.
-- **Effect**: If confirmed, no write lands without someone at the printer,
-  and an unanswered or declined job goes the way of BF5.
-- **Evidence**: To be confirmed in the simulator.
+  its `M862.3` line only. Every build but the iX requires
+  `M862.6 P"Input shaper"`, and under the default setting asks about a
+  file without it (F27: the check in
+  `src/feature/compatibility_checks/gcode_compatibility.cpp`, the parse in
+  `src/common/gcode/gcode_info.cpp`). So every sync job from such a
+  preamble waits in `ATTENTION` for a tap. README.md, under "Requirements
+  for a write", lists the three lines the default job starts with, but
+  says only that a custom preamble's `M862.3` must name the printer's
+  model. The `gcode_preamble` comment in `config.example.toml` says only
+  that too. Its example has the input-shaper line, and neither text says
+  the line is needed.
+- **Effect**: No write lands without someone at the printer, and an
+  unanswered or declined job goes the way of BF5. Under `abort` (BF4) the
+  job is refused.
+- **Evidence**: Read in the firmware source; shown in the simulator by
+  `test_matching_preamble_for_other_model_writes` in `tests/test_writes.py`
+  and `test_w1_custom_preamble_is_written` in
+  `integration/test_configs.py`, which assert the question and tap
+  through it. The default preamble asks nothing on any model the bridge
+  writes to
+  (`test_the_bridge_default_job_asks_nothing_on_the_models_it_writes_to`
+  in `simulator/tests/test_model.py`).
 - **Scenario rows**: W1, W10.
-- **To reproduce**: Needs workstream 2.
+- **To reproduce**: Those tests, today.
 - **Status**: Open.
 
 ### BF4. The printer's check settings change what a failed check does
@@ -136,16 +164,22 @@ written.
   (`gcode_compatibility.cpp:48-150`,
   `marlin_print_preview.cpp:921-971`). README.md, under "Requirements for
   a write", describes only the warning. The INDX lock question (BF1)
-  always asks.
+  always asks. The checks of a print's tools have fixed severities, and
+  the sync job, which names no filament used, raises none of them (F28).
 - **Effect**: Set to abort, a job that fails a check is refused instead of
   held, and goes the way of BF5. Set to ignore, it runs. The default
   preamble passes every check on a supported model, so this matters only
   with BF2, BF3 or another preamble that fails a check.
-- **Evidence**: Read in the firmware source. Which setting governs the
-  filament-type question is still open in simulator-models.md.
+- **Evidence**: Read in the firmware source. The simulator models the
+  three outcomes for an uploaded file (F27).
 - **Scenario rows**: W1, W5, W10.
-- **To reproduce**: The simulator's `set_auto_accept` stands for ignore
-  today. Warn against abort needs workstream 2.
+- **To reproduce**: The simulator's per-printer `checks` setting
+  (`ignore`, `warn` or `abort`, or the `set_checks` action) stands for the
+  menu's settings. `test_checks_set_to_ignore_ask_nothing` and
+  `test_a_fatal_question_offers_only_abort` in
+  `simulator/tests/test_model.py` show ignore and abort on an upload. A
+  bridge with a preamble that fails a check (BF3) meets the same
+  outcomes. No bridge test sets `checks`.
 - **Status**: Open.
 
 ### BF5. A declined or refused sync job uses up a job ID and never finishes
@@ -163,11 +197,17 @@ written.
   spool "didn't take" (W5).
 - **Effect**: Each attempt holds the printer at a question until someone
   answers, and the spool is flagged after the second. No charge changes.
-- **Evidence**: Read in the firmware source. The bridge's side is inferred
-  from `app.py`: no test runs this sequence, because the simulator gives
-  the job no ID until the question is accepted.
+- **Evidence**: Read in the firmware source. The simulator models the
+  printer's side (F27; `test_the_preview_counts_the_job_then_asks` and
+  `test_abort_at_the_preview_ends_idle_with_the_id_used` in
+  `simulator/tests/test_model.py`). The bridge's side is inferred from
+  `app.py`: no test declines a sync job.
 - **Scenario rows**: W2, W5, W6.
-- **To reproduce**: Needs workstream 2.
+- **To reproduce**: Raise the question as
+  `test_w1_custom_preamble_is_written` does, with a preamble that has no
+  input-shaper line, then answer it with `cancel` instead of
+  `tap_through`, polling between. With `checks` set to `abort`, `cancel`
+  is the only answer.
 - **Status**: Open.
 
 ### BF6. A failed `M865` is silent
@@ -200,7 +240,9 @@ written.
   flag lists the differences, not the cause.
 - **Evidence**: Read in the firmware source.
 - **Scenario rows**: W5, T6.
-- **To reproduce**: Needs workstream 2.
+- **To reproduce**: Can't be shown. The simulator's preview doesn't model
+  an uncalibrated nozzle cleaner (`simulator/README.md`), and the bridge
+  uploads nothing to an INDX until the per-tool write (BF14).
 - **Status**: Open.
 
 ### BF8. INDX presets differ from the bridge's table
@@ -258,7 +300,9 @@ written.
   Purge filament since its last load or print, the ramming counts about
   22 mm (23 mm commanded at 0.95) while the job is still visible.
   `accounting.print_start` takes the first counter rise in a new job as
-  the print's start (Q4), so it takes the ramming as one.
+  the print's start (Q4), so it takes the ramming as one. A cancel during
+  the scan or the start blip moves nothing and ends in `IDLE` (F27), so
+  this takes a cancel later in the preheat.
 - **Effect**: A print cancelled before it extruded counts as started. An
   open unconfirmed swap closes as "assumed same spool" with a provisional
   charge (S4, Q1), and a staged spool is flagged (S9, Q2). A Spoolman fix
@@ -270,7 +314,7 @@ written.
 - **To reproduce**: The simulator has what it needs today:
   `test_p8_cancelled_during_preheat_is_not_a_print_start` in
   `integration/test_prints.py`, with the tool fed (`extrude`) between the
-  load and the print.
+  load and the print. The test already cancels after the blip.
 - **Status**: Open.
 
 ### BF11. A power-panic resume loses usage and counts a purge
@@ -298,6 +342,36 @@ written.
 - **Status**: Open. A candidate for Accepted: printer-behaviors.md, under
   "Bridge follow-ups found here", calls both parts fine.
 
+### BF23. A print declined after the preview's load can count as started
+
+- **Printers**: Single-tool models with counters. A toolchanger's
+  tools-mapping screen loads nothing.
+- **What happens**: A print started on a tool with no filament asks for a
+  load at the preview (F28). The load counts while the printer reads
+  `BUSY` with no job: 57 mm on a Core One L, (20 + 40) × 0.95. A file
+  that names another type than the one loaded then asks again, and the
+  user can decline there. `accounting.print_start` takes a new job as
+  started when a later poll of the same job sees the counter past where
+  the first poll saw it. With one poll at the preview's first question,
+  the next at the wrong-filament question and none during the load, the
+  load's count reads as the print's first extrusion. The load takes about
+  11 s at the simulator's load rate, and `poll_printing` defaults to 30 s,
+  so a poll usually misses it.
+- **Effect**: A job that never printed counts as started. An open
+  unconfirmed swap closes as "assumed same spool" with a provisional
+  charge (S4, Q1), and a staged spool is flagged (S9, Q2), as in BF10.
+- **Evidence**: Reproduced through the unit harness, with no test kept. A
+  poll during the load avoids it: the bridge sees no job then, and takes
+  the job's counter afresh when the job comes back.
+- **Scenario rows**: P8, Q4, S4, Q1, S9, Q2.
+- **To reproduce**: Unload the tool's spool. Start a print whose segment
+  names another type on the empty tool, and poll at the "no filament"
+  question. `tap_through`, then `load` the tool with a preset of a
+  different type from the segment's, with no poll during the load. Poll
+  at the wrong-filament question, then `cancel`. The ledger shows
+  `swap_assumed` for the job.
+- **Status**: Open.
+
 ## Multi-tool
 
 ### BF12. Hand swaps on a toolchanger can be missed
@@ -309,7 +383,11 @@ written.
   (`marlin_server.cpp:1098, 2561`, `toolchanger_indx.cpp:222-262`). An XL
   has whichever tool is on the head. A docked tool emptied by hand keeps
   its type and counts no unload, and nothing sweeps the tools at boot or at
-  a print start. On an idle INDX only a menu unload counts.
+  a print start. On an idle INDX only a menu unload counts. At a print
+  start the tools-mapping screen shows a hand-emptied used tool as having
+  no filament, but that counts no unload either, and the idle sensor clear
+  it allows runs on the picked tool only (F28). Printing past it is BF24
+  and BF25.
 - **Effect**: The bridge sees no unload, so a hand swap opens no swap. A
   spool moved into the tool's location in Spoolman stays staged (S13, S9),
   and the old spool is charged for the new one until a claim moves it.
@@ -347,7 +425,10 @@ written.
   `PRINTER_MODELS` ("multi-tool printers aren't supported yet"). A due
   write flags the spool "can't write to the printer" and uploads nothing.
   The per-tool write isn't built: `M865 L<n>` per tool (F22), with no
-  `M865.1`, since these models keep no UUIDs (F21).
+  `M865.1`, since these models keep no UUIDs (F21). The tools-mapping
+  screen won't stand in its way: the sync job names no filament used, so
+  the screen doesn't apply (F28), and on INDX only the lock question asks
+  (BF1).
 - **Effect**: After the INDX upgrade the owner's printer gets no writes. A
   menu load keeps the preset's name and temperatures, and each write that
   would be due leaves a flag. Charging isn't affected. Building the write
@@ -358,6 +439,53 @@ written.
   `test_family_story`.
 - **Scenario rows**: T6, W10.
 - **To reproduce**: Those tests, today.
+- **Status**: Open.
+
+### BF24. Usage counted on an empty tool lands on the next spool
+
+- **Printers**: Core One INDX, Core One L INDX, XL. A single-tool printer
+  too, when the user turns the sensors off at the filament-not-inserted
+  screen instead of loading (F29), which the simulator doesn't model.
+- **What happens**: On the tools-mapping screen, Print with a used tool
+  empty first asks to turn the filament sensors off, and only that lets
+  the print go on (F28, F29). The print then runs through the empty tool,
+  and the tracker counts its purge and moves on that tool with no
+  material. The bridge holds that usage because the tool reports no
+  material (C7). When filament is next loaded in that tool, the bridge
+  charges the held usage, with the load's own count, to the spool
+  reported there.
+- **Effect**: The new spool is charged for filament that came from no
+  spool: 76 mm in the test, on top of its load.
+- **Evidence**: Shown in the simulator by
+  `test_a_print_through_an_empty_tool_holds_its_usage` in
+  `tests/test_toolchanger_prints.py`, on an INDX.
+- **Scenario rows**: C7, T2.
+- **To reproduce**: That test, today.
+- **Status**: Open.
+
+### BF25. Printing past an empty tool leaves the filament sensors off
+
+- **Printers**: As BF24.
+- **What happens**: The sensors setting that BF24's Print turns off is
+  persistent (F29). Until the user turns it on again, the printer detects
+  no runout and runs no idle sensor clear, so filament pulled out by hand
+  counts no unload. Only a menu unload counts. The bridge's swap detection
+  rests on those unloads. Nothing the simulator serves says the sensors
+  are off, and the bridge has no reading for it that this work found.
+- **Effect**: A hand swap opens no swap, as in BF12, so the old spool is
+  charged for the new one until a claim moves it. A spool that runs out
+  isn't noticed, and the print goes on through the empty tool, which is
+  BF24 again.
+- **Evidence**: Read in the firmware source (F29). The printer's side is
+  shown in the simulator by `test_with_the_sensors_off_nothing_reads_them`
+  in `simulator/tests/test_model.py`. The bridge's side is inferred.
+- **Scenario rows**: P2, S2, T4.
+- **To reproduce**: The printer's side, with that test. With a bridge,
+  turn the sensors off with the simulator's `sensors` setting or
+  `set_sensors`, then empty a tool by hand and pick it as
+  `test_t4_idle_sensor_clear_on_a_picked_tool` in
+  `integration/test_tools.py` does, and poll: no unload counts, where T4
+  counts one. No bridge test covers it.
 - **Status**: Open.
 
 ## MMU3
@@ -424,7 +552,8 @@ before workstream 5, and the scenarios have no MMU rows yet.
   Answering yes unloads the filament for a job that moves none.
 - **Evidence**: Read in the firmware source.
 - **Scenario rows**: W1, W5.
-- **To reproduce**: Needs workstreams 2 and 5.
+- **To reproduce**: Needs workstream 5, which adds the preview's unload
+  question.
 - **Status**: Open.
 
 ### BF19. MMU: writes reach slot 0 only
@@ -479,12 +608,15 @@ before workstream 5, and the scenarios have no MMU rows yet.
 - **Printers**: Every Nextruder, in tests only.
 - **What happens**: `add_station` and `make` in `tests/harness.py` default
   to `auto_retract=False`, because most unit tests move the counter by
-  hand. So the unit suite never sees the ram at the end of a job (BF9,
-  BF10). The integration suite runs the simulator's default, with the
-  auto-retract on, and `tests/test_families.py` turns it on.
+  hand. `tests/test_families.py` and `tests/test_toolchanger_prints.py`
+  turn it on, so the unit suite sees the ram after a load and at a
+  print's end in the family story on each family (BF9), and runs INDX
+  prints, whose end doesn't ram. The rest of the unit suite runs with it
+  off, so no unit test sees the ram at a cancel (BF10). The integration
+  suite runs the simulator's default, with the auto-retract on.
 - **Effect**: No charge changes. A unit test can pass on behavior the ram
-  would change, as BF10 shows.
-- **Evidence**: Read in `tests/harness.py`.
+  would change.
+- **Evidence**: Read in `tests/harness.py` and those two test files.
 - **Scenario rows**: P8.
 - **To reproduce**: `tests/harness.py`, today.
 - **Status**: Open. A candidate for Accepted.

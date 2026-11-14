@@ -48,7 +48,7 @@ Before you finish a change, run `script/test` and `script/lint`. CI also runs
 | `integration/` | The end-to-end tests. The bridge and the simulator run in the test process, against a real Spoolman. |
 | `firmware/` | The code behind `script/firmware-check`. |
 | `tests/`, `simulator/tests/`, `firmware/tests/` | The unit suite. |
-| `docs/` | The scenario list, the printer behaviors, and plans. |
+| `docs/` | The scenario list, the printer behaviors, the bridge findings, and plans. |
 
 ## Bridge architecture
 
@@ -170,6 +170,9 @@ behavior names its firmware source and its trace, or the trace still to record. 
 status says how far the evidence goes, from read in the source to traced on the printer.
 Change the simulator's printer behavior only on that evidence: the firmware source or a
 trace.
+
+`docs/bridge-findings.md` tracks what the simulator work found the bridge gets wrong, by
+BF ID, in priority stages. A new finding gets an entry there, not a GitHub issue.
 
 ## Firmware tables
 

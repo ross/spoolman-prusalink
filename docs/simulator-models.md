@@ -39,7 +39,8 @@ Not in scope:
   change takes are out. So is `READY`: only Prusa Connect is told it, and
   PrusaLink reports the state underneath (`status_renderer.cpp:30`).
 - **Bridge changes.** Where the source shows the bridge would misbehave,
-  [Bridge findings](#bridge-findings) records it. Fixing it is other work.
+  [bridge-findings.md](bridge-findings.md) records it. Fixing it is other
+  work.
 - **Models with no counters beyond what exists.** The MINI, MK3.5 and
   MK3.5S report materials only, and the bridge charges nothing there. Their
   load lengths don't matter.
@@ -113,9 +114,6 @@ firmware update.
   On the XL and INDX these rows are one tools-mapping question, which a
   print it applies to asks with nothing wrong too, and the idle sensor
   clear runs on the picked tool while it's up. Print past a tool with no
-  filament turns every filament sensor off, and the print then counts on
-  that tool with no material. A printer's `sensors` switch turns off the
-  runout, the idle sensor clear and the preview's filament question. Print past a tool with no
   filament turns every filament sensor off, and the print then counts on
   that tool with no material. A printer's `sensors` switch turns off the
   runout, the idle sensor clear and the preview's filament question.
@@ -441,73 +439,10 @@ and C in printer-behaviors.md cover F1 to F13 and F24. This plan adds:
 
 ## Bridge findings
 
-Recorded, not planned. Each is from the source, and the simulator will be
-able to show it once the workstream named is built.
-
-1. **INDX: every sync job asks.** The default preamble has no
-   `M862.6 P"INDX lock"`, so the job waits in `ATTENTION` for a tap.
-   (Workstream 2.)
-2. **The model check is stricter than the firmware's.** `model_problem`
-   wants the exact name; the firmware takes a group. A Core One preamble on
-   a Core One L is refused by the bridge and fine for the printer. (2.)
-3. **A printer set to abort on a model mismatch**, or to ignore one,
-   behaves differently from the warning the bridge's docs describe. (2.)
-4. **Hand swaps on a toolchanger can be missed.** A docked tool emptied by
-   hand keeps its type and counts no unload, and an idle INDX has every
-   tool docked. Only a menu unload counts there. (4.)
-5. **A spool join** counts an unload on the old tool in the middle of a
-   print, and the rest of the print is charged to the join's tool. (4.)
-6. **The auto-retract charges filament that wasn't used**: 15 mm per idle
-   load and per print, and 15 mm more at the next forward move, on every
-   Nextruder. The 8 mm it also counts is extruded. (1.)
-7. **MMU: swaps are invisible.** `unload_count` doesn't move, so the bridge
-   never sees a spool change on a slot. (5.)
-8. **MMU: each tool change over-charges the outgoing slot** by roughly
-   200 mm. (5.)
-9. **MMU: nothing is counted after a boot** until the next tool change or
-   load, a power-panic resume included. (5.)
-10. **MMU: the sync job can wait on a question** when filament is in the
-    nozzle, and answering yes unloads it. The stock end G-code unloads
-    after every print, so this is a printer left loaded by hand. (5.)
-11. **MMU: writes reach slot 0 only**, UUIDs too, and the tag reader is
-    off. (5.)
-12. **MMU printers are on the bridge's supported list** as single-tool
-    models. `/api/v1/info` has an `mmu` flag the bridge doesn't read. (5.)
-13. **A failed `M865` is silent.** A bad name prints a serial error, stores
-    nothing, and the job still reads `FINISHED`. The bridge's "didn't take"
-    check covers it.
-14. **Presets differ by model**, as [plans.md](plans.md) already notes for
-    INDX.
-15. **A declined or refused sync job uses up a job ID** and shows as a job
-    in `ATTENTION`, then `IDLE` with no `FINISHED`. (2.)
-16. **An INDX with an uncalibrated nozzle cleaner refuses every print**, the
-    sync job included. (2.)
-17. **`READY` in the bridge's `IDLE_STATES` never arrives** over PrusaLink.
-    It's harmless.
-18. **A print cancelled in preheat can look started.** On a tool that
-    isn't auto-retracted, the end of the print rams about 22 mm (23
-    commanded × 0.95) while the job is still visible.
-    `accounting.print_start` takes the first counter rise in a new job as
-    the print's start, so it would take that ramming as one. No test covers
-    it: the P8 test's tool is already auto-retracted. (1.)
-19. **A custom `gcode_preamble` without the input-shaper line makes every
-    sync job wait.** `model_problem` checks a custom preamble only for its
-    `M862.3`, so one without `M862.6 P"Input shaper"` passes, and the
-    printer asks before each job runs. The bridge sees its job in
-    `ATTENTION`, and a declined question as a write that didn't take. The
-    W1 test `test_w1_custom_preamble_is_written` taps Print to get past it.
-    (2.)
-20. **Usage counted on an empty tool lands on the next spool.** A print
-    that reaches a tool with no filament counts on that tool. The bridge
-    holds that usage (C7) and then charges it, with the load's own count,
-    to the spool reported next in that tool, though no spool fed it.
-    `test_a_print_through_an_empty_tool_holds_its_usage` in
-    `tests/test_toolchanger_prints.py` shows it on an INDX. (2.)
-21. **Printing past an empty tool turns the filament sensors off for
-    good.** On a toolchanger that's the only way past the tools-mapping
-    screen's "no filament" row. Until the user turns them on again, there's
-    no runout and no idle sensor clear, so an unload by hand counts nothing
-    and the bridge misses the swap. (2.)
+[bridge-findings.md](bridge-findings.md) lists the places where the
+firmware source or the simulator shows the bridge would charge wrongly,
+miss a swap, or fail to write, each by its BF ID and in a proposed order
+of work. A finding from a later workstream gets an entry there.
 
 ## Open questions
 
@@ -522,6 +457,6 @@ Left to the work:
 Only hardware could tell, and none is expected:
 
 - How long an MMU's push to the filament sensor takes, which sets the size
-  of finding 8.
+  of BF16 in [bridge-findings.md](bridge-findings.md).
 - The iX's assisted-insertion length.
 - How the real slow feed compares with the tracker's fixed gap.
