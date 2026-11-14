@@ -47,6 +47,7 @@ Before you finish a change, run `script/test` and `script/lint`. CI also runs
 | `simulator/` | A stand-in for Prusa printers. It serves the PrusaLink endpoints the bridge calls, over a physical model of tools, counters, and jobs. The bridge never imports it. |
 | `integration/` | The end-to-end tests. The bridge and the simulator run in the test process, against a real Spoolman. |
 | `firmware/` | The code behind `script/firmware-check`. |
+| `script/slicer/` | Developer helpers that slice test models in PrusaSlicer, to measure the E moves a stock profile adds. They aren't part of any test suite. |
 | `tests/`, `simulator/tests/`, `firmware/tests/` | The unit suite. |
 | `docs/` | The scenario list, the printer behaviors, the bridge findings, and plans. |
 
