@@ -289,16 +289,16 @@ def test_duration_sets_the_rate():
 
 
 def test_print_without_filament_waits_for_a_load():
+    # The preview finds the empty tool: its first screen, then its wait for a load.
     sim, p = make(tools=[SimTool(0)])
     p.start_print(one_segment(10, preheat_s=0))
     sim.tick(1)
+    assert p.state is State.ATTENTION and p.job.waits_for(Reason.PREVIEW)
+    p.tap_through()
     assert p.state is State.ATTENTION and p.job.phase is JobPhase.WAIT_LOAD
     assert tool0(p).unload_count == 0
     p.load(0, source="preset", name="PLA")
-    sim.tick(40)
-    assert p.state is State.PAUSED
-    p.resume()
-    sim.tick(10)
+    sim.tick(40)  # the load, the blip and 10 mm of printing
     assert p.state is State.FINISHED
 
 
@@ -413,8 +413,12 @@ def test_color_change_in_one_large_tick():
 def test_multi_tool_print_attributes_extrusion_and_purges():
     tools = [loaded(0, PETG), loaded(1, PETG), SimTool(2), loaded(3, PETG, enabled=False)]
     sim, p = make("8.10.0", tools, toolchange_purge_mm=30)
-    with pytest.raises(Invalid):
-        p.start_print(PrintSpec([Segment(3, 10)]))
+    with pytest.raises(Invalid, match="has no tool 5"):
+        p.start_print(PrintSpec([Segment(5, 10)]))
+    p.start_print(PrintSpec([Segment(3, 10)]))  # disabled: the preview refuses it
+    sim.tick(0.5)
+    assert p.job.attention.fatal and p.job.waits_for(Reason.TOOLS_MAPPING)
+    p.cancel()
     spec = PrintSpec([Segment(0, 100), Segment(1, 200), Segment(0, 100)], preheat_s=0)
     p.start_print(spec)
     sim.tick(0.8 + 20 + 1)  # 105 mm in: the change to T1 and its purge happened
@@ -432,6 +436,8 @@ def test_multi_tool_print_attributes_extrusion_and_purges():
 def test_tool_change_to_empty_tool_waits_for_it():
     sim, p = make("8.10.0", [loaded(0, PETG), SimTool(1)])
     p.start_print(PrintSpec([Segment(0, 10), Segment(1, 10)], preheat_s=0))
+    sim.tick(0.5)
+    p.tap_through()  # Print on the tools-mapping screen, which warns about T1
     sim.tick(100)
     assert p.job.phase is JobPhase.WAIT_LOAD and str(p.job.attention) == "no filament in tool 1"
 
@@ -865,7 +871,9 @@ def test_no_print_while_a_tool_process_runs():
 def test_tool_change_into_an_empty_tool_purges_after_the_reload():
     sim, p = make("8.10.0", [loaded(0, PETG), SimTool(1)])
     p.start_print(PrintSpec([Segment(0, 10), Segment(1, 10)], preheat_s=0))
-    sim.tick(0.8 + 10)
+    sim.tick(0.5)
+    p.tap_through()  # Print on the tools-mapping screen, which warns about T1
+    sim.tick(0.3 + 10)
     assert p.job.phase is JobPhase.WAIT_LOAD and p.job.toolchange_purge
     p.load(1, source="preset", name="PLA")
     sim.tick(40)

@@ -28,7 +28,15 @@ from simulator.compatibility import (
     XL_CHECKS,
     GCodeChecks,
 )
-from simulator.preview import Severity, preview
+from simulator.preview import (
+    Failed,
+    Severity,
+    ToolView,
+    preview,
+    print_checks,
+    tool_mapping,
+    wrong_types,
+)
 from simulator.tool import (
     AUTO_RETRACT_STEP,
     CORE_ONE_EXTRUDER,
@@ -115,6 +123,7 @@ class JobPhase(StrEnum):
     RECOVER = "RECOVER"  # BUSY after a power-panic boot, before the resume
     AWAIT_RESUME = "AWAIT_RESUME"  # ATTENTION: the bed went cold during the outage
     UNPARK = "UNPARK"  # PAUSED briefly while the head unparks, then the nozzle clean purges
+    PREVIEW_LOAD = "PREVIEW_LOAD"  # BUSY with no job: the preview's filament-not-inserted load
 
 
 IDLE_STATES = (State.IDLE, State.FINISHED, State.STOPPED)
@@ -133,6 +142,9 @@ PHASE_STATES = {
     JobPhase.RECOVER: State.BUSY,
     JobPhase.AWAIT_RESUME: State.ATTENTION,
     JobPhase.UNPARK: State.PAUSED,
+    # The load's own screen covers the preview, and with no print running yet it reads BUSY
+    # (`get_state` in `src/state/printer_state.cpp`), which has no job.
+    JobPhase.PREVIEW_LOAD: State.BUSY,
 }
 TIMED_PHASES = (
     JobPhase.SCANNING,
@@ -149,23 +161,36 @@ class Reason(StrEnum):
     """Why a job waits for the user."""
 
     PREVIEW = "preview"  # the print preview asks about a file's failed checks
+    TOOLS_MAPPING = "tools mapping"  # a toolchanger's preview asks about the tools a print uses
+    WRONG_FILAMENT = "wrong filament"  # the preview asks about a tool holding another type
     PARSE_ERROR = "parse error"  # a sync job's G-code can't run
     JAM = "jam"
     RUNOUT = "runout"
     COLOR_CHANGE = "color change"
-    NO_FILAMENT = "no filament"  # a print reached a tool that has none
+    NO_FILAMENT = "no filament"  # a print uses or reached a tool that has none
     COLD_BED = "cold bed"  # the bed went cold during a power panic
 
 
 # The reasons each waiting phase can have. A jam waits in HOLD when it's cleared in place,
 # and in WAIT_LOAD when it unloads the tool.
 PHASE_REASONS = {
-    JobPhase.HOLD: frozenset({Reason.PREVIEW, Reason.PARSE_ERROR, Reason.JAM}),
+    JobPhase.HOLD: frozenset(
+        {
+            Reason.PREVIEW,
+            Reason.TOOLS_MAPPING,
+            Reason.WRONG_FILAMENT,
+            Reason.PARSE_ERROR,
+            Reason.JAM,
+        }
+    ),
     JobPhase.WAIT_LOAD: frozenset(
         {Reason.RUNOUT, Reason.JAM, Reason.COLOR_CHANGE, Reason.NO_FILAMENT}
     ),
     JobPhase.AWAIT_RESUME: frozenset({Reason.COLD_BED}),
 }
+# The questions the print preview asks with Abort and Print or Ok, which `tap_through` and
+# `cancel` answer.
+PREVIEW_QUESTIONS = frozenset({Reason.PREVIEW, Reason.TOOLS_MAPPING, Reason.WRONG_FILAMENT})
 
 
 @dataclass(frozen=True)
@@ -180,8 +205,8 @@ class Attention:
 
     def __str__(self) -> str:
         match self.reason:
-            case Reason.PREVIEW:
-                return f"preview{' (abort only)' if self.fatal else ''}: {self.detail}"
+            case Reason.PREVIEW | Reason.TOOLS_MAPPING | Reason.WRONG_FILAMENT:
+                return f"{self.reason}{' (abort only)' if self.fatal else ''}: {self.detail}"
             case Reason.PARSE_ERROR:
                 return f"parse error: {self.detail}"
             case Reason.NO_FILAMENT:
@@ -419,6 +444,9 @@ class Settings:
 class Segment:
     tool: int
     slicer_mm: float
+    # The filament type the file names for this tool (`filament_type` in its metadata), or
+    # None when it names none, which skips the preview's type check.
+    material: str | None = None
 
 
 @dataclass
@@ -480,6 +508,7 @@ class UserJob(SimJob):
     cold_bed: bool = False  # a power-panic resume waits for the user when the bed went cold
     clean_at: float | None = None  # RECOVER time left when the nozzle clean purges
     restore_gap: float | None = None  # the tool's gap when a filament change began
+    previewing: bool = True  # until the preview lets the print begin
 
     def progress(self) -> int:
         return int(100 * self.fed_mm / self.spec.total_mm)
@@ -546,6 +575,14 @@ def check_color(color: Any) -> str | None:
     if not isinstance(color, str) or not gcode.COLOR_RE.fullmatch(color):
         raise Invalid(f"color {color!r} must look like #rrggbb")
     return color.lower()
+
+
+def check_file_type(value: Any) -> str | None:
+    """A segment's filament type, as a file's `filament_type` entry can hold it: the
+    firmware cuts each to 7 characters (`gcode_info.cpp`)."""
+    if value is not None and not (isinstance(value, str) and 0 < len(value) <= 7):
+        raise Invalid(f"a segment's material must be 1 to 7 characters, got {value!r}")
+    return value
 
 
 def check_uuid(value: Any) -> str | None:
@@ -795,7 +832,9 @@ class SimPrinter:
         purge = ex.cleaner_purge_mm or lengths.purge_mm * (2 if self.high_flow else 1)
         return lengths.slow_load_mm, lengths.fast_load_mm, purge
 
-    def _load_steps(self, purge: float | None, extra: float, printing: bool) -> list[LoadStep]:
+    def _load_steps(
+        self, purge: float | None, extra: float, printing: bool, *, auto_retract: bool = True
+    ) -> list[LoadStep]:
         """The moves of a load (`src/marlin_stubs/pause/pause.cpp`), with the overrides.
 
         `purge` is the load's own purge override, and `extra` is added to the purge. As
@@ -809,6 +848,7 @@ class SimPrinter:
         auto-retract (`M1705`), in a print too. A load outside a print then auto-retracts
         (`load_finalize_process`). A reload during a print primes and retracts again
         instead, and the resume puts the tool back at the gap it had when the change began.
+        The preview's load does neither.
         """
         s, lengths = self.settings, self.model.extruder.lengths
         slow, fast, model_purge = self._load_lengths()
@@ -836,7 +876,7 @@ class SimPrinter:
             steps.append(LoadStep(AUTO_RETRACT_STEP))
         if printing:
             steps += [LoadStep("PRIME", lengths.prime_mm), LoadStep("RETRACT", -lengths.retract_mm)]
-        else:
+        elif auto_retract:
             steps.append(LoadStep(AUTO_RETRACT_STEP))
         return steps
 
@@ -890,7 +930,7 @@ class SimPrinter:
 
     def job_visible(self) -> bool:
         job = self.job
-        return job is not None and job.phase is not JobPhase.BLIP
+        return job is not None and job.phase not in (JobPhase.BLIP, JobPhase.PREVIEW_LOAD)
 
     def can_print(self) -> bool:
         # The firmware's rule is state-only: IDLE, READY, STOPPED or FINISHED. A print asked
@@ -956,7 +996,16 @@ class SimPrinter:
         if purge_mm is not None:
             purge_mm = _positive(purge_mm, "purge_mm")
         extra = self.settings.jam_purge_mm if waiting and job.waits_for(Reason.JAM) else 0.0
-        t.process = LoadProcess(self._load_steps(purge_mm, extra, waiting), material)
+        if waiting and isinstance(job, UserJob) and job.previewing:
+            # The preview's Yes runs `M701` (`queue_filament_gcodes` in
+            # `src/common/marlin_print_preview.cpp`): a plain load, with no prime, and no
+            # auto-retract because `is_printing()` is already true there
+            # (`load_finalize_process` in `src/marlin_stubs/pause/pause.cpp`).
+            steps = self._load_steps(purge_mm, extra, False, auto_retract=False)
+            job.enter(JobPhase.PREVIEW_LOAD)
+        else:
+            steps = self._load_steps(purge_mm, extra, waiting)
+        t.process = LoadProcess(steps, material)
         self._next_load_step(t, t.process)  # a load with no slow or fast feed types at once
         if job is None:
             self.screen = State.IDLE  # using the menu dismisses a finished or stopped screen
@@ -1051,9 +1100,14 @@ class SimPrinter:
         self._check_start_print()
         if not spec.segments:
             raise Invalid("a print needs at least one segment")
+        types: dict[int, str | None] = {}
         for s in spec.segments:
-            self._tool(s.tool)
+            # A disabled tool is the preview's to refuse, after the job is counted.
+            self._tool(s.tool, enabled=False)
             _positive(s.slicer_mm, "slicer_mm")
+            check_file_type(s.material)
+            if types.setdefault(s.tool, s.material) != s.material:
+                raise Invalid(f"a file names one filament type per tool, not two for T{s.tool}")
         if spec.duration_s is not None:
             _positive(spec.duration_s, "duration_s")
         if spec.preheat_s is not None and spec.preheat_s < 0:
@@ -1111,10 +1165,10 @@ class SimPrinter:
     def cancel(self) -> None:
         self._check_cancel()
         job = self.job
-        if job.waits_for(Reason.PREVIEW) or job.phase in (JobPhase.SCANNING, JobPhase.BLIP):
-            # Abort at the preview, or a stop before the print begins, which `print_abort`
-            # sends to `Aborting_Preview`: `cleanup_print` in `marlin_server.cpp` goes to
-            # IDLE with nothing parked or moved, and the job's ID stays used.
+        if self._at_preview(job) or job.phase is JobPhase.BLIP:
+            # Abort or No at the preview, or a stop before the print begins, which
+            # `print_abort` sends to `Aborting_Preview`: `cleanup_print` in `marlin_server.cpp`
+            # goes to IDLE with nothing parked or moved, and the job's ID stays used.
             self._log("action", f"cancel job {job.id}: abort at the preview")
             self.job, self.screen = None, State.IDLE
             self._show_state()
@@ -1123,6 +1177,14 @@ class SimPrinter:
         for t in self.tools.values():
             self._abort_process(t)
         self._park(job, State.STOPPED)
+
+    @staticmethod
+    def _at_preview(job: UserJob | SyncJob) -> bool:
+        """Whether the job is still in the preview: scanned, or waiting on one of its
+        questions."""
+        if job.phase is JobPhase.SCANNING or any(job.waits_for(r) for r in PREVIEW_QUESTIONS):
+            return True
+        return isinstance(job, UserJob) and job.previewing and job.phase is JobPhase.WAIT_LOAD
 
     def _abort_process(self, t: SimTool) -> None:
         """Stop a load or unload where it stands.
@@ -1193,11 +1255,14 @@ class SimPrinter:
         self._show_state()
 
     def tap_through(self) -> None:
-        """Answer the screen's question: Print at the preview, or abort on a parse error."""
+        """Answer the screen's question: Print or Ok at the preview, or abort on a parse
+        error."""
         self._check_tap_through()
         job = self.job
         self._log("action", f"tap through: {job.attention}")
-        if job.waits_for(Reason.PREVIEW):
+        if isinstance(job, UserJob) and job.waits_for(Reason.PREVIEW):
+            self._after_incompatible(job)
+        elif any(job.waits_for(r) for r in PREVIEW_QUESTIONS):
             self._begin(job)
         else:
             self._park(job, State.STOPPED)
@@ -1406,6 +1471,8 @@ class SimPrinter:
         self._need_power()
         if self.job is None or self.job.phase is JobPhase.PARKING:
             raise Busy("nothing to cancel")
+        if self.job.phase is JobPhase.PREVIEW_LOAD:
+            raise Busy("the preview's load is running")
 
     def _check_dismiss(self) -> None:
         self._need_power()
@@ -1426,7 +1493,7 @@ class SimPrinter:
     def _check_tap_through(self) -> None:
         self._need_power()
         job = self.job
-        if job is None or job.phase is not JobPhase.HOLD or not isinstance(job, SyncJob):
+        if job is None or job.phase is not JobPhase.HOLD or job.waits_for(Reason.JAM):
             raise Busy("nothing to tap through")
         if job.attention.fatal:
             raise Busy("the preview offers only Abort; cancel answers it")
@@ -1528,6 +1595,10 @@ class SimPrinter:
         job = self.job
         if job is not None and job.phase is JobPhase.WAIT_LOAD:
             job.enter(JobPhase.PAUSED)
+        elif job is not None and job.phase is JobPhase.PREVIEW_LOAD:
+            # The load's result isn't checked and no sensor is read again: the type check
+            # follows (`filament_not_inserted_load` in `marlin_print_preview.cpp`).
+            self._check_types(job)
         self._show_state()
 
     def _tick_job(self, dt: float) -> None:
@@ -1555,7 +1626,9 @@ class SimPrinter:
 
     def _end_phase(self, job: UserJob | SyncJob) -> None:
         if job.phase is JobPhase.SCANNING:
-            if not (isinstance(job, SyncJob) and self._ask(job)):
+            if isinstance(job, UserJob):
+                self._ask_print(job)
+            elif not self._ask(job):
                 self._begin(job)
         elif job.phase is JobPhase.BLIP:
             self._after_blip(job)
@@ -1578,6 +1651,8 @@ class SimPrinter:
 
     def _begin(self, job: UserJob | SyncJob) -> None:
         """Start the job the preview let through: the blip, then the job itself."""
+        if isinstance(job, UserJob):
+            job.previewing = False
         if self.settings.start_blip:
             job.enter(JobPhase.BLIP)
             job.remaining = self.settings.blip_seconds
@@ -1596,6 +1671,55 @@ class SimPrinter:
         self._log("job", f"job {job.id} waits: {job.attention}")
         self._show_state()
         return True
+
+    # The preview of a print with segments: the chain of `PrintPreview::Loop` in
+    # `src/common/marlin_print_preview.cpp`, each question its own wait.
+
+    def _uses(self, job: UserJob) -> dict[int, str | None]:
+        return {s.tool: s.material for s in job.spec.segments}
+
+    def _tool_views(self) -> dict[int, ToolView]:
+        return {
+            i: ToolView(t.enabled, t.loaded, t.material.name if t.material else None)
+            for i, t in self.tools.items()
+        }
+
+    def _preview_question(self, job: UserJob, reason: Reason, rows: list[Failed]) -> None:
+        detail = "; ".join(r.text for r in rows)
+        job.enter(JobPhase.HOLD, Attention(reason, detail=detail, fatal=any(r.fatal for r in rows)))
+        self._log("job", f"job {job.id} waits: {job.attention}")
+        self._show_state()
+
+    def _ask_print(self, job: UserJob) -> None:
+        """The "G-code incompatible" screen (`stateFromPrinterCheck`), then the rest."""
+        rows = print_checks(self.model.max_tools, self._uses(job), self._tool_views()).rows
+        if rows:
+            self._preview_question(job, Reason.PREVIEW, rows)
+        else:
+            self._after_incompatible(job)
+
+    def _after_incompatible(self, job: UserJob) -> None:
+        """The tools-mapping screen on a toolchanger, else the filament-not-inserted screen
+        (`stateFromFilamentPresence` and `checks_done`)."""
+        checks = print_checks(self.model.max_tools, self._uses(job), self._tool_views())
+        if checks.mapping:
+            self._preview_question(job, Reason.TOOLS_MAPPING, checks.mapping)
+        elif checks.empty:
+            job.enter(JobPhase.WAIT_LOAD, Attention(Reason.NO_FILAMENT, checks.empty[0]))
+            self._log("job", f"job {job.id} waits: {job.attention}")
+            self._show_state()
+        else:
+            self._check_types(job)
+
+    def _check_types(self, job: UserJob) -> None:
+        """The wrong-filament screen (`stateFromFilamentType`), which a printer with tool
+        mapping leaves to its tools-mapping screen."""
+        uses, views = self._uses(job), self._tool_views()
+        rows = [] if tool_mapping(self.model.max_tools, uses, views) else wrong_types(uses, views)
+        if rows:
+            self._preview_question(job, Reason.WRONG_FILAMENT, rows)
+        else:
+            self._begin(job)
 
     def _after_blip(self, job: UserJob | SyncJob) -> None:
         if isinstance(job, SyncJob):

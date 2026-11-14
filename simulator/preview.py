@@ -103,3 +103,94 @@ def _failed(
     if unknown:
         found.append(("unsupported features: " + ", ".join(repr(f) for f in unknown), severity))
     return found
+
+
+# The name a tool with no filament type reports, which no file's type matches
+# (`src/common/filament.cpp`).
+NO_TYPE = "---"
+
+
+@dataclass(frozen=True)
+class ToolView:
+    """What the preview reads of one tool: whether it's enabled, whether its sensor sees
+    filament, and the name of its stored type, or None for none."""
+
+    enabled: bool
+    loaded: bool
+    material: str | None
+
+
+@dataclass(frozen=True)
+class PrintChecks:
+    """What the preview asks about a print, in order.
+
+    `rows` is the "G-code incompatible" screen. On a printer with tool mapping the per-tool
+    rows go to `mapping`, the tools-mapping screen, instead. On one without, `empty` names
+    the used tools with no filament, which the filament-not-inserted screen asks to load.
+    The type check comes after that load, so `wrong_types` runs then.
+    """
+
+    rows: list[Failed]
+    mapping: list[Failed]
+    empty: list[int]
+
+
+def tool_mapping(max_tools: int, uses: dict[int, str | None], tools: dict[int, ToolView]) -> bool:
+    """Whether the print goes through the tools-mapping screen
+    (`is_tool_mapping_possible` in `src/common/tools_mapping.cpp`).
+
+    The toolchanger builds have tool mapping, and so do MMU builds with the MMU on, which
+    the simulator never is. It applies when the print uses more than one tool, or when more
+    than one tool is enabled.
+    """
+    enabled = sum(t.enabled for t in tools.values())
+    return max_tools > 1 and (len(uses) > 1 or (enabled > 1 and len(uses) > 0))
+
+
+def print_checks(
+    max_tools: int, uses: dict[int, str | None], tools: dict[int, ToolView]
+) -> PrintChecks:
+    """Return the preview's questions about a print that uses the tools in `uses`, each with
+    the filament type its file names or None.
+
+    `generate_without_toolmapping` and `generate_toolmapping_only_noclear` in
+    `src/feature/compatibility_checks/gcode_compatibility.cpp`, as
+    `stateFromPrinterCheck` and `stateFromFilamentPresence` in
+    `src/common/marlin_print_preview.cpp` use them. A print has no `M862` lines, so only
+    these checks apply, and no setting governs any of them: more used tools than enabled
+    ones warns, a disabled used tool aborts, and a used tool with no filament warns. The
+    type check is left out of the first screen.
+    """
+    rows = []
+    if len(uses) > sum(t.enabled for t in tools.values()):
+        rows.append(Failed("the print uses more tools than are enabled", False))
+    mapped = tool_mapping(max_tools, uses, tools)
+    per_tool = []
+    for index in sorted(uses):
+        t = tools[index]
+        if not t.enabled:  # the firmware checks nothing else on a disabled tool
+            per_tool.append(Failed(f"T{index} is disabled", True))
+            continue
+        if not t.loaded:
+            per_tool.append(Failed(f"T{index} has no filament", False))
+        if mapped:
+            per_tool += wrong_types({index: uses[index]}, tools)
+    if mapped:
+        return PrintChecks(rows, per_tool, [])
+    empty = [i for i in sorted(uses) if tools[i].enabled and not tools[i].loaded]
+    return PrintChecks(rows + per_tool, [], empty)
+
+
+def wrong_types(uses: dict[int, str | None], tools: dict[int, ToolView]) -> list[Failed]:
+    """The used, enabled tools whose stored type isn't the one the file names: an exact,
+    case-sensitive comparison of names. A tool the file names no type for, or `---`, isn't
+    checked."""
+    out = []
+    for index in sorted(uses):
+        want, t = uses[index], tools[index]
+        if want in (None, "", NO_TYPE) or not t.enabled:
+            continue
+        have = t.material or NO_TYPE
+        if want != have:
+            out.append(Failed(f"T{index} holds {have}, not {want}", False))
+    return out

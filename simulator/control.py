@@ -161,6 +161,7 @@ def _check(where: str, value: Any, hint: Any) -> Any:
 
 
 _SEGMENT_KEYS = {f.name for f in fields(Segment)}
+_SEGMENT_NEEDS = {"tool", "slicer_mm"}
 _PRINT_KEYS = {f.name for f in fields(PrintSpec)}
 
 
@@ -171,9 +172,9 @@ def _print_spec(body: dict) -> PrintSpec:
             f"start_print takes {', '.join(sorted(_PRINT_KEYS))}, not {', '.join(sorted(extra))}"
         )
     segments = body.get("segments")
-    shape = 'segments, a list of {"tool": T, "slicer_mm": MM}'
+    shape = 'segments, a list of {"tool": T, "slicer_mm": MM} with an optional "material"'
     if not isinstance(segments, list) or not all(
-        isinstance(s, dict) and set(s) == _SEGMENT_KEYS for s in segments
+        isinstance(s, dict) and _SEGMENT_NEEDS <= set(s) <= _SEGMENT_KEYS for s in segments
     ):
         raise Invalid(f"start_print needs {shape}, got {segments!r}")
     where = "start_print segments"
@@ -182,6 +183,7 @@ def _print_spec(body: dict) -> PrintSpec:
             Segment(
                 _check(f"{where}[{i}] tool", s["tool"], int),
                 _check(f"{where}[{i}] slicer_mm", s["slicer_mm"], float),
+                _check(f"{where}[{i}] material", s.get("material"), str | None),
             )
             for i, s in enumerate(segments)
         ],

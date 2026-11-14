@@ -139,10 +139,48 @@ def multi_tool_unloading():
 
 
 def preheat_empty():
-    """A print preheats on an empty tool, so a runout has no filament to run out."""
-    sim, p = make(tools=[SimTool(0)])
+    """A toolchanger's print preheats on an empty tool once Print is pressed on the
+    tools-mapping screen, so a runout has no filament to run out."""
+    sim, p = make("3.1.0", [SimTool(0), loaded(1)])
     p.start_print(one_segment(100, preheat_s=60))
-    run(sim, 1.8)
+    run(sim, 1)
+    p.tap_through()
+    run(sim, 1)
+    return sim, p
+
+
+def preview_empty():
+    """A print on an empty tool: the preview's first screen."""
+    sim, p = make(tools=[SimTool(0)])
+    p.start_print(one_segment(100))
+    run(sim, 1)
+    return sim, p
+
+
+def preview_waits_for_a_load():
+    sim, p = preview_empty()
+    p.tap_through()
+    return sim, p
+
+
+def preview_loading():
+    sim, p = preview_waits_for_a_load()
+    p.load(0, source="preset", name="PLA")
+    run(sim, 1)
+    return sim, p
+
+
+def preview_wrong_filament():
+    sim, p = make()
+    p.start_print(PrintSpec([Segment(0, 100, "PETG")]))
+    run(sim, 1)
+    return sim, p
+
+
+def preview_disabled_tool():
+    sim, p = make("3.1.0", [loaded(0), loaded(1), loaded(2, enabled=False)])
+    p.start_print(PrintSpec([Segment(0, 100), Segment(2, 100)]))
+    run(sim, 1)
     return sim, p
 
 
@@ -168,6 +206,11 @@ SITUATIONS = [
     multi_tool_idle,
     multi_tool_unloading,
     preheat_empty,
+    preview_empty,
+    preview_waits_for_a_load,
+    preview_loading,
+    preview_wrong_filament,
+    preview_disabled_tool,
 ]
 
 
