@@ -194,8 +194,8 @@ def test_a_changed_region_is_reported_with_the_diff_to_read():
         "the compatibility upgrades in src/common/printer_model.cpp changed since 7d8bf6858b36:"
         " check UPGRADES in simulator/compatibility.py against the diff, then record"
         f" fingerprint {change.now} and commit {newer}\n"
-        "    in a firmware checkout: git diff 7d8bf6858b36..abcdef012345 --"
-        " src/common/printer_model.cpp"
+        "    in a firmware checkout, after git fetch if it lacks abcdef012345:"
+        " git diff 7d8bf6858b36..abcdef012345 -- src/common/printer_model.cpp"
     )
     lines, ok = compare.report([], (), [change])
     assert not ok

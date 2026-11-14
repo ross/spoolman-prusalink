@@ -49,8 +49,11 @@ UPSTREAM_7D8BF685 = "7d8bf6858b363c453c0617bceab5e66997d8fc25"
 
 # The regions the copies come from. Each row's commit is the one its region was last read
 # at, not the last one checked: a region whose text is the same at a newer commit stays as
-# it is. When one changes, read the diff the check prints, check the copy it names, and
-# then record the fingerprint and commit the check prints.
+# it is. When one changes, read the diff the check prints, fetching upstream first if the
+# checkout lacks the newer commit, check the copy it names, and then record the
+# fingerprint and commit the check prints. When the check says the recorded fingerprint is
+# wrong, there's no diff to read: re-read the region at the recorded commit and the copy it
+# names, then record the fingerprint the check found and keep the commit.
 WATCHED = (
     # The upgrade paths: `UPGRADES` in simulator/compatibility.py.
     Watched(
@@ -209,8 +212,8 @@ class Change:
         return (
             f"{w.name} in {w.path} changed since {_short(w.commit)}: check {w.copy} against"
             f" the diff, then record fingerprint {self.now} and commit {self.commit}\n"
-            f"    in a firmware checkout: git diff"
-            f" {_short(w.commit)}..{_short(self.commit)} -- {w.path}"
+            f"    in a firmware checkout, after git fetch if it lacks {_short(self.commit)}:"
+            f" git diff {_short(w.commit)}..{_short(self.commit)} -- {w.path}"
         )
 
 

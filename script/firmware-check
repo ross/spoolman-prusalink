@@ -12,9 +12,12 @@
 # difference; firmware/compare.py has the details and the list of expected differences.
 # It also fingerprints the firmware code behind the copied rules it can't rebuild, and
 # reports each watched region whose code changed; firmware/watch.py lists them. For a
-# changed region, run the printed git diff in a firmware checkout, re-read the copy it
-# names and update it if the rule changed, then record the new fingerprint and commit.
-# Update a row only when its region changed.
+# changed region, run the printed git diff in a firmware checkout, after a git fetch if
+# it lacks the newer commit, re-read the copy it names and update it if the rule changed,
+# then record the new fingerprint and commit. Update a row only when its region changed.
+# When the check says the recorded fingerprint is wrong, there's no diff to read: re-read
+# the region at the recorded commit and the copy it names, then record the fingerprint
+# the check found and keep the commit.
 # Exits 0 when every difference is expected, 1 on any other difference, an expected one
 # that no longer occurs or a changed watched region, 2 on a usage error, 3 when the
 # firmware can't be fetched or a file doesn't have the structure the reader expects.

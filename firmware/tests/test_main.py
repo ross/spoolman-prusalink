@@ -134,7 +134,8 @@ def test_a_changed_watched_region_exits_1(calls, monkeypatch, capsys):
     ) in out
     assert (
         " and commit c0ffee\n"
-        "    in a firmware checkout: git diff 7d8bf6858b36..c0ffee -- include/device/board.h\n"
+        "    in a firmware checkout, after git fetch if it lacks c0ffee:"
+        " git diff 7d8bf6858b36..c0ffee -- include/device/board.h\n"
     ) in out
     assert out.endswith(", 0 stale expected entries, 1 changed watched regions\n")
 

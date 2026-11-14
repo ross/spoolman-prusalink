@@ -198,13 +198,18 @@ each, `WATCHED` in `firmware/watch.py` records a fingerprint of the firmware cod
 from: a watched region. Each row also records the firmware commit the region was last
 read at. When the check reports a changed region, do these steps in order:
 
-1. In a firmware checkout, run the `git diff` that the check prints.
+1. In a firmware checkout, run `git fetch` if the checkout doesn't have the newer commit,
+   then run the `git diff` that the check prints.
 2. Re-read the copy that the check names.
 3. If the rule changed, update the copy.
 4. Record the new fingerprint and commit that the check prints.
 
 Update a row only when its region changed. A region with the same text at a newer commit
 passes, and its row keeps its commit.
+
+When the check says the recorded fingerprint is wrong, the checked commit is the row's
+own, and there's no diff to read. Re-read the region at the recorded commit and the copy
+it names, then record the fingerprint the check found and keep the commit.
 
 ## Conventions
 

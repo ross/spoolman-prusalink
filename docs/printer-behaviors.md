@@ -305,52 +305,67 @@ observations are notes.
    the bed is cold, then plug it in. Expect the printer to ask before it
    resumes.
 
-**Sitting D, an empty tool at a print's start.** Two short prints started
-from the printer's screen, about 30 minutes. Only a single-tool printer
-shows these paths, and the simulator doesn't model them, so they can't be
-recorded after the INDX upgrade. Slice two short prints for the Core One
-L, one for PETG and one for PLA, and load cheap PLA. The second check
-turns the filament sensor off, a setting that persists and that the
-production bridge relies on: don't leave the printer before step 7.
+**Sitting D, an empty tool at a print's start.** The printer has no
+filament in it and is told to print anyway; nothing in the sitting needs
+filament in the extruder while the printer reports none. Two short prints
+started from the printer's screen, about 30 minutes. Only a single-tool
+printer shows these paths, and the simulator doesn't model them, so they
+can't be recorded after the INDX upgrade. Every screen below comes from
+the firmware source, and none has been seen on the printer yet: when the
+printer doesn't offer a step, mark that in the probe and go on to the next
+step that it allows. Slice two short prints for the Core One L and load
+cheap PLA. Slice the first with a custom filament type, a name the
+printer's build doesn't know, such as `TESTPLA`: the preview's load
+takes the file's type when the build knows it, and asks only otherwise.
+Slice the second for PLA. The second check turns the filament sensor
+off, a setting that persists and that the production bridge relies on:
+don't leave the printer before step 7.
 
 1. **F28, a load at the preview.** Unload from the menu. Start the probe
-   as `F28-load-then-decline`, then start the PETG print from the
+   as `F28-load-then-decline`, then start the `TESTPLA` print from the
    printer's screen. Expect `IDLE` with no `job` while the preview is
    open, then a new `job` reading `PRINTING`, then `ATTENTION` with the
    `job` at the warning that a used tool has no filament. Choose Print.
-   At the filament-not-inserted screen, also `ATTENTION`, answer Yes and
-   load the PLA spool as PLA. Mark the load. Expect `BUSY` with no `job`
+   At the filament-not-inserted screen, also `ATTENTION`, answer Yes.
+   Expect the load to ask for a type; pick PLA, which isn't the file's,
+   and load the PLA spool. Mark the load. Expect `BUSY` with no `job`
    while it loads, and `extruded` up about 57 mm with no auto-retract at
-   its end. If the load offers only the file's type, mark that, cancel
-   the print once it starts, and note it against BF23 in
-   bridge-findings.md: the decline it needs can't happen this way.
-2. **F28, declined.** At the wrong-filament question, `ATTENTION` with
-   the `job`, choose Abort. Expect `IDLE` with no `job`, and the job ID
+   its end. If the load doesn't ask, or the printer behaves otherwise,
+   mark that in the probe, cancel the print once it starts, note it
+   against BF23 in bridge-findings.md, and go to step 3. If the printer
+   shows neither screen, mark that, cancel, and go to step 3.
+2. **F28, declined.** Expect the wrong-filament question once the load
+   ends, `ATTENTION` with the `job`, and choose Abort. Expect `IDLE` with no `job`, and the job ID
    used up. The bridge may then write the assigned spool, as in sitting
    A's step 3; let its job finish, and stop the probe a heartbeat later.
    Check the bridge's log and ledger for the declined job: BF23 predicts
    a print start with `swap_assumed` when no poll lands in the load. Note
-   whether a poll did.
+   whether a poll did. If no wrong-filament question comes, mark that and
+   cancel the print.
 3. **F29, the preview again.** Unload from the menu, so the tool is empty
    again. Start the probe as `F29-sensors-off-print`, then start the PLA
    print from the printer's screen. Expect the warning and the
    filament-not-inserted screen as in step 1.
 4. **F29, printing with no filament.** At the filament-not-inserted
    screen, turn the filament sensor off instead of loading, and mark it.
-   Expect `PRINTING` with no `ATTENTION` and no reload, and no `material`
-   in `/api/v1/filament`. Once the preheat is over, watch whether
-   `extruded` grows: BF24 rests on it growing with no `material`. After a
-   minute of printing, cancel. Expect `PRINTING` while it parks, then
-   `STOPPED` with no `job` (F7). Note what `extruded` does while it
-   parks: F29 infers that the end's auto-retract counts on an empty tool
-   too. The bridge holds what the print counted, since the tool reports no
-   material (C7).
-5. **F29, a load with the sensor off.** Load the PLA spool from the menu,
-   and mark it. Expect what F3 says: `extruded` grows with no `material`,
-   then `material` appears, then the purge and the auto-retract count.
-   BF24 predicts the bridge then charges the held count with the load to
-   the assigned spool. The bridge may write the assigned spool after the
-   load; let its job finish.
+   If the screen offers no such answer, mark that, cancel, turn the
+   sensor off from the menu, and go to step 5. Expect `PRINTING` with no
+   `ATTENTION` and no reload, and no `material` in `/api/v1/filament`.
+   Once the preheat is over, watch whether `extruded` grows: BF24 rests
+   on it growing with no `material`. After a minute of printing, cancel.
+   Expect `PRINTING` while it parks, then `STOPPED` with no `job` (F7).
+   Note what `extruded` does while it parks: F29 infers that the end's
+   auto-retract counts on an empty tool too. The bridge holds what the
+   print counted, since the tool reports no material (C7).
+5. **F29, a load with the sensor off.** This step explores: the source
+   doesn't say whether a menu load works as usual with the sensor
+   disabled. Try loading the PLA spool from the menu, mark it, and record
+   what happens. If the printer refuses or behaves oddly, mark that, stop
+   the load, and go to step 7. Otherwise expect what F3 says: `extruded`
+   grows with no `material`, then `material` appears, then the purge and
+   the auto-retract count. BF24 predicts the bridge then charges the held
+   count with the load to the assigned spool. The bridge may write the
+   assigned spool after the load; let its job finish.
 6. **F29, a hand pull with the sensor off.** Let the nozzle cool: as F14
    says, the pull needs a cold extruder. With the printer idle, pull the
    filament out by hand, and mark it. Expect no unload counted and the
