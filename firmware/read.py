@@ -351,23 +351,45 @@ _RAMMING_BODY = re.compile(
     re.S,
 )
 _RAMMING_STEP = re.compile(r"\s*\{\s*(-?\d+)\s*,\s*(\d+)\s*\}\s*(?:,|$)")
+_RAMMING_FUNCTION = re.compile(r"\bstandard_ramming_sequence\s*\([^()]*\)\s*\{")
+# What the files hold around the `switch (seq)`. Anything else, such as a test that returns
+# another sequence before the switch, could change which sequence a build uses.
+_RAMMING_BEFORE_SWITCH = (
+    "",
+    "const bool is_flexible = FilamentType::for_tool_heuristic(virtual_tool)"
+    ".parameters().is_flexible;",
+    "[[maybe_unused]] const bool is_high_flow_nozzle = config_store()"
+    ".get_nozzle_is_high_flow(virtual_tool.to_physical());",
+)
+_RAMMING_AFTER_SWITCH = "bsod_unreachable();"
 
 
 def ramming(text: str, macros: Macros, path: str) -> dict[str, tuple[Step, ...]]:
     """Return one build's standard ramming sequences, by case name, from the file at `path`.
 
-    Reads the `switch (seq)` in `standard_ramming_sequence(...)`. Where a case returns
+    Reads the `switch (seq)` in `standard_ramming_sequence(...)`, which may only be preceded
+    by a known declaration and followed by `bsod_unreachable();`. Where a case returns
     another sequence for flexible filament first, that one is also given as
     `<name>_flexible`. The cases have to be `runout`, `unload` and, on a build with
     `HAS_AUTO_RETRACT`, `auto_retract`.
     """
     try:
         text = "\n".join(active_lines(_strip_comments(text).splitlines(), macros))
-        switches = list(re.finditer(r"switch\s*\(\s*seq\s*\)\s*\{", text))
+        functions = list(_RAMMING_FUNCTION.finditer(text))
+        if len(functions) != 1:
+            raise ValueError(f"{len(functions)} standard_ramming_sequence definitions")
+        function = text[functions[0].end() : _closing_brace(text, functions[0].end() - 1) - 1]
+        switches = list(re.finditer(r"switch\s*\(\s*seq\s*\)\s*\{", function))
         if len(switches) != 1:
             raise ValueError(f"{len(switches)} switch (seq) statements")
         start = switches[0].end()
-        body = text[start : _closing_brace(text, start - 1) - 1]
+        stop = _closing_brace(function, start - 1)
+        before = _tokens(function[: switches[0].start()])
+        if before not in map(_tokens, _RAMMING_BEFORE_SWITCH):
+            raise ValueError("unexpected code before switch (seq)")
+        if _tokens(function[stop:]) != _tokens(_RAMMING_AFTER_SWITCH):
+            raise ValueError("unexpected code after switch (seq)")
+        body = function[start : stop - 1]
         result: dict[str, tuple[Step, ...]] = {}
         pos = 0
         while body[pos:].strip():
@@ -425,7 +447,12 @@ def cleaner_purge(text: str, macros: Macros) -> tuple[float, bool]:
         entry = _one(
             r"\{\s*Sequence::purge_clean\s*,\s*\{(.*?)\}\s*\}", text, "Sequence::purge_clean"
         )
-        literals = _one(r'\.default_gcode\s*=\s*((?:"[^"]*"\s*)+)', entry, ".default_gcode")
+        literals, rest = _one(
+            r'\.default_gcode\s*=\s*((?:"[^"]*"\s*)+)(?=(.*))', entry, ".default_gcode", 2
+        )
+        # Only a trailing comma may follow, so a macro between the literals can't hide G-code.
+        if not re.fullmatch(r",?\s*", rest, re.S):
+            raise ValueError("unexpected code after the .default_gcode literals")
         gcode = "".join(re.findall(r'"([^"]*)"', literals))
         if re.search(r"\\(?!n)", gcode):
             raise ValueError("an escape other than \\n in purge_clean")
@@ -448,6 +475,12 @@ def cleaner_purge(text: str, macros: Macros) -> tuple[float, bool]:
     except ValueError as e:
         raise Unreadable(CLEANER_FILE, str(e)) from None
     return extruded, retract is not None
+
+
+def _tokens(code: str) -> str:
+    """Return `code`'s words and other characters split by single spaces, so two pieces of
+    code compare equal whatever their spacing."""
+    return " ".join(re.findall(r"\w+|\S", code))
 
 
 def _closing_brace(text: str, start: int) -> int:

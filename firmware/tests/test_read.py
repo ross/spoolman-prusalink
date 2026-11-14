@@ -588,6 +588,7 @@ def test_pause_lengths(text, values, lengths):
         ("#define AB 2\n#define A 1\n#define B(x) x", 1),
         ("#if HAS_DRIVER(TMC26X)\n#define B 1\n#endif\n#define A 1", 1),
         ("#if B()\n#define A 1\n#else\n#define A 2\n#endif", 2),
+        ("#if B()\n#if X()\n#define A 1\n#endif\n#else\n#define A 2\n#endif", 2),
         ("#if B()\n#elif X()\n#if B()\n#endif\n#define A 3\n#endif", 3),
         ("#ifdef UNITTESTS\n#define A 2\n#endif\n#define A 1", 1),
     ],
@@ -632,6 +633,12 @@ def test_e_steps_and_pause_lengths_name_the_file():
 
 NEXTRUDER_RUNOUT = ((7, 1500), (-50, 2700), (-5, 50), (-50, 1500))
 MINI_RAMMING = ((20, 1500), (-50, 2700), (-5, 50), (-50, 1500))
+RETURN_BEFORE_SWITCH = """\
+    if (virtual_tool.to_physical() == 1) {
+        static constexpr RammingSequenceArray seq({ { -50, 600 } });
+        return seq;
+    }
+"""
 
 
 def test_ramming_nextruder():
@@ -669,9 +676,16 @@ def test_ramming_mini_and_mk3_5():
         ("{ 7, 1500 }", "{ 7, 0 }", "can't read the steps of ramming sequence runout"),
         ("{ 7, 1500 }", "{ 7, -1500 }", "can't read the steps of ramming sequence runout"),
         ("{ 7, 1500 },", "{ 7, 1500 } x", "can't read the steps of ramming sequence runout"),
+        ("{ -5, 50 },", "{ -5, 50 } x", "can't read the steps of ramming sequence runout"),
         ("return seq;\n    }\n\n    case", "f();\n    }\n\n    case", "can't read the case block"),
         ("    }\n    }\n", "    }\n    default: break;\n    }\n", "unexpected 'default:'"),
         ("switch (seq) {", "switch (other) {", "0 switch"),
+        ("    switch", "    switch (seq) {}\n    switch", "2 switch"),
+        ("    switch", RETURN_BEFORE_SWITCH + "    switch", "unexpected code before switch"),
+        ("    switch", "    const bool is_flexible = f();\n    switch", "unexpected code before"),
+        ("bsod_unreachable();", "return f();", "unexpected code after"),
+        ("bsod_unreachable();", "bsod_unreachable();\n    f();", "unexpected code after"),
+        ("standard_ramming_sequence(", "other(", "0 standard_ramming_sequence definitions"),
     ],
 )
 def test_ramming_fail_closed(old, new, problem):
@@ -683,7 +697,7 @@ def test_ramming_fail_closed(old, new, problem):
 
 def test_ramming_needs_the_builds_cases():
     unload = fixtures.RAMMING_MK3_5_CPP.index("    case StandardRammingSequence::unload")
-    text = fixtures.RAMMING_MK3_5_CPP[:unload] + "    }\n}\n"
+    text = fixtures.RAMMING_MK3_5_CPP[:unload] + "    }\n    bsod_unreachable();\n}\n"
     with pytest.raises(Unreadable, match="the cases are runout, not runout, unload"):
         read.ramming(text, macros(HAS_AUTO_RETRACT=False), "r.cpp")
     with pytest.raises(Unreadable, match="cases are runout, unload, not auto_retract, runout"):
@@ -691,7 +705,7 @@ def test_ramming_needs_the_builds_cases():
     with pytest.raises(Unreadable, match=r"unknown macro HAS_AUTO_RETRACT\(\)"):
         read.ramming(fixtures.RAMMING_NEXTRUDER_CPP, macros(), "r.cpp")
     with pytest.raises(Unreadable, match="unbalanced braces"):
-        read.ramming("switch (seq) {", macros(), "r.cpp")
+        read.ramming("standard_ramming_sequence() {", macros(), "r.cpp")
 
 
 @pytest.mark.parametrize(("indx", "purge"), [(True, (25.0, True)), (False, (0.0, False))])
@@ -726,6 +740,8 @@ def test_cleaner_purge_sums_the_e_moves(gcode, purge):
         (purge_clean('"M1705\\nG750 E5"'), "M1705 before the last E move"),
         (purge_clean('"M1705"'), "M1705 before the last E move"),
         (purge_clean('"G750 E5\\t"'), "an escape other than"),
+        (purge_clean('"G750 E25\\n" EXTRA "M1705 N"'), "unexpected code after the .default_gcode"),
+        (purge_clean('"G750 E25" .filename = "q"'), "unexpected code after the .default_gcode"),
         ("#if NEW()\n#endif", r"unknown macro NEW\(\)"),
     ],
 )
