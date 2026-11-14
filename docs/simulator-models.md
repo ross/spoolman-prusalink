@@ -141,7 +141,7 @@ Paths are in the firmware at `ff61540d4`.
 | Feed ratio | E steps over calibrated E steps: 380/400 on every build but INDX, which is 550/576. | `planner.cpp:2210-2218`, `Configuration_COREONE.h:476-484` |
 | Auto-retract | After an idle load and at the end of a print, a Nextruder's sequence leaves the filament 55 mm retracted, but the tracker's gap stops at 40. The sequence first feeds back whatever the tracker says is retracted, so it starts from a gap of 0 and counts 23 mm: its 8 mm feed, which does leave the nozzle, and 15 mm that never does. When the tracker has lost the distance (the gap at its limit), only the 15 mm counts. The next forward move counts 15 mm more that never left the nozzle. INDX is exact. Off for flexible filament and when the user turns it off. | `standard_ramming_sequence_nextruder.cpp`, `ramming_sequence.cpp`, `mapi/motion.cpp`, `marlin_server.cpp:763-770, 1045-1080`, `pause.cpp:1041-1044` |
 | Unload | A menu unload rams first. It counts about 23 mm on a Nextruder that isn't auto-retracted and about 19 mm on INDX, before the unload is recorded. | `pause.cpp` |
-| Power-panic resume | INDX purges 25 mm (`G750 E25`). The MK4 family, Core One, Core One L and iX feed back the 8 mm they retracted at the cut. The XL moves nothing. F12 in printer-behaviors.md reads the same, the simulator follows the source per model, and the F12 trace decides. | `power_panic.cpp:110-116, 480-521` |
+| Power-panic resume | INDX purges 25 mm (`G750 E25`). The MK4 family, MK3.5, MK3.5S, Core One, Core One L and iX feed back the 8 mm they retracted at the cut. The XL moves nothing. The MINI and the XL dev kit have no power panic (`ProjectOptions.cmake:334-345`), but the simulator resumes them like the rest. F12 in printer-behaviors.md reads the same, the simulator follows the source per model, and the F12 trace decides. | `power_panic.cpp:110-116, 480-521` |
 | Nozzle-cleaner sequences | On the iX and INDX, a file under `/usb/macros/nozzle_cleaner/` replaces a built-in sequence, the INDX purges included. The simulator assumes the built-in ones. | `gcode_loader.cpp:24-30, 105-115` |
 
 With the gap full, a Core One L menu load counts 20 mm before the type
@@ -468,6 +468,8 @@ Left to the work:
 - The single-tool power-panic resume: the source gives a plain Core One L
   the 8 mm fed back, not a 25 mm purge, and the simulator follows the
   source. The F12 trace confirms it.
+- The MINI and the XL dev kit have no power panic, so a cut drops their
+  print. The simulator still resumes one.
 - PrusaSlicer's default wiping volume, from [slicer run](#slicer-runs) 1.
 - Whether an INDX profile's retract before a tool change is emitted, from
   slicer run 5.

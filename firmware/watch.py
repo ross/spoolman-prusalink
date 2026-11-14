@@ -11,7 +11,7 @@ A region is one of four kinds, each found exactly once in its file:
 - "function": a C++ function definition, by its name as the definition spells it, from
   the start of its line to its closing brace.
 - "statement": a C++ statement, by the start of its first line: to its `;`, or, where a
-  brace block comes first, to the block's closing brace.
+  brace block comes first, to the block's closing brace. One with an `else` can't be read.
 - "directive": a preprocessor line, by its start. A conditional branch (`#if`, `#elif`,
   `#else` and the like) runs to the next directive of the same conditional.
 - "cmake": a CMake command, by its start. An `if()` runs to its `endif()`.
@@ -352,10 +352,12 @@ def _statement(text: str, anchor: str) -> str:
     for i in range(starts[0], len(masked)):
         c = masked[i]
         depth += {"(": 1, "[": 1, ")": -1, "]": -1}.get(c, 0)
-        if depth == 0 and c == ";":
-            return text[starts[0] : i + 1]
-        if depth == 0 and c == "{":
-            return text[starts[0] : _closing(masked, i, "{", "}")]
+        if depth == 0 and c in ";{":
+            end = i + 1 if c == ";" else _closing(masked, i, "{", "}")
+            # An `else` belongs to the statement, and the region would leave it out.
+            if re.match(r"\s*else(?!\w)", masked[end:]):
+                raise ValueError(f"{anchor} has an else")
+            return text[starts[0] : end]
     raise ValueError(f"{anchor} isn't closed")
 
 
