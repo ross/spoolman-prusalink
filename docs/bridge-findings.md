@@ -508,10 +508,12 @@ written.
   a runout waits for its reload resumes the print on its own, through the
   tool the runout emptied (F12). A cut during Tune > Change filament on
   another tool, or during a spool join's unload, does the same on that
-  tool until the file's next tool change (F34, F35). The bridge holds that usage because the tool reports no
-  material (C7). When filament is next loaded in that tool, the bridge
-  charges the held usage, with the load's own count, to the spool
-  reported there.
+  tool until the file's next tool change (F34, F35). The bridge holds that
+  usage because the tool reports no material (C7). When filament is next
+  loaded in that tool, the bridge charges the held usage, with the load's
+  own count, to the spool reported there. An MMU's runout writes no type,
+  so a cut while it waits holds nothing: the resumed print has no slot
+  selected and counts nothing at all (F44, BF17).
 - **Effect**: The new spool is charged for filament that came from no
   spool: in the test, the held 84 mm on top of the load's own count.
 - **Evidence**: On a toolchanger, shown in the simulator by
@@ -528,7 +530,10 @@ written.
   `test_a_cut_while_a_runout_waits_for_the_reload` in the same file: the
   swap the runout opened stays open, the bridge holds the resumed print's
   usage, and charges it with the next load's count to the spool reported
-  then.
+  then. On an MMU, by
+  `test_a_cut_while_an_mmu_runout_waits_charges_nothing_after` in
+  `tests/test_mmu.py`: no unload is recorded, no usage is held, and spool 1
+  is charged only what slot 0 counted before the runout.
 - **Scenario rows**: C7, T2, P12.
 - **To reproduce**: Those tests, today, on a toolchanger and after a power
   cut. On the Core One L,
@@ -706,9 +711,9 @@ written.
 
 Each MMU finding applies to the MK4 family, the Core One and the Core One
 L with an MMU3 turned on in the printer's settings. The simulator models
-the MMU's switch, its selected slot, its idle operations and its prints
-(F38 to F42, F46); runouts, `M600` and power panic come later in
-workstream 5. The MMU's scenario rows are T12, T13, T14 and T17.
+the MMU's switch, its selected slot, its idle operations, its prints, and
+its runouts, `M600` and spool joins (F38 to F42, F44, F46); power panic
+comes later in workstream 5. The MMU's scenario rows are T12, T13, T14 and T17.
 
 ### BF15. MMU: swaps are invisible
 
@@ -726,15 +731,20 @@ workstream 5. The MMU's scenario rows are T12, T13, T14 and T17.
 - **Effect**: The usual swap, Eject and then Preload with the new type,
   shows the printer only a type change. A spool moved into the slot's
   location stays staged (S13, S9), and the old spool is charged for the
-  new one, with a drift flag for the new type, until a claim moves it.
+  new one, with a drift flag for the new type, until a claim moves it. A
+  swap at a runout shows the printer nothing at all: the `M600` ejects the
+  slot and reloads it with its type kept (F44), so the new spool stays
+  staged and the old one is charged, with no flag.
 - **Evidence**: Read in the firmware source; shown in the simulator by
-  `test_an_mmu_slot_swap_by_eject_and_preload_counts_no_unload` in
-  `tests/test_mmu.py`.
+  `test_an_mmu_slot_swap_by_eject_and_preload_counts_no_unload` and
+  `test_an_mmu_runout_swap_counts_no_unload` in `tests/test_mmu.py`.
 - **Scenario rows**: S1, S2, S9, S13, T13.
 - **To reproduce**: That test: with spool 3 moved into slot 0's location,
   slot 0 is ejected and preloaded with PETG. No unload is recorded, spool 3
   stays staged, and the next print's 135 mm goes to spool 1, which is
-  flagged for the printer's PETG.
+  flagged for the printer's PETG. The second test swaps spool 3 in while a
+  runout waits for its reload: the print's 157 mm goes to spool 1, with no
+  flag.
 - **Status**: Open.
 
 ### BF16. MMU: each tool change over-charges the outgoing slot

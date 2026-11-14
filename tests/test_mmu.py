@@ -2,7 +2,7 @@
 
 from harness import LOC, jobs, ledger, make, menu, spool_x, tool_locations
 
-from simulator.model import PrintSpec, Segment
+from simulator.model import PrintSpec, Segment, State
 from simulator.prusalink import filament, info
 from simulator.tool import SimTool
 
@@ -188,4 +188,62 @@ async def test_a_second_mmu_print_in_one_boot_counts_less_at_its_start(tmp_path)
     assert first == {1: 624, 2: 444}
     # 1275.3072 and 934.7672 mm counted: 1211 and 888.
     assert second == {1: 1211 - 624, 2: 888 - 444}
+    await bridge.aclose()
+
+
+async def test_an_mmu_runout_swap_counts_no_unload(tmp_path):
+    # BF15: a runout's `M600` unloads slot 0 into the MMU, ejects it and reloads it with no
+    # type written, so the printer never reports the swap the user makes there. Spool 3,
+    # moved into slot 0's location while the printer waits for the reload, stays staged,
+    # and what the reload and the rest of the print count is charged to spool 1.
+    bridge, fake, station, locations = mmu(tmp_path, [(0, "PLA")], t0="PLA")
+    p = station.printer
+    fake.spools[3] = spool_x(3, SHELF)
+    await bridge.poll()
+    mark = len(ledger(tmp_path))
+    await station.start_print(PrintSpec([Segment(0, 20)], duration_s=4))
+    p.runout(0)
+    await bridge.poll()
+    assert p.job.wait_tool == 0
+    fake.spools[1]["location"], fake.spools[3]["location"] = SHELF, locations[0]
+    await bridge.poll()
+    p.load(0)
+    await run(station, lambda: p.tools[0].process is None)
+    await bridge.poll()
+    p.resume()
+    await run(station, lambda: p.job is None)
+    await bridge.poll()
+    assert p.tools[0].unload_count == 0 and station.material(0)[0] == "PLA"
+    assert swaps(tmp_path, mark) == [(0, "swap_staged")]
+    # A one-color print on slot 0 counts 35 + 15 + 53 + 20 + 19.3 = 142.3 mm, and the
+    # runout's ramming 12 and reload 11 more (simulator/tests/test_mmu_runout.py): 165.3,
+    # 157 at 0.95, all of it charged to spool 1.
+    assert totals(fake) == {1: 157}
+    assert fake.flag(1) is None and fake.flag(3) is None
+    await bridge.aclose()
+
+
+async def test_a_cut_while_an_mmu_runout_waits_charges_nothing_after(tmp_path):
+    # BF24 doesn't reach an MMU this way: the runout writes no type, so the bridge holds no
+    # usage. The resume finds no slot selected, so the resumed print counts nothing on any
+    # slot (BF17), and spool 1 is charged only what slot 0 counted before the runout.
+    bridge, fake, station, _ = mmu(tmp_path, [(0, "PLA")], t0="PLA")
+    p = station.printer
+    await bridge.poll()
+    mark = len(ledger(tmp_path))
+    await station.start_print(PrintSpec([Segment(0, 20)], duration_s=4))
+    p.runout(0)
+    await bridge.poll()
+    # Slot 0's start, 35 + 15 + 53, its 3 mm of print and the runout's ramming 12 after the
+    # park's retract: 118 mm, 112 at 0.95.
+    assert p.job.fed_mm == 3 and station.counter_at(0) == 112
+    p.set_power("off")
+    p.set_power("on", resume=True)
+    await run(station, lambda: p.job is not None and p.state is State.PRINTING)
+    await run(station, lambda: p.job is None)
+    await bridge.poll()
+    assert station.counter_at(0) == 0 and p.selected_tool is None
+    assert swaps(tmp_path, mark) == []
+    assert totals(fake) == {1: 112}
+    assert fake.flag(1) is None
     await bridge.aclose()
