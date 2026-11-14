@@ -553,9 +553,10 @@ written.
 
 ### BF27. A filament change before a tool's first extrusion in a print looks like its print start
 
-- **Printers**: Core One INDX, Core One L INDX and XL, through Tune >
-  Change filament on a tool the print hasn't used yet. Every model with
-  counters, through a runout during a print's preheat.
+- **Printers**: Core One INDX and Core One L INDX always, through Tune >
+  Change filament on a tool the print hasn't used yet. The XL the same
+  way, and every single-tool model with counters through a runout during
+  a print's preheat, but only when the tool isn't fully auto-retracted.
 - **What happens**: Tune > Change filament on a toolchanger asks for a
   tool and sends `M600 P T<n>`, which picks that tool, changes its
   filament and changes back (F34, `src/marlin_stubs/pause/M600.cpp:204-340`,
@@ -568,7 +569,13 @@ written.
   `swap_assumed` with a provisional charge, and flags the spool as assumed
   reloaded. On a tool the print has already extruded with, the swap stays
   open as P2 and P3 say. A runout during a print's preheat, before any
-  extrusion, takes the same path on a single-tool printer.
+  extrusion, takes the same path on a single-tool printer. It needs the
+  unload to count something. A Nextruder that is fully auto-retracted, as
+  it is after a menu load or a finished print, unloads cold with no
+  ramming (`can_cold_unload`, `pause.cpp:1249-1255`), so nothing counts
+  and the swap stays open as P2 says. A Nextruder rams when auto-retract
+  is off, with flexible filament, and on an XL tool that an earlier print
+  used but didn't end on. INDX never unloads cold, so it always rams.
 - **Effect**: A Spoolman change made while the printer waits for the
   reload, which P2 promises confirms the swap, is staged instead (S13),
   and the reload and the rest of the print go to the old spool until a
@@ -579,13 +586,15 @@ written.
   in `tests/test_toolchanger_prints.py`. Reproduced, no test kept: the
   same change on a tool the print used earlier follows P2, and a runout in
   the preheat of a Core One L print gives `unload`, `swap_unconfirmed` and
-  `swap_assumed` in one poll. That a real runout can come before the
+  `swap_assumed` in one poll when the tool isn't auto-retracted, and
+  nothing more than P2 when it is. That a real runout can come before the
   print's first extrusion is inferred: the start G-code's heat waits come
   before its purge line.
 - **Scenario rows**: T10, P2, P3, P8, Q4, S13.
 - **To reproduce**: That test, today. For the single-tool path, start a
-  print with a preheat on a Core One L through the unit harness, poll
-  during the preheat, `runout(0)`, and poll.
+  print with a preheat on a Core One L through the unit harness, with the
+  tool not auto-retracted (the harness's starting state, or `auto_retract`
+  off), poll during the preheat, `runout(0)`, and poll.
 - **Status**: Open.
 
 ## Multi-tool

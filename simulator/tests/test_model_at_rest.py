@@ -326,3 +326,34 @@ def test_a_cut_at_the_preview_of_a_multi_tool_indx_print_keeps_the_pick():
     assert p.job.previewing and p.selected_tool == 0
     p.reboot(keep_job=True)
     assert p.selected_tool == 0
+
+
+def test_an_xl_left_with_one_tool_picks_it_at_boot():
+    """The firmware decides at boot: one Dwarf found turns the toolchanger off and picks it."""
+    sim, p = make(XL, [loaded(0), loaded(1)])
+    p.select_tool(1)
+    p.park_tool()
+    p.set_tool_enabled(0, False)
+    assert p.selected_tool is None
+    p.reboot()
+    assert p.selected_tool == 1
+    p.extrude(1, 5)  # Move E has its tool again
+
+
+def test_a_jam_cleared_in_place_on_indx_counts_nothing_after_a_cut_either():
+    """The firmware's `was_paused` is the pause state, which a jam's dialog never enters."""
+    sim, p = make(INDX, [loaded(0), loaded(1)])
+    start(sim, p, print_spec((0, 100)))
+    p.jam(0, unload=False)
+    p.clear_jam()
+    p.reboot(keep_job=True)
+    sim.advance(p.settings.panic_idle_seconds + p.settings.recover_seconds + 0.1)
+    assert p.state is State.PAUSED
+    p.resume()
+    assert p.job.phase is JobPhase.PRINTING and counts(p)[0] == 0
+
+
+def test_a_one_tool_xl_has_no_change_all():
+    _, p = make(XL)
+    with pytest.raises(Invalid, match="XL has one tool"):
+        p.change_all([0], name="PETG")

@@ -84,6 +84,7 @@ def test_a_change_on_another_xl_tool_counts_on_that_tool_and_changes_back(high_f
     # T1 back to the change's gap 0: 12 fed, nothing counts. Then the change back to T0,
     # with no purge.
     assert p.tools[1].path.gap == 0 and p.selected_tool == 0
+    assert [e.text for e in sim.events if e.text.startswith("pick")][-2:] == ["pick T1", "pick T0"]
     assert counts(p) == pytest.approx([before, 7 + 40 + purge])
     assert p.state is State.PRINTING
     sim.advance(60)
@@ -203,6 +204,7 @@ def test_a_change_needs_a_print_that_has_begun_printing():
         p.change_filament(1)
     sim.advance(6)
     p.pause()
+    # The firmware offers the item while paused; the simulator doesn't model that.
     with pytest.raises(Busy, match="needs a print in progress"):
         p.change_filament(1)
 

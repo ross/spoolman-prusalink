@@ -1577,6 +1577,11 @@ class SimPrinter:
         self.queue = []  # a change all doesn't survive the cut
         self.homed, self.message = False, None
         self._log("boot", f"boot id {self.boot_id}")
+        enabled = [t.index for t in self.tools.values() if t.enabled]
+        if self.feed.selectable and not self.toolchanger and enabled:
+            # An XL that finds one Dwarf turns its toolchanger off and picks that tool
+            # (`autodetect_active_tool` in `toolchanger_utils_xl.cpp`).
+            self.selected_tool = enabled[0]
         selected = self.feed.idle_clear_tool(self)
         if selected is not None:
             self._idle_sensor_clear(selected, sensor_fault_counts=False)
@@ -1625,9 +1630,6 @@ class SimPrinter:
                 self._track(self._job_tool(job), -self.model.extruder.lengths.retract_mm)
             job.restore = None  # a power loss ends the filament change before its restore
             job.paused_from = JobPhase.PRINTING if was_paused else None
-            # A paused print's resume goes through the pause's unpark, whatever paused it
-            # (`power_panic.cpp:1041-1046`).
-            job.parked = was_paused
             if was_paused:
                 job.enter(JobPhase.PAUSED)
         elif held is not None and not keep_job:
@@ -1851,7 +1853,8 @@ class SimPrinter:
         job = self.job
         # Tune > Change filament is enabled once the print has printed something
         # (`max_printed_z > 0` in `MI_M600::Loop`, `src/gui/screen/screen_m600.cpp`), so
-        # not during the preheat.
+        # not during the preheat. The firmware offers it while paused too
+        # (`screen_printing.cpp`), which the simulator doesn't model.
         if not (isinstance(job, UserJob) and job.phase is JobPhase.PRINTING):
             raise Busy("a filament change needs a print in progress")
 
