@@ -10,7 +10,9 @@ Draft, 2026-11-13. Workstream 1 is built: each model has its profile and
 its build's presets, and `script/firmware-check` compares them with the
 source. The tracker counts with the model's gap and feed ratio, a load runs
 the model's lengths, the ramming and auto-retract run per build, and the
-tests run the bridge against each family. Workstreams 2 to 6 aren't
+tests run the bridge against each family. Workstream 2 is in progress: an
+uploaded file goes through the preview's checks of its `M862` lines, and
+the checks for a print with segments are next. Workstreams 3 to 6 aren't
 started. [Open questions](#open-questions)
 lists what the work still has to settle.
 
@@ -96,9 +98,12 @@ firmware update.
 - A tool has its own counters, material, gap and sensor. A print is a list
   of (tool, mm) segments with a fixed purge at each tool change. Picking a
   tool can trigger the idle sensor clear. A tool can be disabled.
-- The model check stops a job in `ATTENTION` when `M862.3` names anything
-  but the model or its MMU3 name. The job has no ID until the question is
-  accepted.
+- An uploaded file's job is counted at once. When the scan ends, the
+  print preview checks the file's `M862` lines: the model by compatibility
+  group, the G-code level, input shaper, the INDX lock, the MMU3 feature
+  and unknown features. A failed check holds the job in `ATTENTION`, with
+  its ID, until it's answered. One `checks` setting per printer ignores,
+  warns or aborts; the INDX lock always warns.
 - It serves `/api/version`, `/api/v1/info`, `/api/v1/status`, `/api/v1/job`
   and `/api/v1/filament`. `/api/v1/info` always reports `mmu` as false.
 - Tests: the unit harness and the integration fixtures take a model and a
@@ -142,8 +147,7 @@ counts, and print-after-upload goes through the same checks
   `/api/v1/job` answers 200 with `PAUSED`. The upload itself answers 201.
   Declining goes to `IDLE`, not `STOPPED`, with the ID used up and the file
   kept (`wui_api.cpp:291`, `marlin_print_preview.cpp:414-425`,
-  `marlin_server.cpp:1113-1136, 2300-2316`). The simulator gives the job no
-  ID until the question is accepted, which is wrong.
+  `marlin_server.cpp:1113-1136, 2300-2316`).
 - **Severity is a user setting** per kind of check, picked in the printer's
   menu and kept in its config store, not compiled in: ignore, warn (the
   default on every build) or abort. Every failed check shows on one screen, and the worst
@@ -159,7 +163,7 @@ counts, and print-after-upload goes through the same checks
   turns that off. An INDX whose nozzle cleaner isn't calibrated refuses
   every print (`gcode_compatibility.cpp:92-101, 372-376`).
 - **A file sliced for an MMU3 is refused or asked about when the MMU is
-  off**, under the firmware-version setting.
+  off**, under the firmware setting.
 - **The per-tool checks need the file's filament-used metadata**: a tool
   with no filament or another type asks, and a disabled tool refuses. The
   bridge's sync job has no such metadata, so it raises none of them
@@ -171,7 +175,8 @@ counts, and print-after-upload goes through the same checks
 The idle sensor clear runs while the preview opens and stops once a question
 shows (`marlin_server.cpp:1448-1460`).
 
-The simulator has one of these, the model check, by exact name.
+The simulator has the checks of an uploaded file. The per-tool checks and
+the MMU's unload question are still missing.
 
 ### `/api/v1/info`
 
@@ -308,7 +313,9 @@ Each printer has one severity for the checks a setting governs: ignore,
 warn or abort. That replaces `auto_accept_model_check`, which becomes
 "ignore". The firmware has a setting per kind of check, but they share one
 screen and the worst decides, so one setting shows the bridge every
-outcome. The INDX lock and MMU questions always ask, as in the firmware.
+outcome. The INDX lock question always asks, as in the firmware. The MMU
+question is under the firmware setting
+(`gcode_compatibility.cpp:106`).
 
 A print's segment can name the filament type it was sliced for. A segment
 whose tool holds another type, or none, raises the filament question at the
@@ -466,6 +473,13 @@ able to show it once the workstream named is built.
     `accounting.print_start` takes the first counter rise in a new job as
     the print's start, so it would take that ramming as one. No test covers
     it: the P8 test's tool is already auto-retracted. (1.)
+19. **A custom `gcode_preamble` without the input-shaper line makes every
+    sync job wait.** `model_problem` checks a custom preamble only for its
+    `M862.3`, so one without `M862.6 P"Input shaper"` passes, and the
+    printer asks before each job runs. The bridge sees its job in
+    `ATTENTION`, and a declined question as a write that didn't take. The
+    W1 test `test_w1_custom_preamble_is_written` taps Print to get past it.
+    (2.)
 
 ## Open questions
 
