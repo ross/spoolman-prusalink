@@ -583,7 +583,20 @@ WATCHED = (
         "4833bcc6699b4461",
         UPSTREAM_7D8BF685,
     ),
-    # The firmware's load at the start of a file on tool 0 alone with no slot selected.
+    # Which file is single-tool: tool 0 used, and no other tool given in the metadata at
+    # all. An MMU3 profile file lists every slot, so only a file sliced without it is one.
+    Watched(
+        "the single-tool file",
+        "src/common/gcode/gcode_info.cpp",
+        "function",
+        "GCodeInfo::is_singletool_gcode",
+        "PrintSpec.single_tool_file and SimPrinter._check_single_tool_file in"
+        " simulator/model.py, and the single-tool tests in Mmu.prime in simulator/feed.py"
+        " and SimPrinter._end_of_print",
+        "e37dbf978f89ee82",
+        UPSTREAM_7D8BF685,
+    ),
+    # The firmware's load at the start of a single-tool file with no slot selected.
     Watched(
         "the single-tool file's start",
         "src/common/marlin_server.cpp",
