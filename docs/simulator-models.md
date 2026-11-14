@@ -16,13 +16,15 @@ print with segments goes through its checks of the tools it uses. The MMU's
 filament-inserted question belongs to Workstream 5. Workstream 3 is built:
 a tool and its filament path are apart, the selected tool can be none, and
 a feed system holds what differs between direct and toolchanger printers.
-Workstream 4 has started: the XL and INDX have their own feed systems, a
+Workstream 4 is built: the XL and INDX have their own feed systems, a
 menu load or unload picks its tool and INDX docks it after, Move E needs a
-picked tool, the picked tool rests where the firmware leaves it after a
-print, a pause and a boot, and a toolchanger's print runs the stock slicer
+picked tool, and the picked tool rests where the firmware leaves it after a
+print, a pause and a boot. A power cut leaves an idle window before the
+resume. Change all, a filament change on a named tool and a spool join run
+as the firmware runs them, and a toolchanger's print runs the stock slicer
 profile's priming, tool-change moves and end park. Workstreams 5 and 6
-aren't started. [Open questions](#open-questions)
-lists what the work still has to settle.
+aren't started. [Open questions](#open-questions) lists what the work still
+has to settle.
 
 ## Goal and non-goals
 
@@ -154,8 +156,8 @@ firmware update.
   stands for a toolchanger with no tool picked: then no filament moves or
   counts, the idle sensor clear doesn't run, and the end of a print neither
   retracts nor auto-retracts. An idle INDX after a menu load or unload has
-  none, and so does either toolchanger after a finished print or
-  `park_tool`. An XL with one tool enabled isn't a toolchanger here: its
+  none, and so does an INDX or an XL with several tools after a finished
+  print, and either after `park_tool`. An XL with one tool enabled isn't a toolchanger here: its
   tool stays picked, as the firmware keeps it on the head, and it prints
   as a direct printer does, with no profile moves.
 - A power cut on a build with power panic boots the printer `IDLE` with no
@@ -186,8 +188,9 @@ firmware update.
   clear runs on the picked tool while it's up. Print there asks once for
   each kind of failed row: a tool with no filament asks to turn every
   filament sensor off, then a tool holding another type asks. The print
-  then counts on the empty tool with no material. A printer's `sensors` switch turns off the
-  runout, the idle sensor clear and the preview's filament question.
+  then counts on the empty tool with no material. A printer's `sensors`
+  switch turns off the runout, the idle sensor clear and the preview's
+  filament question.
 - It serves `/api/version`, `/api/v1/info`, `/api/v1/status`, `/api/v1/job`
   and `/api/v1/filament`. `/api/v1/info` always reports `mmu` as false.
 - Tests: the unit harness and the integration fixtures take a model and a
@@ -290,7 +293,7 @@ builds that can take one and false elsewhere (`basic_gets.cpp:229-253`).
 | Change all, on the XL and INDX | For each chosen tool in index order, inside one `BUSY` dialog: `M1600` (an unload that counts, then a load) when a type is stored, else `M701` (a load). Each picks its tool inside its dialog. INDX docks after each tool; the XL ends with the last one picked. | `multi_filament_change.cpp:151-239`, `M701_2.cpp:135-140, 240-343` |
 | A load or unload during a print | Reads `ATTENTION` in every phase, `ChangingTool` included, not only while waiting. Idle, it reads `BUSY`. A preheat in a print reads `PRINTING`, not `ATTENTION`. | `printer_state.cpp:152-190, 238-246` |
 
-The simulator has every row. An INDX docks after a menu load or
+The simulator has every row in the table. An INDX docks after a menu load or
 unload, a pause and a job's end, so its selected tool becomes none, and the
 Pick/park menu picks or parks a tool on INDX and on an XL with several
 tools. The end G-code's park is part of the slicer profile ("What the slicer
@@ -548,10 +551,26 @@ G-code, plus the `M862` lines:
    with other tools, one tool, the wipe tower on, and a larger purge
    volume.
 
-Runs 4 and 5 used PrusaSlicer 2.9.7 with vendor bundle 2.5.16, and their
-numbers are in "What the slicer adds" and `simulator/slicer.py`. The sliced
-G-code isn't kept in the repository. Runs 1 to 3 are still to do, before
-Workstream 5.
+Runs 4 and 5 used PrusaSlicer 2.9.7 (flatpak `com.prusa3d.PrusaSlicer`)
+with vendor bundle `PrusaResearch` 2.5.16, and their numbers are in "What
+the slicer adds" and `simulator/slicer.py`. The sliced G-code isn't kept in
+the repository. Runs 1 to 3 are still to do, before Workstream 5.
+
+To repeat a run, make a model with `script/slicer/make3mf.py` and slice it
+with `script/slicer/slice.sh`, which both document their arguments. Each
+slice uses one printer, print and filament preset, and one filament per
+tool:
+
+| Run | Printer preset | Print preset | Filament preset |
+| --- | --- | --- | --- |
+| 4, XL 2T and 5T | `Original Prusa XL - 2T Input Shaper 0.4 nozzle`, `Original Prusa XL - 5T Input Shaper 0.4 nozzle` | `0.20mm SPEED @XLIS 0.4` | `Prusament PLA @XLIS` |
+| 4, XL+ 2T | `Prusa XL+ 2T 0.4 nozzle` | `0.20mm Balanced ★ @XL+ 0.4` | `Prusament PLA @XL+` |
+| 5, INDX 4T and 8T | `Prusa CORE One INDX 4T HF0.4 nozzle`, `Prusa CORE One INDX 8T HF0.4 nozzle` | `0.20mm Balanced ★ @COREONEINDX HF0.4` | `Prusament PLA @COREONEINDX HF0.4` |
+
+The model is one 10 x 10 x 1 mm box per tool, which makes five layers at
+0.2 mm and one tool change per layer. The slices that vary one setting change
+the wipe tower, the XL's multi-tool ramming, or the filament's
+`filament_minimal_purge_on_wipe_tower`.
 
 ## Before the INDX upgrade
 
@@ -572,8 +591,9 @@ six below are what this plan adds; the last two are sitting D's:
   expect `ATTENTION`, a `job` with a new ID, and `/api/v1/job` reading
   `PAUSED`. Decline one and expect `IDLE`.
 - **The power-panic resume's purge.** F12 confirms the 8 mm fed back on a
-  single-tool Core One L, which the simulator follows from the source, and
-  shows whether the idle clear can run before the resume.
+  single-tool Core One L, which the simulator follows from the source. It
+  also shows the idle window, and whether PrusaLink answers before the
+  firmware's first resume attempt, which decides BF26.
 - **Everything with a tag**: F4 and F24's tag rows. The INDX has no tag
   reader until the firmware adds one.
 - **A load at the preview, then Abort.** `F28-load-then-decline`, steps 1
@@ -607,7 +627,14 @@ Left to the work:
   the stock print settings' lengths.
 - Why INDX's wipe-tower purge, off by default, is 1.67 mm, below the
   10 mm³ minimum. The simulator models the default purge station only.
-- The Core One L INDX profile, which bundle 2.5.16 doesn't have.
+- Both INDX models use the Core One INDX numbers, since bundle 2.5.16 has
+  no Core One L INDX profile.
+- A tool first used above layer 1 gets the first layer's larger purge on the
+  XL, since a segment has no layers.
+- The tools-mapping screen's checks of a spool join's chain, which
+  `simulator/README.md` lists.
+- Change filament while a print is paused, which the firmware offers (F34).
+- The iX's resume purge after a pause (F6).
 - The single-tool XL profiles' start and end moves, which the slices
   didn't cover. A one-tool XL prints with no profile moves.
 
