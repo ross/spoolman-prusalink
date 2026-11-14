@@ -220,14 +220,38 @@ def preset_temperatures(name: str) -> dict[str, int]:
     return dict(zip(("nozzle", "preheat", "bed"), values, strict=True))
 
 
+TYPE_STEP = "TYPE"  # the step that writes the type; it moves nothing
+
+
+@dataclass
+class LoadStep:
+    """One step of a load: a signed E move in commanded mm, or the type write."""
+
+    phase: str  # SLOW, FAST, TYPE, PURGE, PRIME or RETRACT
+    mm: float = 0.0  # what's left of the move: positive feeds, negative retracts
+
+
 @dataclass
 class LoadProcess:
-    phase: str  # FEED_GAP (not counted), FEED (counted, old material), PURGE (new material)
-    remaining: float  # mm left in this phase
-    feed_mm: float
-    purge_mm: float
-    material: Material | None  # set at the purge; None restores the type the unload left
+    """A load as the steps left to run, the current one first. It ends with its last step."""
+
+    steps: list[LoadStep]
+    material: Material | None  # written at the TYPE step; None restores the unload's type
     kind: str = "load"
+
+    @property
+    def phase(self) -> str:
+        return self.steps[0].phase
+
+    @property
+    def remaining(self) -> float:
+        """The mm left in the current step."""
+        return abs(self.steps[0].mm)
+
+    @property
+    def typed(self) -> bool:
+        """Whether the type has been written."""
+        return all(s.phase != TYPE_STEP for s in self.steps)
 
 
 @dataclass

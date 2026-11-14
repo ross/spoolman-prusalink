@@ -39,6 +39,7 @@ def test_defaults(tmp_path):
     assert (cfg.host, cfg.control_port, cfg.settings) == ("127.0.0.1", 8000, {})
     p = cfg.printers[0]
     assert (p.port, p.api_key, p.firmware, p.auto_accept_model_check) == (8001, "sim-p", None, None)
+    assert not p.high_flow
     assert [t.index for t in p.tools] == [0]
     assert p.tools[0].material is None
 
@@ -46,6 +47,19 @@ def test_defaults(tmp_path):
 def test_settings_overrides(tmp_path):
     cfg = load(write(tmp_path, "time_scale = 10\nstart_blip = false\n" + printer()))
     assert cfg.settings == {"time_scale": 10.0, "start_blip": False}
+    # The load lengths and the feed ratio take a number; an absent key is the model's.
+    text = "slow_load_mm = 10\nfast_load_mm = 0\npurge_mm = 5\nfeed_ratio = 1\n" + printer()
+    cfg = load(write(tmp_path, text))
+    assert cfg.settings == {
+        "slow_load_mm": 10.0,
+        "fast_load_mm": 0.0,
+        "purge_mm": 5.0,
+        "feed_ratio": 1.0,
+    }
+
+
+def test_high_flow(tmp_path):
+    assert load(write(tmp_path, printer("high_flow = true"))).printers[0].high_flow
 
 
 def test_normalizes_color_and_uuid(tmp_path):
@@ -64,6 +78,9 @@ def tool(body: str) -> str:
 BAD = {
     "unknown top key": ("bogus = 1\n" + printer(), "bogus isn't a known key"),
     "unknown printer key": (printer("bogus = 1"), "printers[0].bogus isn't a known key"),
+    "removed setting": ("load_feed_mm = 36\n" + printer(), "load_feed_mm isn't a known key"),
+    "bad high flow": (printer("high_flow = 1"), "printers[0].high_flow must be true or false"),
+    "negative load length": ("slow_load_mm = -1\n" + printer(), "slow_load_mm must be a number"),
     "unknown tool key": (printer(tool("index = 0\nbogus = 1")), "printers[0].tools[0].bogus"),
     "unknown material key": (
         printer(tool('index = 0\nmaterial = { name = "PLA", bogus = 1 }')),

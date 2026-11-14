@@ -69,6 +69,12 @@ async def test_settings_and_snapshots(setup):
     assert (await client.post("/api/settings", json={"time_scale": 0})).status == 400
     assert (await client.post("/api/settings", json={"nope": 1})).status == 400
     assert (await client.post("/api/settings", json={"start_blip": 1})).status == 400
+    # JSON null unsets an override, so the model's value applies again.
+    assert (await client.post("/api/settings", json={"purge_mm": 5})).status == 200
+    assert sim.settings.purge_mm == 5
+    assert (await client.post("/api/settings", json={"purge_mm": None})).status == 200
+    assert sim.settings.purge_mm is None
+    assert (await client.post("/api/settings", json={"time_scale": None})).status == 400
     huge = '{"purge_mm": 1' + "0" * 5000 + "}"
     resp = await client.post("/api/settings", data=huge)
     assert resp.status == 400 and "bad JSON" in (await resp.json())["error"]

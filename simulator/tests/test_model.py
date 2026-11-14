@@ -75,35 +75,41 @@ def test_menu_use_dismisses_the_finished_screen():
     assert p.state is State.IDLE
 
 
-def test_load_has_three_phases():
+def test_load_runs_its_steps():
+    # A Core One L loads 40 mm slow, 20 mm fast, writes the type, purges 40 mm and
+    # retracts 8, at 10 mm/s.
     sim, p = make()
     p.unload(0)
     run(sim, 3.1)
     base = tool0(p).extruded
     p.load(0, source="preset", name="PETG")
-    assert p.state is State.BUSY
-    sim.tick(4.0)  # the 40 mm gap, not counted
+    assert p.state is State.BUSY and tool0(p).process.phase == "SLOW"
+    sim.tick(4.0)  # the slow load fills the 40 mm gap: nothing counted
     assert tool0(p).extruded == base and tool0(p).gap == 0
-    sim.tick(3.5)  # 35 of the 36 mm counted feed, no material shown yet
-    assert tool0(p).extruded == pytest.approx(base + 35)
+    assert tool0(p).process.phase == "FAST"
+    sim.tick(1.5)  # 15 of the 20 mm fast load: 15 * 0.95
+    assert tool0(p).extruded == pytest.approx(base + 14.25)
     assert shown(p) is None
-    sim.tick(0.5)  # into the purge: the new material is shown
+    sim.tick(0.5)  # the fast load ends and the type is written before the purge
     assert shown(p) == {"name": "PETG"}
     assert tool0(p).process.phase == "PURGE"
     assert not tool0(p).loaded
-    sim.tick(4.0)
+    sim.tick(4.0)  # the purge: (20 + 40) * 0.95
+    assert tool0(p).extruded == pytest.approx(base + 57)
+    assert tool0(p).process.phase == "RETRACT"
+    sim.tick(0.8)  # the retract only grows the gap
     t = tool0(p)
     assert t.loaded and t.process is None
-    assert t.extruded == pytest.approx(base + 76)
+    assert t.extruded == pytest.approx(base + 57) and t.gap == pytest.approx(8)
     assert p.state is State.IDLE
 
 
 def test_fresh_load_on_loaded_tool_feeds_under_old_material():
-    sim, p = make()
-    p.load(0, source="preset", name="PETG", feed_mm=10, purge_mm=10)
-    sim.tick(0.5)
+    sim, p = make(slow_load_mm=5, fast_load_mm=5)
+    p.load(0, source="preset", name="PETG", purge_mm=10)
+    sim.tick(0.5)  # the gap is 0, so the slow load counts: 5 * 0.95
     assert shown(p)["name"] == "PLA"
-    assert tool0(p).extruded == pytest.approx(5)
+    assert tool0(p).extruded == pytest.approx(4.75)
     sim.tick(1.0)
     assert shown(p) == {"name": "PETG"}
 
@@ -116,7 +122,7 @@ def test_one_tick_runs_a_whole_load():
     sim.tick(100.0)
     t = tool0(p)
     assert t.loaded and t.process is None and p.state is State.IDLE
-    assert t.extruded == pytest.approx(76)
+    assert t.extruded == pytest.approx(57)  # (20 + 40) * 0.95 past the 40 mm gap
     assert t.material == Material("ASA", "#de3129", **preset_temperatures("ASA"))
 
 
@@ -203,8 +209,8 @@ def test_extrude_fills_gap_then_counts_and_retract_clamps():
     sim, p = make()
     p.retract(0, 100)
     assert tool0(p).gap == 40
-    p.extrude(0, 50)
-    assert tool0(p).gap == 0 and tool0(p).extruded == 10
+    p.extrude(0, 50)  # 40 refill the gap, (50 - 40) * 0.95 counts
+    assert tool0(p).gap == 0 and tool0(p).extruded == pytest.approx(9.5)
     p.start_print(PrintSpec([Segment(0, 10)]))
     with pytest.raises(Busy):
         p.extrude(0, 5)
@@ -354,7 +360,9 @@ def test_jam_adds_an_extra_purge_on_reload():
     before = tool0(p).extruded
     p.load(0)
     sim.tick(100)
-    assert tool0(p).extruded == pytest.approx(before + 36 + 40 + 60)
+    # Past the 40 mm gap: the 20 mm fast load, the 40 mm purge and the 60 mm jam purge,
+    # times 0.95. The retract, prime and retract that follow only move within the gap.
+    assert tool0(p).extruded == pytest.approx(before + (20 + 40 + 60) * 0.95)
     assert p.state is State.PAUSED
 
 
@@ -395,11 +403,12 @@ def test_multi_tool_print_attributes_extrusion_and_purges():
     p.start_print(spec)
     sim.tick(0.8 + 20 + 1)  # 105 mm in: the change to T1 and its purge happened
     assert p.selected_tool == 1
-    assert p.tools[1].extruded == pytest.approx(30 + 5 * 0.95)
+    # INDX feeds 550/576 of each mm commanded, purges included.
+    assert p.tools[1].extruded == pytest.approx((30 + 5) * 550 / 576)
     sim.tick(1000)
     assert p.state is State.FINISHED
-    assert p.tools[0].extruded == pytest.approx(200 * 0.95 + 30)
-    assert p.tools[1].extruded == pytest.approx(200 * 0.95 + 30)
+    assert p.tools[0].extruded == pytest.approx((200 + 30) * 550 / 576)
+    assert p.tools[1].extruded == pytest.approx((200 + 30) * 550 / 576)
     assert p.tools[2].extruded == 0
     assert all(t.unload_count == 0 for t in p.tools.values())
 
@@ -432,14 +441,14 @@ def test_power_loss_resume_keeps_the_job():
     sim.tick(0.8 + 2)
     p.reboot(keep_job=True)
     assert p.job.id == 1 and p.state is State.BUSY and tool0(p).extruded == 0
-    sim.tick(1)  # halfway through the recovery the nozzle clean purges
-    assert p.state is State.BUSY and tool0(p).extruded == 25
+    sim.tick(1)  # halfway through the recovery the nozzle clean purges 25 mm: 25 * 0.95
+    assert p.state is State.BUSY and tool0(p).extruded == pytest.approx(23.75)
     sim.tick(1)  # recovered: the head unparks
-    assert p.state is State.PAUSED and tool0(p).extruded == 25
+    assert p.state is State.PAUSED and tool0(p).extruded == pytest.approx(23.75)
     sim.tick(1)  # unparked: the print goes on
-    assert p.state is State.PRINTING and tool0(p).extruded == 25
+    assert p.state is State.PRINTING and tool0(p).extruded == pytest.approx(23.75)
     sim.tick(1)
-    assert tool0(p).extruded > 25
+    assert tool0(p).extruded > 23.75
     p.reboot()
     assert p.job is None and p.state is State.IDLE and p.job_counter == 1
 
@@ -642,6 +651,7 @@ def test_stuck_write_ignores_m865():
 def test_snapshot_round_trip_mid_print_and_mid_load():
     tools = [loaded(0, PETG), SimTool(1, material=None), loaded(2, PETG)]
     sim, p = make("8.10.0", tools)
+    p.high_flow = True
     p.start_print(PrintSpec([Segment(0, 100), Segment(2, 50)], color_changes_mm=[80]))
     p.upload("x.gcode", "M117 x\n", print_after=False, overwrite=False)
     sim.tick(0.8 + 5 + 3)
@@ -655,7 +665,8 @@ def test_snapshot_round_trip_mid_print_and_mid_load():
     copy = other.printers["p"]
     copy.boot_id = p.boot_id  # a restore boots afresh
     assert copy.to_json() == p.to_json()
-    assert copy.job == p.job and copy.tools == p.tools
+    assert copy.job == p.job and copy.tools == p.tools and copy.high_flow
+    assert copy.tools[0].process.steps == p.tools[0].process.steps  # the load in progress
     for s in (sim, other):
         s.tick(100)
         s.printers["p"].resume()
@@ -762,12 +773,16 @@ def test_tool_change_into_an_empty_tool_purges_after_the_reload():
     assert p.job.phase is JobPhase.WAIT_LOAD and p.job.toolchange_purge
     p.load(1, source="preset", name="PLA")
     sim.tick(20)
-    assert p.tools[1].extruded == pytest.approx(36 + 40)
-    p.resume()
-    assert p.tools[1].extruded == pytest.approx(36 + 40 + 30)
+    # T1 was never unloaded, so its gap is 0 and every forward mm counts: the 15 mm slow
+    # load, the 25 mm fast load, the cleaner's 25 mm purge and the 4 mm prime, times
+    # 550/576. The 8 mm retract after the prime only opens the gap.
+    assert p.tools[1].extruded == pytest.approx(69 * 550 / 576)
+    assert p.tools[1].gap == pytest.approx(8)
+    p.resume()  # the unpark feeds the 8 mm back, then the tool change purges 30
+    assert p.tools[1].extruded == pytest.approx((69 + 30) * 550 / 576)
     sim.tick(10)
     assert p.state is State.FINISHED
-    assert p.tools[1].extruded == pytest.approx(36 + 40 + 30 + 9.5)
+    assert p.tools[1].extruded == pytest.approx((69 + 30 + 10) * 550 / 576)
 
 
 def test_sync_job_progress_moves_with_time():
@@ -807,7 +822,7 @@ def test_power_loss_with_a_cold_bed_waits_for_the_user():
     p.resume()
     assert p.state is State.BUSY
     sim.tick(2)
-    assert p.state is State.PAUSED and tool0(p).extruded == 25
+    assert p.state is State.PAUSED and tool0(p).extruded == pytest.approx(25 * 0.95)
     sim.tick(1)
     assert p.state is State.PRINTING
 

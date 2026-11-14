@@ -24,9 +24,11 @@ from simulator.tool import (
     MINI_EXTRUDER,
     MK3_5_EXTRUDER,
     MK4_EXTRUDER,
+    TYPE_STEP,
     XL_DEV_KIT_EXTRUDER,
     Extruder,
     LoadProcess,
+    LoadStep,
     Material,
     SimTool,
     UnloadProcess,
@@ -201,18 +203,24 @@ MODELS = _models(
 )
 
 
+# The load's lengths a setting can override, in the order `_load_lengths` returns them.
+LOAD_LENGTHS = ("slow_load_mm", "fast_load_mm", "purge_mm")
 POSITIVE_SETTINGS = frozenset({"time_scale", "load_rate_mm_s", "print_rate_mm_s"})
 
 
 @dataclass
 class Settings:
+    """The simulation's settings. A field that defaults to None overrides a value of the
+    printer's model, and None means the model's."""
+
     time_scale: float = 1.0
-    feed_ratio: float = 0.95
+    feed_ratio: float | None = None
     print_rate_mm_s: float = 5.0
     load_rate_mm_s: float = 10.0
     unload_seconds: float = 3.0
-    load_feed_mm: float = 36.0
-    purge_mm: float = 40.0
+    slow_load_mm: float | None = None
+    fast_load_mm: float | None = None
+    purge_mm: float | None = None  # the whole purge: no doubling, no cleaner's fixed length
     toolchange_purge_mm: float = 30.0
     jam_purge_mm: float = 60.0
     preheat_seconds: float = 5.0
@@ -234,6 +242,8 @@ class Settings:
             if isinstance(f.default, bool):
                 if not isinstance(value, bool):
                     raise Invalid(f"{key} must be true or false")
+            elif value is None and f.default is None:
+                pass
             elif (
                 isinstance(value, bool)
                 or not isinstance(value, int | float)
@@ -318,6 +328,7 @@ class UserJob(SimJob):
     toolchange_purge: bool = False  # a tool change into an empty tool purges after the reload
     cold_bed: bool = False  # a power-panic resume waits for the user when the bed went cold
     clean_at: float | None = None  # RECOVER time left when the nozzle clean purges
+    unpark_mm: float = 0.0  # what the resume feeds back after a reload
 
     def progress(self) -> int:
         return int(100 * self.fed_mm / self.spec.total_mm)
@@ -395,13 +406,6 @@ def check_uuid(value: Any) -> str | None:
         raise Invalid(f"{value!r} isn't a UUID") from None
 
 
-def _feed(tool: SimTool, mm: float) -> None:
-    """Feed filament: refill the retraction gap first, count only what goes past it."""
-    fill = min(tool.gap, mm)
-    tool.gap -= fill
-    tool.extruded += mm - fill
-
-
 @dataclass
 class SimPrinter:
     name: str
@@ -420,6 +424,7 @@ class SimPrinter:
     message: str | None = None
     homed: bool = False
     auto_accept_model_check: bool | None = None
+    high_flow: bool = False  # a high-flow nozzle, which doubles the load's purge
     tools: dict[int, SimTool] = field(default_factory=lambda: {0: SimTool(0)})
     files: dict[str, str] = field(default_factory=dict)
 
@@ -442,6 +447,63 @@ class SimPrinter:
     @property
     def settings(self) -> Settings:
         return self._sim.settings if self._sim else Settings()
+
+    @property
+    def feed_ratio(self) -> float:
+        """How much an E move feeds per mm commanded: the setting, else the model's."""
+        ratio = self.settings.feed_ratio
+        return self.model.extruder.feed_ratio if ratio is None else ratio
+
+    def _track(self, tool: SimTool, mm: float) -> None:
+        """Move `tool`'s filament by `mm` commanded, signed, as the firmware's tracker counts it.
+
+        A retract grows the gap up to the model's limit, a feed fills it first, and only what
+        goes past the gap counts, times the feed ratio (`track_extruder_move` in
+        `src/feature/filament_tracker/filament_tracker.cpp`).
+        """
+        unclamped = tool.gap - mm
+        tool.gap = min(max(unclamped, 0.0), self.model.gap_mm)
+        tool.extruded += max(-unclamped, 0.0) * self.feed_ratio
+
+    def _load_lengths(self) -> tuple[float, float, float]:
+        """The slow load, fast load and purge a load runs with no override set.
+
+        A high-flow nozzle doubles the purge (`pause_settings.cpp`), except where the
+        nozzle cleaner's G-code purges a fixed length instead (INDX).
+        """
+        ex = self.model.extruder
+        lengths = ex.lengths
+        # The iX's cleaner purges 0 of its own: it purges the build's length in steps.
+        purge = ex.cleaner_purge_mm or lengths.purge_mm * (2 if self.high_flow else 1)
+        return lengths.slow_load_mm, lengths.fast_load_mm, purge
+
+    def _load_steps(self, purge: float | None, extra: float, printing: bool) -> list[LoadStep]:
+        """The moves of a load (`src/marlin_stubs/pause/pause.cpp`), with the overrides.
+
+        `purge` is the load's own purge override, and `extra` is added to the purge.
+
+        The type is written before the purge. Without a nozzle cleaner the purge ends with a
+        retract; the iX purges with no retract, and the INDX cleaner's auto-retract isn't
+        modeled. A reload during a print then primes and retracts again, and the resume
+        feeds that retract back.
+        """
+        s, lengths = self.settings, self.model.extruder.lengths
+        slow, fast, model_purge = self._load_lengths()
+        slow = slow if s.slow_load_mm is None else s.slow_load_mm
+        fast = fast if s.fast_load_mm is None else s.fast_load_mm
+        if purge is None:
+            purge = model_purge if s.purge_mm is None else s.purge_mm
+        steps = [
+            LoadStep("SLOW", slow),
+            LoadStep("FAST", fast),
+            LoadStep(TYPE_STEP),
+            LoadStep("PURGE", purge + extra),
+        ]
+        if self.model.extruder.cleaner_purge_mm is None:
+            steps.append(LoadStep("RETRACT", -lengths.retract_mm))
+        if printing:
+            steps += [LoadStep("PRIME", lengths.prime_mm), LoadStep("RETRACT", -lengths.retract_mm)]
+        return [st for st in steps if st.phase == TYPE_STEP or st.mm]
 
     def _log(self, kind: str, text: str, data: dict | None = None) -> None:
         if self._sim:
@@ -546,11 +608,10 @@ class SimPrinter:
         name: str | None = None,
         color: str | None = None,
         uuid: str | None = None,
-        feed_mm: float | None = None,
         purge_mm: float | None = None,
         temperatures: list[int] | None = None,
     ) -> None:
-        """Load filament into a tool: feed over the gap, counted feed, set the type, purge.
+        """Load filament into a tool: slow and fast feed, set the type, purge.
 
         `source` None keeps the previous type and is only for the reload a runout waits
         for. While the printer is off the filament is pushed in by hand: the type is set
@@ -567,11 +628,11 @@ class SimPrinter:
         job = self.job
         waiting = job is not None and job.wait_tool == tool
         self._log("action", f"load T{tool} {what}")
-        feed = self.settings.load_feed_mm if feed_mm is None else _positive(feed_mm, "feed_mm")
-        purge = self.settings.purge_mm if purge_mm is None else _positive(purge_mm, "purge_mm")
-        if waiting and job.waits_for(Reason.JAM):
-            purge += self.settings.jam_purge_mm
-        t.process = LoadProcess("FEED_GAP", t.gap, feed, purge, material)
+        if purge_mm is not None:
+            purge_mm = _positive(purge_mm, "purge_mm")
+        extra = self.settings.jam_purge_mm if waiting and job.waits_for(Reason.JAM) else 0.0
+        t.process = LoadProcess(self._load_steps(purge_mm, extra, waiting), material)
+        self._next_load_step(t, t.process)  # a load with no slow or fast feed types at once
         if job is None:
             self.screen = State.IDLE  # using the menu dismisses a finished or stopped screen
         self._show_state()
@@ -636,12 +697,12 @@ class SimPrinter:
 
     def extrude(self, tool: int, mm: float) -> None:
         t, mm = self._manual_move(tool, mm)
-        _feed(t, mm)
+        self._track(t, mm)
         self._log("action", f"extrude T{tool} {mm:g} mm: extruded {int(t.extruded)}")
 
     def retract(self, tool: int, mm: float) -> None:
         t, mm = self._manual_move(tool, mm)
-        t.gap = min(t.gap + mm, self.model.gap_mm)
+        self._track(t, -mm)
         self._log("action", f"retract T{tool} {mm:g} mm: gap {t.gap:g}")
 
     def select_tool(self, tool: int) -> None:
@@ -701,6 +762,10 @@ class SimPrinter:
             self._recover(job, clean=True)
             return
         self._log("action", "resume")
+        if job.unpark_mm:
+            # The unpark feeds back what the reload's last retract pulled in.
+            self._track(self.tools[self.selected_tool], job.unpark_mm)
+            job.unpark_mm = 0.0
         if job.paused_from is JobPhase.PREHEAT:
             job.enter(JobPhase.PREHEAT)
             self._show_state()
@@ -725,16 +790,16 @@ class SimPrinter:
     def _abort_process(self, t: SimTool) -> None:
         """Stop a load or unload where it stands.
 
-        The type is set at the start of the purge, so a load stopped before then leaves the
-        tool empty with no type, and one stopped in the purge keeps its type and counts as
-        loaded. A stopped unload leaves the filament in. This is a simplification of the
-        firmware's abort paths.
+        The type is set before the purge, so a load stopped before then leaves the tool
+        empty with no type, and one stopped after keeps its type and counts as loaded. A
+        stopped unload leaves the filament in. This is a simplification of the firmware's
+        abort paths.
         """
         p = t.process
         if p is None:
             return
         t.process = None
-        if isinstance(p, LoadProcess) and p.phase == "PURGE":
+        if isinstance(p, LoadProcess) and p.typed:
             t.loaded = True
         self._log("load", f"T{t.index} {p.kind} stopped by the cancel")
 
@@ -859,7 +924,7 @@ class SimPrinter:
         """Core One and Core One L clean the nozzle on a power-panic resume, which purges."""
         tool = self.tools[job.spec.segments[job.segment].tool]
         if tool.loaded:
-            _feed(tool, self.settings.panic_purge_mm)
+            self._track(tool, self.settings.panic_purge_mm)
             self._log("job", f"nozzle clean purged {self.settings.panic_purge_mm:g} mm")
 
     def set_power(self, power: Power, *, resume: bool = False, cold_bed: bool = False) -> None:
@@ -1080,25 +1145,27 @@ class SimPrinter:
                 self._physical_unload(t, "unload")
                 self._process_done()
                 return
-            step = min(p.remaining, rate * dt)
-            if p.phase == "FEED_GAP":
-                t.gap = max(0.0, t.gap - step)
-            else:
-                t.extruded += step
-            p.remaining -= step
-            dt -= step / rate
-            if p.remaining <= EPSILON:
-                self._next_load_phase(t, p)
+            dt -= self._load_step(t, p, rate * dt) / rate
 
-    def _next_load_phase(self, t: SimTool, p: LoadProcess) -> None:
-        if p.phase == "FEED_GAP":
-            p.phase, p.remaining, t.gap = "FEED", p.feed_mm, 0.0
-        elif p.phase == "FEED":
-            material = p.material if p.material is not None else t.kept()
-            t.store(material)
+    def _load_step(self, t: SimTool, p: LoadProcess, most: float) -> float:
+        """Run the current move for up to `most` mm; return the mm moved."""
+        step = p.steps[0]
+        moved = min(abs(step.mm), most)
+        move = moved if step.mm > 0 else -moved
+        self._track(t, move)
+        step.mm -= move
+        if abs(step.mm) <= EPSILON:
+            p.steps.pop(0)
+            self._next_load_step(t, p)
+        return moved
+
+    def _next_load_step(self, t: SimTool, p: LoadProcess) -> None:
+        """Write the type when its step comes up, and end the load after its last step."""
+        if p.steps and p.steps[0].phase == TYPE_STEP:
+            p.steps.pop(0)
+            t.store(p.material if p.material is not None else t.kept())
             self._log("load", f"T{t.index} type set to {describe(t.material)}")
-            p.phase, p.remaining = "PURGE", p.purge_mm
-        else:
+        if not p.steps:
             t.loaded, t.process = True, None
             self._log("load", f"T{t.index} loaded: extruded {int(t.extruded)}")
             self._process_done()
@@ -1106,6 +1173,8 @@ class SimPrinter:
     def _process_done(self) -> None:
         job = self.job
         if job is not None and job.phase is JobPhase.WAIT_LOAD:
+            # A reload during a print ends retracted; the resume's unpark feeds it back.
+            job.unpark_mm = self.model.extruder.lengths.retract_mm
             job.enter(JobPhase.PAUSED)
         self._show_state()
 
@@ -1173,7 +1242,7 @@ class SimPrinter:
         if self.tools[tool].loaded:
             if job.toolchange_purge:
                 job.toolchange_purge = False
-                _feed(self.tools[tool], self.settings.toolchange_purge_mm)
+                self._track(self.tools[tool], self.settings.toolchange_purge_mm)
             job.enter(JobPhase.PRINTING)
             self._show_state()
         else:
@@ -1197,18 +1266,17 @@ class SimPrinter:
         total = spec.total_mm
         rate = total / spec.duration_s if spec.duration_s else self.settings.print_rate_mm_s
         ends = [sum(s.slicer_mm for s in spec.segments[: i + 1]) for i in range(len(spec.segments))]
-        ratio = self.settings.feed_ratio
         while dt > EPSILON and job.phase is JobPhase.PRINTING:
             tool = self.tools[spec.segments[job.segment].tool]
             change = job.pending_color_changes[0] if job.pending_color_changes else None
             target = ends[job.segment] if change is None else min(change, ends[job.segment])
             need = max(0.0, target - job.fed_mm)
             if rate * dt < need:
-                _feed(tool, rate * dt * ratio)
+                self._track(tool, rate * dt)
                 job.fed_mm += rate * dt
                 job.time_printing += dt
                 return 0.0
-            _feed(tool, need * ratio)
+            self._track(tool, need)
             job.fed_mm = target
             dt -= need / rate
             job.time_printing += need / rate
@@ -1237,7 +1305,7 @@ class SimPrinter:
             job.toolchange_purge = True
             self._wait_for_filament(job, new)
             return
-        _feed(tool, self.settings.toolchange_purge_mm)
+        self._track(tool, self.settings.toolchange_purge_mm)
 
     # The sync job.
 
@@ -1302,7 +1370,11 @@ class SimPrinter:
                 "uuids": m.uuids,
                 "gap_mm": m.gap_mm,
                 "max_tools": m.max_tools,
+                # What an unset override falls back to on this printer.
+                "feed_ratio": m.extruder.feed_ratio,
+                **dict(zip(LOAD_LENGTHS, self._load_lengths(), strict=True)),
             },
+            "high_flow": self.high_flow,
             "firmware": str(self.firmware),
             "power": str(self.power),
             "fault": str(self.fault),
@@ -1321,6 +1393,12 @@ class SimPrinter:
                 for t in sorted(self.tools.values(), key=lambda t: t.index)
             ],
         }
+
+
+def _setting_kind(default: Any) -> str:
+    if isinstance(default, bool):
+        return "bool"
+    return "number" if default is not None else "optional"  # a number, or null for the model's
 
 
 def _refusal(check: Callable[[], None]) -> str | None:
@@ -1358,6 +1436,7 @@ def _process_from(d: dict | None) -> LoadProcess | UnloadProcess | None:
     if kind == "unload":
         return UnloadProcess(**d)
     d["material"] = _material_from(d["material"])
+    d["steps"] = [LoadStep(**st) for st in d["steps"]]
     return LoadProcess(**d)
 
 
@@ -1505,8 +1584,7 @@ class Simulation:
             "snapshots": self.snapshot_names(),
             # What the page's forms offer, so it copies none of the model's lists.
             "setting_fields": [
-                {"name": f.name, "kind": "bool" if isinstance(f.default, bool) else "number"}
-                for f in fields(Settings)
+                {"name": f.name, "kind": _setting_kind(f.default)} for f in fields(Settings)
             ],
             "options": {
                 "power": [str(v) for v in Power],
