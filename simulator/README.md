@@ -535,6 +535,11 @@ Choices made where the firmware was silent or the plan left it open:
   try finds everything ready, the firmware starts the resume over the new
   print: its check that the printer is idle is a debug assertion
   (`resume_print` in `power_panic.cpp`). The simulator doesn't model that.
+- A `T` while the MMU connects waits for it on every model. The Core
+  One's MMU, on MODBUS, connects that way. The MK4 family's, on UART, first
+  runs its bootloader for up to 10 s, where the firmware's `T` doesn't
+  wait: its feed can count on slot 0, and the slot is set though the MMU
+  never changed slots. The bootloader phase isn't modeled.
 - One `checks` setting stands for the firmware's settings per kind of check
   (model, compatibility mode, G-code level, input shaper and firmware). The
   checks share one screen and the worst severity decides it, so one setting

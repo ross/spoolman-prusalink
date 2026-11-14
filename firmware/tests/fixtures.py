@@ -247,6 +247,20 @@ set_feature_for_printers(HAS_NOZZLE_CLEANER_LITE "XL" "COREONE" "COREONEL")
 if(HAS_TOOLCHANGER OR HAS_MMU2)
   define_boolean_option(HAS_TOOL_MAPPING yes)
 endif()
+
+if(${BOARD} STREQUAL "XBUDDY" AND HAS_MMU2)
+  # for XBUDDY based printers, UART6 is being used either for puppies/MODBUS or directly for the MMU
+  if(HAS_PUPPIES)
+    # UART already occupied by the puppies/MODBUS
+    set(HAS_MMU2_OVER_UART NO)
+  else()
+    # UART used for the MMU
+    set(HAS_MMU2_OVER_UART YES)
+  endif()
+else()
+  # other boards: set to NO, whatever new edge cases that may bring...
+  set(HAS_MMU2_OVER_UART NO)
+endif()
 """
 
 PRESETS_CPP = """\
@@ -2600,6 +2614,17 @@ MMU2_MK4_H = """\
     float nominalEMotorFSOffReg = nominalEMotorFSOff;
     /// A record of the last E-motor position when fsensor turned off while unloading
     float unloadEPosOnFSOff = nominalEMotorFSOff;
+
+#ifdef UNITTEST
+    // Unit tests - avoid talking to the bootloader on the serial
+    #define MMU_USE_BOOTLOADER() 0
+#elif HAS_MMU2_OVER_UART()
+    // Only MK4 with MMU over UART may try to talk to the bootloader on the serial
+    #define MMU_USE_BOOTLOADER() 1
+#else
+    // CORE One with MMU over MODBUS - avoid talking to the bootloader on the serial
+    #define MMU_USE_BOOTLOADER() 0
+#endif
 """  # noqa: E501 (verbatim firmware lines)
 
 # `mmu2_mk4.cpp`, excerpts.
@@ -3121,6 +3146,29 @@ bool MMU2::WaitForMMUReady() {
     default:
         return true;
     }
+}
+
+void __attribute__((noinline)) MMU2::mmu_loop_inner(bool reportErrors) {
+    mmu2Serial.check_recovery();
+
+    #if MMU_USE_BOOTLOADER()
+    if (state == xState::Bootloader) {
+        bootloader->loop();
+
+        if (!bootloader->is_active()) {
+            bootloader_result_ = bootloader->result();
+            bootloader.reset();
+            state = xState::Connecting;
+            logic.Start();
+        }
+
+    } else
+    #endif
+    {
+        logicStepLastStatus = LogicStep(reportErrors); // it looks like the mmu_loop doesn't need to be a blocking call
+    }
+
+    CheckErrorScreenUserInput();
 }
 """  # noqa: E501 (verbatim firmware lines)
 
@@ -4259,6 +4307,42 @@ PrintPreview::Result PrintPreview::Loop() {
 }
 """  # noqa: E501 (verbatim firmware lines)
 
+# `protocol_logic.cpp`, excerpt.
+PROTOCOL_LOGIC_CPP = """\
+void ProtocolLogic::PlanGenericRequest(RequestMsg rq) {
+    plannedRq = rq;
+    if (!ExpectsResponse()) {
+        ActivatePlannedRequest();
+    } // otherwise wait for an empty window to activate the request
+}
+
+bool ProtocolLogic::ActivatePlannedRequest() {
+    switch (plannedRq.code) {
+    case RequestMsgCodes::Button:
+        // only issue the button to the MMU and do not restart the state machines
+        SendButton(plannedRq.value);
+        plannedRq = RequestMsg(RequestMsgCodes::unknown, 0);
+        return true;
+    case RequestMsgCodes::Read:
+        SendReadRegister(plannedRq.value, ScopeState::ReadRegisterSent);
+        plannedRq = RequestMsg(RequestMsgCodes::unknown, 0);
+        return true;
+    case RequestMsgCodes::Write:
+        SendWriteRegister(plannedRq.value, plannedRq.value2, ScopeState::WriteRegisterSent);
+        plannedRq = RequestMsg(RequestMsgCodes::unknown, 0);
+        return true;
+    case RequestMsgCodes::unknown:
+        return false;
+    default: // commands
+        currentScope = Scope::Command;
+        SetRequestMsg(plannedRq);
+        plannedRq = RequestMsg(RequestMsgCodes::unknown, 0);
+        CommandRestart();
+        return true;
+    }
+}
+"""
+
 # `queue.cpp`, excerpt.
 GCODE_QUEUE_CPP = """\
 /**
@@ -4352,6 +4436,7 @@ FILES = {
     read.IMAGES_FILE: PRESETS_JSON,
     read.PAUSE_SETTINGS_FILE: PAUSE_SETTINGS_HPP,
     "lib/Marlin/Marlin/src/gcode/queue.cpp": GCODE_QUEUE_CPP,
+    "lib/Marlin/Marlin/src/feature/prusa/MMU2/protocol_logic.cpp": PROTOCOL_LOGIC_CPP,
 }
 
 

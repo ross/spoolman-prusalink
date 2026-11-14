@@ -654,6 +654,56 @@ WATCHED = (
         "a23abdb1628d7363",
         UPSTREAM_7D8BF685,
     ),
+    # A `T` while the MMU connects waits, and its feed counts on no slot, only once
+    # `MMU2::Start` has handed over to the protocol. A build whose MMU talks UART, the MK4
+    # family's, runs the MMU's bootloader first, and there a `T`'s request goes out at once
+    # and its wait ends at the first pass. That phase isn't modeled. `MMU2::Start` itself
+    # can't be watched (see "the MMU started at boot").
+    Watched(
+        "the builds with the MMU on UART",
+        read.OPTIONS_FILE,
+        "cmake",
+        'if(${BOARD} STREQUAL "XBUDDY" AND HAS_MMU2)',
+        "SimPrinter._mmu_change in simulator/model.py: a `T` waits while the MMU connects",
+        "c0faba2142c463c6",
+        UPSTREAM_7D8BF685,
+    ),
+    Watched(
+        "the builds that run the MMU's bootloader",
+        "lib/Marlin/Marlin/src/feature/prusa/MMU2/mmu2_mk4.h",
+        "directive",
+        "#elif HAS_MMU2_OVER_UART()",
+        "SimPrinter._mmu_change in simulator/model.py: a `T` waits while the MMU connects",
+        "07c135661af13830",
+        UPSTREAM_7D8BF685,
+    ),
+    Watched(
+        "the MMU's bootloader phase",
+        "lib/Marlin/Marlin/src/feature/prusa/MMU2/mmu2_mk4.cpp",
+        "function",
+        "MMU2::mmu_loop_inner",
+        "SimPrinter._mmu_change in simulator/model.py: a `T` waits while the MMU connects",
+        "727d1bf0385f9c87",
+        UPSTREAM_7D8BF685,
+    ),
+    Watched(
+        "the MMU request sent at once",
+        "lib/Marlin/Marlin/src/feature/prusa/MMU2/protocol_logic.cpp",
+        "function",
+        "ProtocolLogic::PlanGenericRequest",
+        "SimPrinter._mmu_change in simulator/model.py: a `T` waits while the MMU connects",
+        "d87749532e5d2649",
+        UPSTREAM_7D8BF685,
+    ),
+    Watched(
+        "the MMU request activated",
+        "lib/Marlin/Marlin/src/feature/prusa/MMU2/protocol_logic.cpp",
+        "function",
+        "ProtocolLogic::ActivatePlannedRequest",
+        "SimPrinter._mmu_change in simulator/model.py: a `T` waits while the MMU connects",
+        "3e7e32a59e5138de",
+        UPSTREAM_7D8BF685,
+    ),
     # A print's `T` to the slot already selected changes nothing. The name has two
     # overloads, so the definition is read as a statement.
     Watched(

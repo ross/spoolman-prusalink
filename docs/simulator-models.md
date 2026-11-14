@@ -661,6 +661,10 @@ Left to the work:
   and 0.6 nozzle presets, and layers with no change.
 - Whether the firmware ever plans a second 189.9 mm move at an MMU tool
   change, which a longer bowden would need. The simulator plans one.
+- A `T` during the MK4 family's MMU bootloader phase, up to 10 s after a
+  boot, which doesn't wait for the MMU: its feed can count on slot 0. The
+  simulator has no bootloader phase, and its `T` waits on every model
+  (F45).
 - Whether INDX's `G1 E1.6` lock move after a pickup reaches the nozzle or
   only seats the lock. The firmware counts it as any move, and so does the
   simulator; a trace of a tool change would settle it.

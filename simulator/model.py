@@ -1197,10 +1197,16 @@ class SimPrinter:
         MMU then unloads it cleanly is inferred.
 
         A `T` while the MMU connects, as in a print resumed after a power cut, waits for the
-        MMU's answer (`WaitForMMUReady` lets it through, then `manage_response`), and the
-        feed is planned on the MMU's progress messages, which come once it's Active. So the
-        feed counts on no slot, not slot 0. That's inferred, and the wait isn't timed: the
-        MMU is Active at once.
+        MMU's answer once `MMU2::Start` has handed over to the protocol, `xState::Connecting`
+        (`WaitForMMUReady` lets it through, then `manage_response`), and the feed is planned
+        on the MMU's progress messages, which come once it's Active. So the feed counts on no
+        slot, not slot 0. That's inferred, and the wait isn't timed: the MMU is Active at
+        once. The Core One's MMU, on MODBUS, connects that way from the start. The MK4
+        family's, on UART, first runs its bootloader for up to 10 s (`mmu2_mk4.h:24-33`,
+        `mmu2_mk4.cpp:181-184, 343-363`, `src/mmu2/mmu2_bootloader.cpp:93-109`). There a `T`'s
+        request goes out at once (`protocol_logic.cpp:783-812`) and `manage_response` returns
+        at its first pass, so the feed can count on slot 0, and the slot is set though the
+        MMU never changed slots. That phase isn't modeled: the `T` waits on every model.
         """
         if self.selected_tool == new.index:
             self._log("job", f"T{new.index}: slot {new.index} already selected")
