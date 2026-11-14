@@ -289,7 +289,8 @@ shows, except on the tools-mapping screen (`marlin_server.cpp:1448-1460`).
 
 The simulator has the checks of an uploaded file and of a print's tools,
 and the MMU's question, which `tap_through` answers No and `unload_first`
-Yes. A print raises no model question: it has no `M862` lines.
+Yes. It refuses Yes while the MMU connects, and once it's Active with FINDA
+clear. A print raises no model question: it has no `M862` lines.
 
 ### `/api/v1/info`
 
@@ -372,11 +373,13 @@ short:
   single-tool file gets the firmware's `T0` and 35 mm load instead. A
   finished print with the MMU Active skips the auto-retract, and a stopped
   one unloads (F42).
-- **The preview** checks no slot for filament with the MMU Active, and asks
-  to unload first when FINDA sees filament, which holds the bridge's sync
-  job in `ATTENTION` (F43, BF18).
+- **The preview** checks no slot for filament with the MMU Active. It asks
+  to unload first when FINDA sees filament, and whatever FINDA sees while
+  the MMU connects, which holds the bridge's sync job in `ATTENTION` (F43,
+  BF18, BF26).
 - **A runout is FINDA's**, and its `M600` ejects the slot and reloads the
-  same slot with no type written (F44).
+  same slot with no type written. The reload reads `PRINTING` while it runs
+  (F44).
 
 The simulator models these on the models with a stock MMU3 profile: the
 unit and its constants in `simulator/mmu.py`, its rules in the `Mmu` feed
@@ -477,13 +480,12 @@ MMU on.
 
 ### The preview
 
-A preview step replaces `wrong_model`. It counts the job, runs the checks
-in the list above, and holds the job in `ATTENTION` on a question, visible
-with its ID. The page's tap-through accepts, and declining ends in `IDLE`.
+The preview counts the job, runs the checks in the list above, and holds
+the job in `ATTENTION` on a question, visible with its ID. The page's
+tap-through accepts, and declining ends in `IDLE`.
 
-Each printer has one severity for the checks a setting governs: ignore,
-warn or abort. That replaces `auto_accept_model_check`, which becomes
-"ignore". The firmware has a setting per kind of check, but they share one
+Each printer has one severity for the checks a setting governs, `checks`:
+ignore, warn or abort. The firmware has a setting per kind of check, but they share one
 screen and the worst decides, so one setting shows the bridge every
 outcome. The INDX lock question always asks, as in the firmware. The MMU
 question is under the firmware setting
@@ -695,6 +697,9 @@ Left to the work:
   feeds 50, which BF16's range covers.
 - The firmware's `m600_sent`, which stays set after a runout with no slot
   selected and may block later runouts. The simulator doesn't keep it.
+- What Yes at the MMU's unload question unloads while the MMU connects:
+  the firmware reads the selector's slot as if the MMU were up
+  (`marlin_print_preview.cpp:709-711`). The simulator refuses Yes then.
 - The color question after an MMU reload, `IsColor` in `ATTENTION`, with
   its Retry and Purge More. The simulator's reload goes on to `PAUSED`.
 - MMU errors, the automatic retries and the error screens, which the
