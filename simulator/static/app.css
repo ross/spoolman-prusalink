@@ -104,8 +104,8 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
 .prev { color: var(--muted); opacity: .75; }
 .uuid { font-family: var(--mono); font-size: 10px; color: var(--muted); }
 .toolbtns { display: flex; flex-wrap: wrap; gap: 3px; align-items: center; }
-.toolbtns .proc { flex: 1 0 15em; height: 1.5em; font-size: 11px; white-space: nowrap; overflow: hidden;
-  text-overflow: ellipsis; font-variant-numeric: tabular-nums; }
+.toolstat { height: 1.5em; font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  font-variant-numeric: tabular-nums; }
 .form { border: 1px solid var(--border); border-radius: 3px; background: var(--bg); padding: 4px 6px;
   margin: 3px 0; display: flex; flex-wrap: wrap; gap: 3px 8px; align-items: flex-end; }
 .form label { display: flex; flex-direction: column; font-size: 11px; color: var(--muted); }

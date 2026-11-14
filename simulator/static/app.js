@@ -205,7 +205,7 @@ function renderTool(p, t) {
     '<td class="num">' + t.extruded_at_unload + '</td>' +
     '<td class="num">' + Number(t.gap || 0).toFixed(1) + '</td></tr>';
 
-  // The process text and the flags come and go, so they sit in a slot of fixed size after
+  // The process text and the flags come and go, so they sit on a line of their own under
   // the buttons, which then never move.
   h += '<tr class="sub"><td colspan="9"><div class="toolbtns">' +
     btn('Load', 'load_form', Object.assign({ tool: i, cls: isOpen(p, 'load' + i) ? 'on' : '' }, loadGate)) +
@@ -221,8 +221,7 @@ function renderTool(p, t) {
     btn('Sensor fault', 'sensor_fault', gate(a, 'set_sensor_fault', { tool: i, cls: t.sensor_fault ? 'on' : '' })) +
     btn('Stuck write', 'stuck_write', gate(a, 'set_stuck_write', { tool: i, cls: t.stuck_write ? 'on' : '' })) +
     btn(t.enabled ? 'Disable' : 'Enable', 'tool_enabled', gate(a, 'set_tool_enabled', { tool: i, cls: 'fixw' })) +
-    '<span class="proc" title="' + procTxt + '">' + flags + (flags ? ' ' : '') + procTxt + '</span>' +
-    '</div>';
+    '</div><div class="toolstat" title="' + procTxt + '">' + flags + (flags ? ' ' : '') + procTxt + '</div>';
 
   if (isOpen(p, 'load' + i)) {
     const sources = (p.load_sources || ['preset']).concat(canKeep ? ['keep'] : []);

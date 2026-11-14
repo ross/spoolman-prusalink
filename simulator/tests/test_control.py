@@ -126,6 +126,7 @@ async def test_advance_moves_simulated_time(setup):
 async def test_static_files_are_served_and_the_root_is_not_escaped(setup):
     sim, p, client = setup
     resp = await client.get("/static/app.js")
+    assert resp.headers["Cache-Control"] == "no-cache"
     assert resp.status == 200 and "javascript" in resp.content_type
     assert (await client.get("/static/nothing.js")).status == 404
     # A path that climbs out of the folder, sent without the client tidying it away.
