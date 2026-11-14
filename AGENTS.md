@@ -194,7 +194,9 @@ difference. A weekly workflow runs it.
 
 After you change a copied table, run the check. If a difference is intended, add it to
 `EXPECTED` in `firmware/compare.py`. The check also fails when an expected difference no
-longer occurs.
+longer occurs. When the firmware's side of a table changes, look up the flag or table in
+"Behaviors that rest on one flag or function" in `docs/printer-behaviors.md`, which names
+the simulator code and the bridge findings that the change moves.
 
 A few copied rules are code in the firmware, which the check can't rebuild as a table. For
 each, `WATCHED` in `firmware/watch.py` records a fingerprint of the firmware code it came
@@ -203,13 +205,11 @@ read at. When the check reports a changed region, do these steps in order:
 
 1. In a firmware checkout, run `git fetch` if the checkout doesn't have the newer commit,
    then run the `git diff` that the check prints.
-2. Re-read the copy that the check names.
+2. Re-read the copy that the check names, and look up the region in "Behaviors that rest
+   on one flag or function" in `docs/printer-behaviors.md`, which names the simulator code
+   and the bridge findings that a change there moves.
 3. If the rule changed, update the copy.
 4. Record the new fingerprint and commit that the check prints.
-
-Before step 3, look up the region, or the flag or table behind a table difference, in
-"Behaviors that rest on one flag or function" in `docs/printer-behaviors.md`. It names the
-simulator code and the bridge findings that a change there moves.
 
 Update a row only when its region changed. A region with the same text at a newer commit
 passes, and its row keeps its commit.
