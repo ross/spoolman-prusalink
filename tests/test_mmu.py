@@ -2,6 +2,7 @@
 
 from harness import LOC, jobs, ledger, make, menu, spool_x, tool_locations
 
+from simulator.model import PrintSpec, Segment
 from simulator.prusalink import filament, info
 from simulator.tool import SimTool
 
@@ -9,6 +10,8 @@ MK4S = "1.4.1"
 COLORS = ("ff0000", "00ff00", "0000ff", "ffff00", "00ffff")
 SHELF = "shelf"
 SWAPS = ("swap_staged", "unload", "swap_committed", "swap_unconfirmed", "swap_confirmed")
+# The acceptance print of simulator/tests/test_mmu_prints.py: slots 0 and 1, twice each.
+TWO_COLOR = PrintSpec([Segment(t, 20) for t in (0, 1, 0, 1)], duration_s=8)
 
 
 def mmu(tmp_path, spools, **types):
@@ -144,4 +147,46 @@ async def test_a_load_to_nozzle_after_an_unload_counts_7(tmp_path):
         await bridge.poll()
     assert fake.used == {1: [44.0, 19.0, 7.0]}
     assert p.tools[0].unload_count == 0
+    await bridge.aclose()
+
+
+async def print_through(station, spec):
+    await station.start_print(spec)
+    await run(station, lambda: station.printer.job is None)
+    await station.poll()
+
+
+async def test_an_mmu_tool_change_charges_the_outgoing_slot_the_firmware_feed(tmp_path):
+    # BF16: each change counts the firmware's feed, 206.9 mm of the new slot's filament, on
+    # the old slot, and the wipe tower's stamping 15 mm more past the 40 mm gap. The bridge
+    # charges each slot's spool what its counter says: slot 0 counts 657.6536 mm, slot 1
+    # 467.3836 (simulator/tests/test_mmu_prints.py), so 624 and 444 at 0.95, where the
+    # model, the start and the purges come to 70 + 40 + 61.95 + 3 x 20.9518 on slot 0 and
+    # 86.63 + 40 + 20.9518 on slot 1.
+    bridge, fake, station, _ = mmu(tmp_path, [(0, "PLA"), (1, "PLA")], t0="PLA", t1="PLA")
+    p = station.printer
+    await bridge.poll()
+    mark = len(ledger(tmp_path))
+    await print_through(station, TWO_COLOR)
+    assert [station.counter_at(i) for i in range(5)] == [624, 444, 0, 0, 0]
+    assert totals(fake) == {1: 624, 2: 444}
+    assert swaps(tmp_path, mark) == []
+    assert p.selected_tool is None and all(t.unload_count == 0 for t in p.tools.values())
+    assert fake.flag(1) is None and fake.flag(2) is None
+    await bridge.aclose()
+
+
+async def test_a_second_mmu_print_in_one_boot_counts_less_at_its_start(tmp_path):
+    # BF29: the first print's end left the gap at 40, and the second print's first change,
+    # with no slot selected, leaves it there. The start's 17 + 53 then count 30 on slot 0,
+    # not 70: the bridge charges spool 1 38 mm less, and spool 2 the same again.
+    bridge, fake, station, _ = mmu(tmp_path, [(0, "PLA"), (1, "PLA")], t0="PLA", t1="PLA")
+    await bridge.poll()
+    await print_through(station, TWO_COLOR)
+    first = totals(fake)
+    await print_through(station, TWO_COLOR)
+    second = {spool: total - first[spool] for spool, total in totals(fake).items()}
+    assert first == {1: 624, 2: 444}
+    # 1275.3072 and 934.7672 mm counted: 1211 and 888.
+    assert second == {1: 1211 - 624, 2: 888 - 444}
     await bridge.aclose()
