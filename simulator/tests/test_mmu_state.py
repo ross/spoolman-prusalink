@@ -216,6 +216,21 @@ def test_the_page_shows_the_mmu_and_which_slot_is_in_the_extruder():
     assert make()[1].to_json()["mmu"] is None
 
 
+def test_with_the_mmu_off_the_page_shows_tool_0_loaded_from_its_path():
+    # Off, the printer feeds slot 0 as a single-tool one, so the fed slot doesn't decide.
+    sim, p = make_mmu(types={})
+    p.set_mmu(False)
+    p.load(0, source="preset", name="PLA")
+    sim.advance(60)
+    assert p.mmu.path.loaded and p.mmu.fed is None
+    tool = p.to_json()["tools"][0]
+    assert tool["loaded"] is True and tool["actions"]["unload"] is None
+
+    sim, p = make_mmu(types={0: PLA, 2: PETG}, slot=2)
+    p.set_mmu(False)
+    assert [t["loaded"] for t in p.to_json()["tools"]] == [True, False, False, False, False]
+
+
 def test_the_tag_reader_is_off_while_the_mmu_is_on():
     sim, p = make_mmu(CORE_ONE)
     assert p.to_json()["load_sources"] == ["preset"]

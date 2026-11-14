@@ -2755,10 +2755,12 @@ class SimPrinter:
 
     def _tool_json(self, t: SimTool) -> dict:
         """The tool as the page shows it. On an MMU every slot shares the extruder's path,
-        so a slot reads loaded only when its filament is the one in it."""
+        so a slot reads loaded only when its filament is the one in it. With the MMU off,
+        the printer feeds slot 0 as a single-tool one, and slot 0 owns the path."""
         out = {**_tool_json(t), "listed": self.listed(t)}
         if self.mmu is not None:
-            out["loaded"] = t.path.loaded and self.mmu.fed == t.index
+            owner = self.mmu.fed if self.mmu.on else 0
+            out["loaded"] = t.path.loaded and t.index == owner
         return out
 
 
