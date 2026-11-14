@@ -192,7 +192,12 @@ firmware update.
   switch turns off the runout, the idle sensor clear and the preview's
   filament question.
 - It serves `/api/version`, `/api/v1/info`, `/api/v1/status`, `/api/v1/job`
-  and `/api/v1/filament`. `/api/v1/info` always reports `mmu` as false.
+  and `/api/v1/filament`. `/api/v1/info` reports `mmu` as the MMU's
+  setting.
+- An MMU3 is a unit: the `mmu` printer key, `set_mmu`, five slots sharing
+  one filament path, the slots listed by the setting, and the selected slot
+  that counts E moves (slot 0 while the MMU connects, none after a boot).
+  Its operations and prints are still missing.
 - Tests: the unit harness and the integration fixtures take a model and a
   tool count. `tests/test_families.py` runs one story (a print with a tool
   change, a swap, a reboot) on the Core One L, MK4S, iX, XL, Core One L INDX
@@ -276,7 +281,8 @@ has no `M862` lines.
 
 Five fields on every build: `nozzle_diameter` (tool 0), `mmu`, `serial`,
 `hostname` and `min_extrusion_temp` (170). `mmu` is the MMU setting on
-builds that can take one and false elsewhere (`basic_gets.cpp:229-253`).
+builds that can take one and false elsewhere (`basic_gets.cpp:229-247`).
+Built: the simulator reports the setting, true while the MMU connects too.
 
 ### Toolchangers: XL and INDX
 
