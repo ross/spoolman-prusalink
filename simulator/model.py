@@ -2611,10 +2611,8 @@ class SimPrinter:
         """Advance this printer by dt; return whether anything was running."""
         if self.power is Power.OFF or dt <= 0:
             return False
-        active = False
-        if self.mmu is not None and self.mmu.connecting > 0:
-            active = True
-            self._tick_mmu(dt)
+        active = self.mmu is not None and self.mmu.connecting > 0
+        elapsed = dt
         for t in self.tools.values():
             if t.process is not None:
                 active = True
@@ -2625,6 +2623,10 @@ class SimPrinter:
         if self.job is not None:
             active = True
             self._tick_job(dt)
+        # The MMU's connecting window counts down after the tick's moves, which it covered:
+        # a window that ends with the tick still credits them to slot 0.
+        if self.mmu is not None and self.mmu.connecting > 0:
+            self._tick_mmu(elapsed)
         self._idle_clear_selected()
         return active
 
