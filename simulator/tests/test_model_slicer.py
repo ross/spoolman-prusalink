@@ -131,6 +131,25 @@ def test_a_print_can_set_its_own_prime_and_tool_change_purge(model, counted):
 
 
 @pytest.mark.parametrize(
+    ("model", "counted"),
+    [
+        # T0: its 37 prime, 10, the change's ramming, its later pick's purge of 5 (the 20
+        # back counts nothing), 10, and the end's ramming. T1: its 39 prime, its first
+        # pick's purge of 5 after the 20 back, 10, and the change's ramming.
+        (XL, {0: XL_FIRST + 10 + XL_RAM + 5 + 10 + XL_RAM, 1: XL_OTHER + 5 + 10 + XL_RAM}),
+        # T0: the start's 33, its prime, 10, its later pick (the lock move 1.6, then the
+        # purge of 5, since the 8.8 refill what its park retracted), and 10. T1: the
+        # start's 33, its first pick's 1.6 and purge of 5, and 10.
+        (INDX, {0: INDX_START + INDX_PRIME + 10 + 1.6 + 5 + 10, 1: INDX_START + 1.6 + 5 + 10}),
+    ],
+)
+def test_a_print_s_purge_override_covers_a_later_pick_too(model, counted):
+    sim, p = make(model, [loaded(0), loaded(1)])
+    finish(sim, p, spec((0, 10), (1, 10), (0, 10), toolchange_purge_mm=5))
+    assert counts(p) == pytest.approx(counted)
+
+
+@pytest.mark.parametrize(
     ("model", "overrides", "error"),
     [
         ("8.1.0", {"prime_mm": 5}, "prime_mm needs a multi-tool slicer profile"),
