@@ -72,6 +72,16 @@ def test_printer_models_ignore_comments():
             model_table(model_entry(extra=" .compatibility_group = 3,")),
             ".compatibility_group appears 2 times",
         ),
+        (
+            model_table("#if HAS_X()", model_entry(), "#endif"),
+            "a preprocessor line in printer_model_info",
+        ),
+        (model_table(model_entry(name='MK4" "S')), r'can\'t read .id_str = "MK4" "S"'),
+        (
+            model_table('{ .model = PrinterModel::xl, .id_str = "XL" },', model_entry()),
+            "unexpected '{ .model = PrinterModel::xl, .id_str = \"XL\" },' before the first "
+            "PrinterModelInfo in printer_model_info",
+        ),
     ],
 )
 def test_printer_models_fail_closed(text, problem):
@@ -107,6 +117,18 @@ def variant(model="mk4", name="MK4MMU3"):
         ),
         (model_table(model_entry(), variants=variant().replace(".model", ".m")), "no .model"),
         (model_table(model_entry(), variants=variant().replace(".id_str", ".s")), "no .id_str"),
+        (
+            model_table(model_entry(), variants=f"#if HAS_X()\n{variant()}\n#endif"),
+            "a preprocessor line in printer_model_mmu_variant",
+        ),
+        (
+            model_table(model_entry(), variants=variant(name='MK4" "MMU3')),
+            r'can\'t read .id_str = "MK4" "MMU3"',
+        ),
+        (
+            model_table(model_entry(), variants=f'{{ .id_str = "MK4X" }}, {variant()}'),
+            "unexpected '{ .id_str = \"MK4X\" },' before the first PrinterModelMMUVariant",
+        ),
     ],
 )
 def test_mmu_variants_fail_closed(text, problem):

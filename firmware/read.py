@@ -76,16 +76,10 @@ def mmu_variants(text: str) -> dict[str, str]:
     try:
         text = _strip_comments(text)
         codes = {model: code for model, code, _, _ in _model_entries(text)}
-        region = _one(
-            r"printer_model_mmu_variant\s*\{(.*?)\n\};", text, "printer_model_mmu_variant array"
-        )
-        entries = re.split(r"PrinterModelMMUVariant\s*\{", region)[1:]
-        if not entries:
-            raise ValueError("no PrinterModelMMUVariant entries")
         variants: dict[str, str] = {}
-        for entry in entries:
+        for entry in _array_entries(text, "printer_model_mmu_variant", "PrinterModelMMUVariant"):
             model = _enum_field(entry, "model", "PrinterModel")
-            name = _one(_ID_STR_FIELD, entry, ".id_str")
+            name = _id_str(entry)
             if model not in codes:
                 raise ValueError(f"the MMU variant {name} names an unknown PrinterModel::{model}")
             if name in variants:
@@ -96,7 +90,29 @@ def mmu_variants(text: str) -> dict[str, str]:
     return variants
 
 
-_ID_STR_FIELD = r'\.id_str\s*=\s*"([^"]*)"'
+def _array_entries(text: str, array: str, kind: str) -> list[str]:
+    """Return the text of each `kind { ... }` entry in the brace table `array`.
+
+    The table may hold only those entries: a preprocessor line could leave an entry out of
+    some builds, and text before the first entry would be an entry of another shape.
+    """
+    region = _one(rf"{array}\s*\{{(.*?)\n\}};", text, f"{array} array")
+    if re.search(r"^[ \t]*#", region, re.M):
+        raise ValueError(f"a preprocessor line in {array}")
+    before, *entries = re.split(rf"{kind}\s*\{{", region)
+    if before.strip():
+        raise ValueError(f"unexpected {before.strip()!r} before the first {kind} in {array}")
+    if not entries:
+        raise ValueError(f"no {kind} entries")
+    return entries
+
+
+def _id_str(entry: str) -> str:
+    """Return an entry's `.id_str`: one string literal, then the end of the initializer."""
+    name, rest = _one(r'\.id_str\s*=\s*"([^"]*)"([^,}]*)', entry, ".id_str", 2)
+    if rest.strip():
+        raise ValueError(f'can\'t read .id_str = "{name}"{rest.rstrip()}')
+    return name
 
 
 def _enum_field(entry: str, field: str, enum: str) -> str:
@@ -111,19 +127,15 @@ def _enum_field(entry: str, field: str, enum: str) -> str:
 def _model_entries(text: str) -> list[tuple[str, str, str, str]]:
     """Return each `printer_model_info` entry as (`PrinterModel` member, type code, `id_str`,
     compatibility group). Raises ValueError."""
-    region = _one(r"printer_model_info\s*\{(.*?)\n\};", text, "printer_model_info array")
-    entries = re.split(r"PrinterModelInfo\s*\{", region)[1:]
-    if not entries:
-        raise ValueError("no PrinterModelInfo entries")
     found = []
     codes, models = set(), set()
-    for entry in entries:
+    for entry in _array_entries(text, "printer_model_info", "PrinterModelInfo"):
         model = _enum_field(entry, "model", "PrinterModel")
         group = _enum_field(entry, "compatibility_group", "PrinterModelCompatibilityGroup")
         version = _one(
             r"\.version\s*=\s*\{\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*\}", entry, ".version", 3
         )
-        name = _one(_ID_STR_FIELD, entry, ".id_str")
+        name = _id_str(entry)
         code = ".".join(version)
         if code in codes:
             raise ValueError(f"model {code} appears twice")
