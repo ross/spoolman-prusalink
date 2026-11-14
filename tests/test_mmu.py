@@ -71,7 +71,7 @@ async def test_the_bridge_writes_to_an_mmu_printer_as_a_single_tool_model(tmp_pa
 async def test_an_mmu_slot_swap_by_eject_and_preload_counts_no_unload(tmp_path):
     # BF15: Eject writes no type, and Preload writes the new one over the old with no
     # unload between, so the printer never reports the swap. Spool 3, moved into slot 0's
-    # location first, stays staged, and the next load is charged to spool 1, which the
+    # location first, stays staged, and the next print is charged to spool 1, which the
     # bridge flags for the printer's new type.
     bridge, fake, station, locations = mmu(tmp_path, [(0, "PLA")], t0="PLA")
     p = station.printer
@@ -85,12 +85,11 @@ async def test_an_mmu_slot_swap_by_eject_and_preload_counts_no_unload(tmp_path):
     p.change_all([0], name="PETG")
     await run(station, lambda: not p.queue and p.tools[0].process is None)
     assert station.material(0)[0] == "PETG" and p.tools[0].unload_count == 0
-    p.load_to_nozzle(0)
-    await run(station, lambda: p.tools[0].process is None)
-    await bridge.poll()
+    await print_through(station, PrintSpec([Segment(0, 20)], duration_s=2))
     assert swaps(tmp_path, mark) == [(0, "swap_staged")]
-    # The load counts 47 * 0.95 = 44.65 from a fresh boot's empty gap.
-    assert totals(fake) == {1: 44}
+    # A one-color print on slot 0 counts 35 + 15 + 53 + 20 + 19.3 = 142.3 mm
+    # (simulator/tests/test_mmu_prints.py), 135 at 0.95, all of it charged to spool 1.
+    assert totals(fake) == {1: 135}
     assert "name printer='PETG' spoolman='PLA'" in fake.flag(1)
     await bridge.aclose()
 
