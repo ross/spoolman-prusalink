@@ -324,8 +324,8 @@ Choices made where the firmware was silent or the plan left it open:
   say otherwise, but a trace hasn't shown it.
 - The simulator has no spool join. The firmware refuses to turn the
   sensors off when a print joins spools.
-- Stuck-filament detection isn't modeled. It's on by default, except on
-  INDX, where it's off.
+- Stuck-filament detection isn't modeled. Load-cell printers have it, on by
+  default except on INDX. The MINI and MK3.5 don't have it.
 - The preview doesn't model an uncalibrated INDX nozzle cleaner, which
   refuses every print, the unfinished-selftest screen, the
   new-firmware screen (`M115 U`, which continues by itself after 30 s),

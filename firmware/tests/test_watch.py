@@ -214,5 +214,5 @@ def test_a_changed_region_at_its_recorded_commit_is_a_wrong_fingerprint():
     assert str(change) == (
         f"the compatibility upgrades in src/common/printer_model.cpp has fingerprint"
         f" {change.now} at 7d8bf6858b36, its recorded commit, not {row.fingerprint}: the"
-        " recorded fingerprint is wrong"
+        " recorded fingerprint is wrong; check UPGRADES in simulator/compatibility.py"
     )

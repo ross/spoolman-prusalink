@@ -207,7 +207,8 @@ class Change:
         if self.commit == w.commit:
             return (
                 f"{w.name} in {w.path} has fingerprint {self.now} at {_short(w.commit)}, its"
-                f" recorded commit, not {w.fingerprint}: the recorded fingerprint is wrong"
+                f" recorded commit, not {w.fingerprint}: the recorded fingerprint is wrong; check"
+                f" {w.copy}"
             )
         return (
             f"{w.name} in {w.path} changed since {_short(w.commit)}: check {w.copy} against"
