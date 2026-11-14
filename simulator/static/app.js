@@ -196,7 +196,8 @@ function renderTool(p, t) {
 
   let h = '<tr class="t">' +
     '<td class="' + (p.selected_tool === i ? 'sel' : '') + '">' + (p.selected_tool === i ? '&#9654;' : '') + i + '</td>' +
-    '<td>' + (!t.listed ? '<span class="dis" title="an MMU slot, and the MMU is off">unlisted</span>'
+    '<td>' + (t.enabled && !t.listed
+      ? '<span class="dis" title="an MMU slot, and the MMU is off">unlisted</span>'
       : t.enabled ? 'on' : '<span class="dis">off</span>') + '</td>' +
     '<td>' + (t.loaded ? 'yes' : '<span class="muted">no</span>') + '</td>' +
     '<td>' + matHtml(t.material, false) + '</td>' +
