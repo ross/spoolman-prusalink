@@ -90,9 +90,9 @@ async def test_an_mmu_slot_swap_by_eject_and_preload_counts_no_unload(tmp_path):
     assert station.material(0)[0] == "PETG" and p.tools[0].unload_count == 0
     await print_through(station, PrintSpec([Segment(0, 20)], duration_s=2))
     assert swaps(tmp_path, mark) == [(0, "swap_staged")]
-    # A one-color print on slot 0 counts 35 + 15 + 53 + 20 + 19.3 = 142.3 mm
-    # (simulator/tests/test_mmu_prints.py), 135 at 0.95, all of it charged to spool 1.
-    assert totals(fake) == {1: 135}
+    # A one-color print on slot 0 counts 17 + 53 + 20 + 19.3 = 109.3 mm
+    # (simulator/tests/test_mmu_prints.py), 103 at 0.95, all of it charged to spool 1.
+    assert totals(fake) == {1: 103}
     assert "name printer='PETG' spoolman='PLA'" in fake.flag(1)
     await bridge.aclose()
 
@@ -160,11 +160,13 @@ async def print_through(station, spec):
 
 async def test_an_mmu_tool_change_charges_the_outgoing_slot_the_firmware_feed(tmp_path):
     # BF16: each change counts the firmware's feed, 206.9 mm of the new slot's filament, on
-    # the old slot, and the wipe tower's stamping 15 mm more past the 40 mm gap. The bridge
-    # charges each slot's spool what its counter says: slot 0 counts 657.6536 mm, slot 1
-    # 467.3836 (simulator/tests/test_mmu_prints.py), so 624 and 444 at 0.95, where the
-    # model, the start and the purges come to 70 + 40 + 61.95 + 3 x 20.9518 on slot 0 and
-    # 86.63 + 40 + 20.9518 on slot 1.
+    # the old slot, and the wipe tower's stamping 15 mm more past the gap. The bridge
+    # charges each slot's spool what its counter says. In commanded mm, slot 0 counts
+    # 657.6536 and slot 1 467.3836 (simulator/tests/test_mmu_prints.py), and the counters
+    # read 624 and 444 at 0.95. Each slot rams out twice, so the start, the model, the
+    # loads, the purges and the rammings come to 70 + 40 + 32 + 29.95 + 2 x 20.9518 =
+    # 213.8536 on slot 0 and 32 + 54.63 + 40 + 32 + 29.95 + 2 x 20.9518 = 230.4836 on
+    # slot 1; the rest is 2 x (206.9 + 15) on slot 0 and 206.9 + 2 x 15 on slot 1.
     bridge, fake, station, _ = mmu(tmp_path, [(0, "PLA"), (1, "PLA")], t0="PLA", t1="PLA")
     p = station.printer
     await bridge.poll()

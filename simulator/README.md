@@ -131,7 +131,9 @@ slicer profile, `prime_mm` and `toolchange_purge_mm` replace the profile's
 prime and tool-change purge; elsewhere they answer 400. On an MMU the prime
 is the purge line. `single_tool_file`, on an MMU only, is a file that
 prints on tool 0 alone and has no MMU profile, as one sliced for the
-printer without the MMU; it takes neither override. On a toolchanger,
+printer without the MMU; it takes neither override. Only such a file is
+single-tool to the firmware: a one-color MMU3 profile file lists all five
+slots, so it isn't, even on slot 0. On a toolchanger,
 `spool_join` is a list of `{"tool": A, "to": B}`: when tool A runs out, the
 print goes on with tool B. Each tool joins on once and is joined to once,
 no chain loops, and B can't be a tool the segments use. The page's start
