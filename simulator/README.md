@@ -240,6 +240,11 @@ that trace. The points that matter for the bridge, in short:
   change isn't an unload; the incoming tool gets a purge. Neither stores
   UUIDs, so `M865.1` does nothing there. Disabled tools don't appear in
   `/api/v1/filament`.
+- A model's feed system, direct or toolchanger, holds the rules that differ
+  between the two (`feed.py`). The XL and INDX models are toolchangers, and
+  the rest are direct. The feed system says whether `select_tool` can pick a
+  tool, whether the preview's tools-mapping screen applies, and what a
+  print's tool change does.
 - MINI, MK3.5 and MK3.5S report the material with no counters. The
   `no_endpoint` firmware mode answers 404, like stock firmware.
 

@@ -145,17 +145,17 @@ def view(loaded=True, material="PLA", enabled=True) -> ToolView:
 
 
 def test_a_print_on_a_loaded_tool_of_its_type_asks_nothing():
-    assert print_checks(1, {0: "PLA"}, {0: view()}) == PrintChecks([], [], [])
+    assert print_checks(False, {0: "PLA"}, {0: view()}) == PrintChecks([], [], [])
     assert wrong_types({0: "PLA"}, {0: view()}) == []
 
 
 def test_an_empty_used_tool_warns_then_waits_for_a_load():
-    checks = print_checks(1, {0: "PLA"}, {0: view(loaded=False)})
+    checks = print_checks(False, {0: "PLA"}, {0: view(loaded=False)})
     assert checks == PrintChecks([Failed("T0 has no filament", False)], [], [0])
 
 
 def test_another_type_is_a_question_of_its_own():
-    assert print_checks(1, {0: "PETG"}, {0: view()}) == PrintChecks([], [], [])
+    assert print_checks(False, {0: "PETG"}, {0: view()}) == PrintChecks([], [], [])
     assert wrong_types({0: "PETG"}, {0: view()}) == [Failed("T0 holds PLA, not PETG", False)]
 
 
@@ -171,18 +171,18 @@ def test_the_type_is_compared_exactly():
 def test_a_file_that_names_no_type_skips_the_type_check():
     for want in (None, "---"):
         assert wrong_types({0: want}, {0: view(material="PETG")}) == []
-        assert print_checks(5, {0: want, 1: "PLA"}, {0: view(), 1: view()}).mapping == []
+        assert print_checks(True, {0: want, 1: "PLA"}, {0: view(), 1: view()}).mapping == []
 
 
 def test_only_used_tools_are_checked():
     tools = {0: view(), 1: view(loaded=False), 2: view(enabled=False)}
-    assert print_checks(1, {0: "PLA"}, tools) == PrintChecks([], [], [])
+    assert print_checks(False, {0: "PLA"}, tools) == PrintChecks([], [], [])
     assert wrong_types({0: "PLA"}, {**tools, 1: view(material="ABS")}) == []
 
 
 def test_a_disabled_used_tool_is_fatal_and_checked_no_further():
     tools = {0: view(enabled=False, loaded=False)}
-    found = print_checks(1, {0: "PETG"}, tools)
+    found = print_checks(False, {0: "PETG"}, tools)
     assert found.rows == [
         Failed("the print uses more tools than are enabled", False),
         Failed("T0 is disabled", True),
@@ -192,14 +192,14 @@ def test_a_disabled_used_tool_is_fatal_and_checked_no_further():
 
 def test_more_used_tools_than_enabled_ones_warns():
     tools = {0: view(), 1: view(enabled=False), 2: view(enabled=False)}
-    found = print_checks(5, {0: None, 1: None}, tools)
+    found = print_checks(True, {0: None, 1: None}, tools)
     assert found.rows == [Failed("the print uses more tools than are enabled", False)]
     assert found.mapping == [Failed("T1 is disabled", True)]
 
 
 def test_a_toolchanger_asks_about_its_tools_on_the_mapping_screen():
     tools = {0: view(loaded=False), 1: view(material="PETG"), 2: view(enabled=False)}
-    found = print_checks(5, {0: "PLA", 1: "PLA", 2: "PLA"}, tools)
+    found = print_checks(True, {0: "PLA", 1: "PLA", 2: "PLA"}, tools)
     # Tool by tool, in the order of `VirtualToolCheck`: the tool, its filament, its type.
     assert found == PrintChecks(
         [Failed("the print uses more tools than are enabled", False)],
@@ -217,20 +217,20 @@ def test_a_toolchanger_asks_about_its_tools_on_the_mapping_screen():
 def test_tool_mapping_needs_two_used_or_two_enabled_tools():
     one = {0: view()}
     two = {0: view(), 1: view()}
-    assert not tool_mapping(1, {0: None}, one)  # no toolchanger
-    assert not tool_mapping(5, {0: None}, one)  # one tool enabled, one used
-    assert tool_mapping(5, {0: None}, two)
-    assert tool_mapping(5, {0: None, 1: None}, {0: view(), 1: view(enabled=False)})
-    assert not tool_mapping(5, {}, two)
+    assert not tool_mapping(False, {0: None}, one)  # no toolchanger
+    assert not tool_mapping(True, {0: None}, one)  # one tool enabled, one used
+    assert tool_mapping(True, {0: None}, two)
+    assert tool_mapping(True, {0: None, 1: None}, {0: view(), 1: view(enabled=False)})
+    assert not tool_mapping(True, {}, two)
     # With nothing wrong, the screen still shows: it has no rows.
-    assert print_checks(5, {0: None}, two) == PrintChecks([], [], [], mapped=True)
+    assert print_checks(True, {0: None}, two) == PrintChecks([], [], [], mapped=True)
     # Without tool mapping, an XL with one tool enabled checks as a single-tool printer does.
-    found = print_checks(5, {1: "PLA"}, {0: view(enabled=False), 1: view(loaded=False)})
+    found = print_checks(True, {1: "PLA"}, {0: view(enabled=False), 1: view(loaded=False)})
     assert found == PrintChecks([Failed("T1 has no filament", False)], [], [1])
 
 
 def test_no_setting_governs_a_print_s_checks():
     # `checks` is for a file's `M862` lines; a print's rows have fixed severities.
     tools = {0: view(loaded=False), 1: view(enabled=False)}
-    found = print_checks(5, {0: "PLA", 1: "PLA"}, tools)
+    found = print_checks(True, {0: "PLA", 1: "PLA"}, tools)
     assert [r.fatal for r in found.mapping] == [False, False, True]

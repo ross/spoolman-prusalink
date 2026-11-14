@@ -28,6 +28,7 @@ from simulator.compatibility import (
     XL_CHECKS,
     GCodeChecks,
 )
+from simulator.feed import FEED_SYSTEMS, Feed, FeedSystem
 from simulator.preview import (
     Failed,
     Severity,
@@ -254,6 +255,13 @@ class ModelInfo:
         Core One L build `M865.1` and the tag reader.
         """
         return self.uuids and tool == UUID_TOOL
+
+    @property
+    def feed(self) -> Feed:
+        """The build's feed system. The `HAS_TOOLCHANGER` builds, XL and INDX, are exactly
+        the ones with more than one tool (`ProjectOptions.cmake`), and `script/firmware-check`
+        compares `max_tools`, so it covers this too."""
+        return Feed.TOOLCHANGER if self.max_tools > 1 else Feed.DIRECT
 
     def preset_temperatures(self, name: str) -> dict[str, int]:
         """Return the temperatures a material named `name` starts from, as `Material`
@@ -649,6 +657,11 @@ class SimPrinter:
         if any(t.process is not None for t in self.tools.values()):
             return State.BUSY
         return self.screen
+
+    @property
+    def feed(self) -> FeedSystem:
+        """The rules of the model's feed system."""
+        return FEED_SYSTEMS[self.model.feed]
 
     # Plumbing.
 
@@ -1489,7 +1502,7 @@ class SimPrinter:
             raise Invalid(f"T{t.index} has no filament")
 
     def _check_select(self, t: SimTool) -> None:
-        if self.model.max_tools == 1:
+        if not self.feed.selectable:
             raise Invalid(f"{self.model.name} has one tool")
         if self.job is not None or self.state is State.BUSY:
             raise Busy(f"can't pick a tool while {self.state}")
@@ -1765,7 +1778,7 @@ class SimPrinter:
 
     def _ask_print(self, job: UserJob) -> None:
         """The "G-code incompatible" screen (`stateFromPrinterCheck`), then the rest."""
-        rows = print_checks(self.model.max_tools, self._uses(job), self._tool_views()).rows
+        rows = print_checks(self.feed.tool_mapping, self._uses(job), self._tool_views()).rows
         if rows:
             self._preview_question(job, Reason.PREVIEW, rows)
         else:
@@ -1779,7 +1792,7 @@ class SimPrinter:
         applies, with nothing wrong too: only a remote start that is fully compatible skips
         it (`checks_done` in `src/common/marlin_print_preview.cpp`).
         """
-        checks = print_checks(self.model.max_tools, self._uses(job), self._tool_views())
+        checks = print_checks(self.feed.tool_mapping, self._uses(job), self._tool_views())
         if checks.mapped:
             job.mapping = self._mapping_report(job, checks.mapping)
             self._wait(job, job.mapping[0])
@@ -1819,7 +1832,7 @@ class SimPrinter:
         """The wrong-filament screen (`stateFromFilamentType`), which a printer with tool
         mapping leaves to its tools-mapping screen."""
         uses, views = self._uses(job), self._tool_views()
-        rows = [] if tool_mapping(self.model.max_tools, uses, views) else wrong_types(uses, views)
+        rows = [] if tool_mapping(self.feed.tool_mapping, uses, views) else wrong_types(uses, views)
         if rows:
             self._preview_question(job, Reason.WRONG_FILAMENT, rows)
         else:
@@ -1905,13 +1918,7 @@ class SimPrinter:
         new = segments[job.segment].tool
         if new == old:
             return
-        self.selected_tool = new
-        self._log("job", f"tool change T{old} -> T{new}")
-        # Nothing checks for filament at a pickup, and a runout needs the sensor to go from
-        # filament to none, so an empty tool prints on and counts what it would have fed
-        # (`check_runout` in `src/feature/filament_sensor/filament_sensors_handler.cpp`,
-        # `check_for_events` in `filament_sensor.cpp`).
-        self._track(self.tools[new], self.settings.toolchange_purge_mm)
+        self.feed.tool_change(self, self.tools[old], self.tools[new])
 
     # The sync job.
 

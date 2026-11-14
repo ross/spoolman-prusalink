@@ -141,26 +141,27 @@ class PrintChecks:
     mapped: bool = False
 
 
-def tool_mapping(max_tools: int, uses: dict[int, str | None], tools: dict[int, ToolView]) -> bool:
+def tool_mapping(mapping: bool, uses: dict[int, str | None], tools: dict[int, ToolView]) -> bool:
     """Whether the print goes through the tools-mapping screen
     (`is_tool_mapping_possible` in `src/common/tools_mapping.cpp`, which the `WATCHED` row
     "the tool mapping condition" guards).
 
-    The toolchanger builds have tool mapping, and so do MMU builds with the MMU on, which
-    the simulator never is. It applies when the print uses more than one tool, or when more
-    than one tool is enabled and the print uses one. A file with no `filament used [g]`,
-    such as the bridge's sync job, uses none (`UsedExtrudersCount` in
-    `src/common/gcode/gcode_info.cpp`), so it never applies there.
+    `mapping` says whether the printer has tool mapping at all: the toolchanger builds do,
+    and so do MMU builds with the MMU on, which the simulator never is. It applies when the
+    print uses more than one tool, or when more than one tool is enabled and the print uses
+    one. A file with no `filament used [g]`, such as the bridge's sync job, uses none
+    (`UsedExtrudersCount` in `src/common/gcode/gcode_info.cpp`), so it never applies there.
     """
     enabled = sum(t.enabled for t in tools.values())
-    return max_tools > 1 and (len(uses) > 1 or (enabled > 1 and len(uses) > 0))
+    return mapping and (len(uses) > 1 or (enabled > 1 and len(uses) > 0))
 
 
 def print_checks(
-    max_tools: int, uses: dict[int, str | None], tools: dict[int, ToolView]
+    mapping: bool, uses: dict[int, str | None], tools: dict[int, ToolView]
 ) -> PrintChecks:
     """Return the preview's questions about a print that uses the tools in `uses`, each with
-    the filament type its file names or None.
+    the filament type its file names or None, on a printer that has tool mapping when
+    `mapping` is true.
 
     `generate_without_toolmapping` and `generate_toolmapping_only_noclear` in
     `src/feature/compatibility_checks/gcode_compatibility.cpp`, as
@@ -174,7 +175,7 @@ def print_checks(
     rows = []
     if len(uses) > sum(t.enabled for t in tools.values()):
         rows.append(Failed("the print uses more tools than are enabled", False))
-    mapped = tool_mapping(max_tools, uses, tools)
+    mapped = tool_mapping(mapping, uses, tools)
     per_tool = []
     for index in sorted(uses):
         t = tools[index]
