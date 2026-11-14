@@ -273,6 +273,8 @@ function renderPrinter(p) {
     Number(m.feed_ratio).toFixed(4) + ', load ' + esc(m.slow_load_mm) + ' + ' + esc(m.fast_load_mm) +
     ', purge ' + esc(m.purge_mm) + ' mm' + (p.high_flow ? ' (high-flow)' : '') + '</small></div>';
 
+  const a = p.actions || {};
+  const canTap = !!attn && a.tap_through == null;
   h += '<div class="jobline">';
   if (job) {
     h += '<span title="' + esc(job.kind + ' ' + job.name + ' ' + ph) + '">job <b>#' + esc(job.id) + '</b> ' + esc(job.kind) + ' ' + esc(job.name) +
@@ -285,14 +287,17 @@ function renderPrinter(p) {
     } else if (job.total_mm) {
       h += '<small>' + Number(job.fed_mm || 0).toFixed(0) + '/' + Number(job.total_mm).toFixed(0) + ' mm</small>';
     }
-    if (attn) h += '<span class="attn" title="' + esc(attn) + '">' + esc(attn) + '</span>';
+    if (attn) {
+      // A question that Tap through answers isn't an error: say how to go on.
+      const hint = attn + (canTap ? '. Tap through to go on, or Cancel' : '');
+      h += '<span class="attn' + (canTap ? ' ask' : '') + '" title="' + esc(hint) + '">' + esc(hint) + '</span>';
+    }
   } else {
     h += '<span class="muted">no job</span>';
   }
   h += '</div>';
   h += '<div class="msgline">' + (p.message ? '<span class="pill" title="last M117: ' + esc(p.message) + '">' + esc(p.message) + '</span>' : '') + '</div>';
 
-  const a = p.actions || {};
   h += '<div class="btns">' +
     btn('Start print', 'toggle', gate(a, 'start_print', { form: 'start', cls: isOpen(p, 'start') ? 'on' : '' })) +
     btn('Pause', 'pause', gate(a, 'pause')) +
@@ -306,7 +311,7 @@ function renderPrinter(p) {
     btn('Power-loss resume', 'power_loss', gate(a, 'reboot', { title: 'reboot, keeping the job' })) +
     '<label title="the bed cools during the outage, so the print waits for Resume"><input type="checkbox" data-k="cold"' +
     (getv(p.name, 'cold', false) ? ' checked' : '') + '>cold bed</label>' +
-    btn('Tap through', 'tap_through', gate(a, 'tap_through')) +
+    btn('Tap through', 'tap_through', gate(a, 'tap_through', { cls: canTap ? 'on' : '' })) +
     btn('Clear jam', 'clear_jam', gate(a, 'clear_jam')) +
     btn('Filament sensors', 'sensors', { cls: p.sensors ? 'on' : '', title: 'the menu switch for every filament sensor' }) +
     btn('Counter step back', 'toggle', { form: 'counter', cls: isOpen(p, 'counter') ? 'on' : '' }) +

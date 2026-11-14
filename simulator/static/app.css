@@ -81,6 +81,7 @@ button.fixw { min-width: 5em; }
 .bar { flex: 1 1 100px; min-width: 80px; height: 8px; background: var(--pill); border-radius: 4px; overflow: hidden; }
 .bar > i { display: block; height: 100%; background: var(--printing); }
 .attn { color: var(--err); font-weight: 600; }
+.attn.ask { color: var(--accent); }
 .btns { display: flex; flex-wrap: wrap; gap: 3px; margin: 4px 0; }
 
 table.tools { width: 100%; border-collapse: collapse; margin-top: 4px; table-layout: fixed; }
