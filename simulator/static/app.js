@@ -308,7 +308,7 @@ function renderPrinter(p) {
 
   if (isOpen(p, 'start')) {
     h += '<div class="form">' +
-      '<label>segments (tool:mm per line)<textarea data-k="start.segments">' + esc(getv(p.name, 'start.segments', '0:1000')) + '</textarea></label>' +
+      '<label>segments (tool:mm or tool:mm:TYPE per line)<textarea data-k="start.segments">' + esc(getv(p.name, 'start.segments', '0:1000')) + '</textarea></label>' +
       '<label>duration s' + inp(p, 'start.duration', '', 'type="number" step="any"') + '</label>' +
       '<label>preheat s' + inp(p, 'start.preheat', '', 'type="number" step="any"') + '</label>' +
       '<label>color changes mm (a, b)' + inp(p, 'start.cc', '', 'type="text"') + '</label>' +
@@ -387,9 +387,11 @@ function startBody(name) {
   const segs = [];
   for (const line of String(getv(name, 'start.segments', '0:1000')).split('\n')) {
     if (!line.trim()) continue;
-    const m = /^\s*(\d+)\s*[:=]\s*([0-9.]+)\s*$/.exec(line);
+    const m = /^\s*(\d+)\s*[:=]\s*([0-9.]+)\s*(?::\s*(\S+)\s*)?$/.exec(line);
     if (!m) throw new Error('Bad segment line: ' + line.trim());
-    segs.push({ tool: Number(m[1]), slicer_mm: Number(m[2]) });
+    const seg = { tool: Number(m[1]), slicer_mm: Number(m[2]) };
+    if (m[3]) seg.material = m[3];
+    segs.push(seg);
   }
   if (!segs.length) throw new Error('Add at least one segment');
   const body = { segments: segs };
