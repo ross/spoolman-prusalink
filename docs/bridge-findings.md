@@ -494,8 +494,8 @@ written.
   filament-not-inserted screen offers the same, and the print goes on
   alike (F29). The print then runs through the empty tool, and the tracker
   counts every move on that tool with no material, a toolchanger's
-  priming and purges included. A power-panic resume gets there a second way: when the
-  filament was pulled out while the power was off, the idle sensor clear
+  priming and purges included. A power-panic resume gets there a second
+  way: when the filament was pulled out while the power was off, the idle sensor clear
   in the window before the resume counts the unload and clears the type,
   and the resumed print goes on through the empty tool, since a runout
   needs the sensor to see the filament go (F12, F29). The resume's feed
