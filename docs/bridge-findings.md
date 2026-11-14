@@ -733,7 +733,7 @@ workstream 5. The MMU's scenario rows are T12, T13, T14 and T17.
 - **Scenario rows**: S1, S2, S9, S13, T13.
 - **To reproduce**: That test: with spool 3 moved into slot 0's location,
   slot 0 is ejected and preloaded with PETG. No unload is recorded, spool 3
-  stays staged, and the next print's 135 mm goes to spool 1, which is
+  stays staged, and the next print's 103 mm goes to spool 1, which is
   flagged for the printer's PETG.
 - **Status**: Open.
 

@@ -254,19 +254,19 @@ class Mmu(FeedSystem):
     def prime(self, p: SimPrinter, job: UserJob, slicer: MmuSlicer | None) -> None:
         """The print's start, before its first segment.
 
-        A file that uses tool 0 alone, by its filament use, gets the firmware's own load
-        first when the MMU is Active and no slot is selected: a `T0` through the tool
-        mapping, then 35 mm
-        (`PrintInit`, `marlin_server.cpp:2492-2518`). A single-tool file stops there, and
-        a one-color profile file for slot 0 goes on with its start, whose `T0` then finds
-        the slot selected. The profile's start retracts with no slot selected yet, so
+        A single-tool file, one sliced without the MMU3 profile, gets the firmware's own
+        load when the MMU is Active and no slot is selected: a `T0` through the tool
+        mapping, then 35 mm (`PrintInit`, `marlin_server.cpp:2493-2521`), and has no
+        start of its own. A file from the MMU3 profile is never single-tool, even with one
+        color on slot 0: it lists filament used for all five slots, and the firmware's
+        test needs every tool but 0 left out (`GCodeInfo::is_singletool_gcode`,
+        `gcode_info.cpp:611-625`). Its start retracts with no slot selected yet, so
         uncounted, sends `T<first>`, whose feed counts on no slot either, and loads and
         purges the first slot (`MmuSlicer`). Its second `T<first>` after the start changes
         nothing: that it's a no-op in the firmware is unverified.
         """
         first = p.tools[p._seg_tool(job, 0)]
-        single = all(s.tool == 0 for s in job.spec.segments)
-        if p.mmu.active and p.selected_tool is None and single:
+        if p.mmu.active and p.selected_tool is None and job.spec.single_tool_file:
             p._log("job", "a file on tool 0 alone: the firmware loads T0")
             p._mmu_change(first)
             p._print_moves(first, SINGLE_TOOL_LOAD)

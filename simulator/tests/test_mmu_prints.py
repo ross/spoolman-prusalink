@@ -133,21 +133,16 @@ def test_the_same_print_again_in_one_boot_counts_40_less_at_its_start():
     assert START - 40 == 30
 
 
-@pytest.mark.parametrize(
-    ("slot", "counted"),
-    [
-        # A file on tool 0 alone is single-tool by its filament use, so the firmware loads
-        # slot 0 first: `T0` from none, then 35 mm. The profile's -2 then counts on slot 0,
-        # its `T0` finds the slot selected and does nothing, and 17 + 53 count 15 + 53.
-        (0, 35 + 15 + 53 + 40 + 19.3),
-        # On slot 2 the -2 and the `T2` count nothing, then 17 + 53.
-        (2, START + 40 + 19.3),
-    ],
-)
-def test_a_one_color_print(slot, counted):
+@pytest.mark.parametrize("slot", [0, 2])
+def test_a_one_color_print(slot):
+    # A one-color file from the MMU3 profile lists filament used for all five slots, so
+    # it isn't single-tool even on slot 0 (`GCodeInfo::is_singletool_gcode`), and the
+    # firmware loads nothing first. The -2 and the `T<slot>` count nothing, then 17 + 53
+    # count on the slot. No tower: the print's -0.7, then `M702`'s +20 counts 19.3 past
+    # it, and unloads.
     sim, p = make_mmu(types={0: PLA, 2: PLA})
     finish(sim, p, spec((slot, 40)))
-    # No tower: the print's -0.7, then `M702`'s +20 counts 19.3 past it, and unloads.
+    counted = START + 40 + 19.3
     assert counts(p)[slot] == pytest.approx(counted)
     assert sum(counts(p).values()) == pytest.approx(counted)
     assert p.selected_tool is None and not p.mmu.path.loaded
