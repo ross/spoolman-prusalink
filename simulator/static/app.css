@@ -88,9 +88,9 @@ table.tools { width: 100%; border-collapse: collapse; margin-top: 4px; table-lay
 table.tools col.c-n { width: 2.2em; }
 table.tools col.c-en { width: 2em; }
 table.tools col.c-ld { width: 3.4em; }
-table.tools col.c-ex { width: 3.8em; }
-table.tools col.c-ul { width: 2em; }
-table.tools col.c-at { width: 3.4em; }
+table.tools col.c-ex { width: 4.6em; }
+table.tools col.c-ul { width: 2.4em; }
+table.tools col.c-at { width: 4.2em; }
 table.tools col.c-gap { width: 2.8em; }
 table.tools tr.t td { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 /* A material's name is never cut: on a narrow card it wraps. */

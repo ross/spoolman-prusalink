@@ -178,6 +178,9 @@ function matHtml(m, prev) {
     '</span>';
 }
 
+// A number cell, with its value as a tooltip in case the column cuts it.
+function num(v) { return '<td class="num" title="' + esc(v) + '">' + esc(v) + '</td>'; }
+
 function renderTool(p, t) {
   const proc = t.process;
   const i = t.index;
@@ -201,9 +204,7 @@ function renderTool(p, t) {
     '<td>' + (t.loaded ? 'yes' : '<span class="muted">no</span>') + '</td>' +
     '<td class="mat">' + matHtml(t.material, false) + '</td>' +
     '<td class="mat">' + matHtml(t.kept_type || t.previous, true) + '</td>' +
-    '<td class="num">' + Math.floor(t.extruded || 0) + '</td>' +
-    '<td class="num">' + t.unload_count + '</td>' +
-    '<td class="num">' + t.extruded_at_unload + '</td>' +
+    num(Math.floor(t.extruded || 0)) + num(t.unload_count) + num(t.extruded_at_unload) +
     '<td class="num">' + Number(t.gap || 0).toFixed(1) + '</td></tr>';
 
   // The process text and the flags come and go, so they sit on a line of their own under
@@ -274,7 +275,8 @@ function renderPrinter(p) {
     ', purge ' + esc(m.purge_mm) + ' mm' + (p.high_flow ? ' (high-flow)' : '') + '</small></div>';
 
   const a = p.actions || {};
-  const canTap = !!attn && a.tap_through == null;
+  // Tap through stops a job held on a parse error; every other question it answers goes on.
+  const canTap = !!attn && at.reason !== 'parse error' && a.tap_through == null;
   h += '<div class="jobline">';
   if (job) {
     h += '<span title="' + esc(job.kind + ' ' + job.name + ' ' + ph) + '">job <b>#' + esc(job.id) + '</b> ' + esc(job.kind) + ' ' + esc(job.name) +
