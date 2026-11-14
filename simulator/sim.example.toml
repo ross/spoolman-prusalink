@@ -41,6 +41,7 @@ model = "8.1.0"                     # Core One L: holds an instance UUID on tool
 # checks = "warn"                   # the print preview: ignore, warn or abort a failed check
 # high_flow = false                 # a high-flow nozzle doubles the load's purge, but not on INDX
 # auto_retract = true               # false turns the auto-retract off where the model can
+# sensors = true                    # false turns every filament sensor off, as the menu does
 
 [[printers.tools]]
 index = 0

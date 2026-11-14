@@ -37,6 +37,7 @@ _PRINTER_KEYS = {
     "checks",
     "high_flow",
     "auto_retract",
+    "sensors",
     "tools",
 }
 _TOOL_KEYS = {"index", "enabled", "material", "extruded", "unload_count", "extruded_at_unload"}
@@ -70,6 +71,7 @@ class PrinterConfig:
     checks: str = Severity.WARN.value
     high_flow: bool = False
     auto_retract: bool = True
+    sensors: bool = True  # the menu switch for every filament sensor
     tools: tuple[ToolConfig, ...] = (ToolConfig(0),)
 
 
@@ -252,6 +254,7 @@ def _printer(entry: object, position: int, control_port: int) -> PrinterConfig:
         checks=checks,
         high_flow=_bool(entry.get("high_flow", False), f"{prefix}.high_flow"),
         auto_retract=auto_retract,
+        sensors=_bool(entry.get("sensors", True), f"{prefix}.sensors"),
         tools=_tools(entry.get("tools"), prefix, model),
     )
 
@@ -386,6 +389,7 @@ def build(cfg: SimConfig) -> Simulation:
                 checks=Severity(pc.checks),
                 high_flow=pc.high_flow,
                 auto_retract=pc.auto_retract,
+                sensors=pc.sensors,
                 tools=tools,
                 selected_tool=enabled[0] if enabled else min(tools),
             )

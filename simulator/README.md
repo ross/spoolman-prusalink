@@ -75,7 +75,8 @@ poll_idle = 3
 See [sim.example.toml](sim.example.toml), which shows every setting with its
 default. A printer has a `model` (a PrusaLink type code such as `8.1.0`), an
 `api_key`, a `firmware` mode, `checks` for the print preview, `high_flow`
-for a high-flow nozzle, and `[[printers.tools]]` entries that can start
+for a high-flow nozzle, `sensors` for the menu's switch of every filament
+sensor, and `[[printers.tools]]` entries that can start
 loaded with a material and counters. `checks` is `ignore`, `warn` (the
 default) or `abort`, and it stands for every setting in the printer's menu
 that governs a check of a file's `M862` lines. The top-level settings are
@@ -106,8 +107,8 @@ Actions: `load`, `unload`, `extrude`, `retract`, `select_tool`,
 `start_print`, `pause`, `resume`, `cancel`, `dismiss`, `home`, `runout`, `jam`,
 `clear_jam`, `reboot`, `set_power`, `set_fault`, `set_firmware`,
 `set_sensor_fault`, `set_stuck_write`, `set_tool_enabled`,
-`set_checks`, `counter_step_back`, `set_extruded_at_unload`,
-`tap_through`. Parameter names are the keyword arguments of the methods with
+`set_checks`, `set_sensors`, `counter_step_back`,
+`set_extruded_at_unload`, `tap_through`. Parameter names are the keyword arguments of the methods with
 those names in `model.py`, and their type hints say what each takes: JSON
 `true` or `false` for a bool, an integer such as `3` (not `3.0`) for an int,
 any finite number for a float, and a listed value for an enum. An action the
@@ -195,13 +196,21 @@ that trace. The points that matter for the bridge, in short:
   stored type isn't the segment's `material`, compared exactly, asks
   again. On the XL and INDX, a print that uses two tools, or any print with
   two tools enabled, asks one tools-mapping question with every per-tool
-  row, the type included, and asks it with nothing wrong too. Nothing loads
-  there: the print waits for a load when it reaches an empty tool, as a
-  tool change into one does. While that question is up the printer isn't
-  printing, so the idle sensor clear runs on the picked tool.
+  row, the type included, and asks it with nothing wrong too. While that
+  question is up the printer isn't printing, so the idle sensor clear runs
+  on the picked tool. Nothing loads there. Print with a used tool empty asks
+  again, to turn the filament sensors off: `tap_through` does, and `cancel`
+  goes back to the tools-mapping screen.
   `tap_through` answers Print or Ok, and `cancel` answers Abort or No,
   which ends in `IDLE` with no job and the ID used up. `checks` governs
   none of these: the firmware's severities are fixed.
+- A print never waits for a tool with no filament. A runout needs the sensor
+  to see filament go, and nothing checks for filament when a tool is
+  picked, so a print that reaches an empty tool prints on through it: the
+  tool's `extruded` counts the purge and the moves with no `material`.
+  `sensors` is the menu's switch for every filament sensor. Off, there's no
+  runout, no idle sensor clear and no filament question at the preview, and
+  it stays off until `set_sensors` turns it on.
 - Every print start shows `PRINTING`, then a brief `IDLE` with no job, then
   `PRINTING`. `FINISHED` and `STOPPED` persist until dismissed, and the job
   disappears from `/api/v1/status` and `/api/v1/job` as soon as a print ends.
@@ -301,9 +310,15 @@ Choices made where the firmware was silent or the plan left it open:
 - The preview's load is the user's choice of what to load. The firmware
   loads the file's type when it knows the name and asks otherwise. The
   wrong-filament screen's Change, which runs a filament change, and the
-  "disable the filament sensor" answer aren't modeled. Neither is the
+  filament-not-inserted screen's "disable the filament sensor" answer
+  aren't modeled. Neither is the
   firmware's mapping of a print with one tool to the only enabled tool on a
   toolchanger. The load can't be cancelled.
+- A print's end auto-retracts the picked tool even when it has no
+  filament, as the simulator does for a loaded one. The source doesn't
+  say otherwise, but a trace hasn't shown it. The firmware refuses to turn
+  the sensors off when a print joins spools, which the simulator doesn't
+  model.
 - The preview doesn't model an uncalibrated INDX nozzle cleaner, which
   refuses every print, the unfinished-selftest screen, the
   new-firmware screen (`M115 U`, which continues by itself after 30 s),

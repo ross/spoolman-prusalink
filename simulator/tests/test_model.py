@@ -436,13 +436,70 @@ def test_multi_tool_print_attributes_extrusion_and_purges():
     assert all(t.unload_count == 0 for t in p.tools.values())
 
 
-def test_tool_change_to_empty_tool_waits_for_it():
+# T1's count: the pickup's 30 mm purge and 10 printed, and on the XL the end's
+# auto-retract, 23. INDX's end retract already counts as fully retracted.
+@pytest.mark.parametrize(
+    ("model", "counted"), [("3.1.0", (30 + 10 + 23) * 0.95), ("8.10.0", 40 * 550 / 576)]
+)
+def test_a_print_goes_on_through_an_empty_tool_with_the_sensors_off(model, counted):
+    sim, p = make(model, [loaded(0, PETG), SimTool(1)])
+    p.start_print(PrintSpec([Segment(0, 10), Segment(1, 10)], preheat_s=0))
+    sim.tick(0.5)
+    assert str(p.job.attention) == "tools mapping: T1 has no filament"
+    p.tap_through()  # Print, which asks to turn the sensors off first
+    assert str(p.job.attention) == "filament sensors off: T1 has no filament"
+    assert p.state is State.ATTENTION and p.sensors
+    p.tap_through()  # turn them off
+    assert not p.sensors and p.job.phase is JobPhase.BLIP
+    sim.tick(0.3 + 3)
+    # Nothing checks a picked tool for filament, so T1 prints with none: its counter counts
+    # the pickup's 30 mm purge and what it feeds, and no type appears.
+    assert "tool change T0 -> T1" in [e.text for e in sim.events if e.kind == "job"]
+    assert p.state is State.PRINTING and p.tools[1].extruded > 0
+    assert "material" not in prusalink.filament(p)["tools"][1]
+    sim.tick(100)
+    assert p.state is State.FINISHED and not p.sensors
+    assert p.tools[1].extruded == pytest.approx(counted)
+    assert p.tools[1].unload_count == 0 and p.tools[1].material is None
+
+
+def test_cancel_on_the_sensors_question_goes_back_to_the_mapping_screen():
     sim, p = make("8.10.0", [loaded(0, PETG), SimTool(1)])
     p.start_print(PrintSpec([Segment(0, 10), Segment(1, 10)], preheat_s=0))
     sim.tick(0.5)
-    p.tap_through()  # Print on the tools-mapping screen, which warns about T1
+    p.tap_through()
+    p.cancel()  # Cancel
+    assert str(p.job.attention) == "tools mapping: T1 has no filament" and p.sensors
+    p.cancel()  # Abort
+    assert p.job is None and p.state is State.IDLE and p.job_counter == 1
+
+
+def test_with_the_sensors_off_nothing_reads_them():
+    sim, p = make("8.10.0", [loaded(0, PETG), SimTool(1)])
+    p.set_sensors(False)
+    # No filament question at the preview: the print goes straight on.
+    p.start_print(PrintSpec([Segment(0, 10), Segment(1, 10)], preheat_s=0))
+    sim.tick(0.5)
+    assert str(p.job.attention) == "tools mapping: nothing wrong"
+    p.tap_through()
+    assert p.job.phase is JobPhase.BLIP
+    sim.tick(0.3 + 1)
+    assert p.actions_json()["cancel"] is None  # printing
+    with pytest.raises(Busy, match="sensors are off"):
+        p.runout(0)  # a runout is the sensor seeing the filament go
+    p.jam(0, unload=False)  # a jam is found another way
+    p.clear_jam()
+    p.resume()
     sim.tick(100)
-    assert p.job.phase is JobPhase.WAIT_LOAD and str(p.job.attention) == "no filament in tool 1"
+    # No idle sensor clear: a tool emptied by hand keeps its type, picked or at boot.
+    tool0(p).loaded = False
+    p.select_tool(0)
+    sim.tick(1)
+    p.reboot()
+    assert tool0(p).material == PETG and tool0(p).unload_count == 0
+    p.set_sensors(True)
+    sim.tick(1)
+    assert tool0(p).material is None and tool0(p).unload_count == 1
 
 
 # Power and boot.
@@ -875,30 +932,6 @@ def test_no_print_while_a_tool_process_runs():
     assert p.state is State.BUSY and not p.can_print()
 
 
-def test_tool_change_into_an_empty_tool_purges_after_the_reload():
-    sim, p = make("8.10.0", [loaded(0, PETG), SimTool(1)])
-    p.start_print(PrintSpec([Segment(0, 10), Segment(1, 10)], preheat_s=0))
-    sim.tick(0.5)
-    p.tap_through()  # Print on the tools-mapping screen, which warns about T1
-    sim.tick(0.3 + 10)
-    assert p.job.phase is JobPhase.WAIT_LOAD and p.job.toolchange_purge
-    p.load(1, source="preset", name="PLA")
-    sim.tick(40)
-    # T1 was never unloaded, so its gap is 0 and every forward mm counts: the 15 mm slow
-    # load, the 25 mm fast load and the cleaner's 25 mm purge. The cleaner's auto-retract
-    # counts its 8 mm feed and leaves 8 mm stored (gap 8); the prime feeds those back
-    # (gap 0) and counts its 4 mm. 77 * 550/576. The 8 mm retract after the prime only
-    # opens the gap.
-    assert p.tools[1].extruded == pytest.approx(77 * 550 / 576)
-    assert p.tools[1].gap == pytest.approx(8)
-    p.resume()  # back to the empty tool's gap 0: 8 fed, then the tool change purges 30
-    assert p.tools[1].extruded == pytest.approx((77 + 30) * 550 / 576)
-    sim.tick(10)
-    assert p.state is State.FINISHED
-    # The end retracts 8 mm, which INDX counts as fully retracted: no auto-retract.
-    assert p.tools[1].extruded == pytest.approx((77 + 30 + 10) * 550 / 576)
-
-
 def test_sync_job_progress_moves_with_time():
     sim, p = make()
     run_sync(sim, p)
@@ -964,8 +997,11 @@ def test_power_loss_resume_skips_the_idle_sensor_clear():
     p.set_power("on", resume=True)
     assert p.job.id == 1 and p.state is State.BUSY
     assert tool0(p).unload_count == 0 and tool0(p).material == PLA
-    sim.tick(2 + 1)  # recovered and unparked: the empty tool stops the print
-    assert p.state is State.ATTENTION and tool0(p).extruded == 0
+    # Recovered and unparked. The sensor never saw the filament go, so nothing stops the
+    # print: it counts on with no filament, and the type stays.
+    sim.tick(2 + 1 + 1)
+    assert p.state is State.PRINTING and tool0(p).extruded > 0
+    assert tool0(p).unload_count == 0 and tool0(p).material == PLA
 
 
 def test_power_loss_while_paused_comes_back_paused():

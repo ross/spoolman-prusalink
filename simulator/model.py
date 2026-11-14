@@ -164,11 +164,13 @@ class Reason(StrEnum):
     PREVIEW = "preview"  # the print preview asks about a file's failed checks
     TOOLS_MAPPING = "tools mapping"  # a toolchanger's preview asks about the tools a print uses
     WRONG_FILAMENT = "wrong filament"  # the preview asks about a tool holding another type
+    # Print on the tools-mapping screen with a used tool empty asks to turn the sensors off.
+    SENSORS_OFF = "filament sensors off"
     PARSE_ERROR = "parse error"  # a sync job's G-code can't run
     JAM = "jam"
     RUNOUT = "runout"
     COLOR_CHANGE = "color change"
-    NO_FILAMENT = "no filament"  # a print uses or reached a tool that has none
+    NO_FILAMENT = "no filament"  # the preview's filament-not-inserted screen
     COLD_BED = "cold bed"  # the bed went cold during a power panic
 
 
@@ -180,6 +182,7 @@ PHASE_REASONS = {
             Reason.PREVIEW,
             Reason.TOOLS_MAPPING,
             Reason.WRONG_FILAMENT,
+            Reason.SENSORS_OFF,
             Reason.PARSE_ERROR,
             Reason.JAM,
         }
@@ -191,7 +194,11 @@ PHASE_REASONS = {
 }
 # The questions the print preview asks with Abort and Print or Ok, which `tap_through` and
 # `cancel` answer.
-PREVIEW_QUESTIONS = frozenset({Reason.PREVIEW, Reason.TOOLS_MAPPING, Reason.WRONG_FILAMENT})
+PREVIEW_QUESTIONS = frozenset(
+    {Reason.PREVIEW, Reason.TOOLS_MAPPING, Reason.WRONG_FILAMENT, Reason.SENSORS_OFF}
+)
+# The questions of the firmware's tools-mapping phase, while it isn't printing.
+MAPPING_QUESTIONS = frozenset({Reason.TOOLS_MAPPING, Reason.SENSORS_OFF})
 
 
 @dataclass(frozen=True)
@@ -207,7 +214,7 @@ class Attention:
 
     def __str__(self) -> str:
         match self.reason:
-            case Reason.PREVIEW | Reason.TOOLS_MAPPING | Reason.WRONG_FILAMENT:
+            case Reason.PREVIEW | Reason.TOOLS_MAPPING | Reason.WRONG_FILAMENT | Reason.SENSORS_OFF:
                 detail = self.detail or "nothing wrong"
                 return f"{self.reason}{' (abort only)' if self.fatal else ''}: {detail}"
             case Reason.PARSE_ERROR:
@@ -507,7 +514,6 @@ class UserJob(SimJob):
     segment: int = 0
     pending_color_changes: list[float] = field(default_factory=list)
     paused_from: JobPhase | None = None  # where resume goes back to
-    toolchange_purge: bool = False  # a tool change into an empty tool purges after the reload
     cold_bed: bool = False  # a power-panic resume waits for the user when the bed went cold
     clean_at: float | None = None  # RECOVER time left when the nozzle clean purges
     restore_gap: float | None = None  # the tool's gap when a filament change began
@@ -617,6 +623,9 @@ class SimPrinter:
     # How the print preview treats a failed check that a setting governs: the firmware has
     # one setting per kind of check, but they share one screen and the worst decides.
     checks: Severity = Severity.WARN
+    # The menu's switch for every filament sensor at once. Off, no sensor reads, so no
+    # runout, no idle sensor clear, and no filament check at the preview.
+    sensors: bool = True
     high_flow: bool = False  # a high-flow nozzle, which doubles the load's purge
     # The user's auto-retract switch. It has effect only on a model whose extruder has
     # one; INDX always auto-retracts, and a build without the sequence never does.
@@ -925,6 +934,8 @@ class SimPrinter:
         tool.gap, tool.gap_valid, tool.auto_retracted = self.model.gap_mm, False, None
 
     def _idle_sensor_clear(self, tool: SimTool, *, sensor_fault_counts: bool) -> None:
+        if not self.sensors:
+            return
         empty = not tool.loaded or (sensor_fault_counts and tool.sensor_fault)
         if tool.material is not None and empty:
             self._count_unload(tool, "idle sensor clear")
@@ -1168,6 +1179,10 @@ class SimPrinter:
     def cancel(self) -> None:
         self._check_cancel()
         job = self.job
+        if isinstance(job, UserJob) and job.waits_for(Reason.SENSORS_OFF):
+            self._log("action", "cancel: back to the tools-mapping screen")
+            self._after_incompatible(job)
+            return
         if self._at_preview(job) or job.phase is JobPhase.BLIP:
             # Abort or No at the preview, or a stop before the print begins, which
             # `print_abort` sends to `Aborting_Preview`: `cleanup_print` in `marlin_server.cpp`
@@ -1219,7 +1234,7 @@ class SimPrinter:
 
     def runout(self, tool: int) -> None:
         t = self._tool(tool)
-        self._check_runout(t)
+        self._check_sensor_runout(t)
         self._log("action", f"runout T{tool}")
         self._runout(t, Reason.RUNOUT)
 
@@ -1265,10 +1280,29 @@ class SimPrinter:
         self._log("action", f"tap through: {job.attention}")
         if isinstance(job, UserJob) and job.waits_for(Reason.PREVIEW):
             self._after_incompatible(job)
+        elif isinstance(job, UserJob) and job.waits_for(Reason.TOOLS_MAPPING):
+            self._mapping_print(job)
+        elif job.waits_for(Reason.SENSORS_OFF):
+            self.set_sensors(False)
+            self._begin(job)
         elif any(job.waits_for(r) for r in PREVIEW_QUESTIONS):
             self._begin(job)
         else:
             self._park(job, State.STOPPED)
+
+    def _mapping_print(self, job: UserJob) -> None:
+        """Print on the tools-mapping screen. A used tool with no filament first asks to
+        turn every filament sensor off, which stays off after the print; Cancel goes back to
+        the screen (`on_button_click` in `src/gui/screen/print/frame_tool_mapping.cpp`,
+        `gui_confirm_incompatibility` in
+        `src/feature/compatibility_checks/gcode_compatibility.cpp`)."""
+        views = self._tool_views()
+        empty = [i for i in sorted(self._uses(job)) if views[i].enabled and not views[i].loaded]
+        if empty:
+            rows = [Failed(f"T{i} has no filament", False) for i in empty]
+            self._preview_question(job, Reason.SENSORS_OFF, rows)
+        else:
+            self._begin(job)
 
     # Power and faults.
 
@@ -1387,6 +1421,10 @@ class SimPrinter:
         t.enabled = value
         self._log("action", f"T{tool} {'enabled' if value else 'disabled'}")
 
+    def set_sensors(self, value: bool) -> None:
+        self.sensors = value
+        self._log("action", f"filament sensors {'on' if value else 'off'}")
+
     def set_checks(self, value: Severity) -> None:
         self.checks = Severity(value)
         self._log("action", f"preview checks {self.checks}")
@@ -1453,6 +1491,12 @@ class SimPrinter:
             raise Invalid(f"T{t.index} isn't the selected tool")
         if not t.loaded:
             raise Busy(f"T{t.index} has no filament")
+
+    def _check_sensor_runout(self, t: SimTool) -> None:
+        # A runout is the sensor seeing the filament go. A jam is found another way.
+        self._check_runout(t)
+        if not self.sensors:
+            raise Busy("the filament sensors are off")
 
     def _check_disable(self, t: SimTool) -> None:
         job = self.job
@@ -1529,7 +1573,7 @@ class SimPrinter:
             "unload": lambda: self._check_unload(t),
             "extrude": lambda: self._check_move(t),
             "retract": lambda: self._check_move(t),
-            "runout": lambda: self._check_runout(t),
+            "runout": lambda: self._check_sensor_runout(t),
             "jam": lambda: self._check_runout(t),
             "select_tool": lambda: self._check_select(t),
             # The fault switches take any enabled tool, in any state.
@@ -1566,7 +1610,7 @@ class SimPrinter:
         t = self.tools.get(self.selected_tool)
         job = self.job
         idle = job is None and self.state in IDLE_STATES
-        mapping = job is not None and job.waits_for(Reason.TOOLS_MAPPING)
+        mapping = job is not None and any(job.waits_for(r) for r in MAPPING_QUESTIONS)
         if (idle or mapping) and t is not None and t.process is None:
             self._idle_sensor_clear(t, sensor_fault_counts=True)
 
@@ -1691,8 +1735,10 @@ class SimPrinter:
         return {s.tool: s.material for s in job.spec.segments}
 
     def _tool_views(self) -> dict[int, ToolView]:
+        # A sensor that's off reads neither filament nor none, so no check fails on it.
+        seen = {i: t.loaded or not self.sensors for i, t in self.tools.items()}
         return {
-            i: ToolView(t.enabled, t.loaded, t.material.name if t.material else None)
+            i: ToolView(t.enabled, seen[i], t.material.name if t.material else None)
             for i, t in self.tools.items()
         }
 
@@ -1749,22 +1795,8 @@ class SimPrinter:
         self._show_state()
 
     def _begin_feeding(self, job: UserJob) -> None:
-        tool = job.spec.segments[job.segment].tool
-        self.selected_tool = tool
-        if self.tools[tool].loaded:
-            if job.toolchange_purge:
-                job.toolchange_purge = False
-                self._track(self.tools[tool], self.settings.toolchange_purge_mm)
-            job.enter(JobPhase.PRINTING)
-            self._show_state()
-        else:
-            self._wait_for_filament(job, tool)
-
-    def _wait_for_filament(self, job: UserJob, tool: int) -> None:
-        job.paused_from = JobPhase.PRINTING
-        # An empty tool has no gap to go back to, so the reload resumes with none.
-        job.restore_gap = 0.0
-        job.enter(JobPhase.WAIT_LOAD, Attention(Reason.NO_FILAMENT, tool))
+        self.selected_tool = job.spec.segments[job.segment].tool
+        job.enter(JobPhase.PRINTING)
         self._show_state()
 
     def _park(self, job: UserJob | SyncJob, end: State) -> None:
@@ -1834,12 +1866,11 @@ class SimPrinter:
             return
         self.selected_tool = new
         self._log("job", f"tool change T{old} -> T{new}")
-        tool = self.tools[new]
-        if not tool.loaded:
-            job.toolchange_purge = True
-            self._wait_for_filament(job, new)
-            return
-        self._track(tool, self.settings.toolchange_purge_mm)
+        # Nothing checks for filament at a pickup, and a runout needs the sensor to go from
+        # filament to none, so an empty tool prints on and counts what it would have fed
+        # (`check_runout` in `src/feature/filament_sensor/filament_sensors_handler.cpp`,
+        # `check_for_events` in `filament_sensor.cpp`).
+        self._track(self.tools[new], self.settings.toolchange_purge_mm)
 
     # The sync job.
 
@@ -1918,6 +1949,7 @@ class SimPrinter:
             "job": job,
             "job_counter": self.job_counter,
             "checks": str(self.checks),
+            "sensors": self.sensors,
             "actions": self.actions_json(),
             "load_sources": ["tag", "preset"] if m.uuids else ["preset"],
             "tools": [

@@ -112,7 +112,13 @@ firmware update.
   A segment can name a filament type, and a tool holding another one asks.
   On the XL and INDX these rows are one tools-mapping question, which a
   print it applies to asks with nothing wrong too, and the idle sensor
-  clear runs on the picked tool while it's up.
+  clear runs on the picked tool while it's up. Print past a tool with no
+  filament turns every filament sensor off, and the print then counts on
+  that tool with no material. A printer's `sensors` switch turns off the
+  runout, the idle sensor clear and the preview's filament question. Print past a tool with no
+  filament turns every filament sensor off, and the print then counts on
+  that tool with no material. A printer's `sensors` switch turns off the
+  runout, the idle sensor clear and the preview's filament question.
 - It serves `/api/version`, `/api/v1/info`, `/api/v1/status`, `/api/v1/job`
   and `/api/v1/filament`. `/api/v1/info` always reports `mmu` as false.
 - Tests: the unit harness and the integration fixtures take a model and a
@@ -491,6 +497,17 @@ able to show it once the workstream named is built.
     `ATTENTION`, and a declined question as a write that didn't take. The
     W1 test `test_w1_custom_preamble_is_written` taps Print to get past it.
     (2.)
+20. **Usage counted on an empty tool lands on the next spool.** A print
+    that reaches a tool with no filament counts on that tool. The bridge
+    holds that usage (C7) and then charges it, with the load's own count,
+    to the spool reported next in that tool, though no spool fed it.
+    `test_a_print_through_an_empty_tool_holds_its_usage` in
+    `tests/test_toolchanger_prints.py` shows it on an INDX. (2.)
+21. **Printing past an empty tool turns the filament sensors off for
+    good.** On a toolchanger that's the only way past the tools-mapping
+    screen's "no filament" row. Until the user turns them on again, there's
+    no runout and no idle sensor clear, so an unload by hand counts nothing
+    and the bridge misses the swap. (2.)
 
 ## Open questions
 

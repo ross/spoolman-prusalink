@@ -302,6 +302,7 @@ function renderPrinter(p) {
     (getv(p.name, 'cold', false) ? ' checked' : '') + '>cold bed</label>' +
     btn('Tap through', 'tap_through', gate(a, 'tap_through')) +
     btn('Clear jam', 'clear_jam', gate(a, 'clear_jam')) +
+    btn('Filament sensors', 'sensors', { cls: p.sensors ? 'on' : '', title: 'the menu switch for every filament sensor' }) +
     btn('Counter step back', 'toggle', { form: 'counter', cls: isOpen(p, 'counter') ? 'on' : '' }) +
     btn('Set extruded_at_unload', 'toggle', { form: 'eau', cls: isOpen(p, 'eau') ? 'on' : '' }) +
     '</div>';
@@ -442,6 +443,7 @@ function onClick(e) {
       case 'pause': case 'resume': case 'cancel': case 'dismiss': case 'reboot': case 'home':
       case 'tap_through': case 'clear_jam':
         return go(act, {});
+      case 'sensors': return go('set_sensors', { value: !p.sensors });
       case 'power_loss': return go('reboot', { keep_job: true, cold_bed: !!getv(name, 'cold', false) });
       case 'start_submit':
         return go('start_print', startBody(name), () => { pst(name).open.start = false; renderCard(name); });

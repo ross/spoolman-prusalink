@@ -39,7 +39,7 @@ def test_defaults(tmp_path):
     assert (cfg.host, cfg.control_port, cfg.settings) == ("127.0.0.1", 8000, {})
     p = cfg.printers[0]
     assert (p.port, p.api_key, p.firmware, p.checks) == (8001, "sim-p", None, "warn")
-    assert not p.high_flow and p.auto_retract
+    assert not p.high_flow and p.auto_retract and p.sensors
     assert [t.index for t in p.tools] == [0]
     assert p.tools[0].material is None
 
@@ -60,6 +60,11 @@ def test_settings_overrides(tmp_path):
 
 def test_high_flow(tmp_path):
     assert load(write(tmp_path, printer("high_flow = true"))).printers[0].high_flow
+
+
+def test_sensors_off(tmp_path):
+    cfg = load(write(tmp_path, printer("sensors = false")))
+    assert not cfg.printers[0].sensors and not build(cfg).printer("p").sensors
 
 
 def test_auto_retract_off_where_the_model_has_the_switch(tmp_path):
@@ -86,6 +91,7 @@ BAD = {
     "unknown printer key": (printer("bogus = 1"), "printers[0].bogus isn't a known key"),
     "removed setting": ("load_feed_mm = 36\n" + printer(), "load_feed_mm isn't a known key"),
     "bad high flow": (printer("high_flow = 1"), "printers[0].high_flow must be true or false"),
+    "bad sensors": (printer("sensors = 1"), "printers[0].sensors must be true or false"),
     "bad auto-retract": (printer("auto_retract = 0"), "printers[0].auto_retract must be true"),
     "auto-retract off on INDX": (
         printer("auto_retract = false", model="8.10.0"),

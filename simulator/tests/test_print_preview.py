@@ -210,17 +210,16 @@ def test_a_disabled_used_tool_can_only_be_declined():
 
 
 @pytest.mark.parametrize("model", ["3.1.0", "8.10.0"])
-def test_a_toolchanger_asks_on_its_mapping_screen_then_waits_at_the_tool(model):
+def test_a_toolchanger_asks_on_its_mapping_screen_and_loads_nothing(model):
     sim, p = make(model, [loaded(0, PLA), empty(1), loaded(2, PETG)])
     p.start_print(PrintSpec([Segment(0, 10, "PLA"), Segment(1, 10, "PLA")], preheat_s=0))
     sim.tick(0.5)
     assert str(p.job.attention) == ("tools mapping: T1 has no filament; T1 holds ---, not PLA")
     assert seen(p) == ("ATTENTION", 1, "PAUSED")
     p.tap_through()  # Print: nothing loads at the preview on a toolchanger
-    sim.tick(0.3 + 2 + 1)
-    # The print reaches T1 and waits for it, as a tool change into an empty tool does.
-    assert p.job.phase is JobPhase.WAIT_LOAD and p.job.attention.tool == 1
-    assert not p.job.previewing
+    assert p.job.waits_for(Reason.SENSORS_OFF) and seen(p) == ("ATTENTION", 1, "PAUSED")
+    p.tap_through()
+    assert not p.job.previewing and p.job.phase is JobPhase.BLIP
 
 
 def two_tools(model):
