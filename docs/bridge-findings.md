@@ -236,20 +236,23 @@ written.
   dropped without an error: the parser stops at the 7-character buffer
   and skips `N` (`M865.cpp:132-133`, `gcode_parser.cpp:153-155`), and its
   error report does nothing because `M865`'s parser has no error callback
-  (`M865.cpp:57`, `gcode_parser_helper.cpp:21-24`). The type keeps its
-  old name, and the rest of the line is stored. `printer_name` in
+  (`M865.cpp:57`, `gcode_parser_helper.cpp:21-24`). The rest of the line
+  is stored. The bridge's line has `R`, which resets the name, so the tool
+  loads a type with an empty name (`M865.cpp:83-85`); without `R`, the
+  type keeps its old name. `printer_name` in
   `printer_sync.py` keeps the bridge's names inside these rules, and cuts
   them to 7 characters (`NAME_LIMIT`).
 - **Effect**: A late flag only. The printer still differs, so the bridge
   flags the spool "didn't take" after the second job (W5). The bridge
   can't write a name longer than 7 characters, so the silent drop doesn't
   reach it.
-- **Evidence**: Read in the firmware source. The simulator models the
-  preset case (`simulator/sync.py`,
-  `simulator/tests/test_model_presets.py`).
+- **Evidence**: Read in the firmware source. The simulator runs each
+  case and ends the job `FINISHED` (`simulator/sync.py`,
+  `simulator/tests/test_model.py`, `simulator/tests/test_sync.py`).
 - **Scenario rows**: W1, W5.
-- **To reproduce**: The simulator's preset-write failure, today. No bridge
-  test drives a failing `M865`.
+- **To reproduce**: A sync job in the simulator with a refused name, such
+  as `N"P L A"`, or a preset the build lacks. No bridge test drives a
+  failing `M865`.
 - **Status**: Open.
 
 ### BF7. An INDX with an uncalibrated nozzle cleaner refuses every print

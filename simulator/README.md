@@ -170,7 +170,8 @@ that trace. The points that matter for the bridge, in short:
 - Each model has its build's presets. PPS and PPA exist only on the Core One
   and Core One L. The PC and FLEX preheats differ on INDX, the MINI and the
   MK3.5, and the PA temperatures on the MINI. A menu load of a preset the
-  build lacks answers 400, and an `M865` preset write of one stores nothing.
+  build lacks answers 400, and an `M865 S"<name>"` write of one stores
+  nothing.
 - Every filament move counts as the firmware's filament tracker counts it.
   Each tool has a filament path, which holds its gap, its stored
   auto-retract distance and its sensor. A retract grows the path's gap up to
@@ -320,6 +321,14 @@ that trace. The points that matter for the bridge, in short:
   disappears from `/api/v1/status` and `/api/v1/job` as soon as a print ends.
 - The sync job is accepted only when a print could start, runs as a job
   with the uploaded file's name, and applies `M865`, `M865.1` and `M117`.
+  It reads each `M865` line as the firmware does: the type from `I`, `X` or
+  `S`, then `R`, the parameters, the name check and the load into `L`. No
+  line stops the job, which always ends `FINISHED`. A value that doesn't
+  read, such as a name longer than 7 bytes or an `L` past the build's
+  tools, is skipped and the rest of the line runs. A refused name, a preset
+  the build lacks or no type picked stores nothing. A line that doesn't
+  parse, such as one with unterminated quotes or a lowercase parameter
+  letter, and an unknown command do nothing. The event log names each.
   The job is counted at once and reads `PRINTING` while the file is
   scanned. Then the print preview checks the `M862` lines in the file's
   first 200 G-code lines: the model by compatibility group (`M862.3`), the
@@ -515,6 +524,10 @@ Choices made where the firmware was silent or the plan left it open:
   to `manual_unload` in `pause.cpp`, with no ramming and no unload counted. The simulator rams and counts it as a runout.
 - The `M865` flexible flag isn't modeled: only the preset names in
   `FLEXIBLE_PRESETS` count as flexible.
+- `M865` user types (`U`), encoded types (`S"#<n>"`), color names and
+  decimal colors, and the subcodes past `M865.1` aren't modeled. `X`
+  without `R` starts from the tool's last ad-hoc type, not from the
+  firmware's one pending ad-hoc type.
 - The nozzle cleaning at a print's start isn't modeled. Before it,
   `prepare_for_nozzle_cleaning` (`probe.cpp`) calls
   `ensure_retracted_no_ramming` when the stored distance is known and under
