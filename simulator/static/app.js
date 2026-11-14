@@ -173,7 +173,7 @@ function matHtml(m, prev) {
   return '<span class="' + (prev ? 'prev' : '') + '">' +
     (m.color ? '<span class="swatch" style="background:' + esc(m.color) + '" title="' + esc(m.color) + '"></span>' : '') +
     esc(m.name) + (m.adhoc === false ? ' <span class="tag" title="preset material">preset</span>' : '') +
-    (uuid ? '<br><span class="uuid" title="' + esc(uuid) + '">' + esc(String(uuid).slice(0, 8)) + '</span>' : '') +
+    (uuid ? ' <span class="uuid" title="' + esc(uuid) + '">' + esc(String(uuid).slice(0, 8)) + '</span>' : '') +
     '</span>';
 }
 
@@ -189,7 +189,7 @@ function renderTool(p, t) {
   if (proc) {
     const rem = proc.remaining_mm != null ? proc.remaining_mm.toFixed(1) + ' mm'
       : proc.remaining_s != null ? proc.remaining_s.toFixed(1) + ' s' : '';
-    procTxt = '<span class="proc">' + esc(proc.kind) + ' ' + esc(proc.phase) + ' ' + rem + '</span>';
+    procTxt = esc(proc.kind) + ' ' + esc(proc.phase) + ' ' + rem;
   }
   const flags = (t.sensor_fault ? '<span class="flag" title="sensor fault">sensor</span> ' : '') +
     (t.stuck_write ? '<span class="flag alt" title="stuck write">stuck</span>' : '');
@@ -205,7 +205,9 @@ function renderTool(p, t) {
     '<td class="num">' + t.extruded_at_unload + '</td>' +
     '<td class="num">' + Number(t.gap || 0).toFixed(1) + '</td></tr>';
 
-  h += '<tr class="sub"><td colspan="9"><div class="toolbtns">' + procTxt + flags + (flags ? ' ' : '') +
+  // The process text and the flags come and go, so they sit in a slot of fixed size after
+  // the buttons, which then never move.
+  h += '<tr class="sub"><td colspan="9"><div class="toolbtns">' +
     btn('Load', 'load_form', Object.assign({ tool: i, cls: isOpen(p, 'load' + i) ? 'on' : '' }, loadGate)) +
     btn('Unload', 'unload', gate(a, 'unload', { tool: i })) +
     btn('Extrude', 'extrude', gate(a, 'extrude', { tool: i })) +
@@ -218,7 +220,8 @@ function renderTool(p, t) {
     btn('Select', 'select_tool', gate(a, 'select_tool', { tool: i })) +
     btn('Sensor fault', 'sensor_fault', gate(a, 'set_sensor_fault', { tool: i, cls: t.sensor_fault ? 'on' : '' })) +
     btn('Stuck write', 'stuck_write', gate(a, 'set_stuck_write', { tool: i, cls: t.stuck_write ? 'on' : '' })) +
-    btn(t.enabled ? 'Disable' : 'Enable', 'tool_enabled', gate(a, 'set_tool_enabled', { tool: i })) +
+    btn(t.enabled ? 'Disable' : 'Enable', 'tool_enabled', gate(a, 'set_tool_enabled', { tool: i, cls: 'fixw' })) +
+    '<span class="proc" title="' + procTxt + '">' + flags + (flags ? ' ' : '') + procTxt + '</span>' +
     '</div>';
 
   if (isOpen(p, 'load' + i)) {
@@ -264,8 +267,8 @@ function renderPrinter(p) {
     '<label title="how the print preview treats a failed check">checks <select data-sel="set_checks" data-field="value">' +
     opts(S.options.checks, p.checks) + '</select></label>' +
     '<small class="muted">boot ' + esc(p.boot_id) + '</small>' +
-    '<small>' + (p.homed ? 'homed' : '<span class="muted">not homed</span>') + '</small>' +
-    '<small>tool <b>' + esc(p.selected_tool == null ? 'none' : p.selected_tool) + '</b></small>' +
+    '<small class="homed">' + (p.homed ? 'homed' : '<span class="muted">not homed</span>') + '</small>' +
+    '<small class="picked">tool <b>' + esc(p.selected_tool == null ? 'none' : p.selected_tool) + '</b></small>' +
     '<small class="muted" title="the model\'s values, which an empty setting uses">ratio ' +
     Number(m.feed_ratio).toFixed(4) + ', load ' + esc(m.slow_load_mm) + ' + ' + esc(m.fast_load_mm) +
     ', purge ' + esc(m.purge_mm) + ' mm' + (p.high_flow ? ' (high-flow)' : '') + '</small></div>';
@@ -282,12 +285,12 @@ function renderPrinter(p) {
     } else if (job.total_mm) {
       h += '<small>' + Number(job.fed_mm || 0).toFixed(0) + '/' + Number(job.total_mm).toFixed(0) + ' mm</small>';
     }
-    if (attn) h += '<span class="attn">' + esc(attn) + '</span>';
+    if (attn) h += '<span class="attn" title="' + esc(attn) + '">' + esc(attn) + '</span>';
   } else {
     h += '<span class="muted">no job</span>';
   }
   h += '</div>';
-  if (p.message) h += '<div style="margin-top:3px"><span class="pill" title="last M117">' + esc(p.message) + '</span></div>';
+  h += '<div class="msgline">' + (p.message ? '<span class="pill" title="last M117">' + esc(p.message) + '</span>' : '') + '</div>';
 
   const a = p.actions || {};
   h += '<div class="btns">' +
@@ -345,7 +348,8 @@ function renderPrinter(p) {
   }
 
   h += '<div class="mmbar">extrude / retract mm ' + inp(p, 'mm', '10', 'type="number" step="any"') + '</div>';
-  h += '<table class="tools"><thead><tr><th>#</th><th>en</th><th>loaded</th><th>material</th><th title="what a runout reload restores">kept</th>' +
+  h += '<table class="tools"><colgroup><col class="c-n"><col class="c-en"><col class="c-ld"><col><col>' +
+    '<col class="c-ex"><col class="c-ul"><col class="c-at"><col class="c-gap"></colgroup><thead><tr><th>#</th><th>en</th><th>loaded</th><th>material</th><th title="what a runout reload restores">kept</th>' +
     '<th class="num">extr</th><th class="num">ul</th><th class="num">at ul</th><th class="num">gap</th></tr></thead><tbody>' +
     p.tools.map((t) => renderTool(p, t)).join('') + '</tbody></table>';
   return h;
