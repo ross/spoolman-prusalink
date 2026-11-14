@@ -611,6 +611,49 @@ WATCHED = (
         "6ece29d270dd8ac3",
         UPSTREAM_7D8BF685,
     ),
+    # Preload All writes slots 0 and 1 at once, and slot k's type when slot k - 2's preload
+    # ends: the menu waits while the G-code queue holds more than one command. The queue's
+    # length counts a command until it returns, and the menu reads it after each request it
+    # sends, refreshed before the acknowledgement.
+    Watched(
+        "the G-code queue's length for a client",
+        "src/common/marlin_server.cpp",
+        "statement",
+        "marlin_vars().gqueue = queue.length",
+        "the two preloads ahead in SimPrinter.preload_all and Queued.writes in simulator/model.py",
+        "b8cd11a967bc2844",
+        UPSTREAM_7D8BF685,
+    ),
+    Watched(
+        "the refresh before a request's acknowledgement",
+        "src/common/marlin_server.cpp",
+        "function",
+        "_process_server_request",
+        "the two preloads ahead in SimPrinter.preload_all and Queued.writes in simulator/model.py",
+        "d6e59c11bbbc65ca",
+        UPSTREAM_7D8BF685,
+    ),
+    Watched(
+        "the G-code queue's advance",
+        "lib/Marlin/Marlin/src/gcode/queue.cpp",
+        "function",
+        "GCodeQueue::advance",
+        "the two preloads ahead in SimPrinter.preload_all and Queued.writes in simulator/model.py",
+        "433710015bf001df",
+        UPSTREAM_7D8BF685,
+    ),
+    # A tool is given in a file's metadata when it lists any filament used for it, zero
+    # too: the single-tool rule leans on it.
+    Watched(
+        "a tool given in the metadata",
+        "src/common/gcode/gcode_info.hpp",
+        "statement",
+        "inline bool given() const",
+        "the single-tool rule: PrintSpec.single_tool_file in simulator/model.py and"
+        " Mmu.prime in simulator/feed.py",
+        "a23abdb1628d7363",
+        UPSTREAM_7D8BF685,
+    ),
     # A print's `T` to the slot already selected changes nothing. The name has two
     # overloads, so the definition is read as a statement.
     Watched(

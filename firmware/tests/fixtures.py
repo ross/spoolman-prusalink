@@ -99,6 +99,11 @@ inline constexpr const char *m115 = "M115";
 inline constexpr const char *total_toolchanges = "total toolchanges";
 #endif
 }; // namespace gcode_info
+
+        /// @brief Value for this extruder was given in G-code
+        inline bool given() const {
+            return filament_used_g.has_value();
+        }
 """
 
 OPTIONS_CMAKE = """\
@@ -3519,7 +3524,8 @@ bool should_enable(FilamentSensorID id) {
 }
 """  # noqa: E501 (verbatim firmware lines)
 
-# `marlin_server.cpp`, excerpts: `pre_finalize_print`, its unload, and the single-tool start.
+# `marlin_server.cpp`, excerpts: `pre_finalize_print`, its unload, the single-tool start,
+# and the G-code queue's length as a client reads it.
 MARLIN_SERVER_CPP = """\
 static bool pre_finalize_print([[maybe_unused]] bool finished) {
 #if HAS_ANFC()
@@ -3628,6 +3634,25 @@ void safely_unload_filament_from_nozzle_to_mmu() {
                 // It would require homing the axes first, moving to [maxx-10, -4] and slowly purging while moving towards the origin
             }
 #endif
+
+    marlin_vars().gqueue = queue.length;
+
+static bool _process_server_request(const Request &request) {
+    const uint8_t client_id = request.client_id;
+    if (client_id >= MARLIN_MAX_CLIENTS) {
+        return true;
+    }
+
+    const bool processed = _process_server_valid_request(request);
+
+    // force update of marlin variables after proecssing request -> to ensure client can read latest variables after request completion
+    _server_update_vars();
+
+    if (request.response_required) {
+        marlin_client::marlin_client_events[client_id].set(make_mask(processed ? Event::Acknowledge : Event::NotAcknowledge));
+    }
+    return processed;
+}
 """  # noqa: E501 (verbatim firmware lines)
 
 # The tag radio's MMU condition.
@@ -4234,6 +4259,38 @@ PrintPreview::Result PrintPreview::Loop() {
 }
 """  # noqa: E501 (verbatim firmware lines)
 
+# `queue.cpp`, excerpt.
+GCODE_QUEUE_CPP = """\
+/**
+ * Get the next command in the queue, optionally log it to SD, then dispatch it
+ */
+void GCodeQueue::advance() {
+
+  // Process immediate commands
+  if (process_injected_command()) {
+    delay(1); // Safety measure to avoid locking async job in inject queue (buffering a file)
+    return;
+  }
+
+  // Return if the G-code buffer is empty
+  if (!length) {
+    delay(1);
+    return;
+  }
+
+  last_executed_sdpos = queue.get_current_sdpos();
+  gcode.process_next_command();
+  executed_commmand_count++;
+
+  // The queue may be reset by a command handler or by code invoked by idle() within a handler
+  if (length) {
+    --length;
+    if (++index_r >= BUFSIZE) index_r = 0;
+  }
+
+}
+"""
+
 FILES = {
     read.MODELS_FILE: MODELS_HPP,
     read.GCODE_INFO_FILE: GCODE_INFO_HPP,
@@ -4294,6 +4351,7 @@ FILES = {
     "src/gui/screen/screen_m600.cpp": SCREEN_M600_CPP,
     read.IMAGES_FILE: PRESETS_JSON,
     read.PAUSE_SETTINGS_FILE: PAUSE_SETTINGS_HPP,
+    "lib/Marlin/Marlin/src/gcode/queue.cpp": GCODE_QUEUE_CPP,
 }
 
 
