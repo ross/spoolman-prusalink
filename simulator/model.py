@@ -2189,11 +2189,7 @@ class SimPrinter:
             return
         self._run_steps(t, p.steps)  # what rounding left
         t.process = None
-        self._physical_unload(t, "unload")
-        # `M702` docks after every unload on INDX. `M1600` docks only after its load, so a
-        # change all's unload keeps the tool for the load that follows.
-        if not (self.queue and self.queue[0].tool == t.index):
-            self.feed.rest(self)
+        self.feed.end_unload(self, t)
         self._process_done()
 
     def _next_load_step(self, t: SimTool, p: LoadProcess) -> None:
@@ -2409,20 +2405,11 @@ class SimPrinter:
         return slicer and slicer.overridden(spec.prime_mm, spec.toolchange_purge_mm)
 
     def _park(self, job: UserJob | SyncJob, end: State) -> None:
-        """End a job: a finished print's end G-code on a toolchanger runs the profile's last
-        moves and parks the tool (`P0 S1`, `src/marlin_stubs/P.cpp:35-48`), then the
-        firmware's own end runs, and INDX docks what's still picked (`pre_finalize_print`).
-        A stopped print and a sync job keep the tool to the firmware's end."""
-        slicer = None
+        """End a job: a finished print's end G-code runs the feed system's last moves, then
+        the firmware's own end runs, and INDX docks what's still picked
+        (`pre_finalize_print`). A stopped print and a sync job run no end G-code."""
         if isinstance(job, UserJob) and end is State.FINISHED:
-            slicer = self._slicer(job)
-        if slicer is not None:
-            t = self.tools[self.selected_tool]
-            if len({s.tool for s in job.spec.segments}) > 1:
-                self._print_moves(t, slicer.tower_end)
-            self._print_moves(t, slicer.end)
-            self._log("job", f"end G-code parks T{t.index}")
-            self.selected_tool = None
+            self.feed.end_moves(self, job, self._slicer(job))
         self._end_of_print(job, end)
         self.feed.rest(self)
         job.enter(JobPhase.PARKING)

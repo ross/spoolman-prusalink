@@ -46,6 +46,20 @@ class FeedSystem:
         """The start G-code's moves outside the model, run once as the print first feeds.
         `slicer` is the print's profile with its overrides. A direct printer has none."""
 
+    def end_moves(self, p: SimPrinter, job: UserJob, slicer: Slicer | None) -> None:
+        """A finished print's end G-code moves outside the model, before the firmware's own
+        end. `slicer` is the print's profile with its overrides. A direct printer has none."""
+
+    def end_unload(self, p: SimPrinter, t: SimTool) -> None:
+        """End a menu unload of `t` once its moves have run: the filament leaves the path and
+        the type clears. The picked tool then goes to rest, unless a change all goes on with
+        a load of `t`: `M702` docks after every unload on INDX (`M701_2.cpp:194-197`), and
+        `M1600` docks only after its load, so a change all's unload keeps the tool for the
+        load that follows."""
+        p._physical_unload(t, "unload")
+        if not (p.queue and p.queue[0].tool == t.index):
+            self.rest(p)
+
     def tool_change(
         self, p: SimPrinter, old: SimTool, new: SimTool, slicer: Slicer, first: bool
     ) -> None:
@@ -133,6 +147,19 @@ class Toolchanger(FeedSystem):
         p._pick(first)
         p._print_moves(first, slicer.prime.moves())
         p._log("job", f"start G-code primed {', '.join(f'T{t.index}' for t in used)}")
+
+    def end_moves(self, p: SimPrinter, job: UserJob, slicer: Slicer | None) -> None:
+        """The profile's last moves on the head's tool, the wipe tower's when the print used
+        several tools, then the end G-code's park (`P0 S1`, `src/marlin_stubs/P.cpp:35-48`),
+        when the printer has a profile."""
+        if slicer is None:
+            return
+        t = p._head_tool()
+        if len({s.tool for s in job.spec.segments}) > 1:
+            p._print_moves(t, slicer.tower_end)
+        p._print_moves(t, slicer.end)
+        p._log("job", f"end G-code parks T{t.index}")
+        p.selected_tool = None
 
     def profile(self, p: SimPrinter) -> Slicer | None:
         """On a toolchanger only. An XL with one tool isn't one (`SimPrinter.toolchanger`),

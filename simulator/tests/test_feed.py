@@ -12,9 +12,9 @@ from simulator.feed import (
     Toolchanger,
     XlToolchanger,
 )
-from simulator.model import MODELS, Invalid, PrintSpec, Segment, UserJob
+from simulator.model import MODELS, Invalid, PrintSpec, Queued, Segment, UserJob
 from simulator.slicer import INDX_SLICER, XL_SLICER
-from simulator.tests.util import loaded, make
+from simulator.tests.util import PLA, loaded, make
 
 # The XL, XLP and XL dev kit; the Core One INDX and Core One L INDX.
 XL_FEED = {"3.1.0", "3.1.1", "5.1.0"}
@@ -99,3 +99,49 @@ def test_no_profile_primes_nothing(code):
     _, p = make(code)
     p.feed.prime(p, job((0, 10)), p.profile)
     assert p.tools[0].extruded == 0 and p.tools[0].path.gap == 0
+
+
+def test_a_toolchanger_s_end_rams_on_a_multi_tool_print_then_parks():
+    # The XL: the wipe tower's last ramming, then the 0.8 retract and the park.
+    _, p = make("3.1.0", [loaded(0), loaded(1)])
+    p.selected_tool = 1
+    p.feed.end_moves(p, job((0, 10), (1, 10)), XL_SLICER)
+    assert p.tools[1].extruded / 0.95 == pytest.approx(4.1575)
+    assert p.tools[1].path.gap == pytest.approx(0.8)
+    assert p.tools[0].extruded == 0 and p.selected_tool is None
+
+
+def test_a_toolchanger_s_one_tool_print_ends_with_no_ramming():
+    _, p = make("8.10.0", [loaded(0), loaded(1)])
+    p.selected_tool = 1
+    p.feed.end_moves(p, job((1, 10)), INDX_SLICER)
+    assert p.tools[1].extruded == 0 and p.tools[1].path.gap == pytest.approx(0.8)
+    assert p.selected_tool is None
+
+
+@pytest.mark.parametrize("code", ["8.1.0", "3.1.0"])
+def test_no_profile_ends_with_no_moves_and_keeps_the_tool(code):
+    _, p = make(code)
+    p.feed.end_moves(p, job((0, 10)), p.profile)
+    assert p.tools[0].path.gap == 0 and p.selected_tool == 0
+
+
+@pytest.mark.parametrize(("code", "picked"), [("8.1.0", 0), ("3.1.0", 0), ("8.10.0", None)])
+def test_an_unload_empties_the_tool_then_rests_it(code, picked):
+    # Only INDX docks after the unload.
+    _, p = make(code)
+    t = p.tools[0]
+    p.feed.end_unload(p, t)
+    assert t.unload_count == 1 and t.material is None and not t.path.loaded
+    assert p.selected_tool == picked
+
+
+def test_an_unload_keeps_the_tool_picked_for_a_change_all_s_load():
+    _, p = make("8.10.0")
+    p.queue = [Queued(0, "load", PLA), Queued(1, "load", PLA)]
+    p.feed.end_unload(p, p.tools[0])
+    assert p.tools[0].unload_count == 1 and p.selected_tool == 0
+    # A queue that goes on with another tool docks this one.
+    p.queue = [Queued(1, "load", PLA)]
+    p.feed.end_unload(p, p.tools[0])
+    assert p.selected_tool is None
