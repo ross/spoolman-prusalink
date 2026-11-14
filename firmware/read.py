@@ -91,19 +91,27 @@ def mmu_variants(text: str) -> dict[str, str]:
 
 
 def _array_entries(text: str, array: str, kind: str) -> list[str]:
-    """Return the text of each `kind { ... }` entry in the brace table `array`.
+    """Return the text inside each `kind { ... }` entry in the brace table `array`.
 
     The table may hold only those entries: a preprocessor line could leave an entry out of
-    some builds, and text before the first entry would be an entry of another shape.
+    some builds, and text before an entry or after one, other than its comma, would be an
+    entry of another shape.
     """
     region = _one(rf"{array}\s*\{{(.*?)\n\}};", text, f"{array} array")
     if re.search(r"^[ \t]*#", region, re.M):
         raise ValueError(f"a preprocessor line in {array}")
-    before, *entries = re.split(rf"{kind}\s*\{{", region)
+    before, *pieces = re.split(rf"{kind}\s*(?=\{{)", region)
     if before.strip():
         raise ValueError(f"unexpected {before.strip()!r} before the first {kind} in {array}")
-    if not entries:
+    if not pieces:
         raise ValueError(f"no {kind} entries")
+    entries = []
+    for piece in pieces:
+        end = _closing_brace(piece, 0)
+        after = piece[end:].strip()
+        if after not in ("", ","):
+            raise ValueError(f"unexpected {after!r} after a {kind} in {array}")
+        entries.append(piece[1 : end - 1])
     return entries
 
 
@@ -523,6 +531,9 @@ def defines(text: str, names: Iterable[str], macros: Macros) -> tuple[int, ...]:
     return tuple(values)
 
 
+_IF_FAMILY = re.compile(r"\s*#\s*(?:if|ifdef|ifndef|elif|else|endif)\b")
+
+
 def _scoped(text: str) -> list[tuple[str, list[str]]]:
     """Pair each line outside the `#if` family with the lines `active_lines` needs to decide
     that line alone: the `#if`, `#elif` and `#else` lines of the branches around it, a
@@ -774,56 +785,92 @@ def auto_retract(text: str, macros: Macros) -> tuple[float, bool]:
     return float(found["full_retract_distance"]), found["supports_cold_unload"] == "true"
 
 
-_UNLOAD_PURGE = re.compile(rf"static\s+constexpr\s+float\s+unload_purge_length\s*=\s*{_MM}\s*;")
-_UNLOAD_PURGE_MOVE = re.compile(
-    r"\bdo_e_move_notify_progress_hotextrude\s*\(\s*unload_purge_length\s*,"
+# The two bodies of `Pause::unload_wait_temp_process` a build may compile: the unload
+# purges first, or goes straight to the ramming.
+_UNLOAD_WAIT_BODIES = {
+    "if (!ensureSafeTemperatureNotifyProgress()) { return; } set(LoadState::unload_purge);": True,
+    "if (!ensureSafeTemperatureNotifyProgress()) { return; } set(LoadState::ram_sequence);": False,
+}
+# The body of `Pause::unload_purge_process`, around the purge's length.
+_UNLOAD_PURGE_BODY = (
+    "setPhase(PhasesLoadUnload::Purging_unstoppable); static constexpr float unload_purge_length =",
+    "; std::ignore = do_e_move_notify_progress_hotextrude(unload_purge_length,"
+    " standard_feedrates::extruder(standard_feedrates::Extruder::advanced_pause_purge,"
+    " FilamentType::for_tool_heuristic(settings.virtual_tool())), StopConditions::UserStopped);"
+    " set(LoadState::ram_sequence);",
 )
-_UNLOAD_PURGE_STATE = re.compile(r"\bLoadState::unload_purge\b")
-_UNLOAD_PURGE_ENTRY = re.compile(r"\bset\s*\(\s*LoadState::unload_purge\s*\)\s*;")
+# Where the purge's state may appear outside the body above: the progress tables' steps.
+_UNLOAD_PURGE_STEP = re.compile(r"\{\s*LoadState::unload_purge\s*,\s*\d+\s*\}")
 
 
 def unload_purge(text: str, macros: Macros) -> float:
     """Return how far one build purges before an unload's ramming, in mm: the
     `unload_purge_length` of `Pause::unload_purge_process`, or 0 where the build doesn't
-    compile it.
+    reach it. A build without `HAS_PAUSE` purges 0: `src/marlin_stubs/pause/CMakeLists.txt`
+    compiles `pause.cpp` only with it.
 
-    The constant has to be declared once, on a line of its own, and used once, as the
-    length of a purge move. The purge's only way in, `set(LoadState::unload_purge);`, has
-    to be on a line of its own, once, and compiled for exactly the builds that compile the
-    constant. Only the `#if` branches around those two lines are evaluated.
+    Each of `Pause::unload_wait_temp_process` and `Pause::unload_purge_process` has to be
+    defined once. The build's text of each body has to be a known one, apart from the
+    purge's length, so a condition, an early return or another move fails the read. The
+    wait has to be compiled, and it decides whether the unload purges. The purge function
+    has to be compiled exactly when the wait goes to it. `LoadState::unload_purge` may
+    appear elsewhere only as a progress table's step, so there's no other way in. Only the
+    `#if` branches around and inside the two functions are evaluated.
     """
     try:
+        if not evaluate("HAS_PAUSE()", macros):
+            return 0.0
         text = _strip_comments(text).replace("\\\n", " ")
-        uses = len(re.findall(r"\bunload_purge_length\b", text))
-        if uses != 2:
-            raise ValueError(f"unload_purge_length appears {uses} times, not 2")
-        if len(_UNLOAD_PURGE_MOVE.findall(text)) != 1:
-            raise ValueError("unload_purge_length isn't the length of a purge move")
-        declared, entered = [], []
-        for line, scope in _scoped(text):
-            if re.search(r"\bunload_purge_length\s*=", line):
-                m = _UNLOAD_PURGE.fullmatch(line.strip())
-                if not m:
-                    raise ValueError(f"can't read {line.strip()!r}")
-                declared.append((m.group(1), bool(active_lines(scope, macros))))
-            elif re.search(r"\bset\s*\(\s*LoadState::", line) and _UNLOAD_PURGE_STATE.search(line):
-                if not _UNLOAD_PURGE_ENTRY.fullmatch(line.strip()):
-                    raise ValueError(f"can't read {line.strip()!r}")
-                entered.append(bool(active_lines(scope, macros)))
-        if len(declared) != 1:
-            raise ValueError("no declaration of unload_purge_length")
-        if len(entered) != 1:
-            raise ValueError(f"{len(entered)} set(LoadState::unload_purge) calls, not 1")
-        (value, compiled), [reached] = declared[0], entered
-        if compiled != reached:
+        wait = _pause_body(text, "unload_wait_temp_process", macros)
+        purge = _pause_body(text, "unload_purge_process", macros)
+        if wait is None:
+            raise ValueError("the build doesn't compile Pause::unload_wait_temp_process")
+        reached = {_tokens(b): r for b, r in _UNLOAD_WAIT_BODIES.items()}.get(_tokens(wait[1]))
+        if reached is None:
+            raise ValueError("unexpected code in Pause::unload_wait_temp_process")
+        start, end = wait[0]
+        outside = _UNLOAD_PURGE_STEP.sub("", text[:start] + text[end:])
+        if re.search(r"\bLoadState::unload_purge\b", outside):
+            raise ValueError("LoadState::unload_purge outside Pause::unload_wait_temp_process")
+        if (purge is not None) != reached:
             raise ValueError(
-                "the build compiles unload_purge_length but not set(LoadState::unload_purge)"
-                if compiled
-                else "the build compiles set(LoadState::unload_purge) but not unload_purge_length"
+                "the build compiles Pause::unload_purge_process but doesn't reach it"
+                if purge
+                else "the build reaches Pause::unload_purge_process but doesn't compile it"
             )
+        if purge is None:
+            return 0.0
+        before, after = (_tokens(part) for part in _UNLOAD_PURGE_BODY)
+        body = _tokens(purge[1])
+        value = body[len(before) : len(body) - len(after)].replace(" ", "")
+        m = re.fullmatch(_MM, value)
+        if not (body.startswith(before + " ") and body.endswith(" " + after) and m):
+            raise ValueError("unexpected code in Pause::unload_purge_process")
     except ValueError as e:
         raise Unreadable(PAUSE_FILE, str(e)) from None
-    return float(value) if compiled else 0.0
+    return float(m.group(1))
+
+
+def _pause_body(text: str, name: str, macros: Macros) -> tuple[tuple[int, int], str] | None:
+    """Return where `Pause::<name>`'s definition is in `text` and the build's text of its
+    body, or None where the build doesn't compile it."""
+    found = list(re.finditer(rf"\bvoid\s+Pause::{name}\s*\([^()]*\)\s*\{{", text))
+    if len(found) != 1:
+        raise ValueError(f"{len(found)} definitions of Pause::{name}")
+    m = found[0]
+    if not active_lines(_scope_at(text, m.start()), macros):
+        return None
+    end = _closing_brace(text, m.end() - 1)
+    body = text[m.end() : end - 1]
+    return (m.start(), end), "\n".join(active_lines(body.splitlines(), macros))
+
+
+def _scope_at(text: str, pos: int) -> list[str]:
+    """Return what `_scoped` pairs with the line holding `pos`, which isn't a directive."""
+    lines = text.splitlines()
+    number = text.count("\n", 0, pos)
+    index = sum(1 for line in lines[:number] if not _IF_FAMILY.match(line))
+    return _scoped(text)[index][1]
 
 
 def _tokens(code: str) -> str:

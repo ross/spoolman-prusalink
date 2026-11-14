@@ -485,10 +485,6 @@ able to show it once the workstream named is built.
 
 Left to the work:
 
-- Three extruder numbers are copied by hand, and `script/firmware-check`
-  doesn't compare them yet: the auto-retract's fully-retracted threshold,
-  whether a build can unload cold, and the purge before an INDX unload.
-
 - Which menu setting governs the filament-type question, and whether it
   can be set to ignore or abort. Read it in Workstream 2.
 

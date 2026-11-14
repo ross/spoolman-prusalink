@@ -82,6 +82,11 @@ def test_printer_models_ignore_comments():
             "unexpected '{ .model = PrinterModel::xl, .id_str = \"XL\" },' before the first "
             "PrinterModelInfo in printer_model_info",
         ),
+        (
+            model_table(model_entry(), "    mk3x_info,", model_entry(version="1, 4, 1")),
+            r"unexpected ',\\n    mk3x_info,' after a PrinterModelInfo in printer_model_info",
+        ),
+        (model_table(model_entry() + " }"), "unexpected ', }' after a PrinterModelInfo"),
     ],
 )
 def test_printer_models_fail_closed(text, problem):
@@ -128,6 +133,10 @@ def variant(model="mk4", name="MK4MMU3"):
         (
             model_table(model_entry(), variants=f'{{ .id_str = "MK4X" }}, {variant()}'),
             "unexpected '{ .id_str = \"MK4X\" },' before the first PrinterModelMMUVariant",
+        ),
+        (
+            model_table(model_entry(), variants=f"{variant()}\n    PrinterModelMMUVariant(mk3x),"),
+            r"unexpected ',\\n    PrinterModelMMUVariant\(mk3x\),' after a PrinterModelMMUVariant",
         ),
     ],
 )
@@ -1038,24 +1047,45 @@ def test_auto_retract_fails_on_a_build_the_header_stops():
 
 @pytest.mark.parametrize(("indx", "purge"), [(True, 2.0), (False, 0.0)])
 def test_unload_purge(indx, purge):
-    assert read.unload_purge(fixtures.PAUSE_CPP, macros(HAS_INDX=indx)) == purge
+    assert read.unload_purge(fixtures.PAUSE_CPP, macros(HAS_PAUSE=True, HAS_INDX=indx)) == purge
+    text = fixtures.PAUSE_CPP.replace("= 2.0f;", "= 3.5;")
+    assert read.unload_purge(text, macros(HAS_PAUSE=True, HAS_INDX=True)) == 3.5
+
+
+def test_no_unload_purge_without_pause():
+    assert read.unload_purge("", macros(HAS_PAUSE=False)) == 0.0
 
 
 ENTRY = "    set(LoadState::unload_purge);\n"
-DECLARATION = "static constexpr float unload_purge_length = 2.0f;"
+DECLARATION = "    static constexpr float unload_purge_length = 2.0f; // mm\n"
+MOVE = "    std::ignore = do_e_move_notify_progress_hotextrude("
+PURGE = "void Pause::unload_purge_process([[maybe_unused]] Response response) {"
+WAIT = "void Pause::unload_wait_temp_process([[maybe_unused]] Response response) {"
+WAIT_BODY = "unexpected code in Pause::unload_wait_temp_process"
+PURGE_BODY = "unexpected code in Pause::unload_purge_process"
+INDX_ENTRY = "#if HAS_INDX()\n    set"
+ANOTHER_WAY_IN = "void Pause::f() { set(k ? LoadState::unload_purge : LoadState::ram_sequence); }\n"
 
 
 @pytest.mark.parametrize(
     ("old", "new", "problem"),
     [
-        ("= 2.0f;", "= 2.0f * k;", "can't read 'static constexpr float unload_purge_length"),
-        (DECLARATION, "float unload_purge_length{2};", "no declaration of unload_purge_length"),
-        ("unload_purge_length, standard", "2.0f, standard", "unload_purge_length appears 1 times"),
-        (DECLARATION, f"{DECLARATION} f(unload_purge_length);", "unload_purge_length appears 3"),
-        ("do_e_move_notify_progress_hotextrude(", "move(", "unload_purge_length isn't the length"),
-        (ENTRY, "    set(LoadState::ram_sequence);\n", r"0 set\(LoadState::unload_purge\) calls"),
-        (ENTRY, ENTRY * 2, r"2 set\(LoadState::unload_purge\) calls"),
-        (ENTRY, "    set(LoadState::unload_purge); f();\n", "can't read 'set"),
+        ("= 2.0f;", "= 2.0f * k;", PURGE_BODY),
+        ("Purging_unstoppable", "Purging_xnstoppable", PURGE_BODY),
+        ("UserStopped", "UserStoppex", PURGE_BODY),
+        (MOVE, f"    if (k)\n{MOVE}", PURGE_BODY),
+        (DECLARATION, f"    return;\n{DECLARATION}", PURGE_BODY),
+        (MOVE, f"{MOVE}2.0f, 1);\n{MOVE}", PURGE_BODY),
+        (DECLARATION, "    purge();\n", PURGE_BODY),
+        (DECLARATION, f"    f();\n{DECLARATION}", PURGE_BODY),
+        (ENTRY, "    if (k) set(LoadState::unload_purge); else f();\n", WAIT_BODY),
+        (INDX_ENTRY, f"    set(LoadState::ram_sequence);\n    return;\n{INDX_ENTRY}", WAIT_BODY),
+        (ENTRY, ENTRY * 2, WAIT_BODY),
+        (PURGE, f"{ANOTHER_WAY_IN}{PURGE}", "LoadState::unload_purge outside Pause::unload_wait"),
+        (PURGE, "void Pause::purge() {", "0 definitions of Pause::unload_purge_process"),
+        (PURGE, f"{PURGE}}}\n{PURGE}", "2 definitions of Pause::unload_purge_process"),
+        (WAIT, "void Pause::wait() {", "0 definitions of Pause::unload_wait_temp_process"),
+        (WAIT, f"#if 0\n{WAIT}}}\n#endif\nvoid Pause::f() {{", "the build doesn't compile Pause::"),
         ("#if HAS_INDX()", "#if HAS_NEW()", r"unknown macro HAS_NEW\(\)"),
     ],
 )
@@ -1063,18 +1093,25 @@ def test_unload_purge_fail_closed(old, new, problem):
     text = fixtures.PAUSE_CPP
     assert old in text
     with pytest.raises(Unreadable, match=f"can't read {read.PAUSE_FILE}: {problem}"):
-        read.unload_purge(text.replace(old, new, 1), macros(HAS_INDX=True))
+        read.unload_purge(text.replace(old, new, 1), macros(HAS_PAUSE=True, HAS_INDX=True))
+
+
+def test_unload_purge_fails_without_its_move():
+    end = "StopConditions::UserStopped);\n"
+    text = fixtures.PAUSE_CPP.replace(MOVE, f"#if 0\n{MOVE}").replace(end, f"{end}#endif\n")
+    with pytest.raises(Unreadable, match=PURGE_BODY):
+        read.unload_purge(text, macros(HAS_PAUSE=True, HAS_INDX=True))
 
 
 @pytest.mark.parametrize(
     ("indx", "problem"),
     [
-        (True, "compiles unload_purge_length but not set"),
-        (False, r"compiles set\(LoadState::unload_purge\) but not unload_purge_length"),
+        (True, "compiles Pause::unload_purge_process but doesn't reach it"),
+        (False, "reaches Pause::unload_purge_process but doesn't compile it"),
     ],
 )
 def test_unload_purge_needs_its_way_in(indx, problem):
     # The way in is compiled for the builds that don't compile the purge.
     text = fixtures.PAUSE_CPP.replace("#if HAS_INDX()", "#if !HAS_INDX()", 1)
     with pytest.raises(Unreadable, match=problem):
-        read.unload_purge(text, macros(HAS_INDX=indx))
+        read.unload_purge(text, macros(HAS_PAUSE=True, HAS_INDX=indx))
