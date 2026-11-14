@@ -196,7 +196,8 @@ function renderTool(p, t) {
 
   let h = '<tr class="t">' +
     '<td class="' + (p.selected_tool === i ? 'sel' : '') + '">' + (p.selected_tool === i ? '&#9654;' : '') + i + '</td>' +
-    '<td>' + (t.enabled ? 'on' : '<span class="dis">off</span>') + '</td>' +
+    '<td>' + (!t.listed ? '<span class="dis" title="an MMU slot, and the MMU is off">unlisted</span>'
+      : t.enabled ? 'on' : '<span class="dis">off</span>') + '</td>' +
     '<td>' + (t.loaded ? 'yes' : '<span class="muted">no</span>') + '</td>' +
     '<td>' + matHtml(t.material, false) + '</td>' +
     '<td>' + matHtml(t.kept_type || t.previous, true) + '</td>' +
@@ -266,6 +267,9 @@ function renderPrinter(p) {
     '<small class="muted">boot ' + esc(p.boot_id) + '</small>' +
     '<small>' + (p.homed ? 'homed' : '<span class="muted">not homed</span>') + '</small>' +
     '<small>tool <b>' + esc(p.selected_tool == null ? 'none' : p.selected_tool) + '</b></small>' +
+    (p.mmu ? '<small title="the MMU: its menu setting, and the slot whose filament is in the extruder">MMU <b>' +
+      (!p.mmu.on ? 'off' : p.mmu.active ? 'active' : 'connecting ' + Number(p.mmu.connecting).toFixed(1) + ' s') +
+      '</b>' + (p.mmu.fed == null ? '' : ', slot ' + esc(p.mmu.fed) + ' fed') + '</small>' : '') +
     '<small class="muted" title="the model\'s values, which an empty setting uses">ratio ' +
     Number(m.feed_ratio).toFixed(4) + ', load ' + esc(m.slow_load_mm) + ' + ' + esc(m.fast_load_mm) +
     ', purge ' + esc(m.purge_mm) + ' mm' + (p.high_flow ? ' (high-flow)' : '') + '</small></div>';
@@ -306,6 +310,7 @@ function renderPrinter(p) {
     btn('Tap through', 'tap_through', gate(a, 'tap_through')) +
     btn('Clear jam', 'clear_jam', gate(a, 'clear_jam')) +
     btn('Filament sensors', 'sensors', { cls: p.sensors ? 'on' : '', title: 'the menu switch for every filament sensor' }) +
+    (p.mmu ? btn('MMU', 'mmu', gate(a, 'set_mmu', { cls: p.mmu.on ? 'on' : '', title: 'the MMU menu switch' })) : '') +
     btn('Counter step back', 'toggle', { form: 'counter', cls: isOpen(p, 'counter') ? 'on' : '' }) +
     btn('Set extruded_at_unload', 'toggle', { form: 'eau', cls: isOpen(p, 'eau') ? 'on' : '' }) +
     '</div>';
@@ -482,6 +487,7 @@ function onClick(e) {
       case 'tap_through': case 'clear_jam': case 'park_tool':
         return go(act, {});
       case 'sensors': return go('set_sensors', { value: !p.sensors });
+      case 'mmu': return go('set_mmu', { value: !p.mmu.on });
       case 'power_loss': return go('reboot', { keep_job: true, cold_bed: !!getv(name, 'cold', false) });
       case 'start_submit':
         return go('start_print', startBody(name), () => { pst(name).open.start = false; renderCard(name); });
