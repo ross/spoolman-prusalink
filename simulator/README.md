@@ -114,6 +114,12 @@ any finite number for a float, and a listed value for an enum. An action the
 printer can't do now answers 409 with the reason; bad parameters answer 400
 and name the parameter.
 
+`start_print` takes the fields of `PrintSpec`: `segments`, each
+`{"tool": T, "slicer_mm": MM}` with an optional `"material"`, the filament
+type the file names for that tool, and the optional `duration_s`,
+`preheat_s`, `color_changes_mm` and `name`. The page's start form takes a
+segment per line as `tool:mm` or `tool:mm:TYPE`.
+
 The state lists each printer's and each tool's actions under `actions`, each
 with null when the printer would take it now or the reason it would refuse
 it, with 409 or 400, so a script can check before it asks.
@@ -174,6 +180,24 @@ that trace. The points that matter for the bridge, in short:
   A menu unload of a Nextruder tool that auto-retracted skips the ramming
   and counts nothing. An unload of a tool that fed since its auto-retract
   counts 23 mm times the feed ratio; a Nextruder runout counts 7 mm.
+- A print started from the page stands for the user pressing Print on the
+  file's preview: the job is counted at once and reads `PRINTING` while the
+  file is scanned. Then the preview checks the tools the print's segments
+  use, and each question holds the job in `ATTENTION`, with its ID in
+  `/api/v1/status` and `PAUSED` in `/api/v1/job`. On a printer without
+  tool mapping, the first screen lists more used tools than enabled ones
+  (a warning), a disabled used tool (Abort only) and a used tool with no
+  filament (a warning). Then, for an empty tool, the job waits for a
+  `load` of that tool, which answers Yes. The load reads `BUSY` with no
+  job, and it neither primes nor auto-retracts. Then a used tool whose
+  stored type isn't the segment's `material`, compared exactly, asks
+  again. On the XL and INDX, a print that uses two tools, or any print with
+  two tools enabled, asks one tools-mapping question with every per-tool
+  row, the type included, and nothing loads there: the print waits for a
+  load when it reaches an empty tool, as a tool change into one does.
+  `tap_through` answers Print or Ok, and `cancel` answers Abort or No,
+  which ends in `IDLE` with no job and the ID used up. `checks` governs
+  none of these: the firmware's severities are fixed.
 - Every print start shows `PRINTING`, then a brief `IDLE` with no job, then
   `PRINTING`. `FINISHED` and `STOPPED` persist until dismissed, and the job
   disappears from `/api/v1/status` and `/api/v1/job` as soon as a print ends.
@@ -260,8 +284,23 @@ Choices made where the firmware was silent or the plan left it open:
   that knows the MMU3. A file that declares the `HT Hotend` is taken as
   satisfied: whether the hotend is high-temperature is printer state the
   simulator doesn't hold.
-- The preview checks only uploaded and printed files. A print started from
-  the page has no file, so nothing checks it.
+- A print started from the page isn't a sliced file and has no `M862`
+  lines, so the preview checks only its tools: no model, level or feature
+  check. The simulator judges only the files the bridge uploads that way.
+- The preview screen before Print isn't modeled: `start_print` is the user
+  pressing Print. On the XL and INDX, the firmware shows the tools-mapping
+  screen for every print started at the printer when tool mapping applies,
+  and the simulator asks only when a used tool has a problem. The idle
+  sensor clear that can run while that screen is up isn't modeled.
+- A tool is used when a segment names it; the firmware reads the file's
+  `filament used [g]`. The filament sensor is the tool's `loaded` flag, so a
+  sensor fault doesn't raise the filament question.
+- The preview's load is the user's choice of what to load. The firmware
+  loads the file's type when it knows the name and asks otherwise. The
+  wrong-filament screen's Change, which runs a filament change, and the
+  "disable the filament sensor" answer aren't modeled. Neither is the
+  firmware's mapping of a print with one tool to the only enabled tool on a
+  toolchanger. The load can't be cancelled.
 - The preview doesn't model an uncalibrated INDX nozzle cleaner, which
   refuses every print, the unfinished-selftest screen, the
   new-firmware screen (`M115 U`, which continues by itself after 30 s),

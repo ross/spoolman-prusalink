@@ -10,10 +10,11 @@ Draft, 2026-11-13. Workstream 1 is built: each model has its profile and
 its build's presets, and `script/firmware-check` compares them with the
 source. The tracker counts with the model's gap and feed ratio, a load runs
 the model's lengths, the ramming and auto-retract run per build, and the
-tests run the bridge against each family. Workstream 2 is in progress: an
-uploaded file goes through the preview's checks of its `M862` lines, and
-the checks for a print with segments are next. Workstreams 3 to 6 aren't
-started. [Open questions](#open-questions)
+tests run the bridge against each family. Workstream 2 is built: an
+uploaded file goes through the preview's checks of its `M862` lines, and a
+print with segments goes through its checks of the tools it uses. The MMU's
+filament-inserted question belongs to Workstream 5. Workstreams 3 to 6
+aren't started. [Open questions](#open-questions)
 lists what the work still has to settle.
 
 ## Goal and non-goals
@@ -104,6 +105,12 @@ firmware update.
   and unknown features. A failed check holds the job in `ATTENTION`, with
   its ID, until it's answered. One `checks` setting per printer ignores,
   warns or aborts; the INDX lock always warns.
+- A print started from the page is counted at once, as the user pressing
+  Print. The preview then checks the tools its segments use, with the
+  firmware's fixed severities: a disabled tool refuses, and a tool with no
+  filament warns and then waits for a load, which reads `BUSY` with no job.
+  A segment can name a filament type, and a tool holding another one asks.
+  On the XL and INDX these rows are one tools-mapping question.
 - It serves `/api/version`, `/api/v1/info`, `/api/v1/status`, `/api/v1/job`
   and `/api/v1/filament`. `/api/v1/info` always reports `mmu` as false.
 - Tests: the unit harness and the integration fixtures take a model and a
@@ -165,18 +172,20 @@ counts, and print-after-upload goes through the same checks
 - **A file sliced for an MMU3 is refused or asked about when the MMU is
   off**, under the firmware setting.
 - **The per-tool checks need the file's filament-used metadata**: a tool
-  with no filament or another type asks, and a disabled tool refuses. The
-  bridge's sync job has no such metadata, so it raises none of them
-  (`gcode_info.hpp:95-98`, `gcode_compatibility.cpp:198-211, 420-423`).
+  with no filament or another type asks, and a disabled tool refuses. No
+  menu setting governs them: their severities are fixed. The bridge's sync
+  job has no such metadata, so it raises none of them (`gcode_info.hpp:95-98`,
+  `gcode_compatibility.cpp:156-205, 420-423`).
 - **With an MMU and filament at the nozzle, the preview asks to unload
   first**, whatever the settings. Yes unloads. No starts the print as it is
   (`marlin_print_preview.cpp:228-256, 699-704`).
 
 The idle sensor clear runs while the preview opens and stops once a question
-shows (`marlin_server.cpp:1448-1460`).
+shows, except on the tools-mapping screen (`marlin_server.cpp:1448-1460`).
 
-The simulator has the checks of an uploaded file. The per-tool checks and
-the MMU's unload question are still missing.
+The simulator has the checks of an uploaded file and of a print's tools.
+The MMU's question is still missing. A print raises no model question: it
+has no `M862` lines.
 
 ### `/api/v1/info`
 
@@ -484,9 +493,6 @@ able to show it once the workstream named is built.
 ## Open questions
 
 Left to the work:
-
-- Which menu setting governs the filament-type question, and whether it
-  can be set to ignore or abort. Read it in Workstream 2.
 
 - F12 against this plan on the single-tool power-panic purge, 25 mm or
   8 mm. The F12 trace decides; until then the simulator keeps 25 mm.
