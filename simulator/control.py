@@ -59,6 +59,7 @@ ACTIONS = frozenset(
         "set_tool_enabled",
         "set_checks",
         "set_sensors",
+        "set_mmu",
         "counter_step_back",
         "set_extruded_at_unload",
         "tap_through",

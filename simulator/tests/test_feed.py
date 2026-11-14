@@ -6,15 +6,17 @@ import pytest
 
 from simulator.feed import (
     FEED_SYSTEMS,
+    MMU,
     Direct,
     Feed,
     IndxToolchanger,
+    Mmu,
     Toolchanger,
     XlToolchanger,
 )
 from simulator.model import MODELS, Invalid, PrintSpec, Queued, Segment, UserJob
 from simulator.slicer import INDX_SLICER, XL_SLICER
-from simulator.tests.util import PLA, loaded, make
+from simulator.tests.util import PLA, loaded, make, make_mmu
 
 # The XL, XLP and XL dev kit; the Core One INDX and Core One L INDX.
 XL_FEED = {"3.1.0", "3.1.1", "5.1.0"}
@@ -144,4 +146,41 @@ def test_an_unload_keeps_the_tool_picked_for_a_change_all_s_load():
     # A queue that goes on with another tool docks this one.
     p.queue = [Queued(1, "load", PLA)]
     p.feed.end_unload(p, p.tools[0])
+    assert p.selected_tool is None
+
+
+def test_the_mmu_is_the_feed_only_while_switched_on():
+    _, p = make_mmu()
+    assert p.feed is MMU and type(p.feed) is Mmu and MMU not in FEED_SYSTEMS.values()
+    p.set_mmu(False)
+    assert p.feed is FEED_SYSTEMS[Feed.DIRECT]
+
+
+def test_the_mmu_maps_tools_only_while_active():
+    _, p = make_mmu(mmu_connect_seconds=5)
+    assert MMU.maps_tools(p) is True
+    p.reboot()
+    assert MMU.maps_tools(p) is False
+
+
+def test_the_mmu_credits_slot_0_while_connecting_else_the_selected_slot():
+    _, p = make_mmu(slot=3, mmu_connect_seconds=5)
+    assert MMU.credited(p, p.tools[1]) is p.tools[3]
+    p.reboot()
+    assert MMU.credited(p, p.tools[1]) is p.tools[0]
+    p.mmu.connecting = 0
+    assert MMU.credited(p, p.tools[1]) is None
+
+
+def test_the_mmu_has_no_idle_clear_and_its_head_tool_is_always_there():
+    _, p = make_mmu(slot=2)
+    assert MMU.idle_clear_tool(p) is None
+    assert MMU.head_tool(p) is p.tools[2]
+    p.reboot()
+    assert MMU.head_tool(p) is p.tools[0]
+
+
+def test_a_print_selects_no_mmu_slot():
+    _, p = make_mmu()
+    MMU.select_for_print(p, p.tools[2])
     assert p.selected_tool is None

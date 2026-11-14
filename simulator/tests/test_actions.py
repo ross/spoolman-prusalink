@@ -20,7 +20,7 @@ from simulator.model import (
 )
 from simulator.preview import Severity
 from simulator.tests.test_model import one_segment
-from simulator.tests.util import loaded, make, run, sliced
+from simulator.tests.util import PLA, loaded, make, make_mmu, run, sliced
 
 PRINTER_CALLS: dict[str, Callable[[SimPrinter], None]] = {
     "start_print": lambda p: p.start_print(one_segment(10)),
@@ -34,6 +34,7 @@ PRINTER_CALLS: dict[str, Callable[[SimPrinter], None]] = {
     "reboot": lambda p: p.reboot(),
     "clear_jam": lambda p: p.clear_jam(),
     "tap_through": lambda p: p.tap_through(),
+    "set_mmu": lambda p: p.set_mmu(not (p.mmu and p.mmu.on)),
 }
 TOOL_CALLS: dict[str, Callable[[SimPrinter, int], None]] = {
     "load": lambda p, i: p.load(i, source="preset", name="PLA"),
@@ -271,7 +272,47 @@ def indx_unloading():
     return sim, p
 
 
+def mmu_loaded():
+    """An MK4S whose MMU is Active, with slot 2 loaded to the nozzle and selected."""
+    return make_mmu(types={0: PLA, 2: PLA}, slot=2)
+
+
+def mmu_connecting():
+    """The MMU after a boot: slot 2's filament still in the extruder, no slot selected."""
+    sim, p = mmu_loaded()
+    p.reboot()
+    assert not p.mmu.active
+    return sim, p
+
+
+def mmu_off():
+    """The MMU switched off: slot 0 is the printer's one tool, and slots 1 to 4 aren't
+    listed."""
+    sim, p = make_mmu(slot=0)
+    p.set_mmu(False)
+    return sim, p
+
+
+def mmu_sync_job():
+    sim, p = make_mmu()
+    p.upload("x.gcode", sliced(p, ""), print_after=True, overwrite=False)
+    run(sim, 1)
+    assert p.job is not None
+    return sim, p
+
+
+def mmu_sensors_off():
+    sim, p = make_mmu()
+    p.set_sensors(False)
+    return sim, p
+
+
 SITUATIONS = [
+    mmu_loaded,
+    mmu_connecting,
+    mmu_off,
+    mmu_sync_job,
+    mmu_sensors_off,
     idle,
     loading,
     printing,

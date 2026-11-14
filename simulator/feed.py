@@ -2,8 +2,9 @@
 
 A model's feed system follows from its build: `ModelInfo.feed`, which `script/firmware-check`
 compares with `HAS_TOOLCHANGER` and `HAS_INDX`. Each system is a stateless singleton in
-`FEED_SYSTEMS`, so snapshots and `asdict` never see it. `model` holds the state the rules
-act on, and `SimPrinter.feed` picks the printer's system.
+`FEED_SYSTEMS`, so snapshots and `asdict` never see it. The MMU's system, `MMU`, follows
+from the MMU's setting instead, so it stands outside that table. `model` holds the state the
+rules act on, and `SimPrinter.feed` picks the printer's system.
 """
 
 from __future__ import annotations
@@ -26,6 +27,9 @@ class Feed(StrEnum):
 class FeedSystem:
     selectable: ClassVar[bool]  # the user can pick a tool (select_tool)
     docks: ClassVar[bool] = False  # whether the picked tool goes back to a dock (INDX)
+    # Whether an E move runs with no tool credited: it then counts nothing and leaves the
+    # gap where it is. Elsewhere it can't run (`credited`).
+    moves_without_tool: ClassVar[bool] = False
 
     def maps_tools(self, p: SimPrinter) -> bool:
         """Whether the preview's tools-mapping screen applies (`HAS_TOOL_MAPPING`). A direct
@@ -36,6 +40,11 @@ class FeedSystem:
         """The multi-tool slicer profile `p` prints with. A direct printer has none: its
         single-tool profiles add no moves the simulator models."""
         return None
+
+    def head_tool(self, p: SimPrinter) -> SimTool | None:
+        """The tool whose path the head's own moves run on: the picked tool, or None on a
+        toolchanger with none picked."""
+        return None if p.selected_tool is None else p.tools[p.selected_tool]
 
     def select_for_print(self, p: SimPrinter, tool: SimTool) -> None:
         """Make `tool` the picked tool as a print starts its preheat and each time it starts
@@ -192,6 +201,48 @@ class IndxToolchanger(Toolchanger):
             return
         p._log("load", f"dock T{p.selected_tool}")
         p.selected_tool = None
+
+
+class Mmu(FeedSystem):
+    """An MMU3 switched on: five slots fed one at a time into the one extruder, which share
+    its path (`simulator.mmu`). Only a load or a print's tool change selects a slot, and
+    every unload, eject and cut, a boot and `M709 S1` leave none selected
+    (`mmu2_mk4.cpp:155, 175, 674, 869-871, 913, 1013`)."""
+
+    selectable = False
+    moves_without_tool = True
+
+    def maps_tools(self, p: SimPrinter) -> bool:
+        """The tools-mapping screen applies while the MMU is Active, not while it connects
+        (`is_tool_mapping_possible`, `src/common/tools_mapping.cpp:26-36`)."""
+        return p.mmu.active
+
+    def head_tool(self, p: SimPrinter) -> SimTool | None:
+        """The selected slot, else slot 0: the one physical tool is always there, and every
+        slot's path is the shared one, so only `credited` decides what a move counts on."""
+        return p.tools[0 if p.selected_tool is None else p.selected_tool]
+
+    def select_for_print(self, p: SimPrinter, tool: SimTool) -> None:
+        """Nothing: only a `T`, which loads the slot, selects one."""
+
+    def credited(self, p: SimPrinter, tool: SimTool) -> SimTool | None:
+        """Slot 0 while the MMU isn't Active, else the selected slot or none, whichever slot
+        `tool` is: the slots share one path (`currently_selected_virtual_tool`,
+        `src/common/tool_index.cpp:140-158`). With none, the planner runs the move and
+        counts nothing (`planner.cpp:2206-2219`)."""
+        if not p.mmu.active:
+            return p.tools[0]
+        return None if p.selected_tool is None else p.tools[p.selected_tool]
+
+    def idle_clear_tool(self, p: SimPrinter) -> SimTool | None:
+        """None: the clear is off while the MMU is switched on, connecting too (`has_mmu`,
+        `filament_sensors_handler.cpp:161-182, 303-312`)."""
+        return None
+
+
+# Outside `FEED_SYSTEMS`: a model's build decides its feed system, and an MMU is switched
+# on and off at run time (`SimPrinter.feed`).
+MMU = Mmu()
 
 
 FEED_SYSTEMS: dict[Feed, FeedSystem] = {

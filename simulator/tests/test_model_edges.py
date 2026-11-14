@@ -353,7 +353,7 @@ TOOL_KEYS = {
 def test_a_tool_reports_and_snapshots_its_path_flat():
     # The page and saved snapshots read the path's fields at the tool's level.
     sim, p = make()
-    assert set(p.to_json()["tools"][0]) == TOOL_KEYS | {"actions"}
+    assert set(p.to_json()["tools"][0]) == TOOL_KEYS | {"actions", "listed"}
     assert set(sim.snapshot()["printers"][0]["tools"][0]) == TOOL_KEYS
 
 

@@ -9,6 +9,7 @@ import sys
 import tomllib
 from dataclasses import dataclass, field, fields
 
+from simulator.mmu import MMU_SLOTS, MmuUnit
 from simulator.model import (
     MODELS,
     Firmware,
@@ -40,6 +41,7 @@ _PRINTER_KEYS = {
     "sensors",
     "tools",
     "picked_tool",
+    "mmu",
 }
 _TOOL_KEYS = {"index", "enabled", "material", "extruded", "unload_count", "extruded_at_unload"}
 _MATERIAL_KEYS = {"name", "color", "instance_uuid"}
@@ -75,8 +77,11 @@ class PrinterConfig:
     sensors: bool = True  # the menu switch for every filament sensor
     tools: tuple[ToolConfig, ...] = (ToolConfig(0),)
     # The tool picked at start. None means the model's default: tool 0 on a direct printer,
-    # none on a toolchanger.
+    # none on a toolchanger and on an MMU. On an MMU it's the slot loaded to the nozzle.
     picked_tool: int | None = None
+    # An MMU3 attached and switched on, on a model that takes one. Then the tools are its
+    # slots, and a tool's material is only the type stored for its slot.
+    mmu: bool = False
 
 
 @dataclass(frozen=True)
@@ -169,7 +174,7 @@ def _material(value: object, prefix: str, holds_uuid: bool) -> dict:
     return out
 
 
-def _tool(entry: object, prefix: str, model_code: str) -> ToolConfig:
+def _tool(entry: object, prefix: str, model_code: str, mmu: bool) -> ToolConfig:
     if not isinstance(entry, dict):
         raise ConfigError(f"{prefix} must be a table")
     _unknown(entry, _TOOL_KEYS, prefix)
@@ -177,12 +182,15 @@ def _tool(entry: object, prefix: str, model_code: str) -> ToolConfig:
         raise ConfigError(f"{prefix} needs an index")
     info = MODELS[model_code]
     index = _int(entry["index"], f"{prefix}.index", 0)
-    if index >= info.max_tools:
+    most = _most_tools(model_code, mmu)
+    if index >= most:
         raise ConfigError(
-            f"{prefix}.index must be below {info.max_tools}, the most tools model "
+            f"{prefix}.index must be below {most}, the most tools model "
             f"{model_code} has, got {index}"
         )
     enabled = _bool(entry.get("enabled", True), f"{prefix}.enabled")
+    if mmu and not enabled:
+        raise ConfigError(f"{prefix}.enabled can't be false: an MMU slot can't be disabled")
     material = None
     if "material" in entry:
         material = _material(entry["material"], prefix, info.holds_uuid(index))
@@ -194,18 +202,25 @@ def _tool(entry: object, prefix: str, model_code: str) -> ToolConfig:
     return ToolConfig(index, enabled, material, extruded, unload_count, at_unload)
 
 
-def _tools(raw: object, prefix: str, model_code: str) -> tuple[ToolConfig, ...]:
+def _most_tools(model_code: str, mmu: bool) -> int:
+    """How many tools a printer of the model has: one per slot with an MMU."""
+    return MMU_SLOTS if mmu else MODELS[model_code].max_tools
+
+
+def _tools(raw: object, prefix: str, model_code: str, mmu: bool) -> tuple[ToolConfig, ...]:
     if raw is None:
         return (ToolConfig(0),)
     if not isinstance(raw, list) or not raw:
         raise ConfigError(f"{prefix}.tools must be a list of [[printers.tools]] tables")
-    max_tools = MODELS[model_code].max_tools
+    max_tools = _most_tools(model_code, mmu)
     if len(raw) > max_tools:
         raise ConfigError(
             f"{prefix}.tools has {len(raw)} entries, more than the {max_tools} that "
             f"model {model_code} has"
         )
-    tools = tuple(_tool(entry, f"{prefix}.tools[{i}]", model_code) for i, entry in enumerate(raw))
+    tools = tuple(
+        _tool(entry, f"{prefix}.tools[{i}]", model_code, mmu) for i, entry in enumerate(raw)
+    )
     seen: set[int] = set()
     for i, tool in enumerate(tools):
         if tool.index in seen:
@@ -249,7 +264,14 @@ def _printer(entry: object, position: int, control_port: int) -> PrinterConfig:
     if checks not in {s.value for s in Severity}:
         known = ", ".join(s.value for s in Severity)
         raise ConfigError(f"{prefix}.checks must be one of {known}, got {checks!r}")
-    tools = _tools(entry.get("tools"), prefix, model)
+    sensors = _bool(entry.get("sensors", True), f"{prefix}.sensors")
+    mmu = _bool(entry.get("mmu", False), f"{prefix}.mmu")
+    if mmu and not MODELS[model].takes_mmu:
+        takes = ", ".join(m.name for m in MODELS.values() if m.takes_mmu)
+        raise ConfigError(f"{prefix}.mmu needs a model that takes an MMU3 ({takes}), not {model}")
+    if mmu and not sensors:
+        raise ConfigError(f"{prefix}.mmu needs the filament sensors on")
+    tools = _tools(entry.get("tools"), prefix, model, mmu)
     picked = None
     if "picked_tool" in entry:
         picked = _int(entry["picked_tool"], f"{prefix}.picked_tool", 0)
@@ -264,9 +286,10 @@ def _printer(entry: object, position: int, control_port: int) -> PrinterConfig:
         checks=checks,
         high_flow=_bool(entry.get("high_flow", False), f"{prefix}.high_flow"),
         auto_retract=auto_retract,
-        sensors=_bool(entry.get("sensors", True), f"{prefix}.sensors"),
+        sensors=sensors,
         tools=tools,
         picked_tool=picked,
+        mmu=mmu,
     )
 
 
@@ -391,6 +414,11 @@ def build(cfg: SimConfig) -> Simulation:
         tools = {tc.index: _sim_tool(model, tc) for tc in pc.tools}
         default_pick = model.first_tool(sum(t.enabled for t in tools.values()))
         picked = default_pick if pc.picked_tool is None else pc.picked_tool
+        mmu = None
+        if pc.mmu:
+            # Nothing selected unless a slot is loaded to the nozzle.
+            picked = pc.picked_tool
+            mmu = MmuUnit() if picked is None else MmuUnit.loaded_with(picked)
         sim.add(
             SimPrinter(
                 name=pc.name,
@@ -404,6 +432,7 @@ def build(cfg: SimConfig) -> Simulation:
                 sensors=pc.sensors,
                 tools=tools,
                 selected_tool=picked,
+                mmu=mmu,
             )
         )
     return sim

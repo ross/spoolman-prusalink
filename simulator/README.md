@@ -79,13 +79,18 @@ for a high-flow nozzle, `sensors` for the menu's switch of every filament
 sensor, `picked_tool` for the tool picked at start, and `[[printers.tools]]`
 entries that can start loaded with a material and counters. `picked_tool`
 names an enabled tool; left out, a direct printer has tool 0 picked and a
-toolchanger has none. `checks` is `ignore`, `warn` (the
+toolchanger has none. `mmu = true` gives a model that takes an MMU3, the
+MK3.9, MK3.9S, MK4, MK4S, Core One and Core One L, an MMU that starts on and
+connected. Its tools are then the MMU's slots 0 to 4, each entry's material
+is that slot's stored type, and `picked_tool` names the slot whose filament
+is in the extruder; left out, no slot is loaded or selected. An MMU needs
+`sensors` on, and its slots can't be disabled. `checks` is `ignore`, `warn` (the
 default) or `abort`, and it stands for every setting in the printer's menu
 that governs a check of a file's `M862` lines. The top-level settings are
 timing and lengths: the time scale, how fast loads and prints move filament,
 the extra purge of a jam, the preheat and
-park times, the power-panic resume's wait and phases, and whether the start
-blip is on. The feed ratio and a load's slow, fast and purge
+park times, the power-panic resume's wait and phases, how long an MMU takes
+to connect (`mmu_connect_seconds`), and whether the start blip is on. The feed ratio and a load's slow, fast and purge
 lengths are overrides: left out, each printer uses its model's value, which
 the page shows on the printer's card. On the page or through
 `/api/settings`, an empty value or `null` unsets an override. The purge
@@ -110,7 +115,7 @@ Actions: `load`, `unload`, `extrude`, `retract`, `select_tool`,
 `park_tool`, `change_all`, `start_print`, `pause`, `resume`, `cancel`, `dismiss`, `home`, `runout`, `jam`,
 `change_filament`, `clear_jam`, `reboot`, `set_power`, `set_fault`, `set_firmware`,
 `set_sensor_fault`, `set_stuck_write`, `set_tool_enabled`,
-`set_checks`, `set_sensors`, `counter_step_back`,
+`set_checks`, `set_sensors`, `set_mmu`, `counter_step_back`,
 `set_extruded_at_unload`, `tap_through`. Parameter names are the keyword arguments of the methods with
 those names in `model.py`, and their type hints say what each takes: JSON
 `true` or `false` for a bool, an integer such as `3` (not `3.0`) for an int,
@@ -229,6 +234,20 @@ that trace. The points that matter for the bridge, in short:
   `sensors` is the menu's switch for every filament sensor. Off, there's no
   runout, no idle sensor clear and no filament question at the preview, and
   it stays off until `set_sensors` turns it on.
+- An MMU3's slots share one filament path, sensor and gap (F38, F39).
+  `set_mmu` is the menu's switch, which a print or any operation blocks.
+  With it on, `/api/v1/info` reports `mmu` as true and `/api/v1/filament`
+  lists the five slots; with it off, slot 0 alone. Turning it off clears
+  slot 0's type, an unload, unless the extruder's sensor sees filament.
+  Turning the sensors off turns it off too. Turning it on, or a boot with it
+  on, leaves no slot selected while the MMU connects for
+  `mmu_connect_seconds`, and E moves count on slot 0 meanwhile. Once it's
+  connected, moves count on the selected slot; with none selected they
+  count nothing, the gap stays where it was, and `/api/v1/status` reads
+  `flow` 0. The idle sensor clear and the tag reader are off while the MMU
+  is on, and a print's end with it connected doesn't auto-retract. The
+  MMU's own operations and its prints aren't modeled yet: an MMU printer
+  refuses a print, a load and an unload, and takes the sync job.
 - Every print start shows `PRINTING`, then a brief `IDLE` with no job, then
   `PRINTING`. `FINISHED` and `STOPPED` persist until dismissed, and the job
   disappears from `/api/v1/status` and `/api/v1/job` as soon as a print ends.
@@ -451,8 +470,8 @@ Choices made where the firmware was silent or the plan left it open:
   (model, compatibility mode, G-code level, input shaper and firmware). The
   checks share one screen and the worst severity decides it, so one setting
   shows the bridge every outcome.
-- The MMU is always off, so a file with `M862.6 P"MMU3"` fails on a build
-  that knows the MMU3. A file that declares the `HT Hotend` is taken as
+- The preview takes the MMU for off, so a file with `M862.6 P"MMU3"` fails
+  on a build that knows the MMU3. A file that declares the `HT Hotend` is taken as
   satisfied: whether the hotend is high-temperature is printer state the
   simulator doesn't hold.
 - A print started from the page isn't a sliced file and has no `M862`
