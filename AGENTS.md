@@ -207,6 +207,10 @@ read at. When the check reports a changed region, do these steps in order:
 3. If the rule changed, update the copy.
 4. Record the new fingerprint and commit that the check prints.
 
+Before step 3, look up the region, or the flag or table behind a table difference, in
+"Behaviors that rest on one flag or function" in `docs/printer-behaviors.md`. It names the
+simulator code and the bridge findings that a change there moves.
+
 Update a row only when its region changed. A region with the same text at a newer commit
 passes, and its row keeps its commit.
 

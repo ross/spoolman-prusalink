@@ -169,6 +169,85 @@ MK3.9S, MK4, MK4S, Core One and Core One L take one; their builds have `HAS_MMU2
   (Q11 in scenarios.md). From source at `ff61540d4`, not yet seen on the
   printer.
 
+## Behaviors that rest on one flag or function
+
+Some behaviors above rest on a single build flag or a single firmware
+function or statement. If that one thread changes, the behavior changes
+with it, and so does what the bridge relies on or a finding in
+[bridge-findings.md](bridge-findings.md). Read this list when
+`script/firmware-check` reports a changed table or watched region, and
+before you move the simulator to a new firmware version. Find the entry by
+the flag, by the field and table the check printed, or by the watched
+region's name, which matches its row in `WATCHED` in `firmware/watch.py`.
+
+This list isn't every copied rule; `WATCHED` and the tables in
+`firmware/compare.py` are. Behaviors that rest on broad code with no single
+thread, such as a spool join or the status a state reads, aren't here.
+Paths and lines are at upstream `7d8bf6858`, except the fork's counters at
+`ff61540d4`. "Guard" says what in `script/firmware-check` trips when the
+thread changes; for an entry that isn't guarded, only reading the source
+shows a change.
+
+When a change makes a behavior rest on one flag or function, add its entry
+here in the same PR.
+
+### Every build
+
+| Behavior | Rests on | Guard | When it changes |
+| --- | --- | --- | --- |
+| Every unload counts (F2, F14, F16, F24) | The fork's hook in `CurrentStore::set_filament_type`: setting a tool's type to none while one is stored calls `track_filament_unload` (`store_definition.cpp:258-262`, `filament_tracker.cpp:69-76` at `ff61540d4`). | Not guarded: it's the fork's code, and the check reads upstream. Re-read it whenever the fork moves to a new upstream commit. | `SimPrinter._count_unload` in `simulator/model.py`. A path that starts or stops writing none adds or removes the unloads the bridge sees; BF13, BF15 and BF28 rest on which paths write it. |
+| Which builds count usage (F17) | `HAS_FILAMENT_TRACKER` (`ProjectOptions.cmake:640-648`). | Compared: `counters` in "simulator MODELS", and the `_NO_COUNTERS` reason in "bridge PRINTER_MODELS". | `ModelInfo.counters`, and `PRINTER_MODELS` in `printer_sync.py`, which refuses the MINI and MK3.5 for it. |
+| The idle sensor clear: outside a print, on the picked tool, never with the MMU on (F14, F23, F38) | The statement at `filament_sensors_handler.cpp:306-312` in `FilamentSensors::process_events`. | Watched: "the idle sensor clear with an MMU", and "the runout" for the function around it. | `SimPrinter._idle_sensor_clear` and `_idle_clear_selected`, and `FeedSystem.idle_clear_tool` in `simulator/feed.py`. The clear is how a hand swap shows: BF12, BF15 and BF25, and the F14 note on Q2. |
+| The idle sensor clear runs in the power-panic window and on the tools-mapping screen (F12, F28) | `marlin_server::is_printing` (`marlin_server.cpp:1448-1462`): `Idle` and `PrintPreviewToolsMapping` don't count as printing. | Not guarded. | `SimPrinter._idle_clear_selected` and `boot`. If either state counted as printing, no clear would run there: BF24's power-panic path and BF12's tools-mapping note change. |
+| The auto-retract after an idle load and at a print's end, the sync job's included (F26) | `HAS_AUTO_RETRACT` (`ProjectOptions.cmake:629-638`), and the end's call in `pre_finalize_print` (`marlin_server.cpp:1077-1081`). | Compared: `ramming.auto_retract`, `full_retract_mm`, `cold_unload` and `auto_retract_switchable` in "simulator MODELS". Watched: "the end of a print with an MMU". | `SimPrinter._auto_retract_steps` and `_end_of_print`. BF9, BF10, BF22 and BF27's cold unload rest on it. |
+| A filament change in a print reloads the type the tool had (F8, F24) | `M600_execute`'s type: the stored one, else `FilamentType::for_tool_heuristic` (`src/marlin_stubs/pause/M600.cpp:282-290`, `src/common/filament_tools.cpp:15-45`). | Not guarded: "the M600 with no tool" watches `M600_manual`, not `M600_execute`. | `SimPrinter.load` with no source. P2's reload of the same spool and Q11 rest on it. |
+| Every build but the iX asks about a file with no input-shaper line (F27) | The statement at `gcode_compatibility.cpp:368-370` in `CompatibilityReport::generate_without_toolmapping`. | Watched: "the required features", and "the M862 parser" for the name. Compared: `feature_names` in "simulator MODELS". | `GCodeChecks.required` in `simulator/compatibility.py`, and `default_preamble` in `printer_sync.py`, which declares the line. BF3 and BF4. |
+
+### Tags
+
+| Behavior | Rests on | Guard | When it changes |
+| --- | --- | --- | --- |
+| Only the Core One and Core One L keep UUIDs and build `M865.1` (F4, F10, F21) | `HAS_ANFC` (`ProjectOptions.cmake:814`; `M865.cpp:145-172`). | Compared: `uuids` in "bridge PRINTER_MODELS" and "simulator MODELS". | `ModelInfo.uuids`, and `PrinterModel.uuids` in `printer_sync.py`, which decides where the bridge writes `M865.1` and trusts a tag's UUID (Q10). |
+| UUIDs on tool 0 only (F4, F21) | The one-slot `adhoc_filament_parameters_6` (`store_definition.hpp:547-549`), which `filament.cpp` reads and writes for tool 0 alone (`:251-275, 379-403`). | Not guarded: the compare reads only the flag. | `ModelInfo.holds_uuid` and `UUID_TOOL` in `simulator/model.py`, and `UUID_TOOL` in `printer_sync.py`. BF19. A larger array gives an MMU's slots, or an INDX's tools, UUIDs of their own. |
+| No tag reader on INDX (F21) | `HAS_ANFC`, which leaves out `COREONE_INDX` and `COREONEL_INDX` (`ProjectOptions.cmake:814`, with a TODO at `:648` to try INDX). A `static_assert(!HAS_INDX())` stops an INDX build with a reader until its multi-tool code is revisited (`request_manager.cpp:262`). | Compared: `uuids` for 7.10.0 and 8.10.0 in "bridge PRINTER_MODELS" and "simulator MODELS". `HAS_ANFC_FOR_MULTIPLE_TOOLS` (`ProjectOptions.cmake:816`, set for no build) isn't in `FEATURES`, so turning it on trips nothing by itself. | `ModelInfo.uuids` for the INDX models and `SimPrinter._new_material`. With a reader, Q11 keeps the bridge from writing an INDX tool loaded from a tag, the per-tool write (BF14) has `M865.1` to consider, and the tool-0 entry above decides which tools keep UUIDs. |
+| The tag reader is off while the MMU's setting is on (F21, F38) | `HAS_ANFC_FOR_MULTIPLE_TOOLS` being off: the `#if` at `request_manager.cpp:263-269`, `has_tool_openprinttag_reader` (`tool_tag_buddy.cpp:11-18`), and `mmu_on`'s clear of every slot's tag link (`M70X_mmu.cpp:57-64`). | Watched: "the tag radio with the MMU on", "the tag reader with the MMU on" and "the MMU switched on". The flag itself isn't compared. | `SimPrinter._new_material` and `set_mmu`. BF19. |
+
+### Toolchangers: XL and INDX
+
+| Behavior | Rests on | Guard | When it changes |
+| --- | --- | --- | --- |
+| Which builds are toolchangers, and which are INDX (F19, F30, F32) | `HAS_TOOLCHANGER` (`ProjectOptions.cmake:534-536`) and `HAS_INDX` (`:847`). | Compared: `feed` and `max_tools` in "simulator MODELS", and the `_MULTI_TOOL` reason in "bridge PRINTER_MODELS". | `ModelInfo.feed` and the feed systems in `simulator/feed.py`. BF14. |
+| An idle INDX has no tool picked (F30, F32) | The `#if HAS_INDX()` docks after a menu load and unload (`M701_2.cpp:135-140, 194-197`) and at a print's end in `pre_finalize_print` (`marlin_server.cpp:1095-1100`). | The print's end: watched, "the end of a print with an MMU". The menu's docks: not guarded. | `IndxToolchanger.rest` in `simulator/feed.py`. With no tool picked, no idle sensor clear runs: BF12. |
+| After a cut, an INDX print that used several tools boots with none picked (F12, F32) | `PrusaToolChanger::persist_last_picked_tool` (`toolchanger_indx.cpp:926-939`): a park while printing invalidates the stored tool, unless a single-tool print froze it. | Not guarded. | `SimPrinter._forget_pick`. It decides whether the idle sensor clear runs in the power-panic window on INDX, and so BF24's power-panic path there. |
+| The INDX lock question (F27) | The `#if HAS_INDX()` check in `CompatibilityReport::generate_without_toolmapping` (`gcode_compatibility.cpp:372-376`), with its severity fixed at Warning in the file's check table (`:92-101`). | The check: watched, "the required features"; the name: "the M862 parser", and `feature_names` in "simulator MODELS". The fixed severity: not guarded, since the table sits outside any watched region. | `INDX_CHECKS` in `simulator/compatibility.py` and the fixed warning in `preview` in `simulator/preview.py`. BF1, and BF4's note that the lock always asks. |
+| An INDX with an uncalibrated nozzle cleaner refuses every print (BF7) | The `#if HAS_INDX()` check at `gcode_compatibility.cpp:392-396`, in the same function. | Watched: "the required features". | The simulator doesn't model it. BF7. |
+| The nozzle cleaner's purge on the iX and INDX (F6, F8, F28, F35) | `HAS_NOZZLE_CLEANER` (`ProjectOptions.cmake:755`). The power-panic purge is under "Power panic". | Compared: `cleaner_purge_mm` and `cleaner_auto_retract` in "simulator MODELS". | `Extruder.cleaner_purge_mm` in `simulator/tool.py` and `SimPrinter._unpark_prime`. The purge counts at INDX's pause resume, filament change and spool join: BF13. |
+| When a print gets the tools-mapping screen, and that the sync job never does (F28, F29) | `is_tool_mapping_possible` (`tools_mapping.cpp:26-36`), under `HAS_TOOL_MAPPING`, which toolchanger and MMU builds set (`ProjectOptions.cmake:863-869`). | Watched: "the tool mapping condition". `HAS_TOOL_MAPPING` isn't compared, but it follows `HAS_TOOLCHANGER` and `HAS_MMU2`, which are. | `tool_mapping` in `simulator/preview.py` and `Mmu.maps_tools` in `simulator/feed.py`. A print that uses no tool skips the screen, which BF14's per-tool write counts on; the screen's sensors-off answer is BF24 and BF25. |
+
+### MMU3
+
+| Behavior | Rests on | Guard | When it changes |
+| --- | --- | --- | --- |
+| Which builds take an MMU3 (F38) | `HAS_MMU2` (`ProjectOptions.cmake:592`). | Compared: `mmu` and `EXTRUDERS` in "simulator MODELS". | `ModelInfo.mmu` and `takes_mmu`. BF20. |
+| The setting decides which slots `/api/v1/filament` lists (F19, F38) | `VirtualToolIndex::is_enabled` (`tool_index.cpp:84-109`). | Watched: "the listed MMU slots". | `SimPrinter.listed`. BF20. |
+| E moves count on slot 0 while the MMU connects, then on the selected slot (F39, F45) | `PhysicalExtension::currently_selected_virtual_tool` (`tool_index.cpp:140-158`). | Watched: "the MMU's selected slot". | `Mmu.credited` and `Mmu.head_tool` in `simulator/feed.py`. BF17 and BF28. |
+| With no slot selected, a move runs, counts on no slot and leaves the gap (F39, F41) | The statement `if(tools.virtual_tool.has_value())` (`planner.cpp:2207-2219`). | Watched: "the counted E move". | `SimPrinter._count` and `Mmu.prime`. BF29, the uncounted first change in BF16, and the resumed print in BF17. |
+| No slot is selected after a boot (F1, F45) | `MMU2::Start`, which sets `extruder = MMU2_NO_TOOL` (`mmu2_mk4.cpp:169-191`, the write at `:175`). | Not guarded. The file also defines an empty `MMU2::Start` in its `#else` (`:366-372`), so no function region can hold it, and the write's text starts three other statements in the file (`:870, 913, 1013`). "the MMU started at boot" watches only `app_setup`'s call (`appmain.cpp:186-190`). | `SimPrinter._start_mmu`. BF17. |
+| A tool change selects the new slot last, so its feed counts on the old one (F40) | `extruder = slot` at the end of `MMU2::ToolChangeCommon` (`mmu2_mk4.cpp:657-679`), after `ToolChangeCommonOnce`'s -80 mm retract, which runs only with a slot selected (`:593-594`). | Watched: "the MMU tool change's retries" and "the MMU tool change". | `SimPrinter._mmu_change_steps`. BF16. |
+| Turning the MMU off writes none to slot 0 unless the extruder's sensor sees filament (F38) | `filament_gcodes::mmu_off` (`M70X_mmu.cpp:77-92`). | Watched: "the MMU switched off". | `SimPrinter._mmu_off`. BF28. |
+| A finished print with the MMU Active doesn't auto-retract, and only a stop or a single-tool file unloads (F39, F42) | The `HAS_MMU2` branch of `pre_finalize_print` (`marlin_server.cpp:1067-1075`), and `GCodeInfo::is_singletool_gcode` (`gcode_info.cpp:611-625`). | Watched: "the end of a print with an MMU" and "the single-tool file". | `SimPrinter._end_of_print` and `PrintSpec.single_tool_file`. BF18: a finished sync job leaves the filament, so the next job asks again. |
+| The preview asks to unload when FINDA sees filament (F43) | `PrintPreview::stateFromFilamentPresence` (`marlin_print_preview.cpp:228-257`). | Watched: "the MMU's preview question". | `SimPrinter._ask_mmu_unload` and `_mmu_shortcut`. BF18: the sync job uses no tool, so the single-tool shortcut never applies. |
+
+### Power panic
+
+| Behavior | Rests on | Guard | When it changes |
+| --- | --- | --- | --- |
+| Which builds resume a print after a cut (F12) | `HAS_POWER_PANIC` (`ProjectOptions.cmake:334-345`). | Compared: `power_panic` in "simulator MODELS". | `ModelInfo.power_panic`. BF11 and BF26 list the builds. |
+| The cut retracts 8 mm, except on the XL and for a paused or crashed print (F12) | `power_panic_retracts`, which is `!HAS_DWARF()` (`power_panic.cpp:110-112`), and the retract at `:732-736`. | Watched: "the power-panic retract rule", "the Dwarf builds", "the HAS_DWARF condition" and "the power cut's retract". | `Extruder.panic_retract` in `simulator/tool.py` and `SimPrinter._reboot`. BF11. |
+| The resume purges 25 mm on INDX and feeds the 8 mm back elsewhere (F12, F45) | `power_panic_deretracts` (`power_panic.cpp:114-117`), and the `HAS_NOZZLE_CLEANER` block of `resume_loop` (`:480-493`). | Watched: "the power-panic feed-back rule" and "the power-panic resume". Compared: `panic_purge_mm` and `panic_purge_auto_retract` in "simulator MODELS". | `Extruder.panic_purge_mm`, and `SimPrinter._unpark` and `_nozzle_clean`. BF11, BF17's feed back on slot 0, and BF24. |
+| `IDLE` with no job for at least 1.5 s before the resume (F12) | `print_utils_loop` (`print_utils.cpp:67-83`), whose autostart tries every 1.5 s. | Not guarded, and nothing compares `PANIC_RETRY_SECONDS` in `simulator/model.py` with `rescan_delay`. | `Settings.panic_idle_seconds` and `SimPrinter._tick_resume`. BF26 happens in this window, and the idle sensor clear in it is BF24's power-panic path. |
+| A cut during a filament change dialog resumes on its own, as a cut while printing (F12, F13) | `was_paused` is `marlin_server::printer_paused()`, `print_state == Paused` (`power_panic.cpp:983`, `marlin_server.cpp:1493-1495`), which a filament change never sets. | Not guarded. | `UserJob.parked`, which only `pause()` sets. BF24's third path: a cut while a runout waits for its reload resumes through the empty tool. |
+
 ## Recording a trace
 
 The probe is `simulator/probe.py`. It only reads, so the production bridge

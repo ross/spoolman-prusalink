@@ -552,11 +552,13 @@ confirm first.
    with an MMU on.
    Acceptance: a two-color print's counters match the source's arithmetic,
    and the family matrix runs the bridge against both MMU printers.
-6. **Keeping up.** A list in printer-behaviors.md of the behaviors that
-   rest on one build flag or one firmware function, to read again when
-   `firmware-check` reports a change or a new firmware ships. The first
-   entries: UUIDs on tool 0 only, no tag reader on INDX, the INDX lock
-   question, and the MMU's selected slot at boot.
+6. **Keeping up.** A list in printer-behaviors.md, "Behaviors that rest on
+   one flag or function", of the behaviors that rest on one build flag or
+   one firmware function, to read again when `firmware-check` reports a
+   change or a new firmware ships. Each entry names its thread, what in
+   `firmware-check` guards it, and the simulator code and bridge findings
+   that depend on it. Among them: UUIDs on tool 0 only, no tag reader on
+   INDX, the INDX lock question, and the MMU's selected slot at boot.
 
 ## Slicer runs
 
