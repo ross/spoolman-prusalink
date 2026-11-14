@@ -232,6 +232,16 @@ def test_load_fails_on_a_model_without_a_build():
         compare.load(fixtures.FakeSource(files))
 
 
+def test_load_fails_on_an_indx_build_that_isnt_a_toolchanger():
+    """`tools` and `feed_of` would still call it an INDX toolchanger."""
+    old = 'HAS_TOOLCHANGER "XL" "XL_DEV_KIT" "COREONE_INDX" "COREONEL_INDX"'
+    options = fixtures.OPTIONS_CMAKE.replace(old, old.removesuffix(' "COREONEL_INDX"'))
+    assert options != fixtures.OPTIONS_CMAKE
+    files = {**fixtures.FILES, read.OPTIONS_FILE: options}
+    with pytest.raises(Unreadable, match="HAS_INDX without HAS_TOOLCHANGER on COREONEL_INDX"):
+        compare.load(fixtures.FakeSource(files))
+
+
 def test_load_fails_on_a_build_printer_cant_name():
     options = fixtures.OPTIONS_CMAKE.replace('    "XL_DEV_KIT"\n    "NONE"', '    "NONE"')
     files = {**fixtures.FILES, read.OPTIONS_FILE: options}

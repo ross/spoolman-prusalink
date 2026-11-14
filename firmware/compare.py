@@ -295,6 +295,11 @@ def load(source: Source) -> Firmware:
     unknown = sorted({b for b in MODEL_BUILDS.values() if b} - read.printers(options))
     if unknown:
         raise Unreadable(read.OPTIONS_FILE, f"PRINTER_VALID_OPTS doesn't list {', '.join(unknown)}")
+    # `tools` and `feed_of` take an INDX build for a toolchanger.
+    unknown = sorted(features["HAS_INDX"] - features["HAS_TOOLCHANGER"])
+    if unknown:
+        listed = ", ".join(unknown)
+        raise Unreadable(read.OPTIONS_FILE, f"HAS_INDX without HAS_TOOLCHANGER on {listed}")
     presets_text = source.read(read.PRESETS_FILE)
     tracker_text = source.read(read.TRACKER_FILE)
     configurations = source.read(read.CONFIGURATION_FILE)
