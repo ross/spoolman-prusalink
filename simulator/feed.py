@@ -12,7 +12,7 @@ from enum import StrEnum
 from typing import TYPE_CHECKING, ClassVar
 
 if TYPE_CHECKING:
-    from simulator.model import SimPrinter
+    from simulator.model import SimPrinter, UserJob
     from simulator.slicer import Slicer
     from simulator.tool import SimTool
 
@@ -36,6 +36,15 @@ class FeedSystem:
         """The multi-tool slicer profile `p` prints with. A direct printer has none: its
         single-tool profiles add no moves the simulator models."""
         return None
+
+    def select_for_print(self, p: SimPrinter, tool: SimTool) -> None:
+        """Make `tool` the picked tool as a print starts its preheat and each time it starts
+        feeding: the start G-code's tool, or the one a resume found picked."""
+        p.selected_tool = tool.index
+
+    def prime(self, p: SimPrinter, job: UserJob, slicer: Slicer | None) -> None:
+        """The start G-code's moves outside the model, run once as the print first feeds.
+        `slicer` is the print's profile with its overrides. A direct printer has none."""
 
     def tool_change(
         self, p: SimPrinter, old: SimTool, new: SimTool, slicer: Slicer, first: bool
@@ -96,6 +105,34 @@ class Toolchanger(FeedSystem):
 
     def maps_tools(self, p: SimPrinter) -> bool:
         return True
+
+    def prime(self, p: SimPrinter, job: UserJob, slicer: Slicer | None) -> None:
+        """The profile's start moves (`Slicer`), when the printer has a profile.
+
+        `G427` picks each used tool in ascending order and purges it in the nozzle cleaner
+        (`run` and `prepare_tool` in
+        `src/feature/tool_offset_calibration/tool_offset_calibration.cpp:186-233, 663-850`).
+        """
+        if slicer is None:
+            return
+        # The start G-code's tools go through the tool mapping too.
+        tools = {p._seg_tool(job, i) for i in range(len(job.spec.segments))}
+        first = p.tools[p._seg_tool(job, 0)]
+        used = [p.tools[i] for i in sorted(tools)]
+        p._pick(first)
+        p._print_moves(first, slicer.cleanup)
+        if slicer.calibrates:
+            for t in used:
+                p._pick(t)
+                p._purge_clean(t)
+        if slicer.prime_others is not None:
+            for t in used:
+                if t is not first:
+                    p._pick(t)
+                    p._print_moves(t, slicer.prime_others.moves())
+        p._pick(first)
+        p._print_moves(first, slicer.prime.moves())
+        p._log("job", f"start G-code primed {', '.join(f'T{t.index}' for t in used)}")
 
     def profile(self, p: SimPrinter) -> Slicer | None:
         """On a toolchanger only. An XL with one tool isn't one (`SimPrinter.toolchanger`),

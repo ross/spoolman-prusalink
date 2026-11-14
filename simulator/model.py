@@ -2386,15 +2386,15 @@ class SimPrinter:
         spec = job.spec
         job.enter(JobPhase.PREHEAT)
         job.remaining = self.settings.preheat_seconds if spec.preheat_s is None else spec.preheat_s
-        self.selected_tool = self._seg_tool(job, 0)
+        self.feed.select_for_print(self, self.tools[self._seg_tool(job, 0)])
         self._show_state()
 
     def _begin_feeding(self, job: UserJob) -> None:
         if not job.primed:
             job.primed = True
             job.resumed_on = None  # the start G-code's tool changes end it
-            self._prime(job)
-        self.selected_tool = self._job_tool(job).index
+            self.feed.prime(self, job, self._slicer(job))
+        self.feed.select_for_print(self, self._job_tool(job))
         job.enter(JobPhase.PRINTING)
         self._show_state()
 
@@ -2407,35 +2407,6 @@ class SimPrinter:
         """The print's slicer profile, with the print's overrides."""
         slicer, spec = self.profile, job.spec
         return slicer and slicer.overridden(spec.prime_mm, spec.toolchange_purge_mm)
-
-    def _prime(self, job: UserJob) -> None:
-        """The start G-code's moves outside the model, on a toolchanger (`Slicer`).
-
-        `G427` picks each used tool in ascending order and purges it in the nozzle cleaner
-        (`run` and `prepare_tool` in
-        `src/feature/tool_offset_calibration/tool_offset_calibration.cpp:186-233, 663-850`).
-        """
-        slicer = self._slicer(job)
-        if slicer is None:
-            return
-        # The start G-code's tools go through the tool mapping too.
-        tools = {self._seg_tool(job, i) for i in range(len(job.spec.segments))}
-        first = self.tools[self._seg_tool(job, 0)]
-        used = [self.tools[i] for i in sorted(tools)]
-        self._pick(first)
-        self._print_moves(first, slicer.cleanup)
-        if slicer.calibrates:
-            for t in used:
-                self._pick(t)
-                self._purge_clean(t)
-        if slicer.prime_others is not None:
-            for t in used:
-                if t is not first:
-                    self._pick(t)
-                    self._print_moves(t, slicer.prime_others.moves())
-        self._pick(first)
-        self._print_moves(first, slicer.prime.moves())
-        self._log("job", f"start G-code primed {', '.join(f'T{t.index}' for t in used)}")
 
     def _park(self, job: UserJob | SyncJob, end: State) -> None:
         """End a job: a finished print's end G-code on a toolchanger runs the profile's last

@@ -12,7 +12,7 @@ from simulator.feed import (
     Toolchanger,
     XlToolchanger,
 )
-from simulator.model import MODELS, Invalid
+from simulator.model import MODELS, Invalid, PrintSpec, Segment, UserJob
 from simulator.slicer import INDX_SLICER, XL_SLICER
 from simulator.tests.util import loaded, make
 
@@ -69,3 +69,33 @@ def test_the_feed_gives_the_multi_tool_profile_on_a_toolchanger(code, tools, pro
     _, p = make(code, [loaded(i) for i in range(tools)])
     assert p.feed.profile(p) is profile
     assert p.profile is profile
+
+
+def job(*segments: tuple[int, float]) -> UserJob:
+    return UserJob(name="job", spec=PrintSpec([Segment(t, mm) for t, mm in segments]))
+
+
+@pytest.mark.parametrize(("code", "tool"), [("8.1.0", 0), ("3.1.0", 1), ("8.10.0", 1)])
+def test_a_print_selects_its_tool_with_no_pick(code, tool):
+    sim, p = make(code, [loaded(0), loaded(1)] if tool else None)
+    p.selected_tool = None
+    p.feed.select_for_print(p, p.tools[tool])
+    assert p.selected_tool == tool
+    assert not [e for e in sim.events if e.text.startswith("pick ")]
+
+
+def test_a_toolchanger_primes_each_used_tool_with_its_profile():
+    # The XL: tool 0 retracts 2 and primes 39, so 37 count; tool 1 primes 39 and retracts
+    # 20. Tool 0 ends picked, and tool 2, unused, moves nothing.
+    _, p = make("3.1.0", [loaded(0), loaded(1), loaded(2)])
+    p.feed.prime(p, job((0, 10), (1, 10)), XL_SLICER)
+    assert [t.extruded / 0.95 for t in p.tools.values()] == pytest.approx([37, 39, 0])
+    assert p.selected_tool == 0
+
+
+@pytest.mark.parametrize("code", ["8.1.0", "3.1.0"])
+def test_no_profile_primes_nothing(code):
+    # A direct printer, and an XL with one tool, which prints as one.
+    _, p = make(code)
+    p.feed.prime(p, job((0, 10)), p.profile)
+    assert p.tools[0].extruded == 0 and p.tools[0].path.gap == 0
