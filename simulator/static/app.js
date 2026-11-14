@@ -77,6 +77,7 @@ async function doAction(pname, action, body, onOk) {
 // ---- settings strip ----
 
 // The fields come from the model (`setting_fields`), so the page lists every setting.
+// An optional number left empty means the printer model's value, shown on each card.
 function buildSettings() {
   const box = $('settings');
   const fields = S.setting_fields || [];
@@ -85,7 +86,8 @@ function buildSettings() {
   box.dataset.sig = sig;
   box.innerHTML = fields.map((f) =>
     '<label>' + esc(f.name.replace(/_/g, ' ')) + ' <input data-s="' + esc(f.name) + '" ' +
-    (f.kind === 'bool' ? 'type="checkbox"' : 'type="number" step="any"') + '></label>').join('');
+    (f.kind === 'bool' ? 'type="checkbox"' : 'type="number" step="any"') +
+    (f.kind === 'optional' ? ' placeholder="model" data-opt="1"' : '') + '></label>').join('');
 }
 
 function wireSettings() {
@@ -93,8 +95,10 @@ function wireSettings() {
     const k = e.target.dataset.s;
     if (!k) return;
     const isBool = e.target.type === 'checkbox';
-    if (!isBool && e.target.value.trim() === '') return;
-    const v = isBool ? e.target.checked : Number(e.target.value);
+    const empty = !isBool && e.target.value.trim() === '';
+    const optional = !!e.target.dataset.opt;
+    if (empty && !optional) return;
+    const v = isBool ? e.target.checked : empty ? null : Number(e.target.value);
     try {
       await api('/api/settings', { [k]: v });
     } catch (err) {
@@ -112,7 +116,7 @@ function renderSettings() {
     const el = document.querySelector('[data-s="' + k + '"]');
     if (!el || el === document.activeElement || !(k in S.settings)) continue;
     if (f.kind === 'bool') el.checked = !!S.settings[k];
-    else el.value = S.settings[k];
+    else el.value = S.settings[k] == null ? '' : S.settings[k];
   }
   $('now').textContent = fmtTime(S.now);
   const sel = $('snap-list');
@@ -227,7 +231,6 @@ function renderTool(p, t) {
       '<label>name' + inp(p, 'load' + i + '.name', 'PLA') + '</label>' +
       '<label>color' + inp(p, 'load' + i + '.color', '', 'type="text" placeholder="#rrggbb"') + '</label>' +
       '<label>uuid' + inp(p, 'load' + i + '.uuid', '', 'type="text" size="36"') + '</label>' +
-      '<label>feed mm' + inp(p, 'load' + i + '.feed', '', 'type="number" step="any"') + '</label>' +
       '<label>purge mm' + inp(p, 'load' + i + '.purge', '', 'type="number" step="any"') + '</label>' +
       btn('Start load', 'load_submit', { tool: i, dis: needName && !nm }) + '</div>';
   }
@@ -259,7 +262,10 @@ function renderPrinter(p) {
     '<label>fw <select data-sel="set_firmware" data-field="firmware">' + opts(S.options.firmware, low(p.firmware)) + '</select></label>' +
     '<small class="muted">boot ' + esc(p.boot_id) + '</small>' +
     '<small>' + (p.homed ? 'homed' : '<span class="muted">not homed</span>') + '</small>' +
-    '<small>tool <b>' + esc(p.selected_tool) + '</b></small></div>';
+    '<small>tool <b>' + esc(p.selected_tool) + '</b></small>' +
+    '<small class="muted" title="the model\'s values, which an empty setting uses">ratio ' +
+    Number(m.feed_ratio).toFixed(4) + ', load ' + esc(m.slow_load_mm) + ' + ' + esc(m.fast_load_mm) +
+    ', purge ' + esc(m.purge_mm) + ' mm' + (p.high_flow ? ' (high-flow)' : '') + '</small></div>';
 
   h += '<div class="jobline">';
   if (job) {
@@ -409,11 +415,9 @@ function loadBody(name, i) {
     const v = String(getv(name, k + f, f === 'name' && !keep ? 'PLA' : '')).trim();
     if (v) body[key] = v;
   }
-  for (const [f, key] of [['feed', 'feed_mm'], ['purge', 'purge_mm']]) {
-    const v = numOrNull(getv(name, k + f, ''));
-    if (Number.isNaN(v)) throw new Error(key + ' must be a number');
-    if (v != null) body[key] = v;
-  }
+  const purge = numOrNull(getv(name, k + 'purge', ''));
+  if (Number.isNaN(purge)) throw new Error('purge_mm must be a number');
+  if (purge != null) body.purge_mm = purge;
   return body;
 }
 
