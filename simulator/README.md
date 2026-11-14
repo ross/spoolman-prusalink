@@ -517,8 +517,8 @@ Choices made where the firmware was silent or the plan left it open:
   purge when a cleaning fails on a printer with a nozzle cleaner; it
   retracts to the full distance (20 mm on a Nextruder, 8 mm on INDX) with
   no ramming, whatever the switch says, and stores that distance for the next feed to feed back.
-- Temperatures, `G12` other than INDX's power-panic purge, the mesh bed
-  leveling retract and the MMU don't move filament in the simulator.
+- Temperatures, `G12` other than INDX's power-panic purge and the mesh bed
+  leveling retract don't move filament in the simulator.
 - A power cut during a runout's or a jam's dialog retracts 8 mm, as any
   cut in a print does. The firmware skips that retract when the runout or
   jam interrupted a move, which runs it through the crash recovery
@@ -535,6 +535,10 @@ Choices made where the firmware was silent or the plan left it open:
   try finds everything ready, the firmware starts the resume over the new
   print: its check that the printer is idle is a debug assertion
   (`resume_print` in `power_panic.cpp`). The simulator doesn't model that.
+- A second power cut during the resume's recovery or unpark loses the print
+  in the simulator, on every model, where the firmware keeps the saved state
+  through the resume and resumes again (`power_panic.cpp:228-237, 270-279,
+  732, 946-983`).
 - A `T` while the MMU connects waits for it on every model. The Core
   One's MMU, on MODBUS, connects that way. The MK4 family's, on UART, first
   runs its bootloader for up to 10 s, where the firmware's `T` doesn't
