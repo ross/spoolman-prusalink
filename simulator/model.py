@@ -2410,7 +2410,7 @@ class SimPrinter:
         (`pre_finalize_print`). A stopped print and a sync job run no end G-code."""
         if isinstance(job, UserJob) and end is State.FINISHED:
             self.feed.end_moves(self, job, self._slicer(job))
-        self._end_of_print(job, end)
+        self._end_of_print()
         self.feed.rest(self)
         job.enter(JobPhase.PARKING)
         job.remaining, job.end_state = self.settings.park_seconds, end
@@ -2418,9 +2418,9 @@ class SimPrinter:
             job.paused_from = None
         self._show_state()
 
-    def _end_of_print(self, job: UserJob | SyncJob, end: State) -> None:
-        """What `job`, finished or stopped as `end` says, does to the filament before it
-        parks, a sync job too (`marlin_server.cpp`).
+    def _end_of_print(self) -> None:
+        """What a finished or stopped job does to the filament before it parks, a sync job
+        too (`marlin_server.cpp`).
 
         It retracts the picked tool to 8 mm (`retract_and_lift`). Then `pre_finalize_print`
         stores each tool's valid tracker gap as its auto-retracted distance and
