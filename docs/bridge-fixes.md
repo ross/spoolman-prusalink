@@ -27,7 +27,7 @@ update the workstreams it changes.
 | --- | --- | --- | --- |
 | D1 | In what order do the workstreams go? | As [Order and parallelism](#order-and-parallelism) lists: what protects the printer first (workstreams 1 and 3, then 2), then charging (4 to 6), then the toolchangers before the INDX upgrade (7 and 8), then the MMU (9). This breaks the stage table's rule that, within stage 1, charges come before writes: BF26 loses a print, and the write fixes are small. | The order only. |
 | D2 | Does stage 1 ship alone, merged and deployed to the Core One L before stage 2 or 4 work merges? | Yes. Workstream 7 can be built at the same time, but it merges after workstreams 2 and 3, which change the same code in `app.py` and `printer_sync.py`. | Merging workstreams 7 and 9. |
-| D3 | How does BF26 get fixed: a positive `sync_delay` default, a guard in the bridge after a boot that interrupted a print, or wait for the F12 trace? | A positive default, at most `poll_idle`. The code already holds a write while the printer has been idle for less than `sync_delay`, and a new `PrinterBridge` or a failed read starts that clock again, so the first idle poll after a boot only starts it. That covers a bridge that restarts in the window too, as when one power cut takes down the printer and the bridge's host. What it misses: a config that sets `sync_delay = 0`, and a window that outlasts a poll. What it costs: every write waits one more idle poll, up to 60 s by default. The guard instead keeps ordinary writes at the first idle poll and covers a config with 0, but it misses a restarted bridge: what the printer was doing before the boot is known only in memory. Add the guard as well only if writes at the first idle poll matter to you. Until the default ships, set `sync_delay` above 0 on your own printer. The F12 trace confirms that the window ends within one poll. | Workstream 1. |
+| D3 | How does BF26 get fixed: a positive `sync_delay` default, a guard in the bridge after a boot that interrupted a print, or wait for the F12 trace? | A positive default, at most `poll_idle`. The code already holds a write while the printer has been idle for less than `sync_delay`, and a new `PrinterBridge` or a failed read starts that clock again, so the first idle poll after a boot only starts it. Each boot opens its own window, so a second cut during the resume opens a second one; workstream 1 starts the clock again at each new `boot_id`, so two cuts between two polls are covered too. That covers a bridge that restarts in the window too, as when one power cut takes down the printer and the bridge's host. What it misses: a config that sets `sync_delay = 0`, and a window that outlasts a poll. What it costs: every write waits one more idle poll, up to 60 s by default. The guard instead keeps ordinary writes at the first idle poll and covers a config with 0, but it misses a restarted bridge: what the printer was doing before the boot is known only in memory. Add the guard as well only if writes at the first idle poll matter to you. Until the default ships, set `sync_delay` above 0 on your own printer. The F12 trace confirms that the window ends within one poll. | Workstream 1. |
 | D4 | Keep `gcode_preamble`, or remove it? | Remove it, unless your own config sets it. Its only effects found are BF2, BF3 and BF4, and the default preamble passes every check on every model the bridge writes to. Pre-release, there's no compatibility to keep. If you keep it, workstream 3 validates it instead. | Workstream 3, and the INDX lock line in workstream 7. |
 | D5 | Amend Q4 so that a ramming or a load isn't a print's first extrusion? | Yes. Q4's intent, that a cancelled print changes nothing, holds; only what counts as the first extrusion narrows. | Workstream 4. |
 | D6 | Amend C7: usage counted on a tool with no filament while a user's print runs is reported lost, not charged to the next spool? | Yes. That filament came from no spool. The hold during a load, which S1 and S2 rely on, stays as it is. | Workstream 5. |
@@ -47,10 +47,12 @@ updates the finding's Status and its scenario rows.
 
 Not in scope:
 
-- **Changing the simulator or `firmware/` to make a fix pass.** The
-  simulator follows the firmware source and the traces. If a fix shows the
-  simulator is wrong, that's a separate change, made on firmware or trace
-  evidence first.
+- **Changing what's copied from the firmware to make a fix pass.** The
+  simulator's behavior and the tables copied from the firmware follow the
+  firmware source and the traces, so a fix doesn't change them. If a fix
+  shows one is wrong, that's a separate change, made on firmware or trace
+  evidence first. The checks in `firmware/compare.py` of the bridge's own
+  tables, such as `PRINTER_MODELS` and `PRESETS`, change with the bridge.
 - **Anything the findings don't cover**, such as Q12 or a websocket
   listener for Spoolman.
 - **Firmware changes.** The bridge reads what the firmware fork serves
@@ -72,7 +74,7 @@ elsewhere names it under "Also touches".
 | 4 | [Print start](#4-print-start) | BF10, BF23, BF27 | | 1 | Medium | D5; sitting D confirms | Not started |
 | 5 | [Usage on an empty tool](#5-usage-on-an-empty-tool) | BF24, BF25 | | 1 | Medium | D6; sittings C and D confirm | Not started |
 | 6 | [The auto-retract](#6-the-auto-retract) | BF9 | | 1 | Small | D7; sittings A and B | Not started |
-| 7 | [Writes to toolchangers](#7-writes-to-toolchangers) | BF14, BF1, BF8, BF7 | BF26 | 2 | Medium | D4, D10; workstream 2 | Not started |
+| 7 | [Writes to toolchangers](#7-writes-to-toolchangers) | BF14, BF1, BF8, BF7 | BF26 | 2 | Medium | D4, D10; workstreams 2 and 3 | Not started |
 | 8 | [Toolchanger swaps](#8-toolchanger-swaps) | BF12, BF13 | | 2 | Small | D11, D12 | Not started |
 | 9 | [MMU printers](#9-mmu-printers) | BF20, BF15 to BF19, BF28, BF29 | | 4 | Medium | D8 | Not started |
 | 10 | [Housekeeping](#10-housekeeping) | BF6, BF11, BF21, BF22 | | 5 | Small | D11; F12 trace for BF11 | Not started |
@@ -92,13 +94,20 @@ medium is a new input or condition through `account()` or
   there, and the print never resumes.
 - **Approach (proposal)**: Under D3's recommendation, raise the default
   `sync_delay` in `config.py` (`PrinterConfig` and `_printer_settings`)
-  to a positive value no greater than `poll_idle`. No bridge code changes:
-  `_idle_since` in `PrinterBridge` starts as `None` and goes back to
-  `None` on every failed read, and `sync_printer` holds while the printer
-  has been idle for less than `sync_delay`. So the first idle poll after
-  a boot, or after the bridge starts, never runs a job. If D3 adds the
-  guard, it goes in `sync_printer` and `read()`, and needs the state of
-  the last read before the boot, which `read()` overwrites today.
+  to a positive value no greater than `poll_idle`. `_idle_since` in
+  `PrinterBridge` starts as `None` and goes back to `None` on every failed
+  read, and `sync_printer` holds while the printer has been idle for less
+  than `sync_delay`. So the first idle poll after a boot the bridge saw as
+  an outage, or after the bridge starts, never runs a job.
+  - Each boot opens its own window, and a second cut during the resume
+    keeps the print, so two cuts give two windows (F12, P12). If both
+    fall between two polls, the bridge sees no outage, its idle clock
+    keeps running from the first window, and the next poll can land in
+    the second with the delay already passed. Starting the clock again
+    when `read()` sees a new `boot_id` closes that: one line in `read()`.
+  - If D3 adds the guard, it goes in `sync_printer` and `read()`, and
+    needs the state of the last read before the boot, which `read()`
+    overwrites today.
 - **Needs**: D3. The F12 trace (sitting C) confirms that one poll covers
   the window.
 - **User and saved state**: README, under "Writing to the printer", and
@@ -110,11 +119,14 @@ medium is a new input or condition through `account()` or
   in `tests/test_power_panic.py` then runs with the default and flips: the
   print resumes and the write runs after it. The default's assertion in
   `tests/test_app.py` changes. P12 and W2 drop the BF26 sentence, and W2
-  gains a `test_w2_...` integration test for the window. The MMU variant
+  gains a `test_w2_...` integration test for the window. Add a unit test
+  with two cuts between two polls, beside `test_a_second_cut_during_the_resume`
+  in `tests/test_power_panic.py`. The MMU variant
   in `tests/test_mmu.py` follows workstream 9.
 - **Done when**: with the default config, no sync job uploads between a
-  boot and the resume of a print.
-- **Overlap**: `config.py` (with workstream 3), and the fixtures in
+  boot and the resume of a print, a second cut's boot included.
+- **Overlap**: `config.py` (with workstream 3), `read()` in `app.py` (with
+  workstream 9), and the fixtures in
   `tests/harness.py` and `integration/conftest.py`, which every workstream's
   tests use.
 
@@ -327,11 +339,17 @@ medium is a new input or condition through `account()` or
     `PRESETS` with every model the bridge writes to, so it fails as soon
     as the refusal lifts, until INDX's rows are per model or listed in
     `EXPECTED` in `firmware/compare.py`.
+  - Change `firmware/compare.py`'s check of `PRINTER_MODELS`, which today
+    reports a difference for every model the bridge writes to whose build
+    has more than one tool (`reason is None and build.tools > 1`). It also
+    reads `bridge._MULTI_TOOL` into `Copies`, so if lifting the refusal
+    leaves that constant unused, remove it from both together, or the
+    check fails to start.
   - Name the nozzle-cleaner calibration in the README as a cause of a
     refused job (BF7). Workstream 2's flag is what the user sees.
-- **Needs**: D10, workstream 2, and D4's answer, since a kept
-  `gcode_preamble` would need per-model rules. It has to merge before the
-  INDX upgrade.
+- **Needs**: D10; D4, since a kept `gcode_preamble` would need per-model
+  rules; workstream 2, for BF7's flag; and workstream 3, which changes the
+  same code. It has to merge before the INDX upgrade.
 - **User and saved state**: README's model table and "Writing to the
   printer". No saved state.
 - **Tests**: `test_t6_writes_on_a_multi_tool_model_are_refused` in
@@ -340,7 +358,7 @@ medium is a new input or condition through `account()` or
   change. `test_the_bridge_default_job_asks_nothing_on_the_models_it_writes_to`
   in `simulator/tests/test_model.py` asserts the bridge's list of
   writable models, so its list grows with the table: that's a change to
-  what it checks of the bridge, not to the simulator. BF1's printer side
+  what it checks of the bridge, not to the simulator's behavior. BF1's printer side
   is `test_indx_asks_about_the_lock_under_any_setting`: the bridge's job
   must not meet it.
 - **Done when**: a write lands on every tool of a Core One L INDX and a
@@ -413,9 +431,10 @@ medium is a new input or condition through `account()` or
   stage 1).
 - **Approach (proposal)**: Remove `READY` from `IDLE_STATES` in
   `prusalink.py` (BF21): it's never matched, and a dead entry misleads
-  the next reader. Mark BF6, BF11 and BF22 Accepted (D11). For BF11, once
-  the F12 trace confirms the 8 mm, P12 says the resume's feed is charged
-  to the active spool, as "Bridge follow-ups found here" in
+  the next reader. Mark BF6, BF11 and BF22 Accepted (D11). P12 already
+  says the bridge charges each resume's feed back, a second cut's
+  included. For BF11, once the F12 trace confirms the 8 mm, P12 also says
+  that's where the feed belongs, as "Bridge follow-ups found here" in
   printer-behaviors.md asks.
 - **Needs**: D11; the F12 trace for BF11.
 - **Tests**: none flip.
@@ -430,7 +449,7 @@ ships, a positive `sync_delay` on your printer covers BF26.
 
 | When | Workstreams | Why |
 | --- | --- | --- |
-| Now, in parallel | 1, 4, 10, 8 | Different files: `config.py` and the test fixtures; `accounting.py`; one line of `prusalink.py`; the README. Workstream 1 needs D3. |
+| Now, in parallel | 1, 4, 10, 8 | Different files: `config.py`, one line of `read()` and the test fixtures; `accounting.py`; one line of `prusalink.py`; the README. Workstream 1 needs D3. |
 | Now, one after another | 3, then 2 | Both change `app.py` around `sync_printer`. Workstream 3 also shares `config.py` with workstream 1, a small textual collision. Under D4's recommendation, 3 first: it removes BF3's question from the Core One L at once. |
 | After 4 | 5 | Both change `accounting.py` and `account()`. Traces confirm them later. |
 | After sittings A and B | 6 | Needs the F3 and F5 traces. |
@@ -455,9 +474,11 @@ These rules bind, beyond AGENTS.md:
   `test_<row>_...`, as AGENTS.md says.
 - If a decision you need isn't made, stop and ask Ross: don't pick an
   answer and build on it.
-- Don't change the simulator or `firmware/` to make a fix pass. If the fix
-  shows the simulator is wrong, make that a separate change, with the
-  firmware source or a trace as its evidence.
+- Don't change the simulator's behavior or a table copied from the
+  firmware to make a fix pass. If the fix shows one is wrong, make that a
+  separate change, with the firmware source or a trace as its evidence.
+  The checks in `firmware/compare.py` of the bridge's own tables change
+  with the bridge, in the same change.
 - Report a problem through a condition, logged once when it starts and
   once when it ends, never on every poll.
 - Update README.md in the same change when a user sees a difference.
@@ -477,7 +498,7 @@ These get no code. Each is documented, or Accepted under D11.
 | --- | --- |
 | BF6 | The bridge only writes names inside the firmware's rules and preset names `firmware-check` compares. W5's flag catches the rest. |
 | BF7 | The cause can't be read. Workstream 2's flag and workstream 7's README text are all the bridge can do. |
-| BF11 | The lost usage needs the counters in the firmware's power-panic data. The resume's feed is charged where it belongs. |
+| BF11 | The lost usage needs the counters in the firmware's power-panic data. The resume's feed is charged where it belongs, and so is a second cut's, which leaves the nozzle because that cut doesn't retract. |
 | BF12 | No reading shows a docked tool emptied by hand. Only a new firmware field, such as each tool's sensor state, would. |
 | BF13 | The charges follow the filament, and the old tool's swap and flag are what an emptied tool needs. |
 | BF22 | Changing the harness's default flips many unrelated tests. Workstream 4's new tests turn the auto-retract on themselves. |
