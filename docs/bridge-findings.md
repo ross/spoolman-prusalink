@@ -354,8 +354,10 @@ written.
   power-panic data, so usage since the bridge's last poll is lost. The
   resume then moves filament. INDX purges 25 mm with `G12 S21`
   (`power_panic.cpp:480-488`, `nozzle_cleaner.cpp:96-109`). The MK4
-  family, Core One, Core One L and iX feed back the 8 mm retracted at the
-  cut, and the XL moves nothing (`power_panic.cpp:110-116, 518-521`). The
+  family, MK3.5, MK3.5S, Core One, Core One L and iX feed back the 8 mm
+  retracted at the cut, and the XL moves nothing
+  (`power_panic.cpp:110-116, 518-521`). The MINI and the XL dev kit have
+  no power panic and never resume (`ProjectOptions.cmake:334-345`). The
   purge sits under `HAS_NOZZLE_CLEANER`, which only the iX and the INDX
   builds set (`ProjectOptions.cmake:755-756`), and the iX's plain `G12`
   wipes without a purge (`power_panic.cpp:489-491`,
@@ -367,12 +369,12 @@ written.
   8 mm.
 - **Evidence**: Read in the firmware source. The size on the Core One L
   is to be confirmed: the F12 trace decides, and has to be taken before
-  the INDX upgrade. The simulator still purges 25 mm on every model
-  (`panic_purge_mm`).
+  the INDX upgrade. The simulator follows the source per model.
 - **Scenario rows**: P12, Q5, C1.
 - **To reproduce**: `test_p12_power_panic_resume_keeps_the_job` in
-  `integration/test_prints.py` shows the loss and the simulator's 25 mm
-  purge today. The amount per build needs workstream 4.
+  `integration/test_prints.py` shows the loss and the 8 mm fed back on a
+  Core One L, 7.6 mm counted. `simulator/tests/test_model_power_panic.py`
+  shows the amount per model.
 - **Status**: Open. A candidate for Accepted: printer-behaviors.md, under
   "Bridge follow-ups found here", calls both parts fine.
 

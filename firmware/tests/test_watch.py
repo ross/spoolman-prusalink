@@ -89,6 +89,56 @@ def test_braces_in_literals_dont_count():
     assert region(text, "function", "f").endswith("int n = 8'000; char c = '}';\n}")
 
 
+def test_a_statement_runs_to_its_semicolon():
+    found = region(fixtures.POWER_PANIC_CPP, "statement", "constexpr bool power_panic_retracts")
+    # The comment is gone.
+    assert " ".join(found.split()) == "constexpr bool power_panic_retracts = !HAS_DWARF();"
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "int a = f(x; y) + 1;",  # parentheses hold no end
+        "int a = v[i;j] + 1;",  # nor do brackets
+        'int a = s + ";" + t;',  # nor does a literal
+        'int a { s = "}"; x(); }',
+    ],
+)
+def test_a_statement_ends_outside_brackets_and_literals(statement):
+    assert region(f"    {statement} int b;\n", "statement", "int a") == statement
+
+
+def test_a_statement_with_a_block_runs_to_its_closing_brace():
+    found = region(fixtures.POWER_PANIC_CPP, "statement", "if (power_panic_retracts &&")
+    assert found.startswith("if (power_panic_retracts && PhysicalToolIndex::")
+    assert found.endswith("planner.start_moving();\n        }")
+    text = "if (a) {\n    if (b) { x(); } else { w(); }\n    y();\n}\nelsewhere();\n"
+    expected = "if (a) {\n    if (b) { x(); } else { w(); }\n    y();\n}"
+    assert region(text, "statement", "if (a)") == expected
+
+
+@pytest.mark.parametrize(
+    "text, problem",
+    [
+        ("int b = 1;\n", "0 lines start int a"),
+        ("// int a = 1;\n", "0 lines start int a"),
+        ("int ab = 1;\n", "0 lines start int a"),
+        ("x = 1; int a = 1;\n", "0 lines start int a"),
+        ("int a = 1;\nint a = 2;\n", "2 lines start int a"),
+        ("int a = f(1\n", "int a isn't closed"),
+        ("int a { 1;\n", "unbalanced {}"),
+        ("int a { x(); } else { y(); }\n", "int a has an else"),
+        ("int a { x(); }\n  else if (b) y();\n", "int a has an else"),
+        ("int a = 1; else y();\n", "int a has an else"),
+        ("int a { x(); }\n#if B\nelse { y(); }\n#endif\n", "int a has an else"),
+        ("int a { x(); }\n#if B \\\n  || C\n#endif\n  else y();\n", "int a has an else"),
+    ],
+)
+def test_a_statement_found_other_than_once_fails(text, problem):
+    with pytest.raises(Unreadable, match=rf"{problem}, for the region"):
+        region(text, "statement", "int a")
+
+
 def test_a_branch_runs_to_the_next_directive_of_its_conditional():
     found = region(fixtures.BOARD_H, "directive", "#elif BOARD() == BOARD_XL_DEV_KIT_XLB()")
     assert found.splitlines() == [

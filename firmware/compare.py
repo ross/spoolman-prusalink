@@ -8,10 +8,11 @@ a copy differs. A difference on `EXPECTED` is reported but doesn't fail the chec
 
 Each build also carries its preset filaments, its extruder numbers (steps per mm,
 filament change lengths, ramming sequences, the nozzle cleaner's purge, the auto-retract's
-threshold and cold unload, and the purge before an unload) and what its G-code checks know
-(the compatibility mode and the `M862.6` feature names), which the simulator's models
-copy. The simulator's `GROUPS` copies every name a file's `M862.3` can carry, with its
-compatibility group, and its `MINIMAL_PURGE_MM` copies the shortest purge a load runs.
+threshold and cold unload, the purge before an unload, and the power-panic resume's
+purge) and what its G-code checks know (the compatibility mode and the `M862.6` feature
+names), which the simulator's models copy. The simulator's `GROUPS` copies every name a
+file's `M862.3` can carry, with its compatibility group, and its `MINIMAL_PURGE_MM` copies
+the shortest purge a load runs.
 This module's `MAIN_BOARDS`, which `BOARD_IS` follows, copies each build's main board.
 """
 
@@ -156,7 +157,8 @@ class Pause:
 
 @dataclass(frozen=True)
 class CleanerPurge:
-    """What the nozzle cleaner's `purge_clean` G-code does to the filament."""
+    """What a nozzle cleaner purge sequence, `purge_clean` or `power_panic_purge`, does to
+    the filament."""
 
     e_mm: float
     auto_retract: bool  # whether it runs M1705 after extruding
@@ -183,6 +185,9 @@ class Build:
     # gets another sequence.
     ramming: Mapping[str, Ramming]
     cleaner_purge: CleanerPurge | None  # None without HAS_NOZZLE_CLEANER
+    # The power-panic resume's `G12 S21`: None where `ResumeState::WaitForHeaters` doesn't
+    # run it, every build but those with HAS_NOZZLE_CLEANER on a Core One or Core One L.
+    panic_purge: CleanerPurge | None
     auto_retract: AutoRetract | None  # None without HAS_AUTO_RETRACT
     unload_purge_mm: float  # what an unload purges before the ramming
     feature_names: frozenset[str]  # the `M862.6` names it knows
@@ -294,6 +299,13 @@ def load(source: Source) -> Firmware:
         cleaner = None
         if "HAS_NOZZLE_CLEANER" in has:
             cleaner = CleanerPurge(*read.cleaner_purge(text(read.CLEANER_FILE), values))
+        # `src/common/power_panic.cpp` purges only on these builds; the watched resume says so.
+        panic = None
+        if "HAS_NOZZLE_CLEANER" in has and (
+            values("PRINTER_IS_PRUSA_COREONE") or values("PRINTER_IS_PRUSA_COREONEL")
+        ):
+            sequence = "power_panic_purge"
+            panic = CleanerPurge(*read.cleaner_purge(text(read.CLEANER_FILE), values, sequence))
         # `src/feature/CMakeLists.txt` compiles the auto-retract only with HAS_AUTO_RETRACT,
         # and the header stops the other builds without a Nextruder or INDX with `#error`.
         retract = None
@@ -309,6 +321,7 @@ def load(source: Source) -> Firmware:
             pause=Pause(*read.pause_lengths(text(advanced), values, advanced)),
             ramming=read.ramming(text(ramming), values, ramming),
             cleaner_purge=cleaner,
+            panic_purge=panic,
             auto_retract=retract,
             unload_purge_mm=read.unload_purge(text(read.PAUSE_FILE), values),
             feature_names=read.feature_names(gcode_info, values),
@@ -597,6 +610,11 @@ def _compare_extruder(table: str, code: str, build: Build, extruder: Any, differ
     fw_mm, fw_retract = (None, False) if purge is None else (purge.e_mm, purge.auto_retract)
     differ(table, code, None, "cleaner_purge_mm", fw_mm, extruder.cleaner_purge_mm)
     differ(table, code, None, "cleaner_auto_retract", fw_retract, extruder.cleaner_auto_retract)
+    # The simulator never auto-retracts after the power-panic resume's purge.
+    panic = build.panic_purge
+    fw_mm, fw_retract = (None, False) if panic is None else (panic.e_mm, panic.auto_retract)
+    differ(table, code, None, "panic_purge_mm", fw_mm, extruder.panic_purge_mm)
+    differ(table, code, None, "panic_purge_auto_retract", fw_retract, False)
     # A build without HAS_AUTO_RETRACT has no such constants. The simulator uses its model's
     # only when the model auto-retracts, and the ramming above already checks that it
     # doesn't: it has no `auto_retract` sequence.

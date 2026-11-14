@@ -6,10 +6,12 @@ copy was read from, and the check fails when that text changes. A fingerprint sa
 nothing about whether the copy is right, only that its source changed since someone last
 read it.
 
-A region is one of three kinds, each found exactly once in its file:
+A region is one of four kinds, each found exactly once in its file:
 
 - "function": a C++ function definition, by its name as the definition spells it, from
   the start of its line to its closing brace.
+- "statement": a C++ statement, by the start of its first line: to its `;`, or, where a
+  brace block comes first, to the block's closing brace. One with an `else` can't be read.
 - "directive": a preprocessor line, by its start. A conditional branch (`#if`, `#elif`,
   `#else` and the like) runs to the next directive of the same conditional.
 - "cmake": a CMake command, by its start. An `if()` runs to its `endif()`.
@@ -30,7 +32,7 @@ from typing import Literal
 from firmware import read
 from firmware.source import Source, Unreadable
 
-Kind = Literal["function", "directive", "cmake"]
+Kind = Literal["function", "statement", "directive", "cmake"]
 
 
 @dataclass(frozen=True)
@@ -38,7 +40,7 @@ class Watched:
     name: str
     path: str  # the firmware file
     kind: Kind
-    anchor: str  # the function's name, or the start of the directive or command
+    anchor: str  # the function's name, or the start of the statement, directive or command
     copy: str  # what was copied from the region, and where
     fingerprint: str
     commit: str  # the full hash of the firmware commit the region was last read at
@@ -193,6 +195,69 @@ WATCHED = (
         "eebdf064fe4b03fc",
         UPSTREAM_7D8BF685,
     ),
+    # The next six guard the power cut and its resume: `Extruder.panic_retract` and
+    # `panic_purge_mm` in simulator/tool.py, and `SimPrinter._reboot`, `_unpark` and
+    # `_nozzle_clean` in simulator/model.py. The purge's length is compared as
+    # `panic_purge_mm`. Which builds retract: the Dwarf builds don't.
+    Watched(
+        "the power-panic retract rule",
+        "src/common/power_panic.cpp",
+        "statement",
+        "constexpr bool power_panic_retracts",
+        "Extruder.panic_retract in simulator/tool.py",
+        "8c0d0a81c1b75d9e",
+        UPSTREAM_7D8BF685,
+    ),
+    Watched(
+        "the Dwarf builds",
+        read.OPTIONS_FILE,
+        "cmake",
+        "set(PRINTERS_WITH_DWARF",
+        "Extruder.panic_retract in simulator/tool.py",
+        "261e96818ab33f70",
+        UPSTREAM_7D8BF685,
+    ),
+    Watched(
+        "the HAS_DWARF condition",
+        read.OPTIONS_FILE,
+        "cmake",
+        "if(${PRINTER} IN_LIST PRINTERS_WITH_DWARF",
+        "Extruder.panic_retract in simulator/tool.py",
+        "b27257412fa97fed",
+        UPSTREAM_7D8BF685,
+    ),
+    # Which builds feed the cut's retract back: those that retract and don't purge.
+    Watched(
+        "the power-panic feed-back rule",
+        "src/common/power_panic.cpp",
+        "statement",
+        "constexpr bool power_panic_deretracts",
+        "Extruder.panic_purge_mm in simulator/tool.py and SimPrinter._unpark in simulator/model.py",
+        "56342b3966db2f01",
+        UPSTREAM_7D8BF685,
+    ),
+    # The cut's retract, which a paused print skips.
+    Watched(
+        "the power cut's retract",
+        "src/common/power_panic.cpp",
+        "statement",
+        "if (power_panic_retracts &&",
+        "SimPrinter._reboot in simulator/model.py",
+        "86c46876b2341282",
+        UPSTREAM_7D8BF685,
+    ),
+    # The resume: which builds purge or wipe, where the feed-back runs, and that a paused
+    # print skips both. The function runs every step of the resume, so it also trips on
+    # unrelated changes: about 24 commits touched it in 2026 up to 7d8bf6858.
+    Watched(
+        "the power-panic resume",
+        "src/common/power_panic.cpp",
+        "function",
+        "resume_loop",
+        "SimPrinter._recover, _unpark and _nozzle_clean in simulator/model.py",
+        "1c614228e7ef6377",
+        UPSTREAM_7D8BF685,
+    ),
 )
 
 
@@ -248,6 +313,8 @@ def region(text: str, watched: Watched) -> str:
         text = read._strip_comments(text)
         if watched.kind == "function":
             return _function(text, watched.anchor)
+        if watched.kind == "statement":
+            return _statement(text, watched.anchor)
         return _directive(text, watched.anchor)
     except ValueError as e:
         raise Unreadable(watched.path, f"{e}, for {watched.name}") from None
@@ -270,6 +337,29 @@ def _function(text: str, name: str) -> str:
     start, brace = found[0]
     start = masked.rfind("\n", 0, start) + 1
     return text[start : _closing(masked, brace, "{", "}")]
+
+
+def _statement(text: str, anchor: str) -> str:
+    masked = _mask_literals(text)
+    starts, offset = [], 0
+    for line in masked.splitlines(keepends=True):
+        if _starts(" ".join(line.split()), anchor):
+            starts.append(offset + len(line) - len(line.lstrip()))
+        offset += len(line)
+    if len(starts) != 1:
+        raise ValueError(f"{len(starts)} lines start {anchor}")
+    depth = 0
+    for i in range(starts[0], len(masked)):
+        c = masked[i]
+        depth += {"(": 1, "[": 1, ")": -1, "]": -1}.get(c, 0)
+        if depth == 0 and c in ";{":
+            end = i + 1 if c == ";" else _closing(masked, i, "{", "}")
+            # An `else` belongs to the statement, and the region would leave it out. One
+            # can follow preprocessor lines.
+            if re.match(r"(?:\s*#(?:\\\n|[^\n])*)*\s*else(?!\w)", masked[end:]):
+                raise ValueError(f"{anchor} has an else")
+            return text[starts[0] : end]
+    raise ValueError(f"{anchor} isn't closed")
 
 
 def _closing(text: str, start: int, opening: str, closing: str) -> int:

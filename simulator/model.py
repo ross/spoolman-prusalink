@@ -57,6 +57,7 @@ from simulator.tool import (
     RETRACTED_STEP,
     TYPE_STEP,
     XL_DEV_KIT_EXTRUDER,
+    XL_EXTRUDER,
     Extruder,
     LoadProcess,
     LoadStep,
@@ -123,7 +124,7 @@ class JobPhase(StrEnum):
     PARKING = "PARKING"
     RECOVER = "RECOVER"  # BUSY after a power-panic boot, before the resume
     AWAIT_RESUME = "AWAIT_RESUME"  # ATTENTION: the bed went cold during the outage
-    UNPARK = "UNPARK"  # PAUSED briefly while the head unparks, then the nozzle clean purges
+    UNPARK = "UNPARK"  # PAUSED briefly while the head unparks after a power-panic resume
     PREVIEW_LOAD = "PREVIEW_LOAD"  # BUSY with no job: the preview's filament-not-inserted load
 
 
@@ -320,10 +321,10 @@ MODELS = _models(
         checks=PLAIN_CHECKS,
     ),
     ModelInfo(
-        "3.1.0", "XL", MK4_EXTRUDER, LOAD_CELL_PRESETS, max_tools=5, group="xl", checks=XL_CHECKS
+        "3.1.0", "XL", XL_EXTRUDER, LOAD_CELL_PRESETS, max_tools=5, group="xl", checks=XL_CHECKS
     ),
     ModelInfo(
-        "3.1.1", "XLP", MK4_EXTRUDER, LOAD_CELL_PRESETS, max_tools=5, group="xls", checks=XL_CHECKS
+        "3.1.1", "XLP", XL_EXTRUDER, LOAD_CELL_PRESETS, max_tools=5, group="xls", checks=XL_CHECKS
     ),
     ModelInfo(
         "5.1.0",
@@ -418,7 +419,6 @@ class Settings:
     sync_job_seconds: float = 3.0
     recover_seconds: float = 2.0  # BUSY after a power-panic boot
     unpark_seconds: float = 1.0  # PAUSED while the head unparks on a power-panic resume
-    panic_purge_mm: float = 25.0  # the nozzle clean's purge on a power-panic resume
     start_blip: bool = True
 
     def __post_init__(self) -> None:
@@ -1329,10 +1329,12 @@ class SimPrinter:
     def reboot(self, *, keep_job: bool = False, cold_bed: bool = False) -> None:
         """Reboot. With keep_job a print in progress resumes with the same ID (power panic).
 
-        The resume is BUSY while the firmware recovers, during which the nozzle clean
-        purges `panic_purge_mm`, then PAUSED while the head unparks, then PRINTING. With
-        `cold_bed` it waits in ATTENTION for `resume()` before recovering. A print that was
-        paused comes back paused.
+        A print that wasn't paused retracts at the cut, except on the XL. The resume is BUSY
+        while the firmware recovers: INDX purges in its nozzle cleaner halfway through, and
+        every other model that retracted feeds the retract back at the end. Then PAUSED
+        while the head unparks, then PRINTING. With `cold_bed` it waits in ATTENTION for
+        `resume()` before recovering. A print that was paused comes back paused, with no
+        filament moved.
         """
         self._need_power()
         self._log("action", "power loss and resume" if keep_job else "reboot")
@@ -1348,6 +1350,11 @@ class SimPrinter:
             keep_job and isinstance(job, UserJob) and not job.previewing and job.phase in resumable
         )
         was_paused = keep and job.phase in (JobPhase.PAUSED, JobPhase.WAIT_LOAD)
+        if keep and not was_paused and self.model.extruder.panic_retract:
+            # The cut retracts through the planner, which forgets a stored auto-retract
+            # distance (`panic_loop` in `src/common/power_panic.cpp`). The counters restart
+            # at the boot.
+            self._track(self._job_tool(job), -self.model.extruder.lengths.retract_mm)
         self.boot(idle_clear=not keep)
         if not keep:
             self.job, self.screen = None, State.IDLE
@@ -1364,23 +1371,37 @@ class SimPrinter:
         self._recover(job, clean=not cold_bed)
 
     def _recover(self, job: UserJob, *, clean: bool) -> None:
-        """BUSY while the firmware heats and homes; the nozzle clean purges halfway through."""
+        """BUSY while the firmware heats and homes. With `clean`, a model whose resume
+        purges does so halfway through."""
         job.enter(JobPhase.RECOVER)
         job.remaining = self.settings.recover_seconds
-        job.clean_at = self.settings.recover_seconds / 2 if clean else None
+        purges = clean and self.model.extruder.panic_purge_mm is not None
+        job.clean_at = self.settings.recover_seconds / 2 if purges else None
         self._show_state()
 
     def _unpark(self, job: UserJob) -> None:
+        """End the recovery. A model that retracted at the cut and doesn't purge feeds the
+        retract back, filament loaded or not (`ResumeState::Unpark` in
+        `src/common/power_panic.cpp`)."""
+        ex = self.model.extruder
+        if ex.panic_retract and ex.panic_purge_mm is None:
+            self._track(self._job_tool(job), ex.lengths.retract_mm)
+            self._log("job", f"fed back {ex.lengths.retract_mm:g} mm")
         job.enter(JobPhase.UNPARK)
         job.remaining = self.settings.unpark_seconds
         self._show_state()
 
     def _nozzle_clean(self, job: UserJob) -> None:
-        """Core One and Core One L clean the nozzle on a power-panic resume, which purges."""
-        tool = self.tools[job.spec.segments[job.segment].tool]
-        if tool.loaded:
-            self._track(tool, self.settings.panic_purge_mm)
-            self._log("job", f"nozzle clean purged {self.settings.panic_purge_mm:g} mm")
+        """INDX's power-panic resume purges in the nozzle cleaner, filament loaded or not,
+        and doesn't auto-retract after (`G12 S21`, `ResumeState::WaitForHeaters` in
+        `src/common/power_panic.cpp`)."""
+        purge = self.model.extruder.panic_purge_mm
+        self._track(self._job_tool(job), purge)
+        self._log("job", f"nozzle clean purged {purge:g} mm")
+
+    def _job_tool(self, job: UserJob) -> SimTool:
+        """The tool the job's current segment prints with."""
+        return self.tools[job.spec.segments[job.segment].tool]
 
     def set_power(self, power: Power, *, resume: bool = False, cold_bed: bool = False) -> None:
         """Off freezes the printer; leaving off boots it, which drops any job unless `resume`."""
