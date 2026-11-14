@@ -256,7 +256,8 @@ WATCHED = (
         "src/common/power_panic.cpp",
         "statement",
         "if (power_panic_retracts &&",
-        "SimPrinter._reboot in simulator/model.py",
+        "SimPrinter._reboot in simulator/model.py: the retract, which a paused, a crashed or"
+        " a nested cut skips",
         "86c46876b2341282",
         UPSTREAM_7D8BF685,
     ),
@@ -271,6 +272,59 @@ WATCHED = (
         "SimPrinter._recover, _unpark and _nozzle_clean in simulator/model.py, which have no"
         " MMU step",
         "1c614228e7ef6377",
+        UPSTREAM_7D8BF685,
+    ),
+    # The saved print lasts through the resume: the resume's start marks any cut until its
+    # end a nested one, which keeps the saved state and skips the retract, and the bed
+    # decides at each boot. The end erases the saved state and makes the next cut an
+    # ordinary one.
+    Watched(
+        "the power-panic resume's start",
+        "src/common/power_panic.cpp",
+        "function",
+        "resume_print",
+        "SimPrinter._reboot in simulator/model.py: a cut in RECOVER or AWAIT_RESUME keeps the"
+        " print and doesn't retract, and the bed decides at each boot",
+        "2dce16ddb75affc1",
+        UPSTREAM_7D8BF685,
+    ),
+    Watched(
+        "the power-panic resume's end",
+        "src/common/power_panic.cpp",
+        "function",
+        "atomic_finish",
+        "SimPrinter._reboot and _end_phase in simulator/model.py: the resume ends at the end"
+        " of RECOVER, in UNPARK or, for a paused print, PAUSED",
+        "e7ecd2111c784d2d",
+        UPSTREAM_7D8BF685,
+    ),
+    Watched(
+        "the saved print erased",
+        "src/common/power_panic.cpp",
+        "function",
+        "atomic_reset",
+        "SimPrinter._reboot in simulator/model.py: a cut after the resume's end is an ordinary one",
+        "8143e538e0643ae1",
+        UPSTREAM_7D8BF685,
+    ),
+    # After the resume's end the crash recovery unparks the head, so a cut in UNPARK counts
+    # as crashed: the cut doesn't retract.
+    Watched(
+        "the power-panic resume's unpark",
+        "src/common/marlin_server.cpp",
+        "function",
+        "powerpanic_finish_recovery",
+        "SimPrinter._reboot in simulator/model.py: a cut in UNPARK doesn't retract",
+        "bc229b21963522e7",
+        UPSTREAM_7D8BF685,
+    ),
+    Watched(
+        "the cut's crashed flag",
+        "src/common/power_panic.cpp",
+        "statement",
+        "state_buf.planner.was_crashed = crash_s.did_trigger();",
+        "SimPrinter._reboot in simulator/model.py: a cut in UNPARK doesn't retract",
+        "4d938eebff7464cd",
         UPSTREAM_7D8BF685,
     ),
     # A cut is a paused one only in the pause state, which a filament change dialog never

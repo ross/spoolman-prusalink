@@ -1032,8 +1032,9 @@ static constexpr EnumArray<Sequence, GCodeFile, static_cast<int>(Sequence::_cnt)
 } // namespace nozzle_cleaner
 """
 
-# Cut down to the namespace with the two constants, all of `resume_loop`, the cut's retract
-# in a stub of `panic_loop`, and the cut's flags in a stub of `ac_fault_isr`.
+# Cut down to the namespace with the two constants, the resume's start and end, all of
+# `resume_loop`, the cut's retract in a stub of `panic_loop`, and the cut's flags in a stub
+# of `ac_fault_isr`.
 POWER_PANIC_CPP = """\
 #include "power_panic.hpp"
 
@@ -1052,6 +1053,103 @@ constexpr bool power_panic_deretracts = power_panic_retracts
 
 
 namespace power_panic {
+
+/// reset PP state during atomic_finish (holds print state)
+static void atomic_reset() {
+    // stored state
+    if (state_stored()) {
+        erase();
+    }
+
+    // internal state
+    power_panic_state = PPState::Inactive;
+    resume_state = ResumeState::Setup;
+    runtime_state.nested_fault = false;
+}
+
+/// transition from a nested_fault to a normal fault atomically
+static void atomic_finish() {
+    HAL_NVIC_DisableIRQ(buddy::hw::acFault.getIRQn());
+
+#if HAS_TOOLCHANGER() && HAS_INDX()
+    if (state_buf.toolchanger.phase != PrusaToolChanger::ToolchangePhase::none) {
+        // Power panic hit during a toolchange; finish the toolchange on resume
+        marlin_server::powerpanic_finish_indx_toolchange();
+    } else
+#endif
+#if HAS_TOOLCHANGER() && HAS_TOOL_CRASH_RECOVERY()
+        if (prusa_toolchanger.is_pos_in_toolchange_area(state_buf.crash.crash_machine_position.xy()) && prusa_toolchanger.is_toolchanger_enabled()) {
+
+        // Continue with toolcrash recovery
+        marlin_server::powerpanic_finish_toolcrash();
+    } else
+#endif
+    {
+        if (state_buf.planner.was_paused) {
+            marlin_server::powerpanic_finish_pause();
+        } else {
+            marlin_server::powerpanic_finish_recovery();
+        }
+    }
+    atomic_reset();
+
+    HAL_NVIC_EnableIRQ(buddy::hw::acFault.getIRQn());
+}
+
+void resume_print() {
+    debug_assert(state_stored()); // caller is responsible for checking
+    debug_assert(marlin_server::printer_idle()); // caller is responsible for checking
+
+    // load the data
+    fixed_t::load();
+    state_t::load();
+
+    log_info(PowerPanic, "resuming print");
+    runtime_state.nested_fault = true;
+
+    // immediately update print progress
+    {
+        print_job_timer.resume(state_buf.progress.print_duration);
+        print_job_timer.pause();
+
+        const auto mode_specific = [](const state_progress_t::ModeSpecificData &mbuf, ClProgressData::ModeSpecificData &pdata) {
+            pdata.percent_done.mSetValue(mbuf.percent_done, state_buf.progress.print_duration);
+            pdata.time_to_end.mSetValue(mbuf.time_to_end, state_buf.progress.print_duration);
+            pdata.time_to_pause.mSetValue(mbuf.time_to_pause, state_buf.progress.print_duration);
+        };
+        mode_specific(state_buf.progress.standard_mode, oProgressData.standard_mode);
+        mode_specific(state_buf.progress.stealth_mode, oProgressData.stealth_mode);
+    }
+
+    const bool auto_recover = [] {
+        if (state_buf.print.odometer_e_start >= Odometer_s::instance().get_extruded_all()) {
+            // nothing has been extruded on the bed so far, it's safe to auto-resume irregardless of temp
+            return true;
+        }
+
+// check the bed temperature
+#if HAS_MODULAR_BED()
+        thermalManager.setEnabledBedletMask(state_buf.planner.enabled_bedlets_mask);
+#endif
+        const float current_bed_temp = thermalManager.degBed();
+
+        if (!state_buf.planner.target_bed || current_bed_temp >= state_buf.planner.target_bed) {
+            return true;
+        }
+
+        return (state_buf.planner.target_bed - current_bed_temp) < POWER_PANIC_MAX_BED_DIFF;
+    }();
+
+    if (resume_state == ResumeState::Setup && auto_recover) {
+        resume_state = ResumeState::Resume;
+    }
+
+    const GCodeReaderPosition gcode_pos {
+        .restore_info = state_buf.gcode_stream_restore_info,
+        .offset = state_buf.crash.sdpos,
+    };
+    marlin_server::powerpanic_resume(runtime_state.media_SFN_path, gcode_pos, auto_recover);
+}
 
 void resume_loop() {
     switch (resume_state) {
@@ -3594,7 +3692,7 @@ bool should_enable(FilamentSensorID id) {
 
 # `marlin_server.cpp`, excerpts: `pre_finalize_print`, its unload, the single-tool start,
 # the preview's Print and Inactive results, the G-code queue's length as a client reads it,
-# and the printing and paused checks.
+# the printing and paused checks, and the end of a power-panic resume.
 MARLIN_SERVER_CPP = """\
 static bool pre_finalize_print([[maybe_unused]] bool finished) {
 #if HAS_ANFC()
@@ -3747,6 +3845,15 @@ bool is_printing() {
 
 bool printer_paused() {
     return server.print_state == State::Paused;
+}
+
+void powerpanic_finish_recovery() {
+    // WARNING: this sequence needs to _just_ set the server state and exit
+    // perform any higher-level operation inside power_panic::atomic_finish
+
+    // setup for replay and start recovery
+    crash_s.set_state(Crash_s::RECOVERY);
+    server.print_state = State::Resuming_UnparkHead_ZE;
 }
 """  # noqa: E501 (verbatim firmware lines)
 

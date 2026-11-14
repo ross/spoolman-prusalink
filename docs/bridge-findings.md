@@ -427,7 +427,9 @@ written.
   Core One L, 7.6 mm counted. `simulator/tests/test_model_power_panic.py`
   shows the amount per model. With the filament pulled out while off,
   `test_an_unload_in_the_window_then_printing_on_an_empty_tool` in
-  `tests/test_power_panic.py`.
+  `tests/test_power_panic.py`. A second cut during the resume charges a
+  second feed back, which leaves the nozzle, since that cut doesn't
+  retract: `test_a_second_cut_during_the_resume` there.
 - **Status**: Open. A candidate for Accepted: printer-behaviors.md, under
   "Bridge follow-ups found here", calls both parts fine.
 
