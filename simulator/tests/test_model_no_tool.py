@@ -1,6 +1,6 @@
-"""A printer with no tool selected: nothing counts, the gap stays, and the idle sensor clear
-doesn't run (`track_extruder_move` under `tools.virtual_tool.has_value()` in
-`lib/Marlin/Marlin/src/module/planner.cpp`; `filament_sensors_handler.cpp:294-312`).
+"""A toolchanger with no tool picked: no filament moves or counts, and the idle sensor clear
+doesn't run (`Planner::buffer_segment` in `lib/Marlin/Marlin/src/module/planner.cpp`;
+`filament_sensors_handler.cpp:294-312`).
 
 Nothing sets `selected_tool` to None on today's printers, so these tests set it directly.
 """
@@ -10,7 +10,7 @@ from __future__ import annotations
 import pytest
 
 from simulator.feed import Direct, Toolchanger
-from simulator.model import Material, State
+from simulator.model import Invalid, Material, PrintSpec, Segment, State
 from simulator.tests.util import PLA, loaded, make, run, sliced
 
 CORE_ONE_L, XL, INDX = "8.1.0", "3.1.0", "8.10.0"
@@ -22,27 +22,17 @@ def none_selected(model: str, tools=None, **settings):
     return sim, p
 
 
-@pytest.mark.parametrize("model", [CORE_ONE_L, INDX])
-def test_extrude_counts_nothing_and_leaves_the_gap(model):
-    """The auto-retract hook still feeds a stored distance back, through the planner, which
-    doesn't count it either (`AutoRetract::maybe_deretract_to_nozzle` acts on the physical
-    tool and moves through `Planner::buffer_segment`)."""
+@pytest.mark.parametrize("model", [XL, INDX])
+@pytest.mark.parametrize("move", ["extrude", "retract"])
+def test_a_move_moves_nothing(model, move):
+    """A toolchanger with no tool picked can't move E, and the auto-retract's hooks need a
+    tool too, so the stored distance stays (`Planner::buffer_segment`)."""
     _, p = none_selected(model)
     path = p.tools[0].path
     path.gap, path.auto_retracted = 5.0, 8.0
-    p.extrude(0, 30)
+    getattr(p, move)(0, 30)
     assert p.tools[0].extruded == 0
-    assert (path.gap, path.gap_valid, path.auto_retracted) == (5.0, True, 0.0)
-
-
-@pytest.mark.parametrize("model", [CORE_ONE_L, INDX])
-def test_retract_leaves_the_gap_and_forgets_the_auto_retract(model):
-    _, p = none_selected(model)
-    path = p.tools[0].path
-    path.gap, path.auto_retracted = 5.0, 8.0
-    p.retract(0, 10)
-    assert p.tools[0].extruded == 0
-    assert (path.gap, path.gap_valid, path.auto_retracted) == (5.0, True, None)
+    assert (path.gap, path.gap_valid, path.auto_retracted) == (5.0, True, 8.0)
 
 
 def test_the_idle_clear_needs_a_selected_tool():
@@ -56,13 +46,13 @@ def test_the_idle_clear_needs_a_selected_tool():
 
 
 def test_boot_with_none_selected_skips_the_idle_clear():
-    _, p = none_selected(CORE_ONE_L)
+    _, p = none_selected(INDX)
     p.tools[0].path.loaded = False
     p.reboot()
     assert p.tools[0].material == PLA and p.tools[0].unload_count == 0
 
 
-@pytest.mark.parametrize("model", [CORE_ONE_L, XL])
+@pytest.mark.parametrize("model", [XL, INDX])
 def test_a_sync_jobs_end_moves_nothing(model):
     """The end skips the retract to 8 mm and the auto-retract, and still stores each valid
     gap, as `pre_finalize_print` does for every hotend (`marlin_server.cpp`)."""
@@ -76,6 +66,15 @@ def test_a_sync_jobs_end_moves_nothing(model):
 
 
 def test_no_selected_tool_isnt_one_a_runout_or_a_disable_names():
+    sim, p = make(INDX, [loaded(0), loaded(1)])
+    p.start_print(PrintSpec([Segment(0, 100)]))
+    sim.tick(0.5)
+    p.tap_through()  # Print on the tools-mapping screen
+    sim.tick(5)  # the print is under way
+    p.selected_tool = None
+    with pytest.raises(Invalid, match="T0 isn't the selected tool"):
+        p.runout(0)
+
     _, p = none_selected(INDX, [loaded(0), loaded(1)])
     assert p.to_json()["tools"][0]["actions"]["set_tool_enabled"] is None
     p.set_tool_enabled(0, False)

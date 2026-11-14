@@ -105,10 +105,10 @@ firmware update.
   segments with a fixed purge at each tool change. Picking a tool can
   trigger the idle sensor clear. A tool can be disabled.
 - The model's feed system, direct or toolchanger, holds the rules that
-  differ between the two. The printer's selected tool can be none: then no
-  move counts, the gap stays, the idle sensor clear doesn't run, and the end
-  of a print neither retracts nor auto-retracts. Nothing on today's
-  printers leaves it none.
+  differ between the two. The printer's selected tool can be none, which
+  stands for a toolchanger with no tool picked: then no filament moves or
+  counts, the idle sensor clear doesn't run, and the end of a print neither
+  retracts nor auto-retracts. Nothing leaves it none yet.
 - An uploaded file's job is counted at once. When the scan ends, the
   print preview checks the file's `M862` lines: the model by compatibility
   group, the G-code level, input shaper, the INDX lock, the MMU3 feature
@@ -334,8 +334,17 @@ tool. An MMU printer has five tools and one path. The printer has a
 selected tool, which can be none. A move names the tool whose path moves,
 and the feed system decides which tool it credits. A toolchanger's menu
 load on an unpicked tool counts on that tool until Workstream 4 has a menu
-load pick the tool first. With none selected, nothing counts and the gap
-doesn't move. A load or unload in progress stays on its tool.
+load pick the tool first. A load or unload in progress stays on its tool.
+
+"None selected" is two cases in the firmware. A toolchanger with no tool
+picked has no physical tool: it can't move E at all, the auto-retract's
+hooks don't run, and the end of a print neither retracts nor auto-retracts
+(`tool_index.cpp:121-137`, `planner.cpp:2194-2197, 2224`,
+`mapi/motion.cpp:88-91`). An MMU with no slot selected still has its one
+physical tool: moves run and deretract but don't count, and the end of a
+print still retracts and skips only the auto-retract
+(`tool_index.cpp:134-151`, `auto_retract.cpp:91-94`). The simulator's none
+is the first case. The MMU's feed system brings the second.
 
 A **feed system** owns the rules that differ: which tool is selected and
 when, which tool a move credits, what a tool change moves, and which tool

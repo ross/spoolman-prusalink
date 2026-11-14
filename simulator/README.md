@@ -247,10 +247,10 @@ that trace. The points that matter for the bridge, in short:
   tool, whether the preview's tools-mapping screen applies, what a
   print's tool change does, which tool a move counts on, and which tool's
   sensor the idle sensor clear reads.
-- The selected tool can be none, though nothing on today's printers leaves
-  it so. With none selected, no move counts and the gap stays, the idle
-  sensor clear doesn't run, and a print's end neither retracts nor
-  auto-retracts. The page shows the tool as "none".
+- The selected tool can be none, which stands for a toolchanger with no
+  tool picked, though nothing leaves it so. Then no filament moves or
+  counts, the idle sensor clear doesn't run, and a print's end neither
+  retracts nor auto-retracts. The page shows the tool as "none".
 - MINI, MK3.5 and MK3.5S report the material with no counters. The
   `no_endpoint` firmware mode answers 404, like stock firmware.
 

@@ -35,12 +35,12 @@ class FeedSystem:
         p._track(new, p.settings.toolchange_purge_mm)
 
     def credited(self, p: SimPrinter, tool: SimTool) -> SimTool | None:
-        """The tool a move on `tool`'s path counts on; None when nothing counts.
+        """The tool a move on `tool`'s path counts on; None when the move can't be made.
 
-        The planner counts a move only with a tool selected (`track_extruder_move` under
-        `tools.virtual_tool.has_value()` in `Planner::buffer_segment`,
-        `lib/Marlin/Marlin/src/module/planner.cpp`). The caller names the tool whose path
-        moves, so a menu load on a toolchanger's unpicked tool counts on that tool.
+        A toolchanger with no tool picked can't move E at all (`bsod("E move without tool")`
+        in `Planner::buffer_segment`, `lib/Marlin/Marlin/src/module/planner.cpp`). The
+        caller names the tool whose path moves, so a menu load on a toolchanger's unpicked
+        tool counts on that tool.
         """
         return None if p.selected_tool is None else tool
 

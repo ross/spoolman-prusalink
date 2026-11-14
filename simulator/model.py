@@ -629,8 +629,8 @@ class SimPrinter:
     screen: State = State.IDLE
     job: UserJob | SyncJob | None = None
     job_counter: int = 0
-    # The picked tool, or None with no tool picked: then nothing counts and the idle sensor
-    # clear doesn't run (`SimPrinter.feed`).
+    # The picked tool, or None for a toolchanger with no tool picked: then no filament moves
+    # and the idle sensor clear doesn't run (`SimPrinter.feed`).
     selected_tool: int | None = 0
     message: str | None = None
     homed: bool = False
@@ -685,7 +685,13 @@ class SimPrinter:
         auto-retract hook in `Planner::buffer_segment`
         (`lib/Marlin/Marlin/src/module/planner.cpp`). Every move the simulator makes goes
         through here.
+
+        With no tool picked nothing moves: a toolchanger can't move E without a tool, and
+        the hook needs one too (`bsod("E move without tool")` and `currently_selected()` in
+        the same function).
         """
+        if self.feed.credited(self, tool) is None:
+            return
         if mm > 0:
             self._deretract(tool)
         elif mm < 0:
@@ -695,11 +701,8 @@ class SimPrinter:
     def _count(self, tool: SimTool, mm: float) -> None:
         """Count a move as the firmware's filament tracker does: only what goes past the
         model's gap counts, times the feed ratio (`FilamentPath.move`). The feed system says
-        which tool it counts on; with none, the tracker doesn't see the move and the gap
-        stays."""
+        which tool it counts on."""
         credited = self.feed.credited(self, tool)
-        if credited is None:
-            return
         credited.extruded += tool.path.move(mm, self.model.gap_mm) * self.feed_ratio
 
     def _deretract(self, tool: SimTool) -> None:
@@ -1845,7 +1848,7 @@ class SimPrinter:
         auto-retracts the picked tool, which INDX skips: its 8 mm already counts as fully
         retracted.
 
-        With no tool picked, the retract and the auto-retract do nothing
+        On a toolchanger with no tool picked, the retract and the auto-retract do nothing
         (`move_to_retracted_distance` in `src/common/mapi/motion.cpp`,
         `AutoRetract::maybe_retract_from_nozzle` in `src/feature/auto_retract/auto_retract.cpp`),
         and the valid gaps are still stored: that loop goes over every hotend.
