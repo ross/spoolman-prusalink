@@ -278,8 +278,9 @@ that trace. The points that matter for the bridge, in short:
   slot and loads it to the nozzle, while it reads `PRINTING`, and the print
   goes on with the join's slot; the joins' rules are the toolchangers'.
   With no slot selected, as after a power-panic resume, a runout injects
-  nothing and `change_filament` and a color change do nothing.
-  `change_filament` names the selected slot only. A reload takes no
+  nothing and `change_filament` and a color change do nothing. The
+  firmware leaves its `m600_sent` set after such a runout, which may block
+  later runouts; that isn't modeled. `change_filament` names the selected slot only. A reload takes no
   `purge_mm`, and `jam` is refused: the MMU's jam isn't read.
 - The MMU menu's operations need the MMU on and connected and the printer
   idle, and each reads `BUSY` until it's done (F41).
