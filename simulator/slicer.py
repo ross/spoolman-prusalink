@@ -19,9 +19,10 @@ no Core One L INDX, so both INDX models use the Core One INDX numbers.
 The MMU3's numbers come from the same PrusaSlicer and bundle, in G-code sliced with the
 MK4S, Core One and Core One L MMU3 0.4 presets (`Original Prusa MK4S MMU3 0.4 nozzle`,
 `Prusa CORE One MMU3 0.4 nozzle`, `Prusa CORE One L MMU3 0.4 nozzle`), their default print
-presets (`0.20mm SPEED @MK4S 0.4`, `0.20mm SPEED @COREONE 0.4`), and `Prusament PLA` and
-`Prusament PETG` for each. The MK4, MK3.9 and MK3.9S presets weren't sliced, so those models
-take the MK4S numbers.
+presets (`0.20mm SPEED @MK4S 0.4`, `0.20mm SPEED @COREONE 0.4`, `0.20mm SPEED @COREONEL
+0.4`), and `Prusament PLA` and `Prusament PETG` on the MK4S and Core One. The Core One L was
+sliced with PLA alone and gave the Core One's moves. The MK4, MK3.9 and MK3.9S presets
+weren't sliced, so those models take the MK4S numbers.
 
 A travel retract and its restore that the model's own extrusion makes on both sides of a
 move cancel in the tracker, so they're left out: the XL's restore before the wipe tower's
