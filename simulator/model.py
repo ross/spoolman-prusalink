@@ -243,6 +243,9 @@ class ModelInfo:
     max_tools: int = 1
     counters: bool = True
     mmu: bool = False  # whether the build can drive an MMU3: HAS_MMU2
+    # Whether the build resumes a print after a power cut: HAS_POWER_PANIC in
+    # `ProjectOptions.cmake`. Without it, a cut loses the print.
+    power_panic: bool = True
     # Its `compatibility_group` in `printer_model_data.hpp`. The MK3.5, MK4 and XL builds
     # run several models and check a file against the one the printer is set to
     # (`PrinterModelInfo::current`), so each model has its own entry's group.
@@ -326,6 +329,7 @@ MODELS = _models(
         MINI_EXTRUDER,
         MINI_PRESETS,
         counters=False,
+        power_panic=False,
         group="mini",
         checks=PLAIN_CHECKS,
     ),
@@ -342,6 +346,7 @@ MODELS = _models(
         LOAD_CELL_PRESETS,
         max_tools=5,
         counters=False,
+        power_panic=False,
         group="xl",
         checks=PLAIN_CHECKS,
     ),
@@ -1325,10 +1330,16 @@ class SimPrinter:
         every other model that retracted feeds the retract back at the end. Then PAUSED
         while the head unparks, then PRINTING. With `cold_bed` it waits in ATTENTION for
         `resume()` before recovering. A print that was paused comes back paused, with no
-        filament moved.
+        filament moved. A model without power panic loses the print and boots idle, as a
+        plain reboot does.
         """
         self._need_power()
-        self._log("action", "power loss and resume" if keep_job else "reboot")
+        if not keep_job:
+            self._log("action", "reboot")
+        elif self.model.power_panic:
+            self._log("action", "power loss and resume")
+        else:
+            self._log("action", "power loss, print lost: no power panic")
         self._reboot(keep_job, cold_bed)
 
     def _reboot(self, keep_job: bool, cold_bed: bool = False) -> None:
@@ -1336,9 +1347,13 @@ class SimPrinter:
         resumable = (JobPhase.PRINTING, JobPhase.PAUSED, JobPhase.PREHEAT, JobPhase.WAIT_LOAD)
         # A cut during the preview has nothing to resume: the firmware saves power-panic data
         # only once the print has begun (`power_panic::prepare` in
-        # `src/common/power_panic.cpp`).
+        # `src/common/power_panic.cpp`). A build without power panic resumes nothing.
         keep = (
-            keep_job and isinstance(job, UserJob) and not job.previewing and job.phase in resumable
+            keep_job
+            and self.model.power_panic
+            and isinstance(job, UserJob)
+            and not job.previewing
+            and job.phase in resumable
         )
         was_paused = keep and job.phase in (JobPhase.PAUSED, JobPhase.WAIT_LOAD)
         if keep and not was_paused and self.model.extruder.panic_retract:
@@ -1395,7 +1410,8 @@ class SimPrinter:
         return self.tools[job.spec.segments[job.segment].tool]
 
     def set_power(self, power: Power, *, resume: bool = False, cold_bed: bool = False) -> None:
-        """Off freezes the printer; leaving off boots it, which drops any job unless `resume`."""
+        """Off freezes the printer; leaving off boots it, which drops any job unless `resume`
+        on a model with power panic."""
         power = Power(power)
         old, self.power = self.power, power
         self._log("action", f"power {power}")
