@@ -416,8 +416,9 @@ Runs 1 and 3 go in before Workstream 5, runs 4 and 5 before Workstream 4.
 
 ## Before the INDX upgrade
 
-Once the printer is an INDX, these can't be recorded again. Sittings A, B
-and C in printer-behaviors.md cover F1 to F13 and F24. This plan adds:
+Once the printer is an INDX, these can't be recorded again. Sittings A to
+D in printer-behaviors.md cover F1 to F13, F24, F28 and F29. The first
+six below are what this plan adds; the last two are sitting D's:
 
 - **The load's split.** F3 at `--interval 0.5`: how much counts before the
   type appears, and whether about 23 mm counts at the end of the load
@@ -425,10 +426,10 @@ and C in printer-behaviors.md cover F1 to F13 and F24. This plan adds:
 - **The auto-retract around a print.** F5 with the counters watched during
   parking and at the next print's first move: about 23 mm (15 mm when the
   gap is already at its limit), then about 15 mm.
-- **An unload that isn't auto-retracted.** Unload after a Move E, to see
-  the ramming count.
-- **A preview question.** Upload a file sliced for an MK4S, and one for a
-  Core One: the first should ask, the second shouldn't. While it asks,
+- **An unload that isn't auto-retracted.** F26: unload after a Move E, to
+  see the ramming count.
+- **A preview question.** F27: upload a file sliced for an MK4S, and one
+  for a Core One: the first should ask, the second shouldn't. While it asks,
   expect `ATTENTION`, a `job` with a new ID, and `/api/v1/job` reading
   `PAUSED`. Decline one and expect `IDLE`.
 - **The power-panic resume's purge.** F12 decides between 25 mm and 8 mm on
@@ -436,6 +437,11 @@ and C in printer-behaviors.md cover F1 to F13 and F24. This plan adds:
   the resume.
 - **Everything with a tag**: F4 and F24's tag rows. The INDX has no tag
   reader until the firmware adds one.
+- **A load at the preview, then Abort.** `F28-load-then-decline`, steps 1
+  and 2 of sitting D: whether BF23's print start shows on the printer.
+- **A print with the sensor off.** `F29-sensors-off-print`, steps 3 to 7
+  of sitting D: the single-tool path to BF24 and BF25, which the
+  simulator doesn't model.
 
 ## Bridge findings
 

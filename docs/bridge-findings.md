@@ -40,8 +40,9 @@ written.
    printer.
 2. **The INDX upgrade.** The Core One L+ becomes a Core One L INDX in a few
    months. After that, single-tool behavior can't be traced again, so the
-   traces stage 1 depends on (F3, F5 and F12, listed in simulator-models.md
-   under "Before the INDX upgrade") have to be taken before it.
+   traces listed in simulator-models.md under "Before the INDX upgrade"
+   have to be taken before it: F3, F5, F12, F26, F27, F28 and F29, which
+   stage 1 depends on, and F4 and F24's tag rows, which no finding does.
 3. **Other multi-tool printers (XL).** No finding is the XL's alone: BF9,
    BF12, BF13, BF14, BF24 and BF25 cover it and sit in stages 1 and 2.
 4. **MMU3.**
@@ -53,14 +54,14 @@ written.
 | 1 | BF10 | A print cancelled in preheat can look started |
 | 1 | BF11 | A power-panic resume loses usage and counts a purge |
 | 1 | BF23 | A print declined after the preview's load can count as started |
+| 1 | BF24 | Usage counted on an empty tool lands on the next spool |
+| 1 | BF25 | Printing past an empty tool leaves the filament sensors off |
 | 1 | BF3 | A custom preamble without the input-shaper check makes every sync job wait |
 | 1 | BF2 | The bridge refuses a preamble the printer accepts |
 | 1 | BF4 | The printer's check settings change what a failed check does |
 | 1 | BF5 | A declined or refused sync job uses up a job ID and never finishes |
 | 2 | BF12 | Hand swaps on a toolchanger can be missed |
 | 2 | BF13 | A spool join counts an unload in the middle of a print |
-| 2 | BF24 | Usage counted on an empty tool lands on the next spool |
-| 2 | BF25 | Printing past an empty tool leaves the filament sensors off |
 | 2 | BF14 | Writes are refused on multi-tool models |
 | 2 | BF1 | INDX: every sync job waits for a tap |
 | 2 | BF8 | INDX presets differ from the bridge's table |
@@ -369,7 +370,67 @@ written.
   question. `tap_through`, then `load` the tool with a preset of a
   different type from the segment's, with no poll during the load. Poll
   at the wrong-filament question, then `cancel`. The ledger shows
-  `swap_assumed` for the job.
+  `swap_assumed` for the job. On the Core One L, the live check
+  `F28-load-then-decline` confirms it with the production bridge: sitting
+  D in printer-behaviors.md, under "Capture plan".
+- **Status**: Open.
+
+### BF24. Usage counted on an empty tool lands on the next spool
+
+- **Printers**: Single-tool models with counters, when the user turns the
+  filament sensors off at the filament-not-inserted screen instead of
+  loading (F29). Core One INDX, Core One L INDX and XL, at the
+  tools-mapping screen.
+- **What happens**: On the tools-mapping screen, Print with a used tool
+  empty first asks to turn the filament sensors off, and only that lets
+  the print go on (F28, F29). A single-tool printer's
+  filament-not-inserted screen offers the same, and the print goes on
+  alike (F29). The print then runs through the empty tool, and the tracker
+  counts every move on that tool with no material, a toolchanger's pickup
+  purge included. The bridge holds that usage because the tool reports no
+  material (C7). When filament is next loaded in that tool, the bridge
+  charges the held usage, with the load's own count, to the spool
+  reported there.
+- **Effect**: The new spool is charged for filament that came from no
+  spool: 76 mm in the test, on top of its load.
+- **Evidence**: On a toolchanger, shown in the simulator by
+  `test_a_print_through_an_empty_tool_holds_its_usage` in
+  `tests/test_toolchanger_prints.py`, on an INDX. On a single-tool
+  printer, read in the firmware source (F29): the simulator doesn't model
+  that path.
+- **Scenario rows**: C7, T2.
+- **To reproduce**: That test, today, on a toolchanger. On the Core One L,
+  the live check `F29-sensors-off-print` confirms it with the production
+  bridge: sitting D in printer-behaviors.md, under "Capture plan".
+- **Status**: Open.
+
+### BF25. Printing past an empty tool leaves the filament sensors off
+
+- **Printers**: As BF24.
+- **What happens**: The sensors setting that BF24's answer turns off is
+  persistent (F29). Until the user turns it on again, the printer detects
+  no runout and runs no idle sensor clear, so filament pulled out by hand
+  counts no unload. Only a menu unload counts. The bridge's swap detection
+  rests on those unloads. Nothing the simulator serves says the sensors
+  are off, and the bridge has no reading for it that this work found.
+- **Effect**: A hand swap opens no swap, as in BF12, so the old spool is
+  charged for the new one until a claim moves it. A spool that runs out
+  isn't noticed, and the print goes on through the empty tool, which is
+  BF24 again.
+- **Evidence**: Read in the firmware source (F29). The printer's side is
+  shown in the simulator on a toolchanger, by
+  `test_with_the_sensors_off_nothing_reads_them` in
+  `simulator/tests/test_model.py`. The simulator doesn't model the
+  single-tool path to the setting. The bridge's side is inferred.
+- **Scenario rows**: P2, S2, T4.
+- **To reproduce**: On the Core One L, the live check
+  `F29-sensors-off-print` shows the printer's side: sitting D in
+  printer-behaviors.md, under "Capture plan". In the simulator, the
+  printer's side with that test. With a bridge, turn the sensors off with
+  the simulator's `sensors` setting or `set_sensors`, then empty a tool by
+  hand and pick it as `test_t4_idle_sensor_clear_on_a_picked_tool` in
+  `integration/test_tools.py` does, and poll: no unload counts, where T4
+  counts one. No bridge test covers it.
 - **Status**: Open.
 
 ## Multi-tool
@@ -439,53 +500,6 @@ written.
   `test_family_story`.
 - **Scenario rows**: T6, W10.
 - **To reproduce**: Those tests, today.
-- **Status**: Open.
-
-### BF24. Usage counted on an empty tool lands on the next spool
-
-- **Printers**: Core One INDX, Core One L INDX, XL. A single-tool printer
-  too, when the user turns the sensors off at the filament-not-inserted
-  screen instead of loading (F29), which the simulator doesn't model.
-- **What happens**: On the tools-mapping screen, Print with a used tool
-  empty first asks to turn the filament sensors off, and only that lets
-  the print go on (F28, F29). The print then runs through the empty tool,
-  and the tracker counts its purge and moves on that tool with no
-  material. The bridge holds that usage because the tool reports no
-  material (C7). When filament is next loaded in that tool, the bridge
-  charges the held usage, with the load's own count, to the spool
-  reported there.
-- **Effect**: The new spool is charged for filament that came from no
-  spool: 76 mm in the test, on top of its load.
-- **Evidence**: Shown in the simulator by
-  `test_a_print_through_an_empty_tool_holds_its_usage` in
-  `tests/test_toolchanger_prints.py`, on an INDX.
-- **Scenario rows**: C7, T2.
-- **To reproduce**: That test, today.
-- **Status**: Open.
-
-### BF25. Printing past an empty tool leaves the filament sensors off
-
-- **Printers**: As BF24.
-- **What happens**: The sensors setting that BF24's Print turns off is
-  persistent (F29). Until the user turns it on again, the printer detects
-  no runout and runs no idle sensor clear, so filament pulled out by hand
-  counts no unload. Only a menu unload counts. The bridge's swap detection
-  rests on those unloads. Nothing the simulator serves says the sensors
-  are off, and the bridge has no reading for it that this work found.
-- **Effect**: A hand swap opens no swap, as in BF12, so the old spool is
-  charged for the new one until a claim moves it. A spool that runs out
-  isn't noticed, and the print goes on through the empty tool, which is
-  BF24 again.
-- **Evidence**: Read in the firmware source (F29). The printer's side is
-  shown in the simulator by `test_with_the_sensors_off_nothing_reads_them`
-  in `simulator/tests/test_model.py`. The bridge's side is inferred.
-- **Scenario rows**: P2, S2, T4.
-- **To reproduce**: The printer's side, with that test. With a bridge,
-  turn the sensors off with the simulator's `sensors` setting or
-  `set_sensors`, then empty a tool by hand and pick it as
-  `test_t4_idle_sensor_clear_on_a_picked_tool` in
-  `integration/test_tools.py` does, and poll: no unload counts, where T4
-  counts one. No bridge test covers it.
 - **Status**: Open.
 
 ## MMU3
