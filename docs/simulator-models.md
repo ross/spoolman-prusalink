@@ -358,7 +358,8 @@ The simulator has none of this.
 
 These are the stock profiles' E moves, measured in G-code that PrusaSlicer
 2.9.7 sliced with the stock profiles (vendor bundle 2.5.16). The MMU3 row
-is still worked out from the profile values, until its slicer runs.
+is still worked out from the profile values, until the MMU's slicer profile
+brings the measured ones.
 
 | Printer | At the start | At a tool change | At the end |
 | --- | --- | --- | --- |
@@ -556,8 +557,9 @@ G-code, plus the `M862` lines:
    volume.
 
 Runs 1 to 5 used PrusaSlicer 2.9.7 (flatpak `com.prusa3d.PrusaSlicer`)
-with vendor bundle `PrusaResearch` 2.5.16, and their numbers are in "What
-the slicer adds" and `simulator/slicer.py`. The sliced G-code isn't kept in
+with vendor bundle `PrusaResearch` 2.5.16. The numbers from runs 4 and 5 are
+in "What the slicer adds" and `simulator/slicer.py`, and those from runs 1 to
+3 arrive there with the MMU's slicer profile. The sliced G-code isn't kept in
 the repository.
 
 To repeat a run, make a model with `script/slicer/make3mf.py` and slice it
@@ -575,10 +577,14 @@ a mixed slice is possible. The MMU3 slices use five filaments, one per slot:
 | 4, XL+ 2T | `Prusa XL+ 2T 0.4 nozzle` | `0.20mm Balanced ★ @XL+ 0.4` | `Prusament PLA @XL+` |
 | 5, INDX 4T and 8T | `Prusa CORE One INDX 4T HF0.4 nozzle`, `Prusa CORE One INDX 8T HF0.4 nozzle` | `0.20mm Balanced ★ @COREONEINDX HF0.4` | `Prusament PLA @COREONEINDX HF0.4` |
 
-The model is one 10 x 10 x 1 mm box per tool, side by side, which makes five
-layers at 0.2 mm and one tool change per extra tool on each layer. The slices that vary one setting change
-the wipe tower, the XL's multi-tool ramming, or the filament's
-`filament_minimal_purge_on_wipe_tower`.
+The model is one 10 x 10 mm box per tool the slice uses, side by side. At
+the default height of 1 mm, that makes five layers at 0.2 mm and one tool
+change per extra tool on each layer. `make3mf.py` takes another height, or
+one height per box, which run 1 used for more layers and for layers that
+only one slot prints. The slices that vary one setting change the wipe
+tower, the XL's multi-tool ramming, the filament's
+`filament_minimal_purge_on_wipe_tower`, or on the MMU3 the wipe tower's
+purge volume (`multimaterial_purging`) or the wiping-volume matrix.
 
 ## Before the INDX upgrade
 
@@ -624,8 +630,9 @@ Left to the work:
 - The single-tool power-panic resume: the source gives a plain Core One L
   the 8 mm fed back, not a 25 mm purge, and the simulator follows the
   source. The F12 trace confirms it.
-- PrusaSlicer's purge per change on an MMU3, from [slicer run](#slicer-runs)
-  1. On the toolchangers it's `filament_minimal_purge_on_wipe_tower`.
+- PrusaSlicer's purge per change on an MMU3, which [slicer run](#slicer-runs)
+  1 measured and the MMU's slicer profile brings. On the toolchangers it's
+  `filament_minimal_purge_on_wipe_tower`.
 - Whether INDX's `G1 E1.6` lock move after a pickup reaches the nozzle or
   only seats the lock. The firmware counts it as any move, and so does the
   simulator; a trace of a tool change would settle it.

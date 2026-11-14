@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-"""Write a 3MF of 10 x 10 mm boxes, one per extruder, for slicing a toolchanger print.
+"""Write a 3MF of 10 x 10 mm boxes, one per extruder, for slicing a multi-tool print.
 
 Usage: script/slicer/make3mf.py OUT.3mf EXTRUDERS [HEIGHT_MM]
 
 EXTRUDERS is a comma-separated list of 1-based extruder numbers, one box each:
 `1,2` makes two boxes, the first on tool 1 and the second on tool 2. HEIGHT_MM is
-the boxes' height and defaults to 1. Every box has the same shape and height, so
-each layer prints every box's tool once.
+the boxes' height and defaults to 1. With one height, each layer prints every
+box's tool once. A comma-separated list gives each box its own height, the last
+one repeating: `1,3` leaves the upper layers to the second box's tool alone.
 """
 
 import sys
@@ -65,9 +66,10 @@ def box_config(oid: int, extruder: int) -> str:
     )
 
 
-def write(out: str, extruders: list[int], height: float) -> None:
+def write(out: str, extruders: list[int], heights: list[float]) -> None:
     ids = range(1, len(extruders) + 1)
-    objects = "".join(box_object(oid, height) for oid in ids)
+    heights = heights + heights[-1:] * (len(extruders) - len(heights))
+    objects = "".join(box_object(oid, h) for oid, h in zip(ids, heights, strict=False))
     items = "".join(
         f'<item objectid="{oid}" transform="1 0 0 0 1 0 0 0 1 {100 + oid * 20} 150 0" '
         'printable="1"/>'
@@ -95,8 +97,8 @@ def main() -> int:
     if len(sys.argv) not in (3, 4):
         print(__doc__, file=sys.stderr)
         return 2
-    height = float(sys.argv[3]) if len(sys.argv) == 4 else 1.0
-    write(sys.argv[1], [int(x) for x in sys.argv[2].split(",")], height)
+    heights = [float(x) for x in sys.argv[3].split(",")] if len(sys.argv) == 4 else [1.0]
+    write(sys.argv[1], [int(x) for x in sys.argv[2].split(",")], heights)
     return 0
 
 
