@@ -264,9 +264,23 @@ that trace. The points that matter for the bridge, in short:
   then runs `M702`, which unloads into the MMU. A single-tool file gets the
   firmware's `T0` and 35 mm when no slot is selected, and a finished one
   unloads into the MMU. A stopped print or sync job unloads too, while it
-  reads `PRINTING`; a finished sync job leaves the filament. A color
-  change, `change_filament` and `runout` are refused on an MMU for now, and
-  `jam` always is: the MMU's jam isn't read.
+  reads `PRINTING`; a finished sync job leaves the filament.
+- A `runout` on an MMU is FINDA's, so it takes the slot whose filament is
+  fed (F44). On the selected slot it's the MMU's `M600`, as are
+  `change_filament` and a color change: the park retracts 8 mm, the MMU's
+  ramming counts on the slot, the unit ejects it, and the printer waits in
+  `ATTENTION` for the filament to be loaded into the MMU. No type is
+  written, so no unload counts. `load` with no source then reloads the same
+  slot: the feed counts nothing, the load to the nozzle counts 7 mm past
+  the 40 mm gap and the prime 4, and the print waits `PAUSED` for the
+  resume, which feeds the 8 mm back. With a spool join from the slot, the
+  join unloads the slot into the MMU, changes to the join's slot from no
+  slot and loads it to the nozzle, while it reads `PRINTING`, and the print
+  goes on with the join's slot; the joins' rules are the toolchangers'.
+  With no slot selected, as after a power-panic resume, a runout injects
+  nothing and `change_filament` and a color change do nothing.
+  `change_filament` names the selected slot only. A reload takes no
+  `purge_mm`, and `jam` is refused: the MMU's jam isn't read.
 - The MMU menu's operations need the MMU on and connected and the printer
   idle, and each reads `BUSY` until it's done (F41).
   `load_to_nozzle` is Load To Nozzle: it unloads the selected slot, feeds

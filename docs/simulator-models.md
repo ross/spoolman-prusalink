@@ -197,9 +197,9 @@ firmware update.
 - An MMU3 is a unit: the `mmu` printer key, `set_mmu`, five slots sharing
   one filament path, the slots listed by the setting, and the selected slot
   that counts E moves (slot 0 while the MMU connects, none after a boot).
-  Its idle operations and its prints run (F40 to F42, F46); a runout,
-  `M600`, a spool join, power panic and the preview's unload question are
-  still missing.
+  Its idle operations, its prints, and a runout, `M600` and a spool join
+  run (F40 to F42, F44, F46); power panic and the preview's unload question
+  are still missing.
 - Tests: the unit harness and the integration fixtures take a model and a
   tool count. `tests/test_families.py` runs one story (a print with a tool
   change, a swap, a reboot) on the Core One L, MK4S, iX, XL, Core One L INDX
