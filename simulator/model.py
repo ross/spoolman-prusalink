@@ -2202,8 +2202,9 @@ class SimPrinter:
         `resume()` before recovering. A print that was paused comes back paused after the
         BUSY, with no filament moved. A filament change dialog isn't a pause: a cut during
         one resumes the print on its own, on the tool the cut found picked, and a color
-        change in the file runs again. A model without power panic loses the print and
-        boots idle, as a plain reboot does.
+        change in the file runs again. A cut during the resume keeps the print and doesn't
+        retract, and the next boot resumes it again. A model without power panic loses the
+        print and boots idle, as a plain reboot does.
         """
         self._need_power()
         if not keep_job:
@@ -2224,7 +2225,12 @@ class SimPrinter:
             JobPhase.WAIT_LOAD,
             JobPhase.HOLD,
             JobPhase.JOIN,
+            JobPhase.UNPARK,
         )
+        # The resume before its end. `resume_print` marks any cut from then on a nested one,
+        # until `atomic_reset` clears the mark and erases the saved print at
+        # `ResumeState::Finish` (`power_panic.cpp:228-237, 269-279`).
+        nested = (JobPhase.RECOVER, JobPhase.AWAIT_RESUME)
         # A cut during the preview has nothing to resume: the firmware saves power-panic data
         # only once the print has begun (`power_panic::prepare` in
         # `src/common/power_panic.cpp`). A build without power panic resumes nothing.
@@ -2233,9 +2239,15 @@ class SimPrinter:
             and self.model.power_panic
             and isinstance(job, UserJob)
             and not job.previewing
-            and job.phase in resumable
+            and job.phase in (*resumable, *nested)
         )
-        if keep:
+        if keep and job.phase in nested:
+            # A nested cut doesn't retract, and it saves the first cut's flags, tool and
+            # file position again, so the print resumes again as the first cut left it,
+            # paused or not (`panic_loop` and `ac_fault_isr` in `power_panic.cpp:732,
+            # 946-951, 982-1106`).
+            held = job
+        elif keep:
             held = job
             # The firmware's `was_paused` is its pause state, which only `pause()` enters
             # (`printer_paused` in `marlin_server.cpp`, `ac_fault_isr` in
@@ -2250,7 +2262,10 @@ class SimPrinter:
                 picked = self.selected_tool
                 if picked != self._job_tool(job).index:
                     job.resumed_on = picked
-                if self.model.extruder.panic_retract:
+                # In UNPARK the resume has ended and the crash recovery unparks the head, so
+                # the cut counts as crashed and doesn't retract (`powerpanic_finish_recovery`
+                # in `marlin_server.cpp:2099-2106`, `was_crashed` in `power_panic.cpp:984`).
+                if self.model.extruder.panic_retract and job.phase is not JobPhase.UNPARK:
                     # The cut retracts the head's tool through the planner, which forgets a
                     # stored auto-retract distance (`panic_loop` in `power_panic.cpp`). The
                     # counters restart at the boot. A print in progress always has a tool

@@ -93,6 +93,17 @@ WATCHED = (
         "7e4c129c699f5571",
         UPSTREAM_7D8BF685,
     ),
+    # The INDX lock's question is a warning on every build, set in the file's check table.
+    Watched(
+        "the INDX lock's severity",
+        "src/feature/compatibility_checks/gcode_compatibility.cpp",
+        "statement",
+        "GeneralCheck::indx_lock,",
+        "the fixed warning in preview in simulator/preview.py, and INDX_CHECKS in"
+        " simulator/compatibility.py",
+        "0bce2e674b37d3ec",
+        UPSTREAM_7D8BF685,
+    ),
     # The per-tool checks of a print: the disabled tool, the missing filament and the wrong
     # type in `print_checks` and `wrong_types` in simulator/preview.py. The function runs
     # every per-tool check, nozzles and spool join among them, so it also trips on unrelated
@@ -245,7 +256,8 @@ WATCHED = (
         "src/common/power_panic.cpp",
         "statement",
         "if (power_panic_retracts &&",
-        "SimPrinter._reboot in simulator/model.py",
+        "SimPrinter._reboot in simulator/model.py: the retract, which a paused, a crashed or"
+        " a nested cut skips",
         "86c46876b2341282",
         UPSTREAM_7D8BF685,
     ),
@@ -260,6 +272,126 @@ WATCHED = (
         "SimPrinter._recover, _unpark and _nozzle_clean in simulator/model.py, which have no"
         " MMU step",
         "1c614228e7ef6377",
+        UPSTREAM_7D8BF685,
+    ),
+    # The saved print lasts through the resume: the resume's start marks any cut until its
+    # end a nested one, which keeps the saved state and skips the retract, and the bed
+    # decides at each boot. The end erases the saved state and makes the next cut an
+    # ordinary one.
+    Watched(
+        "the power-panic resume's start",
+        "src/common/power_panic.cpp",
+        "function",
+        "resume_print",
+        "SimPrinter._reboot in simulator/model.py: a cut in RECOVER or AWAIT_RESUME keeps the"
+        " print and doesn't retract, and the bed decides at each boot",
+        "2dce16ddb75affc1",
+        UPSTREAM_7D8BF685,
+    ),
+    Watched(
+        "the power-panic resume's end",
+        "src/common/power_panic.cpp",
+        "function",
+        "atomic_finish",
+        "SimPrinter._reboot and _end_phase in simulator/model.py: the resume ends at the end"
+        " of RECOVER, in UNPARK or, for a paused print, PAUSED",
+        "e7ecd2111c784d2d",
+        UPSTREAM_7D8BF685,
+    ),
+    Watched(
+        "the saved print erased",
+        "src/common/power_panic.cpp",
+        "function",
+        "atomic_reset",
+        "SimPrinter._reboot in simulator/model.py: a cut after the resume's end is an ordinary one",
+        "8143e538e0643ae1",
+        UPSTREAM_7D8BF685,
+    ),
+    # A nested cut is handled even when the printer reads idle, and saves none of the cut's
+    # flags, tool, temperatures or file position anew. The function saves everything the cut
+    # keeps, so it also trips on unrelated changes.
+    Watched(
+        "the power cut's save",
+        "src/common/power_panic.cpp",
+        "function",
+        "ac_fault_isr",
+        "the nested branch of SimPrinter._reboot in simulator/model.py: a cut in RECOVER or"
+        " AWAIT_RESUME keeps what the first cut saved",
+        "232a3f88615927c0",
+        UPSTREAM_7D8BF685,
+    ),
+    # After the resume's end the crash recovery unparks the head, so a cut in UNPARK counts
+    # as crashed: the cut doesn't retract.
+    Watched(
+        "the power-panic resume's unpark",
+        "src/common/marlin_server.cpp",
+        "function",
+        "powerpanic_finish_recovery",
+        "SimPrinter._reboot in simulator/model.py: a cut in UNPARK doesn't retract",
+        "bc229b21963522e7",
+        UPSTREAM_7D8BF685,
+    ),
+    Watched(
+        "the cut's crashed flag",
+        "src/common/power_panic.cpp",
+        "statement",
+        "state_buf.planner.was_crashed = crash_s.did_trigger();",
+        "SimPrinter._reboot in simulator/model.py: a cut in UNPARK doesn't retract",
+        "4d938eebff7464cd",
+        UPSTREAM_7D8BF685,
+    ),
+    # A cut is a paused one only in the pause state, which a filament change dialog never
+    # enters.
+    Watched(
+        "the cut's paused flag",
+        "src/common/power_panic.cpp",
+        "statement",
+        "state_buf.planner.was_paused = marlin_server::printer_paused();",
+        "UserJob.parked, which only SimPrinter.pause sets, and SimPrinter._reboot in"
+        " simulator/model.py",
+        "819d4b9c1252a004",
+        UPSTREAM_7D8BF685,
+    ),
+    Watched(
+        "the paused check",
+        "src/common/marlin_server.cpp",
+        "function",
+        "printer_paused",
+        "UserJob.parked, which only SimPrinter.pause sets, in simulator/model.py",
+        "d9f410744f8b4a07",
+        UPSTREAM_7D8BF685,
+    ),
+    # The autostart resumes the print at its first try, 1.5 s after the boot.
+    Watched(
+        "the autostart",
+        "src/common/print_utils.cpp",
+        "function",
+        "print_utils_loop",
+        "PANIC_RETRY_SECONDS, Settings.panic_idle_seconds and SimPrinter._tick_resume in"
+        " simulator/model.py",
+        "193aecf1fa1646ba",
+        UPSTREAM_7D8BF685,
+    ),
+    # INDX boots with the last picked tool, which a tool parked during a print that uses
+    # several tools marks invalid.
+    Watched(
+        "the INDX last picked tool",
+        "lib/Marlin/Marlin/src/module/prusa/toolchanger_indx.cpp",
+        "function",
+        "PrusaToolChanger::persist_last_picked_tool",
+        "SimPrinter._forget_pick in simulator/model.py",
+        "b3d82a09aa3c9607",
+        UPSTREAM_7D8BF685,
+    ),
+    # Neither the power-panic window nor the tools-mapping screen counts as printing, so the
+    # idle sensor clear runs in both.
+    Watched(
+        "the printing check",
+        "src/common/marlin_server.cpp",
+        "function",
+        "is_printing",
+        "SimPrinter._idle_clear_selected and boot in simulator/model.py",
+        "742ade182c318980",
         UPSTREAM_7D8BF685,
     ),
     # The MMU3. Which slots the printer lists: all five while the MMU's setting is on.
@@ -778,6 +910,16 @@ WATCHED = (
         "ca43809fc54c58c2",
         UPSTREAM_7D8BF685,
     ),
+    # Only tool 0 reads its UUIDs: the one-slot array's size and the write aren't held.
+    Watched(
+        "the tag UUIDs' read",
+        "src/common/filament.cpp",
+        "statement",
+        "i == 0 ? config_store().adhoc_filament_parameters_6.get(i)",
+        "ModelInfo.holds_uuid and UUID_TOOL in simulator/model.py",
+        "77c7f259a0c8a355",
+        UPSTREAM_7D8BF685,
+    ),
     # The MMU's filament menu has no plain Load.
     Watched(
         "the MMU's filament menu",
@@ -806,6 +948,46 @@ WATCHED = (
         "M600_manual",
         "the color change with no slot selected in SimPrinter._print_step in simulator/model.py",
         "23d374077fddf0c9",
+        UPSTREAM_7D8BF685,
+    ),
+    # A filament change given no type reloads the one the tool had: the stored type, else
+    # the file's, else the one the last unload left.
+    Watched(
+        "the filament change",
+        "src/marlin_stubs/pause/M600.cpp",
+        "function",
+        "M600_execute",
+        "SimPrinter.load with no source, change_filament and _type_to_load in simulator/model.py",
+        "e69d3671b0373194",
+        UPSTREAM_7D8BF685,
+    ),
+    Watched(
+        "the filament change's type",
+        "src/common/filament_tools.cpp",
+        "function",
+        "FilamentType::for_tool_heuristic",
+        "SimPrinter._type_to_load and _flexible in simulator/model.py",
+        "3de732fdc5d2fc6c",
+        UPSTREAM_7D8BF685,
+    ),
+    # INDX docks the tool after a menu load, unless it resumes a print, and after every
+    # menu unload.
+    Watched(
+        "the menu load",
+        "src/marlin_stubs/pause/M701_2.cpp",
+        "function",
+        "filament_gcodes::M701_load",
+        "IndxToolchanger.rest in simulator/feed.py",
+        "6df797d4b6519cb5",
+        UPSTREAM_7D8BF685,
+    ),
+    Watched(
+        "the menu unload",
+        "src/marlin_stubs/pause/M701_2.cpp",
+        "function",
+        "filament_gcodes::M702_unload",
+        "IndxToolchanger.rest in simulator/feed.py",
+        "b0dd81c0b84bd2e6",
         UPSTREAM_7D8BF685,
     ),
     Watched(

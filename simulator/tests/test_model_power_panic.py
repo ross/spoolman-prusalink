@@ -504,3 +504,199 @@ def test_a_cut_during_a_color_change_in_the_file_runs_it_again():
     sim.tick(60)
     assert p.state is State.FINISHED
     assert [e.text for e in sim.events].count("color change at 20 mm") == 2
+
+
+# A second cut during the resume.
+#
+# `resume_print` marks every cut from then on a nested one, and only `atomic_reset`, at
+# `ResumeState::Finish`, clears the mark and erases the saved print (`power_panic.cpp:228-237,
+# 269-279, 583`). A nested cut doesn't retract (`:732`), and it saves the first cut's flags,
+# tool and file position again (`:946-951, 982-1106`), so the next boot resumes the print
+# again as the first cut left it. That covers BUSY and a cold bed's wait. In UNPARK the
+# resume has ended: the cut is an ordinary one, but the crash recovery unparks the head, so
+# it counts as crashed and doesn't retract either (`marlin_server.cpp:2099-2106`,
+# `power_panic.cpp:984`). Each resume runs its own feed back or purge: from the boot's gap 0,
+# 8 * 0.95 = 7.6 on a Core One L, 25 * 550/576 = 23.87 on INDX, nothing on the XL.
+
+RECOVER, UNPARK = Settings().recover_seconds, Settings().unpark_seconds
+# Where the second cut falls, in seconds after the first boot, and whether the first
+# resume's purge and feed back have run by then. INDX purges halfway through BUSY, and the
+# others feed back at its end.
+SECOND_CUTS = {
+    "recover, before the purge": (WINDOW + RECOVER / 4, False, False),
+    "recover, after the purge": (WINDOW + RECOVER * 3 / 4, True, False),
+    "unpark": (WINDOW + RECOVER + UNPARK / 2, True, True),
+}
+
+
+def boot_gaps(monkeypatch, p: SimPrinter) -> list[float]:
+    """Record tool 0's gap each time a boot restarts its tracker: what the cut left."""
+    path = p.tools[0].path
+    seen: list[float] = []
+    boot = path.boot
+
+    def record(limit: float) -> None:
+        seen.append(path.gap)
+        boot(limit)
+
+    monkeypatch.setattr(path, "boot", record)
+    return seen
+
+
+@pytest.mark.parametrize("point", SECOND_CUTS)
+@RESUME_COUNTS
+def test_a_second_cut_during_the_resume_resumes_again_without_a_retract(
+    monkeypatch, model, counted, point
+):
+    sim, p = printing(model)
+    job = p.job.id
+    p.reboot(keep_job=True)
+    at, purged, fed_back = SECOND_CUTS[point]
+    sim.tick(at)
+    assert p.job.phase is (JobPhase.UNPARK if point == "unpark" else JobPhase.RECOVER)
+    t = p.tools[0]
+    gap = t.path.gap
+    gaps = boot_gaps(monkeypatch, p)
+    p.reboot(keep_job=True)
+    # No retract: the boot finds the gap the resume left, where a retract would add 8.
+    assert gaps == [gap]
+    assert in_window(p) and p.resuming.id == job and t.extruded == 0
+    resumed(sim, p)
+    assert prusalink.job(p)["id"] == job and p.job_counter == job
+    # The second resume's own feed back or purge, from the boot's gap 0.
+    assert t.extruded == pytest.approx(counted)
+    sim.tick(UNPARK)
+    assert p.state is State.PRINTING and t.extruded > counted
+    # The first resume's moves that ran before the cut, then the second resume's.
+    log = job_log(sim)
+    if model == "8.10.0":
+        assert log.count("nozzle clean purged 25 mm") == 1 + purged
+    elif model == "8.1.0":
+        assert log.count("fed back 8 mm") == 1 + fed_back
+    else:  # the XL retracts nothing and feeds nothing back
+        assert not any(s.startswith(("fed back", "nozzle clean")) for s in log)
+
+
+def test_a_cut_after_the_resume_ends_is_an_ordinary_one(monkeypatch):
+    # PRINTING again: the cut retracts 8 mm, and the next resume feeds them back.
+    sim, p = printing()
+    p.reboot(keep_job=True)
+    sim.tick(WINDOW + RECOVER + UNPARK + 1)
+    assert p.state is State.PRINTING and p.tools[0].path.gap == 0
+    gaps = boot_gaps(monkeypatch, p)
+    p.reboot(keep_job=True)
+    assert gaps == [8]
+    resumed(sim, p)
+    assert p.tools[0].extruded == pytest.approx(FED_BACK)
+    assert job_log(sim).count("fed back 8 mm") == 2
+
+
+def test_a_third_cut_resumes_as_the_second():
+    # Every boot's resume marks its cuts nested, so a cut in the second resume's BUSY is as
+    # the second cut was. No cut came after a feed back, so it runs once, at the last
+    # resume: 7.6.
+    sim, p = printing()
+    for _ in range(3):
+        p.reboot(keep_job=True)
+        sim.tick(WINDOW + RECOVER / 2)
+        assert p.state is State.BUSY and p.job.id == 1
+    sim.tick(RECOVER / 2 + 0.01)
+    assert p.job.phase is JobPhase.UNPARK
+    assert p.tools[0].extruded == pytest.approx(FED_BACK)
+    assert job_log(sim).count("fed back 8 mm") == 1
+
+
+def test_a_second_cut_in_a_paused_print_s_resume_comes_back_paused(monkeypatch):
+    # The nested cut keeps the first cut's `was_paused`, though the print state is then
+    # `PowerPanic_Resume`, not `Paused`, so the print comes back paused with nothing moved.
+    sim, p = printing()
+    p.pause()
+    p.reboot(keep_job=True)
+    sim.tick(WINDOW + RECOVER / 2)
+    assert p.state is State.BUSY
+    gap = p.tools[0].path.gap
+    gaps = boot_gaps(monkeypatch, p)
+    p.reboot(keep_job=True)
+    assert gaps == [gap]
+    sim.tick(WINDOW)
+    assert p.state is State.BUSY
+    sim.tick(RECOVER + 0.01)
+    assert p.state is State.PAUSED and p.job.phase is JobPhase.PAUSED
+    assert p.tools[0].extruded == 0
+    p.resume()
+    assert p.state is State.PRINTING
+    assert not any(s.startswith(("fed back", "nozzle clean")) for s in job_log(sim))
+
+
+@pytest.mark.parametrize("model", WINDOW_MODELS)
+def test_the_bed_decides_again_after_a_cut_during_the_resume(model):
+    # Warm, then cold at the second boot: the resume waits for the user. A cut in that wait
+    # is nested too: warm at the third boot, the print resumes on its own.
+    sim, p = printing(model)
+    p.reboot(keep_job=True)
+    sim.tick(WINDOW + RECOVER / 4)
+    p.reboot(keep_job=True, cold_bed=True)
+    sim.tick(WINDOW)
+    assert p.state is State.ATTENTION and p.job.phase is JobPhase.AWAIT_RESUME
+    p.reboot(keep_job=True)
+    assert in_window(p) and p.resuming.id == 1
+    sim.tick(WINDOW)
+    assert p.state is State.BUSY and p.job.phase is JobPhase.RECOVER
+    sim.tick(RECOVER + UNPARK + 0.01)
+    assert p.state is State.PRINTING
+
+
+def test_a_cut_during_the_resume_after_a_cold_bed_s_wait_resumes_on_its_own():
+    sim, p = printing()
+    p.reboot(keep_job=True, cold_bed=True)
+    sim.tick(WINDOW)
+    p.resume()
+    assert p.state is State.BUSY
+    p.reboot(keep_job=True)
+    sim.tick(WINDOW)
+    assert p.state is State.BUSY and p.job.phase is JobPhase.RECOVER
+    sim.tick(RECOVER + 0.01)
+    assert p.tools[0].extruded == pytest.approx(FED_BACK)
+    assert job_log(sim).count("fed back 8 mm") == 1
+
+
+def test_a_second_cut_on_indx_boots_with_no_tool_and_the_resume_picks_it_again():
+    # A print on T0 then T1, cut in T1's segment. Each boot finds the last picked tool
+    # invalid, so neither window runs an idle sensor clear, and each resume picks T1 before
+    # it purges on it: 23.87 after each boot.
+    sim, p = make("8.10.0", [loaded(0), loaded(1)])
+    p.start_print(PrintSpec([Segment(0, 10), Segment(1, 100)], duration_s=20, preheat_s=0))
+    sim.tick(0.5)
+    p.tap_through()  # Print on the tools-mapping screen
+    while p.job.segment == 0 or p.job.phase is not JobPhase.PRINTING:
+        sim.tick(0.1)
+    p.reboot(keep_job=True)
+    assert p.selected_tool is None
+    sim.tick(WINDOW + RECOVER * 3 / 4)
+    assert p.selected_tool == 1
+    p.reboot(keep_job=True)
+    assert p.selected_tool is None and in_window(p)
+    resumed(sim, p)
+    assert p.selected_tool == 1 and p.tools[1].extruded == pytest.approx(PURGED)
+    assert p.tools[0].extruded == 0
+    assert job_log(sim).count("nozzle clean purged 25 mm") == 2
+
+
+def test_a_second_cut_keeps_the_xl_tool_the_first_cut_found():
+    # The first cut comes while a filament change on T1 waits for the reload, so the resume
+    # prints on T1 until the file's next tool change. The nested cut saves nothing new, so
+    # the second resume prints on T1 too.
+    sim, p = make("3.1.0", [loaded(0), loaded(1)])
+    p.start_print(PrintSpec([Segment(0, 100)], duration_s=20, preheat_s=0))
+    sim.tick(0.5)
+    p.tap_through()  # Print on the tools-mapping screen
+    sim.tick(0.3 + 1)
+    p.change_filament(1)
+    p.reboot(keep_job=True)
+    assert p.resuming.resumed_on == 1
+    sim.tick(WINDOW + RECOVER / 2)
+    p.reboot(keep_job=True)
+    assert p.resuming.resumed_on == 1 and p.selected_tool == 1
+    sim.tick(WINDOW + RECOVER + UNPARK + 1)
+    assert p.state is State.PRINTING and p.selected_tool == 1
+    assert p.tools[1].extruded > 0 and p.tools[0].extruded == 0
