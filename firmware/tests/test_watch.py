@@ -130,6 +130,8 @@ def test_a_statement_with_a_block_runs_to_its_closing_brace():
         ("int a { x(); } else { y(); }\n", "int a has an else"),
         ("int a { x(); }\n  else if (b) y();\n", "int a has an else"),
         ("int a = 1; else y();\n", "int a has an else"),
+        ("int a { x(); }\n#if B\nelse { y(); }\n#endif\n", "int a has an else"),
+        ("int a { x(); }\n#if B \\\n  || C\n#endif\n  else y();\n", "int a has an else"),
     ],
 )
 def test_a_statement_found_other_than_once_fails(text, problem):

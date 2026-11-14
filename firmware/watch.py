@@ -354,8 +354,9 @@ def _statement(text: str, anchor: str) -> str:
         depth += {"(": 1, "[": 1, ")": -1, "]": -1}.get(c, 0)
         if depth == 0 and c in ";{":
             end = i + 1 if c == ";" else _closing(masked, i, "{", "}")
-            # An `else` belongs to the statement, and the region would leave it out.
-            if re.match(r"\s*else(?!\w)", masked[end:]):
+            # An `else` belongs to the statement, and the region would leave it out. One
+            # can follow preprocessor lines.
+            if re.match(r"(?:\s*#(?:\\\n|[^\n])*)*\s*else(?!\w)", masked[end:]):
                 raise ValueError(f"{anchor} has an else")
             return text[starts[0] : end]
     raise ValueError(f"{anchor} isn't closed")
