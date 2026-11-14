@@ -1033,8 +1033,7 @@ static constexpr EnumArray<Sequence, GCodeFile, static_cast<int>(Sequence::_cnt)
 """
 
 # Cut down to the namespace with the two constants, the resume's start and end, all of
-# `resume_loop`, the cut's retract in a stub of `panic_loop`, and the cut's flags in a stub
-# of `ac_fault_isr`.
+# `resume_loop`, the cut's retract in a stub of `panic_loop`, and all of `ac_fault_isr`.
 POWER_PANIC_CPP = """\
 #include "power_panic.hpp"
 
@@ -1436,12 +1435,199 @@ void panic_loop() {
 }
 
 void ac_fault_isr() {
+    if (!ac_fault_enabled) {
+        return;
+    }
+
+    // Mark ac_fault as triggered
+    ac_fault_triggered = true;
+
+    // prevent re-entry
+    HAL_NVIC_DisableIRQ(buddy::hw::acFault.getIRQn());
+
+    // check if handling the fault is worth it (printer is active or can be resumed)
+    if (!runtime_state.nested_fault) {
+        if ((marlin_server::printer_idle() && !marlin_server::printer_paused())
+            || marlin_server::aborting_or_aborted() || marlin_server::print_preview()) {
+            runtime_state.fault_stamp = ticks_ms();
+            power_panic_state = PPState::WaitingToDie;
+            // will continue in the main loop
+
+            // Without the yield, the interrupted task would keep running until the next tick, delaying the ac_fault task.
+            const BaseType_t higher_priority_task_woken = xTaskResumeFromISR(ac_fault_task);
+            portYIELD_FROM_ISR(higher_priority_task_woken);
+            return;
+        }
+    }
+
+    // TODO: can be avoided if running at the same priority as STEP_TIMER_PRIO
+    buddy::InterruptDisabler _;
+
+    // ensure the crash handler can't be re-triggered
+    HAL_NVIC_DisableIRQ(buddy::hw::xDiag.getIRQn());
+    HAL_NVIC_DisableIRQ(buddy::hw::yDiag.getIRQn());
+
+    runtime_state.orig_state = power_panic_state;
+    runtime_state.fault_stamp = ticks_ms();
+    power_panic_state = PPState::Triggered;
+
+    // power off devices in order of power draw
+    runtime_state.orig_axes_home_level = axes_home_level;
+    disable_XY();
+    // Cuts power to heaters "the hard way". Proper one is in manage_heater.
+    buddy_disable_heaters();
+    buddy::hw::hsUSBEnable.write(buddy::hw::Pin::State::high);
+#if HAS_EMBEDDED_ESP32()
+    buddy::hw::espPower.reset();
+#endif
 
     // stop motion
     if (!runtime_state.nested_fault) {
         state_buf.planner.was_paused = marlin_server::printer_paused();
         state_buf.planner.was_crashed = crash_s.did_trigger();
     }
+
+    if (!state_buf.planner.was_crashed) {
+        // fault occurred outside of a crash: trigger one now to update the crash position
+        crash_s.set_state(Crash_s::TRIGGERED_AC_FAULT);
+        crash_s.crash_axes_home_level = runtime_state.orig_axes_home_level;
+    }
+
+    if (!runtime_state.nested_fault) {
+        const marlin_server::resume_state_t &resume = *marlin_server::get_resume_data();
+
+        if (state_buf.planner.was_paused) {
+            // crash_native_position *is* current_position while the print is paused,
+            // so abuse the slot for the restore position instead
+            state_buf.crash.sdpos = marlin_server::media_position();
+            state_buf.crash.crash_native_position = resume.pos;
+        } else {
+            state_buf.crash.sdpos = crash_s.sdpos;
+            state_buf.crash.crash_native_position = crash_s.crash_native_position;
+        }
+
+        // save crash parameters
+#if HAS_TOOLCHANGER() && (HAS_TOOL_CRASH_RECOVERY() || HAS_INDX())
+    #if HAS_INDX()
+        // Snapshot the phase before the preempted tool_change()'s ScopeGuard
+        // runs and wipes phase_. The acquire-load also acts as a publication fence for the
+        // return_data() read below.
+        state_buf.toolchanger.phase = prusa_toolchanger.phase();
+    #endif
+        if (crash_s.is_toolchange_event()) {
+            // Panic during toolchange, use the intended destination for replay
+            // !! We're losing E somewhere?!
+            state_buf.crash.start_current_position = xyze_pos_t(prusa_toolchanger.return_data().return_pos.asNative());
+        } else
+#endif
+        {
+            state_buf.crash.start_current_position = crash_s.start_current_position;
+        }
+        state_buf.crash.crash_machine_position = crash_s.crash_machine_position;
+        state_buf.crash.segments_finished = crash_s.segments_finished;
+        state_buf.crash.axes_home_level = crash_s.crash_axes_home_level;
+        state_buf.crash.leveling_active = crash_s.leveling_active;
+        state_buf.crash.recover_flags = crash_s.recover_flags;
+        state_buf.crash.fr_mm_s = crash_s.fr_mm_s;
+
+        crash_s.counters.increment(Crash_s::Counter::power_panic);
+        state_buf.crash.counters = crash_s.counters.backup_data();
+
+        // save print temperatures
+        if (state_buf.planner.was_paused) { // Paused print or whenever nozzle is cooled down
+            state_buf.planner.target_nozzle = resume.nozzle_temp;
+
+        } else {
+            state_buf.planner.target_nozzle = buddy::safety_timer().original_hotend_targets();
+        }
+
+        if (state_buf.planner.was_paused) {
+            state_buf.planner.fan_speed = resume.fan_speed;
+            state_buf.planner.print_speed = resume.print_speed;
+#if HAS_INDX()
+            state_buf.planner.active_tool = resume.active_tool;
+#endif
+        } else {
+            state_buf.planner.fan_speed = thermalManager.print_fan_speed;
+            state_buf.planner.print_speed = marlin_vars().print_speed;
+#if HAS_INDX()
+            state_buf.planner.active_tool = match(
+                PhysicalToolIndex::currently_selected(),
+                [](PhysicalToolIndex tool) { return tool.to_raw(); },
+                [](NoTool) { return PrusaToolChanger::MARLIN_NO_TOOL_PICKED; });
+#endif
+        }
+#if HAS_MOTOR_CURRENT_PROFILES()
+        state_buf.planner.current_profile = static_cast<uint8_t>(buddy::active_motor_current_profile());
+#endif
+        state_buf.planner.target_bed = thermalManager.degTargetBed();
+#if HAS_MODULAR_BED()
+        state_buf.planner.enabled_bedlets_mask = thermalManager.getEnabledBedletMask();
+#endif
+#if ENABLED(PREVENT_COLD_EXTRUSION)
+        state_buf.planner.extrude_min_temp = thermalManager.extrude_min_temp;
+        state_buf.planner.allow_cold_extrude = thermalManager.allow_cold_extrude;
+#endif
+
+        // remaining planner parameters
+        state_buf.planner.flow_percentage = planner.flow_percentage;
+        state_buf.planner.axis_relative = gcode.axis_relative;
+
+        // IS/PA
+        LOOP_XYZ(i) {
+            if (!input_shaper::current_config().axis[i]) {
+                state_buf.planner.axis_config[i].frequency = 0.f;
+            } else {
+                state_buf.planner.axis_config[i] = *input_shaper::current_config().axis[i];
+            }
+        }
+
+        if (!input_shaper::get_config_for_m74().axis[Y_AXIS]) {
+            state_buf.planner.original_y.frequency = 0.f;
+        } else {
+            state_buf.planner.original_y = *input_shaper::get_config_for_m74().axis[Y_AXIS];
+        }
+
+        if (!input_shaper::current_config().weight_adjust_y) {
+            state_buf.planner.axis_y_weight_adjust.frequency_delta = 0.f;
+        } else {
+            state_buf.planner.axis_y_weight_adjust = *input_shaper::current_config().weight_adjust_y;
+        }
+
+        state_buf.planner.axis_e_config = pressure_advance::get_axis_e_config();
+
+#if HAS_TOOLCHANGER()
+        // Restore planner config if it was changed by toolchange
+        prusa_toolchanger.try_restore();
+#endif
+
+        state_buf.planner.settings = planner.user_settings;
+
+#if !HAS_CLASSIC_JERK
+        state_buf.planner.junction_deviation_mm = planner.junction_deviation_mm;
+#endif
+    }
+
+    if (state_buf.planner.was_crashed) {
+        // fault occured while handling a crash: original crash location has been saved,
+        // it's now safe to overwrite with the current intermediate location for parking
+        crash_s.set_state(Crash_s::TRIGGERED_AC_FAULT);
+    }
+
+    state_buf.planner.compatibility = gcode.compatibility;
+
+    static_assert(
+        std::is_same_v<
+            decltype(state_buf.planner.marlin_debug_flags),
+            decltype(marlin_debug_flags)>
+        == true);
+    state_buf.planner.marlin_debug_flags = marlin_debug_flags;
+
+    // will continue in the main loop
+
+    // Without the yield, the interrupted task would keep running until the next tick, delaying the ac_fault task.
+    const BaseType_t higher_priority_task_woken = xTaskResumeFromISR(ac_fault_task);
+    portYIELD_FROM_ISR(higher_priority_task_woken);
 }
 
 } // namespace power_panic

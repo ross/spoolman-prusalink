@@ -527,9 +527,10 @@ Choices made where the firmware was silent or the plan left it open:
 - A power cut during a runout's or a jam's dialog retracts 8 mm, as any
   cut in a print does. The firmware skips that retract when the runout or
   jam interrupted a move, which runs it through the crash recovery
-  (`was_crashed`), and when a resumed print still replays the move the
-  first cut interrupted. The boot leaves the tracker at gap 0 and untrusted
-  either way, so the resume's feed back counts the same.
+  (`was_crashed`). A cut while a resumed print still replays the move the
+  first cut interrupted retracts too, where the firmware skips it. The boot
+  leaves the tracker at gap 0 and untrusted either way, so the resume's feed
+  back counts the same.
 - The power-panic resume starts at the autostart's first try, 1.5 s after
   the boot: the firmware tries every 1.5 s until the USB drive, the
   temperatures and the screen are ready, and gives up after 100 s, which the

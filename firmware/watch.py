@@ -307,6 +307,19 @@ WATCHED = (
         "8143e538e0643ae1",
         UPSTREAM_7D8BF685,
     ),
+    # A nested cut is handled even when the printer reads idle, and saves none of the cut's
+    # flags, tool, temperatures or file position anew. The function saves everything the cut
+    # keeps, so it also trips on unrelated changes.
+    Watched(
+        "the power cut's save",
+        "src/common/power_panic.cpp",
+        "function",
+        "ac_fault_isr",
+        "the nested branch of SimPrinter._reboot in simulator/model.py: a cut in RECOVER or"
+        " AWAIT_RESUME keeps what the first cut saved",
+        "232a3f88615927c0",
+        UPSTREAM_7D8BF685,
+    ),
     # After the resume's end the crash recovery unparks the head, so a cut in UNPARK counts
     # as crashed: the cut doesn't retract.
     Watched(
