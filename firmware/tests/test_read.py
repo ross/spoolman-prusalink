@@ -261,8 +261,9 @@ def test_printers():
         ("set(X 1)", "no PRINTER_VALID_OPTS"),
         ("set(PRINTER_VALID_OPTS)", "no PRINTER_VALID_OPTS"),
         ('set(PRINTER_VALID_OPTS "A")\nset(PRINTER_VALID_OPTS "B")', "set more than once"),
-        ('if(X)\nset(PRINTER_VALID_OPTS "A")\nendif()', r"set by set\(\) on line 2 inside if"),
-        ('unset(PRINTER_VALID_OPTS "A")', r"set by unset\(\) on line 1$"),
+        ('if(X)\nset(PRINTER_VALID_OPTS "A")\nendif()', r"appears in set\(\) on line 2 inside if"),
+        ('unset(PRINTER_VALID_OPTS "A")', r"appears in unset\(\) on line 1$"),
+        ('set(PRINTER_VALID_OPTS "A" ${MORE})', r"value '\$\{MORE\}' on line 1"),
     ],
 )
 def test_printers_fail_closed(text, problem):
@@ -572,11 +573,17 @@ def test_buddy_boards():
     [
         ("set(OTHER 1)\n", "no BUDDY_BOARDS"),
         ('set(BUDDY_BOARDS "A")\nset(BUDDY_BOARDS "B")\n', "set more than once"),
-        ('if(X)\n  set(BUDDY_BOARDS "A")\nendif()\n', "set by set\\(\\) on line 2 inside if"),
-        (
-            'set(BUDDY_BOARDS "A")\nlist(APPEND BUDDY_BOARDS "B")\n',
-            "changed by list\\(\\) on line 2",
-        ),
+        ('if(X)\n  set(BUDDY_BOARDS "A")\nendif()\n', "appears in set\\(\\) on line 2 inside if"),
+        ('list(APPEND BUDDY_BOARDS "B")\nset(BUDDY_BOARDS "A")', r"in list\(\) on line 1"),
+        ('set(BUDDY_BOARDS "A")\nlist(APPEND BUDDY_BOARDS "B")', r"in list\(\) on line 2"),
+        ('set(BUDDY_BOARDS "A")\nlist(LENGTH X BUDDY_BOARDS)', r"in list\(\) on line 2"),
+        ('set(BUDDY_BOARDS "A")\nstring(APPEND BUDDY_BOARDS ";B")\n', r"appears in string\(\)"),
+        ('set(OTHER ${X} BUDDY_BOARDS)\nset(BUDDY_BOARDS "A")\n', r"appears in set\(\) on line 1"),
+        ('set(BUDDY_BOARDS "A" ${EXTRA})\n', r"can't read BUDDY_BOARDS's value '\$\{EXTRA\}'"),
+        ('set(BUDDY_BOARDS "A;B" "C")\n', "value 'A;B' on line 1"),
+        ('set(BUDDY_BOARDS "A" CACHE STRING "d")\n', "value 'CACHE'"),
+        ('set(BUDDY_BOARDS "A" PARENT_SCOPE)\n', "value 'PARENT_SCOPE'"),
+        ('set(BUDDY_BOARDS "A" "")\n', "value '' on line 1"),
     ],
 )
 def test_buddy_boards_fail_closed(text, problem):
@@ -612,6 +619,8 @@ def test_images():
         (presets_json(preset(PRINTER="XL")), "can't read xl's BOARD None"),
         (presets_json(preset(BOARD="XLBUDDY")), "can't read xl's PRINTER None"),
         (presets_json(preset(PRINTER="XL", BOARD=True)), "can't read xl's BOARD True"),
+        (presets_json(preset(PRINTER="XL", BOARD="")), "can't read xl's BOARD ''"),
+        (presets_json(preset(PRINTER="", BOARD="XLBUDDY")), "can't read xl's PRINTER ''"),
         (
             presets_json(preset(PRINTER="XL", BOARD={"type": "STRING", "value": "XLBUDDY"})),
             "can't read xl's BOARD",

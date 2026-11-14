@@ -301,6 +301,7 @@ def test_main_boards():
                     ("mk4", "MK4", "XBUDDY"),
                     ("mk4-other", "MK4", "BUDDY"),
                     ("anfc", "NONE", "ANFC"),
+                    ("new", "NEW", "XBUDDY"),  # a printer with no build, on a main board
                 )
             ],
         }
@@ -311,6 +312,7 @@ def test_main_boards():
     assert found["MK4"] == {"BUDDY", "XBUDDY"}  # two main boards
     assert found["MINI"] == set()  # no image
     assert "NONE" not in found
+    assert "NEW" not in found
     # A board that's neither a buddy board nor another main board isn't one.
     assert compare.main_boards(images, frozenset({"BUDDY"}))["XL"] == set()
 

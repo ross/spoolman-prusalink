@@ -201,21 +201,29 @@ def buddy_boards(text: str) -> frozenset[str]:
 
 def _set_once(text: str, variable: str) -> frozenset[str]:
     """Return the list one `set()` at the top level of `ProjectOptions.cmake` gives
-    `variable`. Any other command that sets it or changes it as a list fails the read."""
+    `variable`, each value a plain word.
+
+    Any other statement with `variable` as one of its words fails the read, since CMake
+    commands name the variable they write in different places (`string(APPEND X ...)`,
+    `list(LENGTH L X)`). So does a value CMake would expand, split or take as a keyword:
+    one holding `$` or `;`, an empty one, `CACHE` or `PARENT_SCOPE`. A `${X}` inside a
+    longer word only reads the variable, so it passes.
+    """
     found = None
     try:
         for name, words, line, block in _cmake_statements(text):
-            if name == "list" and words[1:2] == [variable]:
-                raise ValueError(f"{variable} is changed by list() on line {line}")
-            if name not in _CMAKE_SETTERS or words[:1] != [variable]:
+            if variable not in words:
                 continue
-            if found is not None:
+            if found is not None and name == "set" and words[0] == variable:
                 raise ValueError(f"{variable} is set more than once (again on line {line})")
-            if block or name != "set":
+            if block or name != "set" or words[0] != variable:
                 raise ValueError(
-                    f"{variable} is set by {name}() on line {line}"
+                    f"{variable} appears in {name}() on line {line}"
                     + (f" inside {block}" if block else "")
                 )
+            for word in words[1:]:
+                if not word or "$" in word or ";" in word or word in _CMAKE_SET_KEYWORDS:
+                    raise ValueError(f"can't read {variable}'s value {word!r} on line {line}")
             found = frozenset(words[1:])
         if not found:
             raise ValueError(f"no {variable}")
@@ -1241,6 +1249,7 @@ _CMAKE_CLOSERS = frozenset(
     {"endif", "endfunction", "endmacro", "endforeach", "endwhile", "endblock"}
 )
 _CMAKE_SETTERS = frozenset({"set", "unset", "option", "define_boolean_option"})
+_CMAKE_SET_KEYWORDS = frozenset({"CACHE", "PARENT_SCOPE"})
 _CMAKE_NAME = re.compile(r"[A-Za-z_]\w*")
 
 
