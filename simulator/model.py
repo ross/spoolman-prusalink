@@ -604,8 +604,10 @@ class PrintSpec:
     prime_mm: float | None = None
     toolchange_purge_mm: float | None = None
     # A file sliced without the MMU3 profile for a printer with an MMU on: no `T`, no
-    # profile moves, every segment on tool 0. The firmware loads a slot for it at the start
-    # and unloads it at the end (`Mmu.prime`, `_end_of_print`).
+    # profile moves, every segment on tool 0, and filament used listed for tool 0 alone,
+    # which is what makes it single-tool (`GCodeInfo::is_singletool_gcode`). The firmware
+    # loads a slot for it at the start and unloads it at the end (`Mmu.prime`,
+    # `_end_of_print`). A print on tool 0 alone without it is an MMU3 profile file.
     single_tool_file: bool = False
     # The print's spool joins, set at the tools-mapping screen, by Connect or by `M864` and
     # reset when the print ends (`marlin_server.cpp:1122`), so a print carries them.
@@ -1654,8 +1656,9 @@ class SimPrinter:
 
     def _check_single_tool_file(self, spec: PrintSpec) -> None:
         """A single-tool file is one sliced without the MMU3 profile, for a printer whose MMU
-        is on: the firmware tells it by its filament use, on tool 0 alone
-        (`GCodeInfo::is_singletool_gcode`, `gcode_info.cpp:611-625`)."""
+        is on. The firmware tells it by its filament-used metadata: tool 0 used and no
+        other tool listed (`GCodeInfo::is_singletool_gcode`, `gcode_info.cpp:611-625`). An
+        MMU3 profile file lists all five slots, so it never is, even on slot 0 alone."""
         if not spec.single_tool_file:
             return
         if self.feed is not MMU:
@@ -2941,7 +2944,7 @@ class SimPrinter:
         job, a sync job too, and a finished single-tool file unload with `M702 W2`, unless
         the extruder's sensor sees no filament (`safely_unload_filament_from_nozzle_to_mmu`,
         `:850-857`). The unload runs on the selected slot, or counts nothing with none, and
-        it runs as the job parks, so it reads `PRINTING`. A finished multi-tool print leaves
+        it runs as the job parks, so it reads `PRINTING`. A finished MMU3 profile print leaves
         it to its end G-code's `M702`, and a finished sync job leaves the filament where it
         is. While the MMU connects, the auto-retract runs on slot 0 (`Mmu.credited`).
         """
@@ -2954,7 +2957,7 @@ class SimPrinter:
                 if tool.path.gap_valid:
                     tool.path.auto_retracted = tool.path.gap
         if self.mmu is not None and self.mmu.active:
-            single = isinstance(job, UserJob) and all(s.tool == 0 for s in job.spec.segments)
+            single = isinstance(job, UserJob) and job.spec.single_tool_file
             if (end is State.STOPPED or single) and self.mmu.path.loaded:
                 self._log("job", "M702 W2: the end of the print unloads into the MMU")
                 self._run_steps(t, self._mmu_unload_steps())

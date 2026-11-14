@@ -736,22 +736,29 @@ workstream 5. The MMU's scenario rows are T12 to T15 and T17.
 - **Scenario rows**: S1, S2, S9, S13, T13.
 - **To reproduce**: That test: with spool 3 moved into slot 0's location,
   slot 0 is ejected and preloaded with PETG. No unload is recorded, spool 3
-  stays staged, and the next print's 135 mm goes to spool 1, which is
+  stays staged, and the next print's 103 mm goes to spool 1, which is
   flagged for the printer's PETG.
 - **Status**: Open.
 
 ### BF16. MMU: each tool change over-charges the outgoing slot
 
 - **What happens**: At a tool change in a print the firmware retracts
-  80 mm, then feeds 189.9, 7 and up to 50 mm to bring the new slot's
-  filament to the extruder, while the old slot is still selected
-  (`mmu2_mk4.cpp:568-679, 681-702`, `mmu2_config.h:35, 44, 69`). The
-  planner counts at plan time, at most 40 mm past the gap, so the old slot
-  is credited 193 to 207 mm, 206.9 with the nominal 50 (F40). The
-  slicer's wipe-tower stamping adds 15 mm per stamping past the same
-  40 mm cap: one per change for PLA, two for PETG (F46). The first change
-  of a print, from no slot, credits nothing, and a failed load's retries
-  add nothing.
+  80 mm and feeds up to 50 mm (`ToolChangeCommonOnce`, `mmu2_mk4.cpp:568-679`,
+  through `FeedWithEStallDetection`, `:492-546`), and plans
+  the 189.9 mm move to the filament sensor and 7 mm past it as the MMU
+  reports its progress (`maximumAllowedExtruderMove`, `:55`, planned at
+  `:1528` in `OnMMUProgressMsgChanged` and `:1590` in
+  `OnMMUProgressMsgSame`; `ExtraLoadDistance() + 2`, `:1583`;
+  `mmu2_config.h:35, 44, 69`). All of it runs while the old slot is still
+  selected (`mmu2_mk4.cpp:681-702`). The planner counts each move at plan
+  time, less whatever is left of the gap, which is at most 40 mm (F39),
+  so the old slot is credited 193 to 207 mm, 206.9 with the nominal 50
+  (F40). The feed leaves the gap at 0, so the new slot's 32 mm slicer
+  load then counts in full, though most of it fills the path to the
+  nozzle. The slicer's wipe-tower stamping on the old slot also counts
+  15 mm of each stamping past the gap: one stamping per change for PLA,
+  two for PETG (F46). The first change of a print, from no slot, credits
+  nothing, and a failed load's retries add nothing.
 - **Effect**: The outgoing slot's spool is charged 221.9 x 0.95 = 210.8
   mm more per change for PLA and 236.9 x 0.95 = 225.1 mm for PETG, about
   0.63 g.
@@ -762,9 +769,20 @@ workstream 5. The MMU's scenario rows are T12 to T15 and T17.
   36 and 50 mm, which only hardware could tell.
 - **Scenario rows**: T12.
 - **To reproduce**: That test: a print on slots 0 and 1, 20 mm each, in the
-  order 0, 1, 0, 1, makes three changes. Slot 0 counts 657.65 mm and slot
-  1 467.38, so the bridge charges 624 and 444 mm, where the model, the
-  start, the loads, the purges and the rammings come to 234.8 and 147.6.
+  order 0, 1, 0, 1, makes three changes, and each slot rams out twice:
+  slot 0 at both changes to slot 1, and slot 1 at its change to slot 0
+  and at the end. In commanded mm, slot 0 counts 657.65 and slot 1
+  467.38, and the counters read 624 and 444 at 0.95, which the bridge
+  charges. The start, the model, the loads, the purges and the rammings
+  come to 213.85 mm on slot 0 (70 + 40 + 32 + 29.95 + 2 x 20.95) and
+  230.48 mm on slot 1 (2 x 32 + 54.63 + 29.95 + 40 + 2 x 20.95), 203 and
+  219 at 0.95. The rest is the firmware's feed and the stampings: 2 x
+  (206.9 + 15) = 443.8 mm on slot 0, and 206.9 + 2 x 15 = 236.9 mm on
+  slot 1, whose last stamping comes at the end with no feed after it.
+- **Open question**: Whether the charge a fix aims for counts the
+  slicer's 17 mm and 32 mm loads. The printer counts them, but most of
+  that filament fills the path to the nozzle and comes back at the next
+  unload.
 - **Status**: Open.
 
 ### BF17. MMU: after a boot, slot 0 is charged while the MMU connects, then nothing until a load or tool change
