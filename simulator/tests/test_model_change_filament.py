@@ -258,6 +258,22 @@ def test_a_cut_during_a_change_on_an_unused_indx_tool_prints_on_it_to_the_next_c
     assert p.tools[2].path.loaded == (point == "load")
 
 
+def test_the_cut_s_retract_is_on_the_picked_tool():
+    """The planner forgets a stored auto-retract distance on the tool it retracts, which is
+    the one on the head, not the print's own."""
+    sim, p = make(INDX, [loaded(0), loaded(1), loaded(2, PETG)])
+    start(sim, p, Segment(0, 50), Segment(1, 50))
+    sim.advance(1)
+    p.change_filament(2)
+    p.tools[2].path.auto_retracted = 20.0
+    before = (p.tools[0].path.gap, p.tools[0].path.auto_retracted)
+    p.reboot(keep_job=True)
+    picked = p.tools[2].path
+    assert (picked.auto_retracted, picked.gap, picked.gap_valid) == (None, 0.0, False)
+    # T0 keeps what it stored: the boot sets its gap from that.
+    assert p.tools[0].path.auto_retracted == before[1]
+
+
 # Refusals.
 
 
