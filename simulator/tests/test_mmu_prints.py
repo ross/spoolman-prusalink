@@ -331,21 +331,6 @@ def test_a_single_tool_file_needs_the_mmu_on_and_tool_0():
         p.start_print(spec((0, 10), single_tool_file=True))
 
 
-def test_the_changes_of_a_later_pr_are_refused_on_an_mmu():
-    sim, p = make_mmu(types={0: PLA, 1: PLA})
-    with pytest.raises(Invalid, match="a color change on an MMU arrives in a later PR"):
-        p.start_print(spec((0, 50), color_changes_mm=[10]))
-    start(sim, p, spec((0, 50)))
-    sim.advance(2)
-    assert p.state is State.PRINTING
-    with pytest.raises(Invalid, match="a runout on an MMU arrives in a later PR"):
-        p.runout(0)
-    with pytest.raises(Invalid, match="a jam isn't modeled with the MMU on"):
-        p.jam(0)
-    with pytest.raises(Invalid, match="a filament change on an MMU arrives in a later PR"):
-        p.change_filament(0)
-
-
 def test_a_tool_change_with_a_slot_selected_retracts_80_first():
     sim, p = make_mmu(slot=2)
     phases = [(s.phase, s.mm) for s in p._mmu_change_steps(selected=True)]
