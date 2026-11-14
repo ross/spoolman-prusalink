@@ -81,7 +81,7 @@ loaded with a material and counters. `checks` is `ignore`, `warn` (the
 default) or `abort`, and it stands for every setting in the printer's menu
 that governs a check of a file's `M862` lines. The top-level settings are
 timing and lengths: the time scale, how fast loads and prints move filament,
-the purges of a tool change, a jam and a power-panic resume, the preheat and
+the purges of a tool change and a jam, the preheat and
 park times, and whether the start blip is on. The feed ratio and a load's slow, fast and purge
 lengths are overrides: left out, each printer uses its model's value, which
 the page shows on the printer's card. On the page or through
@@ -245,9 +245,13 @@ that trace. The points that matter for the bridge, in short:
 
 - A power-panic resume (`reboot` with `keep_job`, or `set_power` on with
   `resume`) keeps the job ID, restarts the counters, skips the idle sensor
-  clear, and goes through `BUSY`, during which a nozzle clean purges
-  `panic_purge_mm`, then a short `PAUSED`, then `PRINTING`. With `cold_bed`
-  it waits in `ATTENTION` for `resume` before the clean. The page's
+  clear, and goes through `BUSY`, then a short `PAUSED`, then `PRINTING`.
+  A print that wasn't paused retracts 8 mm at the cut on every model but
+  the XL. INDX purges 25 mm in its nozzle cleaner halfway through `BUSY`,
+  with no auto-retract after. Every other model that retracted feeds the
+  8 mm back at the end of `BUSY`. Both count whether or not the tool holds
+  filament. With `cold_bed` it waits in `ATTENTION` for `resume` before
+  recovering. The page's
   **Power-loss resume** sends `cold_bed` from its **cold bed** checkbox, and
   **Resume** continues that wait.
 - An upload during the start blip is accepted and dropped: the firmware's
@@ -290,8 +294,8 @@ Choices made where the firmware was silent or the plan left it open:
   purge when a cleaning fails on a printer with a nozzle cleaner; it
   retracts to the full distance (20 mm on a Nextruder, 8 mm on INDX) with
   no ramming, whatever the switch says, and stores that distance for the next feed to feed back.
-- Temperatures, `G12`, the mesh bed leveling retract and the MMU don't move
-  filament in the simulator.
+- Temperatures, `G12` other than INDX's power-panic purge, the mesh bed
+  leveling retract and the MMU don't move filament in the simulator.
 - A power loss during a filament change drops the gap to restore: the
   resume after the reload doesn't move.
 - One `checks` setting stands for the firmware's settings per kind of check

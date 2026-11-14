@@ -170,6 +170,16 @@ class Extruder:
     # What an unload purges before the ramming: 2 mm on INDX (`unload_purge_process` in
     # `src/marlin_stubs/pause/pause.cpp`).
     unload_purge_mm: float = 0.0
+    # Whether a power cut during a print retracts `STANDARD_RETRACT_LENGTH`:
+    # `power_panic_retracts` in `src/common/power_panic.cpp`, false where the build has a
+    # Dwarf (`HAS_DWARF`, the XL builds).
+    panic_retract: bool = True
+    # What the nozzle cleaner's `power_panic_purge` G-code extrudes on a power-panic resume,
+    # with no auto-retract after; None where the resume runs no purge. Where it purges, the
+    # resume doesn't feed the cut's retract back: `power_panic_deretracts` and
+    # `ResumeState::WaitForHeaters` in `src/common/power_panic.cpp`, and
+    # `src/feature/nozzle_cleaner/nozzle_cleaner.cpp`.
+    panic_purge_mm: float | None = None
 
     @property
     def feed_ratio(self) -> float:
@@ -187,16 +197,19 @@ _NEXTRUDER_STEPS = (380, 400)
 _NEXTRUDER_LENGTHS = Lengths(4, 8, 105, 30, 50, 27)
 _CORE_ONE_LENGTHS = Lengths(4, 8, 105, 40, 20, 40)
 
-# Each build's extruder, shared by the models that run the build. The MK4 and XL builds
-# have the same one, and so do the Core One and Core One L, and the two INDX builds.
+# Each build's extruder, shared by the models that run the build. The Core One and Core
+# One L have the same one, and so do the two INDX builds.
 MK4_EXTRUDER = Extruder(
     _NEXTRUDER_STEPS, _NEXTRUDER_LENGTHS, NEXTRUDER_RAMMING, auto_retract_switchable=True
 )
+# The XL's is the MK4's, but its Dwarf doesn't retract at a power cut.
+XL_EXTRUDER = replace(MK4_EXTRUDER, panic_retract=False)
 # The dev kit build lacks HAS_AUTO_RETRACT, which compiles the auto_retract case out.
 XL_DEV_KIT_EXTRUDER = Extruder(
     _NEXTRUDER_STEPS,
     _NEXTRUDER_LENGTHS,
     {k: v for k, v in NEXTRUDER_RAMMING.items() if k != "auto_retract"},
+    panic_retract=False,
 )
 IX_EXTRUDER = Extruder(
     _NEXTRUDER_STEPS,
@@ -217,6 +230,7 @@ INDX_EXTRUDER = Extruder(
     full_retract_mm=8.0,
     cold_unload=False,
     unload_purge_mm=2.0,
+    panic_purge_mm=25.0,
 )
 MK3_5_EXTRUDER = Extruder((266, 280), Lengths(4, 8, 105, 30, 50, 21), MK3_5_RAMMING)
 MINI_EXTRUDER = Extruder((325, 325), Lengths(4, 8, 400, 40, 320, 50), MINI_RAMMING)

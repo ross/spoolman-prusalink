@@ -523,14 +523,14 @@ def test_power_loss_resume_keeps_the_job():
     sim.tick(0.8 + 2)
     p.reboot(keep_job=True)
     assert p.job.id == 1 and p.state is State.BUSY and tool0(p).extruded == 0
-    sim.tick(1)  # halfway through the recovery the nozzle clean purges 25 mm: 25 * 0.95
-    assert p.state is State.BUSY and tool0(p).extruded == pytest.approx(23.75)
-    sim.tick(1)  # recovered: the head unparks
-    assert p.state is State.PAUSED and tool0(p).extruded == pytest.approx(23.75)
-    sim.tick(1)  # unparked: the print goes on
-    assert p.state is State.PRINTING and tool0(p).extruded == pytest.approx(23.75)
     sim.tick(1)
-    assert tool0(p).extruded > 23.75
+    assert p.state is State.BUSY and tool0(p).extruded == 0
+    sim.tick(1)  # recovered: the cut's 8 mm retract is fed back, 8 * 0.95, and the head unparks
+    assert p.state is State.PAUSED and tool0(p).extruded == pytest.approx(7.6)
+    sim.tick(1)  # unparked: the print goes on
+    assert p.state is State.PRINTING and tool0(p).extruded == pytest.approx(7.6)
+    sim.tick(1)
+    assert tool0(p).extruded > 7.6
     p.reboot()
     assert p.job is None and p.state is State.IDLE and p.job_counter == 1
 
@@ -963,18 +963,18 @@ def test_power_loss_with_a_cold_bed_waits_for_the_user():
     assert p.job.id == 1 and p.state is State.BUSY
     sim.tick(2)
     assert p.state is State.ATTENTION and prusalink.job(p)["state"] == "PAUSED"
-    assert tool0(p).extruded == 0  # no nozzle clean before the user answers
+    assert tool0(p).extruded == 0  # nothing fed back before the user answers
     sim.tick(60)
     assert p.state is State.ATTENTION  # nothing happens until the user resumes
     p.resume()
     assert p.state is State.BUSY
     sim.tick(2)
-    assert p.state is State.PAUSED and tool0(p).extruded == pytest.approx(25 * 0.95)
+    assert p.state is State.PAUSED and tool0(p).extruded == pytest.approx(8 * 0.95)
     sim.tick(1)
     assert p.state is State.PRINTING
 
 
-def test_cancel_during_the_power_panic_recovery_cleans_nothing():
+def test_cancel_during_the_power_panic_recovery_feeds_nothing_back():
     sim, p = make()
     p.start_print(one_segment(100, preheat_s=0))
     sim.tick(0.8 + 2)
@@ -982,9 +982,10 @@ def test_cancel_during_the_power_panic_recovery_cleans_nothing():
     assert p.state is State.BUSY and tool0(p).extruded == 0
     p.cancel()
     sim.tick(5)
-    # No clean, but the stop retracts and auto-retracts. The boot left the tracker at gap 0
-    # and invalid, so nothing is fed back first: the retract opens 8 mm, the sequence's
-    # 8 mm feed refills them, and only 15 of its 55 mm feed count: 15 * 0.95.
+    # The cut's retract isn't fed back, but the stop retracts and auto-retracts. The boot
+    # left the tracker at gap 0 and invalid, so nothing is fed back first: the retract opens
+    # 8 mm, the sequence's 8 mm feed refills them, and only 15 of its 55 mm feed count:
+    # 15 * 0.95.
     assert p.job is None and p.state is State.STOPPED and tool0(p).extruded == 14.25
 
 

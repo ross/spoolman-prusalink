@@ -27,7 +27,6 @@
 # sync_job_seconds = 3.0            # how long a sync job holds PRINTING after the blip
 # recover_seconds = 2.0             # BUSY after a power-panic boot
 # unpark_seconds = 1.0              # PAUSED while the head unparks on a power-panic resume
-# panic_purge_mm = 25.0             # the nozzle clean's purge on a power-panic resume
 # start_blip = true                 # the brief IDLE between scanning and preheating
 
 # The port defaults to control_port + 1 + the printer's position in this file.

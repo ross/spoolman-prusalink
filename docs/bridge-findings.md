@@ -367,12 +367,12 @@ written.
   8 mm.
 - **Evidence**: Read in the firmware source. The size on the Core One L
   is to be confirmed: the F12 trace decides, and has to be taken before
-  the INDX upgrade. The simulator still purges 25 mm on every model
-  (`panic_purge_mm`).
+  the INDX upgrade. The simulator follows the source per model.
 - **Scenario rows**: P12, Q5, C1.
 - **To reproduce**: `test_p12_power_panic_resume_keeps_the_job` in
-  `integration/test_prints.py` shows the loss and the simulator's 25 mm
-  purge today. The amount per build needs workstream 4.
+  `integration/test_prints.py` shows the loss and the 8 mm fed back on a
+  Core One L, 7.6 mm counted. `simulator/tests/test_model_power_panic.py`
+  shows the amount per model.
 - **Status**: Open. A candidate for Accepted: printer-behaviors.md, under
   "Bridge follow-ups found here", calls both parts fine.
 
