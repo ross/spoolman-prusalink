@@ -1,11 +1,13 @@
 """The print preview with an MMU3 (F43): the MMU3 feature check, the filament check left out,
 and the question to unload the MMU's filament first.
 
-The question asks when the MMU is Active and FINDA sees filament: a slot's filament past the
-selector, `mmu.fed`. A file on tool 0 alone skips it when the extruder's sensor sees
-filament and slot 0 holds the file's type. No (`tap_through`) prints with the filament where
-it is; Yes (`unload_first`) unloads it into the MMU, reading BUSY with the job hidden, then
-goes on to the tools-mapping screen or the print.
+The question asks when the MMU is Active and FINDA sees filament, a slot's filament past the
+selector (`mmu.fed`), and always while the MMU connects, when FINDA's sensor reads not
+initialized. A single-tool file, one whose metadata names tool 0 alone, skips it when the
+extruder's sensor sees filament and slot 0 holds the file's type. No (`tap_through`) prints
+with the filament where it is; Yes (`unload_first`) unloads it into the MMU, reading BUSY
+with the job hidden, then goes on to the tools-mapping screen or the print. What Yes unloads
+while the MMU connects isn't read, so it's refused then.
 """
 
 from __future__ import annotations
@@ -107,11 +109,50 @@ def test_the_extruder_s_sensor_alone_asks_nothing():
     assert p.job.phase is JobPhase.RUN
 
 
-def test_no_question_while_the_mmu_connects():
-    sim, p = loaded(mmu_connect_seconds=60)
+def connecting(fed: bool):
+    """`loaded()` after a boot whose MMU connects for 60 s; `fed` leaves slot 2's filament
+    in, else the extruder is empty."""
+    sim, p = loaded(mmu_connect_seconds=60) if fed else make_mmu(mmu_connect_seconds=60)
     p.reboot()
+    assert p.mmu.on and not p.mmu.active and p.mmu.fed == (2 if fed else None)
+    return sim, p
+
+
+@pytest.mark.parametrize(
+    ("fed", "text"),
+    [
+        (True, "filament from slot 2 in the MMU: unload it first?"),
+        (False, "filament in the MMU: unload it first?"),
+    ],
+)
+def test_the_question_asks_while_the_mmu_connects_whatever_finda_sees(fed, text):
+    sim, p = connecting(fed)
     sync(sim, p)
-    assert not p.mmu.active and p.job.phase is JobPhase.RUN
+    assert asked(p) and str(p.job.attention) == text
+    assert view(p) == (State.ATTENTION, 1)
+    with pytest.raises(Busy, match="what Yes unloads while the MMU connects isn't read"):
+        p.unload_first()
+    assert asked(p)
+
+
+def test_yes_once_connected_unloads_what_finda_sees():
+    sim, p = connecting(True)
+    sync(sim, p)
+    sim.advance(60)
+    assert p.mmu.active and asked(p)
+    unload(sim, p)
+    assert p.mmu.fed is None and not p.mmu.path.loaded and p.job.phase is JobPhase.BLIP
+
+
+def test_yes_once_connected_with_finda_clear_is_refused():
+    sim, p = connecting(False)
+    sync(sim, p)
+    sim.advance(60)
+    assert p.mmu.active and asked(p)
+    with pytest.raises(Busy, match="FINDA sees no filament"):
+        p.unload_first()
+    p.tap_through()
+    assert p.job.phase is JobPhase.BLIP
 
 
 def test_no_question_with_the_mmu_off():
@@ -339,8 +380,12 @@ def test_a_file_sliced_for_an_mmu3_needs_it_active(mmu, severity):
         p.reboot()
     p.set_checks(severity)
     sync(sim, p, MMU3_FILE)
-    if mmu == "active" or severity is Severity.IGNORE:
+    if mmu == "active" or (mmu == "off" and severity is Severity.IGNORE):
         assert p.job.phase is JobPhase.RUN
+        return
+    if severity is Severity.IGNORE:
+        # The check passes, and the MMU's question asks while it connects.
+        assert asked(p)
         return
     assert p.job.waits_for(Reason.PREVIEW)
     assert p.job.attention.detail == "sliced for an MMU3, which isn't active"

@@ -271,7 +271,7 @@ that trace. The points that matter for the bridge, in short:
   ramming counts on the slot, the unit ejects it, and the printer waits in
   `ATTENTION` for the filament to be loaded into the MMU. No type is
   written, so no unload counts. `load` with no source then reloads the same
-  slot: the feed counts nothing, the load to the nozzle counts 7 mm past
+  slot, reading `PRINTING` while it runs: the feed counts nothing, the load to the nozzle counts 7 mm past
   the 40 mm gap and the prime 4, and the print waits `PAUSED` for the
   resume, which feeds the 8 mm back. With a spool join from the slot, the
   join unloads the slot into the MMU, changes to the join's slot from no
@@ -287,7 +287,9 @@ that trace. The points that matter for the bridge, in short:
   checked for filament, and a print always gets the tools-mapping screen.
   When FINDA sees filament, a slot fed past the selector, the preview first
   asks to unload it, holding the job in `ATTENTION` with its ID: a print
-  from the page and a sync job alike. A `single_tool_file` of slot 0's type
+  from the page and a sync job alike. While the MMU connects, FINDA's
+  sensor isn't read yet, so the question asks whatever FINDA sees; only an
+  upload's sync job can start then. A `single_tool_file` of slot 0's type
   with filament at the extruder's sensor skips the question and the
   mapping screen and prints at once. `tap_through` answers No, which prints
   with the filament in place and no mapping screen. `unload_first` answers
@@ -571,6 +573,11 @@ Choices made where the firmware was silent or the plan left it open:
 - A print's end auto-retracts the picked tool even when it has no
   filament, as the simulator does for a loaded one. The source doesn't
   say otherwise, but a trace hasn't shown it.
+- What the preview's Yes unloads while the MMU connects, or once it's
+  connected with FINDA clear after a question asked while it connected,
+  isn't in the source: `SelectorSlot()` assumes the MMU is up
+  (`marlin_print_preview.cpp:709-711`). `unload_first` is refused then;
+  No and Cancel work.
 - The tools-mapping screen doesn't check a spool join's tools. The
   firmware checks each tool in a join's chain for filament and type, and
   refuses a join whose earlier tool has no working sensor, so the sensors

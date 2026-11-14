@@ -715,15 +715,18 @@ WATCHED = (
         "045f566761af0f0a",
         UPSTREAM_7D8BF685,
     ),
-    # The print preview with an MMU: the question to unload first, when FINDA sees filament,
-    # and the single-tool shortcut past it; then its answers. The answers sit in the
-    # preview's whole state machine, so that row also trips on unrelated changes.
+    # The print preview with an MMU: the question to unload first, unless FINDA's sensor
+    # reads no filament, so while the MMU connects too, and the single-tool shortcut past
+    # it; then its answers. The answers sit in the preview's whole state machine, so that
+    # row also trips on unrelated changes. No is `Result::Inactive`, which the server
+    # starts like Print.
     Watched(
         "the MMU's preview question",
         "src/common/marlin_print_preview.cpp",
         "function",
         "PrintPreview::stateFromFilamentPresence",
-        "SimPrinter._ask_mmu_unload and _mmu_shortcut in simulator/model.py",
+        "SimPrinter._ask_mmu_unload and _mmu_shortcut in simulator/model.py: asked with the"
+        " MMU on, while it connects whatever FINDA sees",
         "e6e4aab68afb170b",
         UPSTREAM_7D8BF685,
     ),
@@ -735,6 +738,15 @@ WATCHED = (
         "SimPrinter.tap_through, unload_first and _process_done in simulator/model.py: No"
         " prints with no mapping screen, Yes unloads and then the checks are done",
         "f19a65b3c6c48c0a",
+        UPSTREAM_7D8BF685,
+    ),
+    Watched(
+        "the MMU preview's No",
+        "src/common/marlin_server.cpp",
+        "statement",
+        "case PrintPreview::Result::Print:",
+        "SimPrinter.tap_through in simulator/model.py: No at the MMU's question prints",
+        "be51a6c5eecc7226",
         UPSTREAM_7D8BF685,
     ),
     # The menu turns the MMU on only with a working extruder sensor.
@@ -831,6 +843,38 @@ WATCHED = (
         "MMU2::WaitForMMUReady",
         "SimPrinter._mmu_change in simulator/model.py: a T while the MMU connects",
         "21e2e2aaec06103b",
+        UPSTREAM_7D8BF685,
+    ),
+    # A spool join on an MMU: no G-code tool mapped falls back to `M600`, and the MMU's
+    # branch has no dialog, purge or restore.
+    Watched(
+        "the spool join",
+        "lib/Marlin/Marlin/src/module/prusa/spool_join.cpp",
+        "function",
+        "SpoolJoin::do_join",
+        "SimPrinter._mmu_join in simulator/model.py",
+        "b92f5b6187f3791e",
+        UPSTREAM_7D8BF685,
+    ),
+    # FINDA's sensor reads not initialized while the MMU connects.
+    Watched(
+        "FINDA's sensor",
+        "src/feature/filament_sensor/filament_sensor_mmu.cpp",
+        "function",
+        "FSensorMMU::cycle",
+        "SimPrinter._check_finda_runout (the Busy while the MMU connects) and"
+        " SimPrinter._ask_mmu_unload (the question while it connects) in simulator/model.py",
+        "ddbb10b71cb63b1f",
+        UPSTREAM_7D8BF685,
+    ),
+    # With the MMU on, only its questions and errors read ATTENTION in a print.
+    Watched(
+        "the filament change's state in a print",
+        "src/state/printer_state.cpp",
+        "function",
+        "load_unload_attention_while_printing",
+        "SimPrinter._mmu_reloading in simulator/model.py: PRINTING while the MMU's reload runs",
+        "50948269e679c31f",
         UPSTREAM_7D8BF685,
     ),
 )

@@ -229,9 +229,10 @@ async def test_an_mmu_runout_swap_counts_no_unload(tmp_path):
 
 
 async def test_a_cut_while_an_mmu_runout_waits_charges_nothing_after(tmp_path):
-    # BF24 doesn't reach an MMU this way: the runout writes no type, so the bridge holds no
-    # usage. The resume finds no slot selected, so the resumed print counts nothing on any
-    # slot (BF17), and spool 1 is charged only what slot 0 counted before the runout.
+    # BF24 doesn't reach an MMU this way: the runout writes no type and slot 0 keeps its
+    # type, so the bridge holds no usage. The resumed print counts on slot 0 while the MMU
+    # connects and on no slot after (BF17). The harness's MMU connects in 0.2 s, before the
+    # resume feeds, so here spool 1 is charged only what slot 0 counted before the runout.
     bridge, fake, station, _ = mmu(tmp_path, [(0, "PLA")], t0="PLA")
     p = station.printer
     await bridge.poll()
@@ -288,6 +289,49 @@ async def test_a_sync_job_on_a_loaded_mmu_waits_on_the_unload_question(tmp_path)
     assert len(jobs(station)) == 1 and station.material(0)[1] == "#00ff00"
     assert fake.flag(10) is None
     assert p.mmu.fed == 0 and p.mmu.path.loaded and p.selected_tool == 0
+    await bridge.aclose()
+
+
+async def test_a_sync_job_in_the_window_on_a_connecting_mmu_waits_on_the_question(tmp_path):
+    # BF26 with an MMU: a Spoolman edit during a print waits, and the cut's boot reads idle,
+    # so the bridge uploads its sync job and the resume is dropped. The MMU still connects,
+    # so the preview asks to unload the MMU's filament first (F43), and the job waits in
+    # ATTENTION with its ID while the bridge only waits. No runs it, and the write lands.
+    locations = tool_locations(LOC, 5)
+    tools = [SimTool(i) for i in range(5)]
+    tools[0].store(menu("PLA", "#ff0000"))
+    bridge, fake, station = make(
+        tmp_path, [spool_x(1, locations[0])], model=MK4S, tools=tools, mmu=True, sync_drift=True
+    )
+    station.poll = lambda: bridge.poll()
+    p = station.printer
+    await bridge.poll()
+    assert jobs(station) == []
+    await station.start_print(PrintSpec([Segment(0, 200)], duration_s=20))
+    await run(station, lambda: p.job.fed_mm >= 30)
+    job = p.job.id
+    fake.spools[1]["filament"]["color_hex"] = "00ff00"  # an edit in Spoolman
+    await bridge.poll()
+    assert jobs(station) == []  # the write waits for the print
+    station.sim.settings.mmu_connect_seconds = 10
+    p.reboot(keep_job=True)
+    assert p.resuming.id == job and not p.mmu.active
+    await poll_during_job(bridge)
+    assert len(jobs(station)) == 1 and 'O"#00ff00"' in jobs(station)[0]
+    assert p.job.kind == "sync" and p.resuming is None
+    station.advance(1)
+    assert p.job.waits_for(Reason.MMU_LOADED) and not p.mmu.active
+    assert status(p)["printer"]["state"] == "ATTENTION" and status(p)["job"]["id"] == job + 1
+    for _ in range(4):
+        station.advance(30)
+        await poll_during_job(bridge)
+    assert len(jobs(station)) == 1 and p.job.waits_for(Reason.MMU_LOADED)
+    assert fake.flag(1) is None
+    p.tap_through()
+    station.finish_job()
+    await bridge.poll()
+    assert len(jobs(station)) == 1 and station.material(0)[1] == "#00ff00"
+    assert p.job_counter == job + 1
     await bridge.aclose()
 
 

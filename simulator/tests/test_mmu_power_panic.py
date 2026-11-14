@@ -156,13 +156,21 @@ def test_an_unload_in_the_window_after_the_mmu_connects_delays_the_resume():
 
 
 def test_an_upload_in_the_window_drops_the_resume_on_an_mmu():
-    # The bridge's sync job in the window (BF26). The MMU still connects as the job ends, so
-    # the end's auto-retract isn't skipped: it runs and counts on slot 0, though slot 1's
-    # filament is in the extruder.
+    # The bridge's sync job in the window (BF26). The MMU still connects, so the preview
+    # asks to unload the MMU's filament first (F43), and Yes is refused: what it unloads
+    # then isn't read. No runs the job while the MMU still connects, so the end's
+    # auto-retract isn't skipped: it runs and counts on slot 0, though slot 1's filament is
+    # in the extruder.
     sim, p, _ = two_color_cut(50)
     p.upload("sync.gcode", sliced(p, "M117 hi\n"), print_after=True, overwrite=False)
     assert p.job.kind == "sync" and p.resuming is None
     assert "job 1: resume dropped by the new job" in messages(sim, "job")
+    sim.advance(2)
+    assert p.state is State.ATTENTION and p.job.waits_for(Reason.MMU_LOADED)
+    assert not p.mmu.active and all(t.extruded == 0 for t in p.tools.values())
+    with pytest.raises(Busy, match="while the MMU connects"):
+        p.unload_first()
+    p.tap_through()
     sim.advance(6)
     assert p.state is State.FINISHED and p.job is None and not p.mmu.active
     assert p.tools[0].extruded > 0 and p.tools[1].extruded == 0
@@ -172,8 +180,8 @@ def test_an_upload_in_the_window_drops_the_resume_on_an_mmu():
 
 def test_an_upload_in_the_window_on_an_active_mmu_waits_at_the_unload_question():
     # BF26 with the MMU Active before the upload: FINDA still sees slot 1's filament, so the
-    # sync job waits at the preview's unload question (F43), and the resume is gone all
-    # the same.
+    # sync job waits at the preview's unload question (F43) as it does while the MMU
+    # connects, and the resume is gone all the same.
     sim, p, _ = two_color_cut(50, connect=0.5)
     sim.advance(1.0)
     assert p.mmu.active and p.state is State.IDLE and p.resuming is not None
