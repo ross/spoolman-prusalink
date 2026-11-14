@@ -170,12 +170,16 @@ function gate(actions, name, o) {
 function matHtml(m, prev) {
   if (!m) return '<span class="muted">-</span>';
   const uuid = m.instance_uuid || m.uuid;
-  return '<span class="' + (prev ? 'prev' : '') + '">' +
+  const tip = m.name + (m.adhoc === false ? ' (preset)' : '') + (uuid ? ' ' + uuid : '');
+  return '<span class="' + (prev ? 'prev' : '') + '" title="' + esc(tip) + '">' +
     (m.color ? '<span class="swatch" style="background:' + esc(m.color) + '" title="' + esc(m.color) + '"></span>' : '') +
     esc(m.name) + (m.adhoc === false ? ' <span class="tag" title="preset material">preset</span>' : '') +
-    (uuid ? '<br><span class="uuid" title="' + esc(uuid) + '">' + esc(String(uuid).slice(0, 8)) + '</span>' : '') +
+    (uuid ? ' <span class="uuid" title="' + esc(uuid) + '">' + esc(String(uuid).slice(0, 8)) + '</span>' : '') +
     '</span>';
 }
+
+// A number cell, with its value as a tooltip in case the column cuts it.
+function num(v) { return '<td class="num" title="' + esc(v) + '">' + esc(v) + '</td>'; }
 
 function renderTool(p, t) {
   const proc = t.process;
@@ -189,7 +193,7 @@ function renderTool(p, t) {
   if (proc) {
     const rem = proc.remaining_mm != null ? proc.remaining_mm.toFixed(1) + ' mm'
       : proc.remaining_s != null ? proc.remaining_s.toFixed(1) + ' s' : '';
-    procTxt = '<span class="proc">' + esc(proc.kind) + ' ' + esc(proc.phase) + ' ' + rem + '</span>';
+    procTxt = esc(proc.kind) + ' ' + esc(proc.phase) + ' ' + rem;
   }
   const flags = (t.sensor_fault ? '<span class="flag" title="sensor fault">sensor</span> ' : '') +
     (t.stuck_write ? '<span class="flag alt" title="stuck write">stuck</span>' : '');
@@ -198,14 +202,14 @@ function renderTool(p, t) {
     '<td class="' + (p.selected_tool === i ? 'sel' : '') + '">' + (p.selected_tool === i ? '&#9654;' : '') + i + '</td>' +
     '<td>' + (t.enabled ? 'on' : '<span class="dis">off</span>') + '</td>' +
     '<td>' + (t.loaded ? 'yes' : '<span class="muted">no</span>') + '</td>' +
-    '<td>' + matHtml(t.material, false) + '</td>' +
-    '<td>' + matHtml(t.kept_type || t.previous, true) + '</td>' +
-    '<td class="num">' + Math.floor(t.extruded || 0) + '</td>' +
-    '<td class="num">' + t.unload_count + '</td>' +
-    '<td class="num">' + t.extruded_at_unload + '</td>' +
+    '<td class="mat">' + matHtml(t.material, false) + '</td>' +
+    '<td class="mat">' + matHtml(t.kept_type || t.previous, true) + '</td>' +
+    num(Math.floor(t.extruded || 0)) + num(t.unload_count) + num(t.extruded_at_unload) +
     '<td class="num">' + Number(t.gap || 0).toFixed(1) + '</td></tr>';
 
-  h += '<tr class="sub"><td colspan="9"><div class="toolbtns">' + procTxt + flags + (flags ? ' ' : '') +
+  // The process text and the flags come and go, so they sit on a line of their own under
+  // the buttons, which then never move.
+  h += '<tr class="sub"><td colspan="9"><div class="toolbtns">' +
     btn('Load', 'load_form', Object.assign({ tool: i, cls: isOpen(p, 'load' + i) ? 'on' : '' }, loadGate)) +
     btn('Unload', 'unload', gate(a, 'unload', { tool: i })) +
     btn('Extrude', 'extrude', gate(a, 'extrude', { tool: i })) +
@@ -218,8 +222,8 @@ function renderTool(p, t) {
     btn('Select', 'select_tool', gate(a, 'select_tool', { tool: i })) +
     btn('Sensor fault', 'sensor_fault', gate(a, 'set_sensor_fault', { tool: i, cls: t.sensor_fault ? 'on' : '' })) +
     btn('Stuck write', 'stuck_write', gate(a, 'set_stuck_write', { tool: i, cls: t.stuck_write ? 'on' : '' })) +
-    btn(t.enabled ? 'Disable' : 'Enable', 'tool_enabled', gate(a, 'set_tool_enabled', { tool: i })) +
-    '</div>';
+    btn(t.enabled ? 'Disable' : 'Enable', 'tool_enabled', gate(a, 'set_tool_enabled', { tool: i, cls: 'fixw' })) +
+    '</div><div class="toolstat" title="' + procTxt + '">' + flags + (flags ? ' ' : '') + procTxt + '</div>';
 
   if (isOpen(p, 'load' + i)) {
     const sources = (p.load_sources || ['preset']).concat(canKeep ? ['keep'] : []);
@@ -264,15 +268,18 @@ function renderPrinter(p) {
     '<label title="how the print preview treats a failed check">checks <select data-sel="set_checks" data-field="value">' +
     opts(S.options.checks, p.checks) + '</select></label>' +
     '<small class="muted">boot ' + esc(p.boot_id) + '</small>' +
-    '<small>' + (p.homed ? 'homed' : '<span class="muted">not homed</span>') + '</small>' +
-    '<small>tool <b>' + esc(p.selected_tool == null ? 'none' : p.selected_tool) + '</b></small>' +
+    '<small class="homed">' + (p.homed ? 'homed' : '<span class="muted">not homed</span>') + '</small>' +
+    '<small class="picked">tool <b>' + esc(p.selected_tool == null ? 'none' : p.selected_tool) + '</b></small>' +
     '<small class="muted" title="the model\'s values, which an empty setting uses">ratio ' +
     Number(m.feed_ratio).toFixed(4) + ', load ' + esc(m.slow_load_mm) + ' + ' + esc(m.fast_load_mm) +
     ', purge ' + esc(m.purge_mm) + ' mm' + (p.high_flow ? ' (high-flow)' : '') + '</small></div>';
 
+  const a = p.actions || {};
+  // Tap through stops a job held on a parse error; every other question it answers goes on.
+  const canTap = !!attn && at.reason !== 'parse error' && a.tap_through == null;
   h += '<div class="jobline">';
   if (job) {
-    h += '<span>job <b>#' + esc(job.id) + '</b> ' + esc(job.kind) + ' ' + esc(job.name) +
+    h += '<span title="' + esc(job.kind + ' ' + job.name + ' ' + ph) + '">job <b>#' + esc(job.id) + '</b> ' + esc(job.kind) + ' ' + esc(job.name) +
       ' <span class="muted">' + esc(ph) + '</span></span>';
     if (ph === 'HOLD') {
       // the attention text stands in for the bar
@@ -282,14 +289,17 @@ function renderPrinter(p) {
     } else if (job.total_mm) {
       h += '<small>' + Number(job.fed_mm || 0).toFixed(0) + '/' + Number(job.total_mm).toFixed(0) + ' mm</small>';
     }
-    if (attn) h += '<span class="attn">' + esc(attn) + '</span>';
+    if (attn) {
+      // A question that Tap through answers isn't an error: say how to go on.
+      const hint = attn + (canTap ? '. Tap through to go on, or Cancel' : '');
+      h += '<span class="attn' + (canTap ? ' ask' : '') + '" title="' + esc(hint) + '">' + esc(hint) + '</span>';
+    }
   } else {
     h += '<span class="muted">no job</span>';
   }
   h += '</div>';
-  if (p.message) h += '<div style="margin-top:3px"><span class="pill" title="last M117">' + esc(p.message) + '</span></div>';
+  h += '<div class="msgline">' + (p.message ? '<span class="pill" title="last M117: ' + esc(p.message) + '">' + esc(p.message) + '</span>' : '') + '</div>';
 
-  const a = p.actions || {};
   h += '<div class="btns">' +
     btn('Start print', 'toggle', gate(a, 'start_print', { form: 'start', cls: isOpen(p, 'start') ? 'on' : '' })) +
     btn('Pause', 'pause', gate(a, 'pause')) +
@@ -303,7 +313,7 @@ function renderPrinter(p) {
     btn('Power-loss resume', 'power_loss', gate(a, 'reboot', { title: 'reboot, keeping the job' })) +
     '<label title="the bed cools during the outage, so the print waits for Resume"><input type="checkbox" data-k="cold"' +
     (getv(p.name, 'cold', false) ? ' checked' : '') + '>cold bed</label>' +
-    btn('Tap through', 'tap_through', gate(a, 'tap_through')) +
+    btn('Tap through', 'tap_through', gate(a, 'tap_through', { cls: canTap ? 'on' : '' })) +
     btn('Clear jam', 'clear_jam', gate(a, 'clear_jam')) +
     btn('Filament sensors', 'sensors', { cls: p.sensors ? 'on' : '', title: 'the menu switch for every filament sensor' }) +
     btn('Counter step back', 'toggle', { form: 'counter', cls: isOpen(p, 'counter') ? 'on' : '' }) +
@@ -345,7 +355,8 @@ function renderPrinter(p) {
   }
 
   h += '<div class="mmbar">extrude / retract mm ' + inp(p, 'mm', '10', 'type="number" step="any"') + '</div>';
-  h += '<table class="tools"><thead><tr><th>#</th><th>en</th><th>loaded</th><th>material</th><th title="what a runout reload restores">kept</th>' +
+  h += '<table class="tools"><colgroup><col class="c-n"><col class="c-en"><col class="c-ld"><col><col>' +
+    '<col class="c-ex"><col class="c-ul"><col class="c-at"><col class="c-gap"></colgroup><thead><tr><th>#</th><th>en</th><th>loaded</th><th>material</th><th title="what a runout reload restores">kept</th>' +
     '<th class="num">extr</th><th class="num">ul</th><th class="num">at ul</th><th class="num">gap</th></tr></thead><tbody>' +
     p.tools.map((t) => renderTool(p, t)).join('') + '</tbody></table>';
   return h;

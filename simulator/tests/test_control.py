@@ -33,7 +33,8 @@ async def test_state_and_page(setup):
     data = await (await client.get("/api/state")).json()
     assert data["printers"][0]["tools"][0]["material"]["name"] == "PLA"
     assert data["printers"][0]["model"]["name"] == "COREONEL"
-    assert (await client.get("/")).status == 200
+    page = await client.get("/")
+    assert page.status == 200 and page.headers["Cache-Control"] == "no-cache"
     assert (await client.get("/static/../model.py")).status == 404
 
 
@@ -126,6 +127,7 @@ async def test_advance_moves_simulated_time(setup):
 async def test_static_files_are_served_and_the_root_is_not_escaped(setup):
     sim, p, client = setup
     resp = await client.get("/static/app.js")
+    assert resp.headers["Cache-Control"] == "no-cache"
     assert resp.status == 200 and "javascript" in resp.content_type
     assert (await client.get("/static/nothing.js")).status == 404
     # A path that climbs out of the folder, sent without the client tidying it away.
