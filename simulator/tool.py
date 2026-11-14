@@ -10,6 +10,7 @@ from dataclasses import dataclass, field, replace
 from typing import Any
 
 Temperatures = tuple[int, int, int]  # nozzle, preheat and bed
+EPSILON = 1e-9
 
 # Nozzle, preheat and bed temperatures of the firmware's preset filaments, which
 # `src/common/filament_presets.cpp` conditions on the build. This is the table of a build
@@ -355,6 +356,54 @@ class FilamentPath:
     auto_retracted: float | None = None
     sensor_fault: bool = False
 
+    def move(self, mm: float, limit: float) -> float:
+        """Track a move as the firmware's filament tracker does, and return the commanded
+        mm that went past the nozzle.
+
+        A retract grows the gap up to `limit`, and a feed fills it first. The gap becomes
+        valid when it reaches 0 and invalid when it reaches the limit (`track_extruder_move`
+        in `src/feature/filament_tracker/filament_tracker.cpp`).
+        """
+        unclamped = self.gap - mm
+        self.gap = min(max(unclamped, 0.0), limit)
+        # A move split into ticks can stop a rounding error short of either end.
+        if self.gap <= EPSILON:
+            self.gap, self.gap_valid = 0.0, True
+        elif self.gap >= limit - EPSILON:
+            self.gap, self.gap_valid = limit, False
+        return max(-unclamped, 0.0)
+
+    def tracked(self) -> float:
+        """The tracker's gap when it's valid, else 0 (`get_retracted_distance`)."""
+        return self.gap if self.gap_valid else 0.0
+
+    def fully_retracted(self, threshold: float) -> bool:
+        """`AutoRetract::is_fully_retracted`: the stored distance reaches the threshold."""
+        return self.auto_retracted is not None and self.auto_retracted >= threshold
+
+    def boot(self, limit: float) -> None:
+        """The tracker starts at gap 0 and invalid; a stored auto-retract distance then sets
+        it, valid below `limit` (`marlin_server::init` and
+        `FilamentTracker::assume_retracted_distance`). The stored distance survives."""
+        stored = self.auto_retracted
+        if stored is None:
+            self.gap, self.gap_valid = 0.0, False
+            return
+        self.gap = min(max(stored, 0.0), limit)
+        self.gap_valid = self.gap != limit
+
+    def empty(self, limit: float) -> None:
+        """Leave the path as an unload leaves it: no filament, the gap at `limit` and not
+        trusted, and no auto-retract stored."""
+        self.loaded = False
+        self.gap, self.gap_valid, self.auto_retracted = limit, False, None
+
+    def fill(self, loaded: bool) -> None:
+        """Set whether filament is in the path, at gap 0 and valid, with no auto-retract
+        stored."""
+        self.loaded = loaded
+        self.gap, self.gap_valid, self.auto_retracted = 0.0, True, None
+
 
 @dataclass
 class SimTool:
@@ -391,9 +440,7 @@ class SimTool:
         model: a tool that has fed since its last auto-retract. A real idle load would
         leave the model's auto-retract instead, but the tool doesn't know its model.
         """
-        path = self.path
-        path.loaded = material is not None
-        path.gap, path.gap_valid, path.auto_retracted = 0.0, True, None
+        self.path.fill(material is not None)
         self.store(material)
 
     def store(self, material: Material | None) -> None:

@@ -44,6 +44,7 @@ from simulator.tool import (
     CORE_ONE_PRESETS,
     DEFAULT_TEMPERATURES,
     DERETRACT_STEP,
+    EPSILON,
     INDX_EXTRUDER,
     INDX_PRESETS,
     IX_EXTRUDER,
@@ -75,7 +76,6 @@ from simulator.tool import (
 
 EVENT_LIMIT = 2000
 SNAPSHOT_NAME = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
-EPSILON = 1e-9
 # The shortest purge a load runs, whatever the override: `minimal_purge` in
 # `src/marlin_stubs/include/pause_settings.hpp`. `script/firmware-check` compares it with
 # the firmware source.
@@ -691,26 +691,9 @@ class SimPrinter:
         self._count(tool, mm)
 
     def _count(self, tool: SimTool, mm: float) -> None:
-        """Count a move as the firmware's filament tracker does.
-
-        A retract grows the gap up to the model's limit, a feed fills it first, and only what
-        goes past the gap counts, times the feed ratio. The gap becomes valid when it reaches
-        0 and invalid when it reaches the limit (`track_extruder_move` in
-        `src/feature/filament_tracker/filament_tracker.cpp`).
-        """
-        limit, path = self.model.gap_mm, tool.path
-        unclamped = path.gap - mm
-        path.gap = min(max(unclamped, 0.0), limit)
-        # A move split into ticks can stop a rounding error short of either end.
-        if path.gap <= EPSILON:
-            path.gap, path.gap_valid = 0.0, True
-        elif path.gap >= limit - EPSILON:
-            path.gap, path.gap_valid = limit, False
-        tool.extruded += max(-unclamped, 0.0) * self.feed_ratio
-
-    def _tracked(self, tool: SimTool) -> float:
-        """The tracker's gap when it's valid, else 0 (`get_retracted_distance`)."""
-        return tool.path.gap if tool.path.gap_valid else 0.0
+        """Count a move as the firmware's filament tracker does: only what goes past the
+        model's gap counts, times the feed ratio (`FilamentPath.move`)."""
+        tool.extruded += tool.path.move(mm, self.model.gap_mm) * self.feed_ratio
 
     def _deretract(self, tool: SimTool) -> None:
         """Feed back an auto-retracted distance (`maybe_deretract_to_nozzle`).
@@ -724,11 +707,6 @@ class SimPrinter:
             self._count(tool, stored)
             self._log("load", f"T{tool.index} deretracted {stored:g} mm")
 
-    def _fully_retracted(self, tool: SimTool) -> bool:
-        """`AutoRetract::is_fully_retracted`: the stored distance reaches the threshold."""
-        stored = tool.path.auto_retracted
-        return stored is not None and stored >= self.model.extruder.full_retract_mm
-
     def _retract_to(self, tool: SimTool, target: float) -> None:
         """Retract until the filament is `target` mm back, unless it already is
         (`mapi::retract_to` in `src/common/mapi/motion.cpp`)."""
@@ -736,7 +714,7 @@ class SimPrinter:
         if stored >= target:
             return
         # A stored distance counts as retracted; the retract then forgets it.
-        current = stored or self._tracked(tool)
+        current = stored or tool.path.tracked()
         if target - current > EPSILON:
             self._track(tool, current - target)
 
@@ -744,7 +722,7 @@ class SimPrinter:
         """Move the filament to `target` mm back, feeding or retracting
         (`mapi::restore_retracted_distance` in `src/common/mapi/motion.cpp`)."""
         stored = tool.path.auto_retracted or 0.0
-        current = stored or self._tracked(tool)
+        current = stored or tool.path.tracked()
         # The move takes a stored distance over, so a feed doesn't deretract it again.
         tool.path.auto_retracted = None if stored else tool.path.auto_retracted
         if abs(target - current) > EPSILON:
@@ -781,7 +759,7 @@ class SimPrinter:
         sequence = ex.ramming.get("auto_retract")
         if (
             sequence is None
-            or self._fully_retracted(tool)
+            or tool.path.fully_retracted(ex.full_retract_mm)
             or (ex.auto_retract_switchable and not self.auto_retract)
             or self._flexible(tool)
         ):
@@ -798,7 +776,7 @@ class SimPrinter:
         """
         ex = self.model.extruder
         unload = ex.lengths.unload_mm
-        if ex.auto_retracts and ex.cold_unload and self._fully_retracted(tool):
+        if ex.auto_retracts and ex.cold_unload and tool.path.fully_retracted(ex.full_retract_mm):
             return [LoadStep("UNLOAD", -max(unload - (tool.path.auto_retracted or 0.0), 0.0))]
         sequence = self._sequence(case, tool)
         return [
@@ -825,7 +803,7 @@ class SimPrinter:
                 steps[:0] = self._auto_retract_steps(tool)
             elif step.phase == DERETRACT_STEP:
                 self._deretract(tool)
-                self._track(tool, self._tracked(tool))
+                self._track(tool, tool.path.tracked())
             else:  # RETRACTED_STEP
                 tool.path.auto_retracted = step.mm
                 self._log(
@@ -947,9 +925,7 @@ class SimPrinter:
 
     def _physical_unload(self, tool: SimTool, why: str) -> None:
         self._count_unload(tool, why)
-        path = tool.path
-        path.loaded = False
-        path.gap, path.gap_valid, path.auto_retracted = self.model.gap_mm, False, None
+        tool.path.empty(self.model.gap_mm)
 
     def _idle_sensor_clear(self, tool: SimTool, *, sensor_fault_counts: bool) -> None:
         if not self.sensors:
@@ -1276,7 +1252,7 @@ class SimPrinter:
         # The filament change records the tracker's distance, parks with a retract, then
         # rams and unloads (`Pause::filament_change` and `park_nozzle_and_notify` in
         # `src/marlin_stubs/pause/pause.cpp`).
-        job.restore_gap = self._tracked(t)
+        job.restore_gap = t.path.tracked()
         self._retract_to(t, self.model.extruder.lengths.retract_mm)
         self._run_steps(t, self._unload_steps(t, "runout"))
         self._physical_unload(t, str(reason))
@@ -1323,23 +1299,12 @@ class SimPrinter:
         for t in self.tools.values():
             t.extruded, t.unload_count, t.extruded_at_unload = 0.0, 0, 0
             t.process = None
-            self._boot_tracker(t)
+            t.path.boot(self.model.gap_mm)
         self.homed, self.message = False, None
         self._log("boot", f"boot id {self.boot_id}")
         selected = self.tools.get(self.selected_tool)
         if idle_clear and selected is not None:
             self._idle_sensor_clear(selected, sensor_fault_counts=False)
-
-    def _boot_tracker(self, t: SimTool) -> None:
-        """The tracker starts at gap 0 and invalid; a stored auto-retract distance then sets
-        it, valid below the gap's limit (`marlin_server::init` and
-        `FilamentTracker::assume_retracted_distance`). The stored distance survives."""
-        stored = t.path.auto_retracted
-        if stored is None:
-            t.path.gap, t.path.gap_valid = 0.0, False
-            return
-        t.path.gap = min(max(stored, 0.0), self.model.gap_mm)
-        t.path.gap_valid = t.path.gap != self.model.gap_mm
 
     def reboot(self, *, keep_job: bool = False, cold_bed: bool = False) -> None:
         """Reboot. With keep_job a print in progress resumes with the same ID (power panic).
