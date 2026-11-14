@@ -76,8 +76,10 @@ See [sim.example.toml](sim.example.toml), which shows every setting with its
 default. A printer has a `model` (a PrusaLink type code such as `8.1.0`), an
 `api_key`, a `firmware` mode, `checks` for the print preview, `high_flow`
 for a high-flow nozzle, `sensors` for the menu's switch of every filament
-sensor, and `[[printers.tools]]` entries that can start
-loaded with a material and counters. `checks` is `ignore`, `warn` (the
+sensor, `picked_tool` for the tool picked at start, and `[[printers.tools]]`
+entries that can start loaded with a material and counters. `picked_tool`
+names an enabled tool; left out, a direct printer has tool 0 picked and a
+toolchanger has none. `checks` is `ignore`, `warn` (the
 default) or `abort`, and it stands for every setting in the printer's menu
 that governs a check of a file's `M862` lines. The top-level settings are
 timing and lengths: the time scale, how fast loads and prints move filament,
@@ -174,10 +176,12 @@ that trace. The points that matter for the bridge, in short:
   filament, and a printer with `auto_retract = false`. The next forward move
   feeds the stored distance back first. At boot, the stored distance sets
   the path's gap; with nothing stored, the gap starts at 0 and the tracker
-  reports no retracted distance until a feed reaches the nozzle. A Nextruder print's end counts 23
-  mm; an INDX print's end counts nothing, because the 8 mm park retract
-  already counts as retracted. The MINI, MK3.5 and the dev kit don't
-  auto-retract.
+  reports no retracted distance until a feed reaches the nozzle. A
+  single-tool Nextruder print's end counts 23 mm. A toolchanger's finished
+  print counts nothing at its end, because its end G-code parks the tool
+  first. A stopped XL print counts the 23 mm on its picked tool, and a
+  stopped INDX print counts nothing, because the 8 mm park retract already
+  counts as retracted. The MINI, MK3.5 and the dev kit don't auto-retract.
 - An unload or runout rams with the model's `unload` or `runout` sequence,
   then retracts what's left of the unload length. INDX purges 2 mm first.
   A menu unload of a Nextruder tool that auto-retracted skips the ramming
@@ -250,7 +254,7 @@ that trace. The points that matter for the bridge, in short:
   tool, whether the preview's tools-mapping screen applies, what a
   print's tool change does, which tool a move counts on, which tool's
   sensor the idle sensor clear reads, and where the picked tool rests after
-  a menu load or unload.
+  a menu load or unload, a pause and a print's end.
 - On a toolchanger, a menu `load` or `unload` picks its tool first, as the
   printer's menu does. The pick reads `IDLE` and opens no dialog, so the
   idle sensor clear runs on the newly picked tool before the operation
@@ -273,10 +277,23 @@ that trace. The points that matter for the bridge, in short:
 - `extrude` and `retract` move only the picked tool, as the menu's Move E
   does. With no tool picked they answer 409, and on another tool 400.
 - The selected tool can be none, which stands for a toolchanger with no
-  tool picked: an INDX after a menu load or unload, or either toolchanger
-  after `park_tool`. Then no filament moves or counts, the idle sensor
-  clear doesn't run, and a print's end neither retracts nor auto-retracts.
-  The page shows the tool as "none".
+  tool picked: a toolchanger at start unless `picked_tool` names a tool,
+  either toolchanger after a finished print or `park_tool`, an INDX after a
+  menu load or unload, a stopped print and a pause, and an INDX booted
+  after a cut during a print that used several tools. Then no filament
+  moves or counts, the idle sensor clear doesn't run, and a print's end
+  neither retracts nor auto-retracts. The page shows the tool as "none".
+- Where the picked tool rests. A finished print on the XL or INDX ends with
+  the stock profiles' `P0 S1`, which parks the tool before the firmware's
+  end retract and auto-retract, so those find no tool. The simulator takes
+  that end G-code as fixed until the slicer's profile is modeled. A stopped
+  XL print and a sync job keep the tool, and INDX docks whatever is picked
+  at a job's end. INDX docks the tool at a pause, after an 8 mm retract,
+  and the resume picks it again and purges it in the nozzle cleaner: 25 mm,
+  then the auto-retract, before the job reads `PRINTING`. The XL keeps its
+  tool through a pause. A boot keeps the picked tool, except on INDX after
+  a cut during a print that used several tools: its EEPROM then holds no
+  tool.
 - MINI, MK3.5 and MK3.5S report the material with no counters. The
   `no_endpoint` firmware mode answers 404, like stock firmware.
 
@@ -284,7 +301,8 @@ that trace. The points that matter for the bridge, in short:
   `resume`) keeps the job ID and restarts the counters. The printer boots
   `IDLE` with no job for `panic_idle_seconds`, as the firmware does until
   its autostart resumes the print, and the idle sensor clear runs then on
-  the picked tool. The resume then goes through `BUSY`, then a short
+  the picked tool, if one is. The resume picks the print's tool before
+  anything moves, then goes through `BUSY`, then a short
   `PAUSED`, then `PRINTING`. A menu load or unload still running when the
   wait ends delays the resume by another `panic_idle_seconds`, until the
   printer is idle. A print started in the wait, an upload too, drops the
@@ -319,9 +337,11 @@ Choices made where the firmware was silent or the plan left it open:
 - The iX's assisted insertion before the slow load isn't modeled: the
   firmware source doesn't give its length. The iX purges its length in one
   move, not in 5 mm steps with a clean between.
-- A pause and resume with no filament change moves no filament. The
-  firmware retracts at the pause and feeds the same length back at the
-  unpark, which counts nothing unless the gap was near its limit.
+- A pause and resume with no filament change moves no filament, except on
+  INDX. The firmware retracts at the pause and feeds the same length back
+  at the unpark, which counts nothing unless the gap was near its limit.
+  The iX's resume runs its nozzle cleaner's `purge_clean` too, which isn't
+  modeled.
 - `fill()` and a tool built loaded start with gap 0, the tracker valid and
   nothing stored, on every model. A real printer that just loaded would
   have auto-retracted.

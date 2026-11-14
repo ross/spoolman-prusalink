@@ -10,8 +10,9 @@ simulator/README.md. A move counts only past the tool's gap, times the feed rati
 with a 40 mm gap on a Nextruder, 550/576 with a 27 mm gap on INDX. A Nextruder's
 auto-retract feeds back what's retracted, counts 23 and leaves 55 stored; the next feed
 deretracts the 55 and counts 15 that fill the gap. INDX's counts 8 and leaves 8, which
-the next feed fills. A tool change purges 30 on the new tool. The counters read whole
-millimetres, so each charge is a difference of whole numbers.
+the next feed fills. A tool change purges 30 on the new tool, and a toolchanger's
+finished print parks its tool before the firmware's end, which then moves nothing. The
+counters read whole millimetres, so each charge is a difference of whole numbers.
 """
 
 from __future__ import annotations
@@ -102,34 +103,35 @@ FAMILIES = {
     ),
     "3.1.0": Family(  # XL: the MK4's lengths on five tools; tool 1 starts at 500.
         {
-            # T0 100 * 0.95 = 95. T1 the 30 purge, 50, the end's 23: 103 * 0.95 = 97.85.
-            # The end stores T0's valid gap, 0, so T0 isn't auto-retracted.
-            "print 1": {1: 95, 2: 97},
-            # T0's unload rams from gap 0: 23 * 0.95 = 21.85, 1095 to 1116.85. Then the
-            # load as on the MK4S, 85.5: 1202.35.
+            # T0 100 * 0.95 = 95. T1 the 30 purge and 50: 80 * 0.95 = 76, 576. The end
+            # G-code parks T1 first, so the end retracts and auto-retracts nothing, and
+            # stores each tool's valid gap, 0.
+            "print 1": {1: 95, 2: 76},
+            # The menu picks T0, whose unload rams from gap 0: 23 * 0.95 = 21.85, 1095 to
+            # 1116.85. Then the load as on the MK4S, 85.5: 1202.35. T0 stays picked.
             "swap": {1: 21, 3: 86},
-            # T0: 15 deretracted + 100 = 115 * 0.95 = 109.25, 1311.6. T1: 15 deretracted,
-            # 30 + 50, 23 = 118 * 0.95 = 112.1, 597.85 to 709.95.
-            "print 2": {3: 109, 2: 112},
+            # T0: 15 deretracted + 100 = 115 * 0.95 = 109.25, 1311.6. T1 from gap 0: 30 +
+            # 50 = 80 * 0.95 = 76, 652.
+            "print 2": {3: 109, 2: 76},
             "reboot": {},
-            # T0 from gap 0: 10 * 0.95 = 9.5. T1 from a full gap: 15 + 30 + 10 + 23 = 78 *
-            # 0.95 = 74.1.
-            "print 3": {3: 9, 2: 74},
+            # Both tools boot at gap 0, with 0 stored. T0 10 * 0.95 = 9.5. T1 30 + 10 = 40 *
+            # 0.95 = 38.
+            "print 3": {3: 9, 2: 38},
         },
         f"XL isn't supported: {MULTI_TOOL}",
         uuids=False,
     ),
     "8.10.0": Family(  # Core One L INDX on eight tools: 15 slow, 25 fast, the cleaner's 25.
         {
-            # T0 100 * 550/576 = 95.49. T1 30 + 50 = 80 * 550/576 = 76.39: 576.39. The
-            # end's 8 mm retract is fully retracted on INDX: no auto-retract.
+            # T0 100 * 550/576 = 95.49. T1 30 + 50 = 80 * 550/576 = 76.39: 576.39. The end
+            # G-code parks T1 first, so the end retracts and auto-retracts nothing.
             "print 1": {1: 95, 2: 76},
             # T0's unload purges 2 and rams 17: 19 * 550/576 = 18.14, 1113.63. The load
             # from gap 27: 13 fast past it, the 25 purge, the cleaner's auto-retract 8:
             # 46 * 550/576 = 43.92, 1157.55.
             "swap": {1: 18, 3: 44},
-            # The deretracts refill 8 mm gaps and count nothing. T0 95.49: 1253.04. T1
-            # 76.39: 652.78.
+            # T0's deretract refills the cleaner's 8 mm gap and counts nothing. T0 95.49:
+            # 1253.04. T1 from gap 0: 76.39, 652.78.
             "print 2": {3: 96, 2: 76},
             "reboot": {},
             # T0 10 * 550/576 = 9.55. T1 40 * 550/576 = 38.19.

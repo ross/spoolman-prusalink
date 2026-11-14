@@ -17,8 +17,9 @@ filament-inserted question belongs to Workstream 5. Workstream 3 is built:
 a tool and its filament path are apart, the selected tool can be none, and
 a feed system holds what differs between direct and toolchanger printers.
 Workstream 4 has started: the XL and INDX have their own feed systems, a
-menu load or unload picks its tool and INDX docks it after, and Move E
-needs a picked tool. Workstreams 5 and 6 aren't started. [Open questions](#open-questions)
+menu load or unload picks its tool and INDX docks it after, Move E needs a
+picked tool, and the picked tool rests where the firmware leaves it after a
+print, a pause and a boot. Workstreams 5 and 6 aren't started. [Open questions](#open-questions)
 lists what the work still has to settle.
 
 ## Goal and non-goals
@@ -112,6 +113,14 @@ firmware update.
   its dialog, with no clear, and INDX docks it after; a reload in a print
   neither picks nor docks. Move E moves only the picked tool, and the Pick/park
   menu's park (`park_tool`) leaves none picked.
+- A toolchanger's finished print parks its tool before the firmware's end,
+  as the stock profiles' end G-code does, so the end retracts and
+  auto-retracts nothing. A stopped XL print keeps its tool, and INDX docks
+  at a job's end and at a pause, whose resume picks the tool again and
+  purges it in the nozzle cleaner. A boot keeps the picked tool, except an
+  INDX cut during a print that used several tools, which boots with none.
+  A toolchanger starts with none picked unless the config's `picked_tool`
+  names one.
 - Change all (`change_all`) changes the chosen tools one at a time in index
   order, `BUSY` throughout: an unload first where a type is stored, then a
   load. Each pick is inside the dialog, with no clear. INDX docks after
@@ -124,10 +133,11 @@ firmware update.
   stands for a toolchanger with no tool picked: then no filament moves or
   counts, the idle sensor clear doesn't run, and the end of a print neither
   retracts nor auto-retracts. An idle INDX after a menu load or unload has
-  none, and so does either toolchanger after `park_tool`.
+  none, and so does either toolchanger after a finished print or
+  `park_tool`.
 - A power cut on a build with power panic boots the printer `IDLE` with no
   job for 1.5 s before the resume starts, and the idle sensor clear runs in
-  that window on the picked tool. The firmware's autostart tries every
+  that window on the picked tool, if one is. The firmware's autostart tries every
   1.5 s and gives up after 100 s (`print_utils.cpp:67-82`); the simulator
   resumes at the first try, delays the resume while a menu load or unload
   runs, and drops it when a print starts in the window. A cold bed
@@ -245,19 +255,20 @@ builds that can take one and false elsewhere (`basic_gets.cpp:229-253`).
 | Tool change in a print | No unload and no firmware E move on the XL. The INDX head-lock moves are excluded from counting. The slicer's ramming counts on whichever tool is picked. | `toolchanger_indx.cpp:365-376`, `planner.cpp:2194` |
 | Menu load or unload of another tool | Picks that tool first with `T<n> S1 L0 D0`, outside any dialog: it reads `IDLE`, and the idle sensor clear can run on the new tool before the operation starts. INDX docks it again afterwards; the XL leaves it picked. A preheat cancel or a failed pickup leaves an INDX tool picked. The preview's load picks inside its dialog. | `MItem_filament.cpp:41-104`, `M701_2.cpp:84-88, 112-114, 135-140, 162-166, 179-181, 194-197, 339-342`, `pause.cpp:1447-1468` |
 | No tool picked | A non-service E move is a `bsod`, so callers pick first and Move E sends no E. The idle sensor clear doesn't run. | `planner.cpp:2194-2198`, `screen_menu_move.cpp:166-171, 206-211`, `filament_sensors_handler.cpp:306` |
-| The picked tool at rest | INDX docks its tool after a load, an unload, a pause and a print, so an idle INDX has none picked. At boot it has one only if a tool is physically on the head. An XL has whichever tool is physically on the head, which after a print depends on the end G-code; the stock profile parks it. | `M701_2.cpp:135-140, 194-197, 339-342`, `pause.cpp:1395-1402`, `marlin_server.cpp:1098, 2561`, `toolchanger_indx.cpp:222-262`, `toolchanger_xl.cpp:582-597` |
-| Idle sensor clear | Only the picked tool. So it never runs on an idle INDX, and rarely on an XL. A tool emptied by hand while docked keeps its type. Nothing sweeps the tools at boot or at a print start. | `filament_sensors_handler.cpp:294-312` |
+| The picked tool at rest | INDX docks its tool after a load, an unload, a pause and a print, so an idle INDX has none picked. The pause docks in `Pausing_ParkHead`, and the resume picks the tool again and purges it in the nozzle cleaner, 25 mm then `M1705 N`, while `PAUSED`. A finished print's stock end G-code parks the tool on both toolchangers (`P0 S1`, PrusaResearch.ini 2.5.16), so the firmware's end retract and auto-retract find no tool. A stopped XL print keeps its tool and gets the end's retract and auto-retract; a stopped INDX print docks after its auto-retract. A sync job leaves the tool as it was. At boot the XL picks the Dwarf on its head. INDX restores the EEPROM's last picked tool, checked against its nozzle sensor; parking a tool while printing invalidates it unless a single-tool print froze it, so a multi-tool print cut short boots with none. | `M701_2.cpp:135-140, 194-197, 339-342`, `marlin_server.cpp:1077-1100, 2549-2563, 2662-2674, 2789-2817, 3298-3307, 3423-3434`, `P.cpp:35-48`, `toolchanger_utils_indx.cpp:50-57`, `toolchanger_indx.cpp:213-261, 926-939`, `toolchanger_utils_xl.cpp:54-58`, `toolchanger_xl.cpp:589-597` |
+| Idle sensor clear | Only the picked tool, and only while not printing and with no load or unload dialog open: the XL reads the Dwarf's extruder sensor, INDX the tool's side sensor. It doesn't run on an idle INDX with none picked. The XL keeps a tool picked after a menu operation, a stop and a boot, so it runs there often. A tool emptied by hand while docked keeps its type until something picks it while idle, the menu's pick before a load or unload included. Nothing sweeps the tools at boot or at a print start. | `filament_sensors_handler.cpp:118-131, 197-212, 303-312`, `filament_sensors_handler_XL.cpp:17-61`, `filament_sensors_handler_INDX.cpp:20-23` |
 | Runout with a spool join | Counts an unload on the old tool, and the print goes on with the join's tool. The new tool's type isn't set or copied. Its purge counts on it: 27 mm on the XL, 25 mm on INDX. | `spool_join.cpp:258-342`, `toolchanger_xl.cpp:505-549`, `nozzle_cleaner.cpp:87` |
 | Runout without one | `M600` on the same tool, as on a single-tool printer. | `filament_sensors_handler.cpp:237` |
 | `M600 T<n>` | Picks tool `n`, changes its filament, and goes back. | `M600.cpp:223-241, 319` |
 | Change all, on the XL and INDX | For each chosen tool in index order, inside one `BUSY` dialog: `M1600` (an unload that counts, then a load) when a type is stored, else `M701` (a load). Each picks its tool inside its dialog. INDX docks after each tool; the XL ends with the last one picked. | `multi_filament_change.cpp:151-239`, `M701_2.cpp:135-140, 240-343` |
 | A load or unload during a print | Reads `ATTENTION` in every phase, not only while waiting. Idle, it reads `BUSY`. | `printer_state.cpp:178-190, 238-243` |
 
-The simulator has the first three rows and an idle sensor clear that
-follows the picked tool. An INDX docks after a menu load or unload, so its
-selected tool becomes none, and the Pick/park menu picks or parks a tool on
-either toolchanger. Where the picked tool rests after a pause or a print,
-and at boot, is still to come.
+The simulator has the first five rows. An INDX docks after a menu load or
+unload, a pause and a job's end, so its selected tool becomes none, and the
+Pick/park menu picks or parks a tool on either toolchanger. The end G-code's
+park stands for the stock profile until the slicer is modeled
+(`Toolchanger.end_parks`). The printer config's `picked_tool` sets the tool
+picked at start, none by default on a toolchanger.
 
 After a power cut, the idle sensor clear in the window before the resume
 reads the picked tool too. On the XL that's the tool on the head. On INDX
@@ -265,8 +276,8 @@ it's the EEPROM's last picked tool, which a pickup during a print
 invalidates unless a single-tool print's `G427` froze it, so a multi-tool
 INDX print boots with no tool picked and gets no clear
 (`toolchanger_indx.cpp:926-939`, `tool_offset_calibration.cpp:719-729`).
-The simulator keeps the picked tool across the cut, so its clear runs there
-too.
+The simulator does the same, and its resume picks the print's tool before
+anything moves.
 
 ### MMU3
 

@@ -558,23 +558,34 @@ written.
 - **What happens**: The idle sensor clear runs only on the picked tool
   (`filament_sensors_handler.cpp:294-312`). An INDX docks its tool after a
   load, an unload, a pause and a print, so an idle INDX has none picked
-  (`M701_2.cpp:135-140, 194-197, 339-342`, `pause.cpp:1395-1402`,
-  `marlin_server.cpp:1098, 2561`). An XL
-  has whichever tool is on the head. A docked tool emptied by hand keeps
-  its type and counts no unload, and nothing sweeps the tools at boot or at
-  a print start. On an idle INDX only a menu unload counts. At a print
-  start the tools-mapping screen shows a hand-emptied used tool as having
-  no filament, but that counts no unload either, and the idle sensor clear
-  it allows runs on the picked tool only (F28). Printing past it is BF24
-  and BF25.
+  (`M701_2.cpp:135-140, 194-197, 339-342`,
+  `marlin_server.cpp:1098, 2561`). A finished print's end G-code parks the
+  tool on the XL too (`P0 S1` in the stock profiles), and the XL otherwise
+  has whichever tool is on the head (F32). A docked or parked tool emptied
+  by hand keeps its type and counts no unload, and nothing sweeps the
+  tools at boot or at a print start. On an idle INDX only a menu load,
+  unload or Pick/park of that tool counts it: each picks the tool first,
+  with no dialog open, and the clear then counts the unload (F23, F30). At
+  a print start the tools-mapping screen shows a hand-emptied used tool as
+  having no filament, but that counts no unload either, and the idle
+  sensor clear it allows runs on the picked tool only (F28). Printing past
+  it is BF24 and BF25.
 - **Effect**: The bridge sees no unload, so a hand swap opens no swap. A
   spool moved into the tool's location in Spoolman stays staged (S13, S9),
-  and the old spool is charged for the new one until a claim moves it.
-- **Evidence**: Read in the firmware source; the bridge's side is
-  inferred.
-- **Scenario rows**: T3, T4, S9, S13.
-- **To reproduce**: Needs workstream 4. The simulator always has a tool
-  picked today, so T4 shows only the picked-tool case.
+  and the old spool is charged for the new one until a claim moves it, or
+  until the user next loads, unloads or picks that tool from the menu. The
+  menu's pick runs the idle clear first, which counts the unload, so a menu
+  load commits the staged swap before the load counts. A print's preview
+  load picks inside its dialog and counts no unload.
+- **Evidence**: Read in the firmware source. Shown in the simulator:
+  `test_a_tool_emptied_by_hand_while_docked_counts_no_unload` in
+  `tests/test_toolchanger_prints.py`.
+- **Scenario rows**: T3, T4, T8, S9, S13.
+- **To reproduce**: `test_a_tool_emptied_by_hand_while_docked_counts_no_unload`:
+  an INDX finishes a print, so no tool is picked; T1 is emptied by hand
+  while off and its spool swapped in Spoolman. The bridge sees no unload
+  and the new spool stays staged. A menu load of T1 then counts the unload
+  and commits the swap. T4 shows the picked-tool case.
 - **Status**: Open.
 
 ### BF13. A spool join counts an unload in the middle of a print

@@ -87,8 +87,8 @@ def test_the_preview_s_load_picks_with_no_clear_and_indx_docks_after():
         sim.tick(0.1)
     assert p.job.phase is JobPhase.BLIP and p.selected_tool is None
     assert p.tools[0].unload_count == 0
-    sim.advance(5)
-    assert p.selected_tool == 0  # the print picks its first tool
+    sim.advance(0.5)
+    assert p.job.phase is JobPhase.PRINTING and p.selected_tool == 0  # the print picks T0
 
 
 def test_a_reload_in_a_print_neither_picks_nor_docks():

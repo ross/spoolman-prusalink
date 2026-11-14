@@ -157,7 +157,8 @@ async def test_t4_idle_sensor_clear_on_a_picked_tool(world: World):
     await baseline(w)
 
     # Tool 1's filament is pulled out while the printer is off, so its type stays stored.
-    # The boot's idle clear runs on the selected tool, 0, which still has filament.
+    # The INDX starts with no tool picked, and a boot keeps that, so the boot's idle clear
+    # reads no tool. Picking T1 from the Pick/park menu then runs the clear on it.
     w.printer.set_power("off")
     w.printer.unload(TOOL1)
     w.printer.set_power("on")
@@ -188,6 +189,7 @@ async def test_t5_tool_the_printer_does_not_report(world: World, caplog: pytest.
     # Disabled, or its dock not calibrated: tool 1 drops out of /api/v1/filament.
     w.printer.set_tool_enabled(TOOL1, False)
     assert [t["index"] for t in prusalink.filament(w.printer)["tools"]] == [0]
+    w.printer.select_tool(0)  # Move E moves only the picked tool
     mark = w.mark()
     for _ in range(3):
         w.printer.extrude(0, 10)

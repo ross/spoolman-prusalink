@@ -25,6 +25,13 @@ class Feed(StrEnum):
 class FeedSystem:
     selectable: ClassVar[bool]  # the user can pick a tool (select_tool)
     tool_mapping: ClassVar[bool]  # the preview's tools-mapping screen applies (HAS_TOOL_MAPPING)
+    docks: ClassVar[bool] = False  # whether the picked tool goes back to a dock (INDX)
+    # Whether a finished print's end G-code parks the picked tool. The stock PrusaSlicer
+    # profiles of the toolchangers end with `P0 S1 ; park tool` (vendor bundle
+    # PrusaResearch.ini 2.5.16: `[printer:*XLMULTI*]`, and `[printer:*C1_INDX_8T_common*]`,
+    # which the 4T inherits), and `P0` is `tool_change(NoTool {})` (`src/marlin_stubs/P.cpp`).
+    # The slicer's profile isn't modeled yet, so this stands for it.
+    end_parks: ClassVar[bool] = False
 
     def tool_change(self, p: SimPrinter, old: SimTool, new: SimTool) -> None:
         """A print's change from `old` to `new`: pick `new` and count what the change moves."""
@@ -59,8 +66,9 @@ class FeedSystem:
         """Pick `tool` up. A direct printer's one tool is always picked."""
 
     def rest(self, p: SimPrinter) -> None:
-        """Put the picked tool where it rests after a menu load or unload. A direct printer
-        and the XL leave it picked: the XL has no dock step there (`M701_2.cpp`)."""
+        """Put the picked tool where it rests after a menu load or unload, a pause, and a
+        print's end. A direct printer and the XL leave it picked: the XL has no dock step
+        (`HAS_INDX` only, `M701_2.cpp`, `marlin_server.cpp`)."""
 
 
 class Direct(FeedSystem):
@@ -75,6 +83,7 @@ class Toolchanger(FeedSystem):
 
     selectable = True
     tool_mapping = True
+    end_parks = True
 
     def pick(self, p: SimPrinter, tool: SimTool) -> None:
         """Pick `tool` up, parking the picked one first. Neither moves counted filament."""
@@ -89,10 +98,16 @@ class XlToolchanger(Toolchanger):
 class IndxToolchanger(Toolchanger):
     """INDX: tools picked from docks onto one head (`toolchanger_indx.cpp`)."""
 
+    docks = True
+
     def rest(self, p: SimPrinter) -> None:
-        """Dock the picked tool: `tool_change(NoTool {}, dock_backoff)` after `M701`, unless
-        it resumes a print, and after every `M702` (`M701_2.cpp:135-140, 194-197`). The
-        dock moves no E."""
+        """Dock the picked tool, if one is picked: `tool_change(NoTool {}, dock_backoff)`
+        after `M701`, unless it resumes a print, and after every `M702`
+        (`M701_2.cpp:135-140, 194-197`); `tool_change(NoTool {})` at a pause, in
+        `Pausing_ParkHead`, and at a print's end, in `pre_finalize_print`
+        (`marlin_server.cpp:2557-2563, 1095-1100`). The dock moves no E."""
+        if p.selected_tool is None:
+            return
         p._log("load", f"dock T{p.selected_tool}")
         p.selected_tool = None
 

@@ -92,6 +92,21 @@ BAD = {
     "removed setting": ("load_feed_mm = 36\n" + printer(), "load_feed_mm isn't a known key"),
     "bad high flow": (printer("high_flow = 1"), "printers[0].high_flow must be true or false"),
     "bad sensors": (printer("sensors = 1"), "printers[0].sensors must be true or false"),
+    "picked tool not configured": (
+        printer("picked_tool = 2\n" + tool("index = 0") + tool("index = 1"), model="3.1.0"),
+        "printers[0].picked_tool must name an enabled tool, got 2",
+    ),
+    "picked tool disabled": (
+        printer(
+            "picked_tool = 1\n" + tool("index = 0") + tool("index = 1\nenabled = false"),
+            model="3.1.0",
+        ),
+        "printers[0].picked_tool must name an enabled tool, got 1",
+    ),
+    "bad picked tool": (
+        printer('picked_tool = "T0"'),
+        "printers[0].picked_tool must be an integer",
+    ),
     "bad auto-retract": (printer("auto_retract = 0"), "printers[0].auto_retract must be true"),
     "auto-retract off on INDX": (
         printer("auto_retract = false", model="8.10.0"),

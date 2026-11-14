@@ -286,10 +286,10 @@ async def test_t1_tool_changes_charge_each_tool_on_an_xl(world: World):
     spec = PrintSpec([Segment(0, 300), Segment(1, 100)], duration_s=4, preheat_s=0.5)
     records = await w.start_print(spec)
     records += await w.finish_print()
-    # T0: 300 * 0.95 = 285, from 1000. T1: the pickup's 30 mm purge and 100, then the
-    # end's 8 mm retract, fed back by the auto-retract, which counts 23 on the picked
-    # tool: 153 * 0.95 = 145.35, from 500.
-    assert w.charged(records, "A") == 285 and w.charged(records, "D") == 145
+    # T0: 300 * 0.95 = 285, from 1000. T1: the pickup's 30 mm purge and 100: 130 * 0.95 =
+    # 123.5, from 500. The end G-code parks T1 first, so the firmware's end retract and
+    # auto-retract find no tool and count nothing.
+    assert w.charged(records, "A") == 285 and w.charged(records, "D") == 123
     assert {r["tool"] for r in charges(records, a)} == {0}
     assert {r["tool"] for r in charges(records, d)} == {1}
     assert events(records) == []

@@ -39,6 +39,7 @@ _PRINTER_KEYS = {
     "auto_retract",
     "sensors",
     "tools",
+    "picked_tool",
 }
 _TOOL_KEYS = {"index", "enabled", "material", "extruded", "unload_count", "extruded_at_unload"}
 _MATERIAL_KEYS = {"name", "color", "instance_uuid"}
@@ -73,6 +74,9 @@ class PrinterConfig:
     auto_retract: bool = True
     sensors: bool = True  # the menu switch for every filament sensor
     tools: tuple[ToolConfig, ...] = (ToolConfig(0),)
+    # The tool picked at start. None means the model's default: tool 0 on a direct printer,
+    # none on a toolchanger.
+    picked_tool: int | None = None
 
 
 @dataclass(frozen=True)
@@ -245,6 +249,12 @@ def _printer(entry: object, position: int, control_port: int) -> PrinterConfig:
     if checks not in {s.value for s in Severity}:
         known = ", ".join(s.value for s in Severity)
         raise ConfigError(f"{prefix}.checks must be one of {known}, got {checks!r}")
+    tools = _tools(entry.get("tools"), prefix, model)
+    picked = None
+    if "picked_tool" in entry:
+        picked = _int(entry["picked_tool"], f"{prefix}.picked_tool", 0)
+        if not any(t.index == picked and t.enabled for t in tools):
+            raise ConfigError(f"{prefix}.picked_tool must name an enabled tool, got {picked}")
     return PrinterConfig(
         name=name,
         model=model,
@@ -255,7 +265,8 @@ def _printer(entry: object, position: int, control_port: int) -> PrinterConfig:
         high_flow=_bool(entry.get("high_flow", False), f"{prefix}.high_flow"),
         auto_retract=auto_retract,
         sensors=_bool(entry.get("sensors", True), f"{prefix}.sensors"),
-        tools=_tools(entry.get("tools"), prefix, model),
+        tools=tools,
+        picked_tool=picked,
     )
 
 
@@ -378,7 +389,7 @@ def build(cfg: SimConfig) -> Simulation:
         model = MODELS[pc.model]
         default = Firmware.FULL if model.counters else Firmware.NO_COUNTERS
         tools = {tc.index: _sim_tool(model, tc) for tc in pc.tools}
-        enabled = sorted(i for i, t in tools.items() if t.enabled)
+        picked = model.first_tool if pc.picked_tool is None else pc.picked_tool
         sim.add(
             SimPrinter(
                 name=pc.name,
@@ -391,7 +402,7 @@ def build(cfg: SimConfig) -> Simulation:
                 auto_retract=pc.auto_retract,
                 sensors=pc.sensors,
                 tools=tools,
-                selected_tool=enabled[0] if enabled else min(tools),
+                selected_tool=picked,
             )
         )
     return sim

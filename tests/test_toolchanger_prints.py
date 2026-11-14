@@ -9,11 +9,12 @@ from __future__ import annotations
 
 import logging
 
-from harness import LOC, PLA, ledger, levels, make, spool, tool_locations
+from harness import LOC, PLA, ledger, levels, make, spool, spool_x, tool_locations
 
 from simulator.model import MODELS, PrintSpec, Reason, Segment, SimTool, State
 
 INDX = "8.10.0"
+SHELF = "shelf"
 
 
 def indx(tmp_path, tools):
@@ -57,8 +58,8 @@ async def test_a_print_waiting_on_the_tools_mapping_screen(tmp_path):
     printer.tap_through()  # Print
     await station.run_until(lambda: printer.job is None, poll_every=0.3)
     await bridge.poll()
-    # T0 100 * 550/576 = 95.49. T1 30 + 50 = 80 * 550/576 = 76.39. The end's 8 mm retract
-    # is fully retracted on INDX: no auto-retract.
+    # T0 100 * 550/576 = 95.49. T1 30 + 50 = 80 * 550/576 = 76.39. The end G-code parks
+    # T1 first, so the firmware's end retracts and auto-retracts nothing.
     assert totals(fake) == {1: 95, 2: 76}
     records = ledger(tmp_path)[mark:]
     assert [r for r in records if "event" in r] == []
@@ -101,4 +102,57 @@ async def test_a_print_through_an_empty_tool_holds_its_usage(tmp_path, caplog):
     await bridge.poll()
     load = station.counter_at(1) - 576
     assert totals(fake)[2] == 576 - 500 + load
+    await bridge.aclose()
+
+
+async def test_a_tool_emptied_by_hand_while_docked_counts_no_unload(tmp_path):
+    """BF12, pinned as the bridge behaves today: a finished print leaves no INDX tool
+    picked, so a docked tool emptied by hand keeps its type and counts no unload, at the
+    boot too. A spool moved into its location stays staged. A menu load on that tool picks
+    it first, and the pick's idle sensor clear then counts the unload."""
+    tools = [
+        SimTool.loaded_with(0, PLA, extruded=1000.0),
+        SimTool.loaded_with(1, PLA, extruded=500.0),
+    ]
+    bridge, fake, station = indx(tmp_path, tools)
+    fake.spools[3] = spool_x(3, SHELF)
+    printer = station.printer
+    await bridge.poll()  # the baseline
+
+    await station.start_print(PrintSpec([Segment(0, 100), Segment(1, 50)], duration_s=2))
+    await station.run_until(lambda: printer.job is None, poll_every=0.3)
+    await bridge.poll()
+    assert printer.selected_tool is None  # the end G-code parked T1
+    mark = len(ledger(tmp_path))
+
+    # T1 emptied by hand while the printer is off, and spool 3 moved into its location.
+    printer.set_power("off")
+    printer.unload(1)
+    printer.set_power("on")
+    location = tool_locations(LOC, MODELS[INDX].max_tools)[1]
+    fake.spools[2]["location"], fake.spools[3]["location"] = SHELF, location
+    for _ in range(3):
+        await bridge.poll()
+        station.advance(1)
+    # A known fault, BF12 in docs/bridge-findings.md: with no tool picked, no idle clear
+    # runs, so T1 keeps its type, the bridge sees no unload, and spool 3 stays staged. A
+    # fix in the bridge changes these lines.
+    assert station.tool_at(1).unload_count == 0 and station.material(1)[0] == "PLA"
+    records = ledger(tmp_path)[mark:]
+    swaps = ("unload", "swap_staged", "swap_committed", "swap_unconfirmed")
+    assert [(r["tool"], r["event"]) for r in records if r.get("event") in swaps] == [
+        (1, "swap_staged")
+    ]
+
+    # A menu load picks T1 first, with no dialog open: the idle clear finds it empty and
+    # counts the unload, so the staged swap commits before the load counts.
+    mark = len(ledger(tmp_path))
+    await station.swap_cycle(tool=1, source="preset", name="PLA")
+    await bridge.poll()
+    assert station.tool_at(1).unload_count == 1 and printer.selected_tool is None
+    records = ledger(tmp_path)[mark:]
+    assert [(r["tool"], r["event"]) for r in records if r.get("event") in swaps] == [
+        (1, "unload"),
+        (1, "swap_committed"),
+    ]
     await bridge.aclose()

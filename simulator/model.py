@@ -254,6 +254,12 @@ class ModelInfo:
     # Its feed system: XL on HAS_TOOLCHANGER builds, INDX on HAS_INDX ones, else direct.
     feed: Feed = field(default=Feed.DIRECT, kw_only=True)
 
+    @property
+    def first_tool(self) -> int | None:
+        """The tool picked when the config names none: a direct printer's one tool, and none
+        on a toolchanger, whose tools wait docked or parked."""
+        return 0 if self.feed is Feed.DIRECT else None
+
     def holds_uuid(self, tool: int) -> bool:
         """Whether `tool` keeps tag UUIDs: tool 0 of a model with a tag reader (F21).
 
@@ -562,7 +568,9 @@ class UserJob(SimJob):
     pending_color_changes: list[float] = field(default_factory=list)
     paused_from: JobPhase | None = None  # where resume goes back to
     clean_at: float | None = None  # RECOVER time left when the nozzle clean purges
-    restore_gap: float | None = None  # the tool's gap when a filament change began
+    # The tool of a filament change and its gap when the change began, which the resume
+    # restores.
+    restore: tuple[int, float] | None = None
     previewing: bool = True  # until the preview lets the print begin
     # The tools-mapping screen and the questions its Print asks, set when the screen opens.
     mapping: list[Attention] = field(default_factory=list)
@@ -1283,6 +1291,13 @@ class SimPrinter:
         job = self.job
         self._log("action", "pause")
         job.paused_from = job.phase
+        if self._primes_at_resume():
+            # The pause retracts to 8 mm (`retract_and_lift` in `Pausing_WaitIdle`), and the
+            # resume never feeds it back: its purge refills the gap instead.
+            t = self._job_tool(job)
+            self._retract_to(t, self.model.extruder.lengths.retract_mm)
+        # INDX docks the tool once the head is parked; the XL keeps it.
+        self.feed.rest(self)
         job.enter(JobPhase.PAUSED)
         self._show_state()
 
@@ -1294,12 +1309,15 @@ class SimPrinter:
             self._recover(job)
             return
         self._log("action", "resume")
-        if job.restore_gap is not None:
+        if job.restore is not None:
             # The unpark's feed and `restore_retracted_distance` put the filament back at
             # the gap it had when the change began (`Pause::filament_change` in
             # `src/marlin_stubs/pause/pause.cpp`).
-            self._restore_to(self.tools[self.selected_tool], job.restore_gap)
-            job.restore_gap = None
+            tool, gap = job.restore
+            self._restore_to(self.tools[tool], gap)
+            job.restore = None
+        else:
+            self._unpark_prime(job)
         if job.paused_from is JobPhase.PREHEAT:
             job.enter(JobPhase.PREHEAT)
             self._show_state()
@@ -1326,6 +1344,24 @@ class SimPrinter:
         for t in self.tools.values():
             self._abort_process(t)
         self._park(job, State.STOPPED)
+
+    def _primes_at_resume(self) -> bool:
+        """Whether resuming a pause purges in the nozzle cleaner: INDX's `purge_clean`.
+        The iX's cleaner G-code isn't modeled here."""
+        return bool(self.model.extruder.cleaner_purge_mm)
+
+    def _unpark_prime(self, job: UserJob) -> None:
+        """Resume from a pause: INDX picks the tool it docked at the pause, then purges it
+        in the nozzle cleaner, `G750 E25` and the `M1705 N` auto-retract, still `PAUSED`
+        (`resuming_begin` and `unpark_prime` in `src/common/marlin_server.cpp:3298-3307,
+        2662-2674, 3423-3434`). The unpark then feeds nothing back: the purge syncs E to
+        the position the pause saved."""
+        t = self._job_tool(job)
+        self._pick(t)
+        if self._primes_at_resume():
+            purge = self.model.extruder.cleaner_purge_mm
+            self._run_steps(t, [LoadStep("PURGE", purge), LoadStep(AUTO_RETRACT_STEP)])
+            self._log("job", f"T{t.index} purged {purge:g} mm at the resume")
 
     @staticmethod
     def _at_preview(job: UserJob | SyncJob) -> bool:
@@ -1389,7 +1425,7 @@ class SimPrinter:
         # The filament change records the tracker's distance, parks with a retract, then
         # rams and unloads (`Pause::filament_change` and `park_nozzle_and_notify` in
         # `src/marlin_stubs/pause/pause.cpp`).
-        job.restore_gap = t.path.tracked()
+        job.restore = (t.index, t.path.tracked())
         self._retract_to(t, self.model.extruder.lengths.retract_mm)
         self._run_steps(t, self._unload_steps(t, "runout"))
         self._physical_unload(t, str(reason))
@@ -1487,13 +1523,14 @@ class SimPrinter:
                 # distance (`panic_loop` in `src/common/power_panic.cpp`). The counters
                 # restart at the boot.
                 self._track(self._job_tool(job), -self.model.extruder.lengths.retract_mm)
-            job.restore_gap = None  # a power loss ends the filament change before its restore
+            job.restore = None  # a power loss ends the filament change before its restore
             job.paused_from = JobPhase.PRINTING if was_paused else None
             if was_paused:
                 job.enter(JobPhase.PAUSED)
         elif held is not None and not keep_job:
             self._log("job", f"job {held.id}: resume dropped by the reboot")
             held = None
+        self._forget_pick(job)
         # A cut while the resume waits finds the printer idle, so it saves nothing new and
         # the saved print waits again (`ac_fault_isr` in `src/common/power_panic.cpp`).
         self.job, self.resuming, self.screen = None, None, State.IDLE
@@ -1510,6 +1547,21 @@ class SimPrinter:
             self.resuming, self.resume_in = held, self.settings.panic_idle_seconds
             self._log("job", f"job {held.id} resumes in {self.resume_in:g} s")
         self._show_state()
+
+    def _forget_pick(self, job: UserJob | SyncJob | None) -> None:
+        """Leave none picked after a cut during a print on INDX that uses several tools.
+
+        INDX boots with the last picked tool its EEPROM holds, and parking a tool while
+        printing marks that invalid, unless a one-tool print froze it at its start
+        (`restore_last_picked_tool` in `toolchanger_utils_indx.cpp:50-57`,
+        `persist_last_picked_tool` in `toolchanger_indx.cpp:926-939`). That this follows
+        from the print's tools is inferred. Every other boot keeps the picked tool: the XL's is the
+        Dwarf on its head (`toolchanger_xl.cpp`).
+        """
+        printing = isinstance(job, UserJob) and not job.previewing
+        if self.feed.docks and printing and len({s.tool for s in job.spec.segments}) > 1:
+            self._log("boot", "no tool restored: the print used several tools")
+            self.selected_tool = None
 
     def _tick_resume(self, dt: float) -> float:
         """Count down to the power-panic resume; return the time left once it starts.
@@ -1543,6 +1595,9 @@ class SimPrinter:
         """BUSY while the firmware heats and homes. A model whose resume purges does so
         halfway through, unless the print was paused: that resume only parks the head
         (`ResumeState::ParkForPause` in `src/common/power_panic.cpp`)."""
+        # The resume sets the tool the print had picked before anything moves
+        # (`power_panic.cpp:380-395`).
+        self._pick(self._job_tool(job))
         job.enter(JobPhase.RECOVER)
         job.remaining = self.settings.recover_seconds
         purges = job.paused_from is None and self.model.extruder.panic_purge_mm is not None
@@ -2050,7 +2105,14 @@ class SimPrinter:
         self._show_state()
 
     def _park(self, job: UserJob | SyncJob, end: State) -> None:
+        """End a job: a finished print's end G-code parks the tool on a toolchanger, then the
+        firmware's own end runs, and INDX docks what's still picked (`pre_finalize_print`).
+        A stopped print and a sync job keep the tool to the firmware's end."""
+        if isinstance(job, UserJob) and end is State.FINISHED and self.feed.end_parks:
+            self._log("job", f"end G-code parks T{self.selected_tool}")
+            self.selected_tool = None
         self._end_of_print()
+        self.feed.rest(self)
         job.enter(JobPhase.PARKING)
         job.remaining, job.end_state = self.settings.park_seconds, end
         if isinstance(job, UserJob):
@@ -2297,6 +2359,8 @@ def _job_from(d: dict | None) -> UserJob | SyncJob | None:
     d["mapping"] = [_attention_from(a) for a in d["mapping"]]
     if d["paused_from"] is not None:
         d["paused_from"] = JobPhase(d["paused_from"])
+    if d["restore"] is not None:
+        d["restore"] = tuple(d["restore"])
     spec = dict(d["spec"])
     spec["segments"] = [Segment(**s) for s in spec["segments"]]
     d["spec"] = PrintSpec(**spec)

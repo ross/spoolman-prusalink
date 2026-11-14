@@ -436,10 +436,10 @@ def test_multi_tool_print_attributes_extrusion_and_purges():
     assert all(t.unload_count == 0 for t in p.tools.values())
 
 
-# T1's count: the pickup's 30 mm purge and 10 printed, and on the XL the end's
-# auto-retract, 23. INDX's end retract already counts as fully retracted.
+# T1's count: the pickup's 30 mm purge and 10 printed. The end G-code parks T1 first, so
+# the firmware's end retracts and auto-retracts nothing.
 @pytest.mark.parametrize(
-    ("model", "counted"), [("3.1.0", (30 + 10 + 23) * 0.95), ("8.10.0", 40 * 550 / 576)]
+    ("model", "counted"), [("3.1.0", (30 + 10) * 0.95), ("8.10.0", 40 * 550 / 576)]
 )
 def test_a_print_goes_on_through_an_empty_tool_with_the_sensors_off(model, counted):
     sim, p = make(model, [loaded(0, PETG), SimTool(1)])

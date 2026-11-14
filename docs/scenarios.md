@@ -241,9 +241,10 @@ in the config, and the bridge keeps each tool's state and charges apart, so
 every row above applies to each tool on its own, except the printer writes,
 which are off on these models (T6), and the rows that need an instance UUID,
 such as S12, since these models keep none (F21). These rows come from
-[printer-behaviors.md](printer-behaviors.md) F19 to F23. No multi-tool
-printer is at hand, so they run end to end against the simulator only, which
-follows the firmware source; each gets traced when the INDX arrives.
+[printer-behaviors.md](printer-behaviors.md) F19 to F23 and F30 to F32. No
+multi-tool printer is at hand, so they run against the simulator only, which
+follows the firmware source: end to end, except T8, which a unit test covers.
+Each gets traced when the INDX arrives.
 
 | # | Scenario | What the bridge does | Status |
 | --- | --- | --- | --- |
@@ -254,6 +255,7 @@ follows the firmware source; each gets traced when the INDX arrives.
 | T5 | A configured tool the printer doesn't report: disabled, or its dock not calibrated (F19). | Logs `printer doesn't report tool index N` once and skips that tool. The other tools are charged as normal. The skipped tool's flags in Spoolman stand. A bridge restart while the tool is skipped clears the flags from comparing the printer with the spool until the tool is compared again; the flags from its saved state survive. When the tool comes back, it carries on from its counter. | Simulator only; end to end |
 | T6 | A write due on a multi-tool printer. | Writes are off for every multi-tool model: the bridge logs the model once per boot ("multi-tool printers aren't supported yet; printer writes are off"), and when a write would be due on a tool, flags the spool "can't write to the printer" and uploads nothing. Charging is unaffected (W10). Writes to multi-tool printers come with multi-tool printer support, when the bridge adds it: `M865 L<n>` per tool (F22) and no `M865.1`, since these models keep no UUIDs (F21). Not yet. | Simulator only; end to end |
 | T7 | A multi-tool printer reboots between prints. | A reboot (C1) on every tool: each tool logs it and its counter restarts at 0, nothing is charged for the restart, and each tool's spool is then charged from 0. | Simulator only; end to end |
+| T8 | A tool emptied by hand while docked or parked, with no tool picked: an idle INDX, or either toolchanger after a finished print (F32). | Nothing: with no tool picked the firmware runs no idle sensor clear, so no unload counts and the tool keeps its type. A spool moved into its location in Spoolman stays staged (S13), and the old spool stays active. The next menu load, unload or pick of that tool picks it first, and the idle clear then counts the unload, so a staged swap commits there. BF12. | Gap (BF12); simulator only; unit |
 | T11 | Change all on a toolchanger: several tools swapped in one operation (F37). | Each changed tool is a swap on its own: S1 where its new spool was already moved into the tool's location, S2 where Spoolman changes after. A changed tool with no spool assigned holds its usage, as in S6. The other tools aren't touched. | Simulator only; unit (`tests/test_change_all.py`) |
 
 ## Out of scope

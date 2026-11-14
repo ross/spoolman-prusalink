@@ -212,7 +212,7 @@ def test_a_runout_parks_and_rams(model, ram):
     # counts 17.
     assert counted(p, lambda: p.runout(0)) == pytest.approx(ram)
     assert p.tools[0].unload_count == 1
-    assert p.job.restore_gap == 0
+    assert p.job.restore == (0, 0)
 
 
 def test_a_jam_and_a_color_change_ram_too():
@@ -233,7 +233,7 @@ def test_a_runout_in_the_preheat_unloads_an_auto_retracted_nextruder_cold():
     # 55 stored is past the park's 8, so the park doesn't move; 55 is fully retracted, so
     # the unload is cold: nothing counts, and the tracker's invalid gap records as 0.
     assert counted(p, lambda: p.runout(0)) == 0
-    assert p.job.restore_gap == 0
+    assert p.job.restore == (0, 0)
 
 
 @pytest.mark.parametrize("lost", ["retract", "boot"])
@@ -249,7 +249,7 @@ def test_a_change_with_the_tracker_lost_resumes_at_gap_0(lost):
     sim.tick(0.8 + 1)
     assert p.job.phase is JobPhase.PREHEAT
     p.runout(0)
-    assert p.job.restore_gap == 0  # `get_retracted_distance(...).value_or(0)`
+    assert p.job.restore == (0, 0)  # `get_retracted_distance(...).value_or(0)`
     p.load(0)
     sim.advance(100)
     # MK4S reload from gap 40: 30 slow (gap 10), 50 fast (gap 0), the 27 mm purge, the
@@ -266,7 +266,7 @@ def test_an_indx_change_in_the_preheat_resumes_at_its_8_mm():
     # The 8 stored meets the park's 8, so the park doesn't move. The 2 mm purge feeds
     # the 8 back (gap 0) and counts 2, the ramming 17.
     assert counted(p, lambda: p.runout(0)) == pytest.approx(2 + 17)
-    assert p.job.restore_gap == 8
+    assert p.job.restore == (0, 8)
     p.load(0)
     sim.advance(100)
     assert tracker(p) == (8, True, None)
@@ -392,16 +392,17 @@ def test_auto_retract_off():
     assert counted(p, lambda: p.extrude(0, 10)) == pytest.approx(10)
 
 
-@pytest.mark.parametrize("model", ["5.1.0", "2.1.0"])
-def test_a_dev_kit_and_a_mini_never_auto_retract(model):
+# The MINI's end retracts 8 and stores nothing. The dev kit's end G-code parks its tool
+# first, so its end retracts nothing.
+@pytest.mark.parametrize(("model", "gap"), [("5.1.0", 0), ("2.1.0", 8)])
+def test_a_dev_kit_and_a_mini_never_auto_retract(model, gap):
     sim, p = make(model, [SimTool(0)])
     p.load(0, source="preset", name="PLA")
     sim.advance(100)
     assert tracker(p) == (8, True, None)
     p.start_print(PrintSpec([Segment(0, 10)], preheat_s=0))
     sim.advance(10)
-    # The end retracts 8 and stores nothing.
-    assert tracker(p) == (8, True, None)
+    assert tracker(p) == (gap, True, None)
     assert not p.to_json()["model"]["auto_retracts"]
 
 
