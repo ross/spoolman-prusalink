@@ -776,6 +776,11 @@ class SimPrinter:
         """The rules of the model's feed system."""
         return FEED_SYSTEMS[self.model.feed]
 
+    def _head_tool(self) -> SimTool | None:
+        """The tool whose path the head's own moves run on: the picked tool, or None on a
+        toolchanger with none picked."""
+        return None if self.selected_tool is None else self.tools[self.selected_tool]
+
     # Plumbing.
 
     @property
@@ -1775,10 +1780,11 @@ class SimPrinter:
                 if picked != self._job_tool(job).index:
                     job.resumed_on = picked
                 if self.model.extruder.panic_retract:
-                    # The cut retracts the picked tool through the planner, which forgets a
+                    # The cut retracts the head's tool through the planner, which forgets a
                     # stored auto-retract distance (`panic_loop` in `power_panic.cpp`). The
-                    # counters restart at the boot.
-                    self._track(self.tools[picked], -self.model.extruder.lengths.retract_mm)
+                    # counters restart at the boot. A print in progress always has a tool
+                    # picked.
+                    self._track(self._head_tool(), -self.model.extruder.lengths.retract_mm)
             job.restore = None  # a power loss ends the filament change before its restore
             job.paused_from = JobPhase.PRINTING if was_paused else None
             if was_paused:
@@ -2446,7 +2452,7 @@ class SimPrinter:
             self._print_moves(t, slicer.end)
             self._log("job", f"end G-code parks T{t.index}")
             self.selected_tool = None
-        self._end_of_print()
+        self._end_of_print(job, end)
         self.feed.rest(self)
         job.enter(JobPhase.PARKING)
         job.remaining, job.end_state = self.settings.park_seconds, end
@@ -2454,9 +2460,9 @@ class SimPrinter:
             job.paused_from = None
         self._show_state()
 
-    def _end_of_print(self) -> None:
-        """What a finished or stopped job does to the filament before it parks, a sync job
-        too (`marlin_server.cpp`).
+    def _end_of_print(self, job: UserJob | SyncJob, end: State) -> None:
+        """What `job`, finished or stopped as `end` says, does to the filament before it
+        parks, a sync job too (`marlin_server.cpp`).
 
         It retracts the picked tool to 8 mm (`retract_and_lift`). Then `pre_finalize_print`
         stores each tool's valid tracker gap as its auto-retracted distance and
@@ -2469,7 +2475,7 @@ class SimPrinter:
         and the valid gaps are still stored: that loop goes over every hotend.
         """
         ex = self.model.extruder
-        t = None if self.selected_tool is None else self.tools[self.selected_tool]
+        t = self._head_tool()
         if t is not None:
             self._retract_to(t, ex.lengths.retract_mm)
         if not ex.auto_retracts:
