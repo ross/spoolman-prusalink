@@ -117,6 +117,7 @@ async def test_t3_swap_on_one_tool_leaves_the_other(world: World):
     records = await w.poll()
     assert [(e["tool"], e["event"]) for e in events(records)] == [(1, "swap_staged")]
 
+    w.printer.select_tool(TOOL1)  # Move E moves only the picked tool
     w.printer.extrude(TOOL1, 20)  # 20 * 550 / 576 = 19.10: the counter reads 519
     # The unload purges 2 and rams 17 first: 19 * 550 / 576 = 18.14, so 537.24.
     await w.unload(TOOL1)
@@ -241,8 +242,10 @@ async def test_t7_reboot_restarts_every_tool(world: World):
     """Reboot on a multi-tool printer: each tool's counter restarts, and nothing is charged."""
     w = world
     await baseline(w)
-    # 10 * 550 / 576 = 9.55 and 20 * 550 / 576 = 19.10
+    # 10 * 550 / 576 = 9.55 and 20 * 550 / 576 = 19.10. Move E moves only the picked tool.
+    w.printer.select_tool(0)
     w.printer.extrude(0, 10)
+    w.printer.select_tool(TOOL1)
     w.printer.extrude(TOOL1, 20)
     records = await w.poll()
     assert w.charged(records, "A") == 9 and w.charged(records, "D") == 19

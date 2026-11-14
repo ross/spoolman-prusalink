@@ -41,8 +41,8 @@ class FeedSystem:
 
         A toolchanger with no tool picked can't move E at all (`bsod("E move without tool")`
         in `Planner::buffer_segment`, `lib/Marlin/Marlin/src/module/planner.cpp`). The
-        caller names the tool whose path moves, so a menu load on a toolchanger's unpicked
-        tool counts on that tool.
+        caller names the tool whose path moves. Every caller picks that tool first, as the
+        firmware does, so on a toolchanger it's the picked tool.
         """
         return None if p.selected_tool is None else tool
 
@@ -54,6 +54,13 @@ class FeedSystem:
         isn't a configured tool has no sensor to read.
         """
         return None if p.selected_tool is None else p.tools.get(p.selected_tool)
+
+    def pick(self, p: SimPrinter, tool: SimTool) -> None:
+        """Pick `tool` up. A direct printer's one tool is always picked."""
+
+    def rest(self, p: SimPrinter) -> None:
+        """Put the picked tool where it rests after a menu load or unload. A direct printer
+        and the XL leave it picked: the XL has no dock step there (`M701_2.cpp`)."""
 
 
 class Direct(FeedSystem):
@@ -69,6 +76,11 @@ class Toolchanger(FeedSystem):
     selectable = True
     tool_mapping = True
 
+    def pick(self, p: SimPrinter, tool: SimTool) -> None:
+        """Pick `tool` up, parking the picked one first. Neither moves counted filament."""
+        p.selected_tool = tool.index
+        p._log("load", f"pick T{tool.index}")
+
 
 class XlToolchanger(Toolchanger):
     """The XL: a Dwarf head per tool (`toolchanger_xl.cpp`)."""
@@ -76,6 +88,13 @@ class XlToolchanger(Toolchanger):
 
 class IndxToolchanger(Toolchanger):
     """INDX: tools picked from docks onto one head (`toolchanger_indx.cpp`)."""
+
+    def rest(self, p: SimPrinter) -> None:
+        """Dock the picked tool: `tool_change(NoTool {}, dock_backoff)` after `M701`, unless
+        it resumes a print, and after every `M702` (`M701_2.cpp:135-140, 194-197`). The
+        dock moves no E."""
+        p._log("load", f"dock T{p.selected_tool}")
+        p.selected_tool = None
 
 
 FEED_SYSTEMS: dict[Feed, FeedSystem] = {

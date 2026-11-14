@@ -296,6 +296,7 @@ function renderPrinter(p) {
     btn('Cancel', 'cancel', gate(a, 'cancel', { cls: 'danger' })) +
     btn('Dismiss', 'dismiss', gate(a, 'dismiss')) +
     btn('Home', 'home', gate(a, 'home')) +
+    btn('Park tool', 'park_tool', gate(a, 'park_tool', { title: 'the Pick/park menu: park the picked tool' })) +
     btn('Reboot', 'reboot', gate(a, 'reboot')) +
     btn('Power-loss resume', 'power_loss', gate(a, 'reboot', { title: 'reboot, keeping the job' })) +
     '<label title="the bed cools during the outage, so the print waits for Resume"><input type="checkbox" data-k="cold"' +
@@ -441,7 +442,7 @@ function onClick(e) {
       case 'toggle': return toggle(b.dataset.form);
       case 'load_form': return toggle('load' + tool);
       case 'pause': case 'resume': case 'cancel': case 'dismiss': case 'reboot': case 'home':
-      case 'tap_through': case 'clear_jam':
+      case 'tap_through': case 'clear_jam': case 'park_tool':
         return go(act, {});
       case 'sensors': return go('set_sensors', { value: !p.sensors });
       case 'power_loss': return go('reboot', { keep_job: true, cold_bed: !!getv(name, 'cold', false) });

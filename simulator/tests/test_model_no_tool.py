@@ -2,7 +2,8 @@
 doesn't run (`Planner::buffer_segment` in `lib/Marlin/Marlin/src/module/planner.cpp`;
 `filament_sensors_handler.cpp:294-312`).
 
-Nothing sets `selected_tool` to None on today's printers, so these tests set it directly.
+An INDX docks its tool after a menu load or unload, and `park_tool` parks either
+toolchanger's. These tests set `selected_tool` to None directly.
 """
 
 from __future__ import annotations
@@ -10,7 +11,7 @@ from __future__ import annotations
 import pytest
 
 from simulator.feed import Direct, Toolchanger
-from simulator.model import Invalid, Material, PrintSpec, Segment, State
+from simulator.model import Busy, Invalid, Material, PrintSpec, Segment, State
 from simulator.tests.util import PLA, loaded, make, run, sliced
 
 CORE_ONE_L, XL, INDX = "8.1.0", "3.1.0", "8.10.0"
@@ -24,29 +25,30 @@ def none_selected(model: str, tools=None, **settings):
 
 @pytest.mark.parametrize("model", [XL, INDX])
 @pytest.mark.parametrize("move", ["extrude", "retract"])
-def test_a_move_moves_nothing(model, move):
-    """A toolchanger with no tool picked can't move E, and the auto-retract's hooks need a
-    tool too, so the stored distance stays (`Planner::buffer_segment`)."""
+def test_a_manual_move_is_refused(model, move):
+    """Move E shows "No tool" and sends no E with none picked (`screen_menu_move.cpp`), so
+    nothing moves and the stored distance stays."""
     _, p = none_selected(model)
     path = p.tools[0].path
     path.gap, path.auto_retracted = 5.0, 8.0
-    getattr(p, move)(0, 30)
+    with pytest.raises(Busy, match="^no tool picked$"):
+        getattr(p, move)(0, 30)
     assert p.tools[0].extruded == 0
     assert (path.gap, path.gap_valid, path.auto_retracted) == (5.0, True, 8.0)
 
 
-def test_an_unload_moves_nothing():
-    """An unload's ramming starts by feeding back the stored distance, which needs a picked
-    tool as any move does."""
+def test_an_unload_picks_its_tool_and_counts():
+    """The menu picks the tool before `M702`, so the unload moves and counts: the 2 mm purge
+    feeds back the stored 5 mm into the 5 mm gap first and counts 2, and the ramming counts
+    17 (`test_model_auto_retract.py` works it out): 19 * 550 / 576. Then INDX docks it."""
     sim, p = none_selected(INDX, [loaded(0), loaded(1)])
     path = p.tools[0].path
-    path.auto_retracted = 5.0
+    path.gap, path.auto_retracted = 5.0, 5.0
     p.unload(0)
-    sim.tick(1)  # into the ramming
-    assert p.tools[0].extruded == 0
-    assert (path.gap, path.auto_retracted) == (0.0, 5.0)
+    assert p.selected_tool == 0
     sim.tick(60)
-    assert p.tools[0].extruded == 0 and p.tools[0].unload_count == 1
+    assert p.tools[0].extruded == pytest.approx(19 * 550 / 576)
+    assert p.tools[0].unload_count == 1 and p.selected_tool is None
 
 
 def test_the_idle_clear_needs_a_selected_tool():

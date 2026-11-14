@@ -28,6 +28,7 @@ PRINTER_CALLS: dict[str, Callable[[SimPrinter], None]] = {
     "cancel": lambda p: p.cancel(),
     "dismiss": lambda p: p.dismiss(),
     "home": lambda p: p.home(),
+    "park_tool": lambda p: p.park_tool(),
     "reboot": lambda p: p.reboot(),
     "clear_jam": lambda p: p.clear_jam(),
     "tap_through": lambda p: p.tap_through(),
@@ -203,6 +204,32 @@ def multi_tool_idle():
     return make("3.1.0", [loaded(0), loaded(1), SimTool(2), loaded(3, enabled=False)])
 
 
+def xl_picked_after_a_load():
+    """An XL leaves the tool a menu load picked: T1, not T0."""
+    sim, p = make("3.1.0", [loaded(0), SimTool(1), loaded(2)])
+    p.load(1, source="preset", name="PLA")
+    sim.advance(60)
+    assert p.selected_tool == 1 and p.tools[1].process is None
+    return sim, p
+
+
+def indx_docked():
+    """An idle INDX docks the tool after a menu load, so none is picked."""
+    sim, p = make("8.10.0", [loaded(0), SimTool(1)])
+    p.load(1, source="preset", name="PLA")
+    sim.advance(60)
+    assert p.selected_tool is None and p.tools[1].process is None
+    return sim, p
+
+
+def indx_unloading():
+    """An INDX unload picks T1 first and holds it until the unload ends."""
+    sim, p = make("8.10.0", [loaded(0), loaded(1)])
+    p.unload(1)
+    assert p.selected_tool == 1
+    return sim, p
+
+
 SITUATIONS = [
     idle,
     loading,
@@ -219,6 +246,9 @@ SITUATIONS = [
     cold_bed,
     multi_tool_print,
     multi_tool_idle,
+    xl_picked_after_a_load,
+    indx_docked,
+    indx_unloading,
     multi_tool_unloading,
     preheat_empty,
     preview_empty,

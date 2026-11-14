@@ -16,7 +16,9 @@ print with segments goes through its checks of the tools it uses. The MMU's
 filament-inserted question belongs to Workstream 5. Workstream 3 is built:
 a tool and its filament path are apart, the selected tool can be none, and
 a feed system holds what differs between direct and toolchanger printers.
-Workstreams 4 to 6 aren't started. [Open questions](#open-questions)
+Workstream 4 has started: the XL and INDX have their own feed systems, a
+menu load or unload picks its tool and INDX docks it after, and Move E
+needs a picked tool. Workstreams 5 and 6 aren't started. [Open questions](#open-questions)
 lists what the work still has to settle.
 
 ## Goal and non-goals
@@ -104,13 +106,20 @@ firmware update.
   sensor; each tool has its own path. A print is a list of (tool, mm)
   segments with a fixed purge at each tool change. Picking a tool can
   trigger the idle sensor clear. A tool can be disabled.
+- On the XL and INDX, a menu load or unload picks its tool first, and the
+  idle sensor clear runs on it at the pick. INDX docks the tool when the
+  operation ends, and the XL leaves it picked. The preview's load picks in
+  its dialog, with no clear, and INDX docks it after; a reload in a print
+  neither picks nor docks. Move E moves only the picked tool, and the Pick/park
+  menu's park (`park_tool`) leaves none picked.
 - The model's feed system, direct, XL or INDX, holds the rules that
   differ between them. `ModelInfo.feed` names it, and
   `script/firmware-check` compares it with `HAS_TOOLCHANGER` and
   `HAS_INDX`. The printer's selected tool can be none, which
   stands for a toolchanger with no tool picked: then no filament moves or
   counts, the idle sensor clear doesn't run, and the end of a print neither
-  retracts nor auto-retracts. Nothing leaves it none yet.
+  retracts nor auto-retracts. An idle INDX after a menu load or unload has
+  none, and so does either toolchanger after `park_tool`.
 - An uploaded file's job is counted at once. When the scan ends, the
   print preview checks the file's `M862` lines: the model by compatibility
   group, the G-code level, input shaper, the INDX lock, the MMU3 feature
@@ -221,8 +230,8 @@ builds that can take one and false elsewhere (`basic_gets.cpp:229-253`).
 | Event | What the firmware does | Source |
 | --- | --- | --- |
 | Tool change in a print | No unload and no firmware E move on the XL. The INDX head-lock moves are excluded from counting. The slicer's ramming counts on whichever tool is picked. | `toolchanger_indx.cpp:365-376`, `planner.cpp:2194` |
-| Menu load or unload of another tool | Picks that tool first. INDX docks it again afterwards; the XL leaves it picked. | `M701_2.cpp:136-139` |
-| No tool picked | Extrusion isn't counted and the idle sensor clear doesn't run. | `planner.cpp:2207` |
+| Menu load or unload of another tool | Picks that tool first with `T<n> S1 L0 D0`, outside any dialog: it reads `IDLE`, and the idle sensor clear can run on the new tool before the operation starts. INDX docks it again afterwards; the XL leaves it picked. A preheat cancel or a failed pickup leaves an INDX tool picked. The preview's load picks inside its dialog. | `MItem_filament.cpp:41-104`, `M701_2.cpp:84-88, 112-114, 135-140, 162-166, 179-181, 194-197, 339-342`, `pause.cpp:1447-1468` |
+| No tool picked | A non-service E move is a `bsod`, so callers pick first and Move E sends no E. The idle sensor clear doesn't run. | `planner.cpp:2194-2198`, `screen_menu_move.cpp:166-171, 206-211`, `filament_sensors_handler.cpp:306` |
 | The picked tool at rest | INDX docks its tool after a load, an unload, a pause and a print, so an idle INDX has none picked. At boot it has one only if a tool is physically on the head. An XL has whichever tool is physically on the head, which after a print depends on the end G-code; the stock profile parks it. | `M701_2.cpp:135-140, 194-197, 339-342`, `pause.cpp:1395-1402`, `marlin_server.cpp:1098, 2561`, `toolchanger_indx.cpp:222-262`, `toolchanger_xl.cpp:582-597` |
 | Idle sensor clear | Only the picked tool. So it never runs on an idle INDX, and rarely on an XL. A tool emptied by hand while docked keeps its type. Nothing sweeps the tools at boot or at a print start. | `filament_sensors_handler.cpp:294-312` |
 | Runout with a spool join | Counts an unload on the old tool, and the print goes on with the join's tool. The new tool's type isn't set or copied. Its purge counts on it: 27 mm on the XL, 25 mm on INDX. | `spool_join.cpp:258-342`, `toolchanger_xl.cpp:505-549`, `nozzle_cleaner.cpp:87` |
@@ -231,10 +240,11 @@ builds that can take one and false elsewhere (`basic_gets.cpp:229-253`).
 | Change all, from the XL menu | For each enabled tool: an unload, the new type, a purge. | `multi_filament_change.cpp:186-233` |
 | A load or unload during a print | Reads `ATTENTION` in every phase, not only while waiting. Idle, it reads `BUSY`. | `printer_state.cpp:178-190, 238-243` |
 
-The simulator has the first row, and an idle sensor clear that follows the
-picked tool. Its selected tool can be none, but nothing makes it none, so
-T4 (the idle clear on a picked tool) describes something an INDX does only
-with a tool left on the head.
+The simulator has the first three rows and an idle sensor clear that
+follows the picked tool. An INDX docks after a menu load or unload, so its
+selected tool becomes none, and the Pick/park menu picks or parks a tool on
+either toolchanger. Where the picked tool rests after a pause or a print,
+and at boot, is still to come.
 
 One correction applies to every build. After a power cut, the firmware sits
 in `IDLE` for at least 1.5 s before the resume starts, and the idle sensor
@@ -336,8 +346,8 @@ A single-tool printer has one of each. A toolchanger has one path per
 tool. An MMU printer has five tools and one path. The printer has a
 selected tool, which can be none. A move names the tool whose path moves,
 and the feed system decides which tool it credits. A toolchanger's menu
-load on an unpicked tool counts on that tool until Workstream 4 has a menu
-load pick the tool first. A load or unload in progress stays on its tool.
+load or unload picks its tool first, as the firmware's menu does. A load or
+unload in progress stays on its tool.
 
 "None selected" is two cases in the firmware. A toolchanger with no tool
 picked has no physical tool: it can't move E at all, the auto-retract's

@@ -104,7 +104,7 @@ curl -X POST -H 'Content-Type: application/json' \
 ```
 
 Actions: `load`, `unload`, `extrude`, `retract`, `select_tool`,
-`start_print`, `pause`, `resume`, `cancel`, `dismiss`, `home`, `runout`, `jam`,
+`park_tool`, `start_print`, `pause`, `resume`, `cancel`, `dismiss`, `home`, `runout`, `jam`,
 `clear_jam`, `reboot`, `set_power`, `set_fault`, `set_firmware`,
 `set_sensor_fault`, `set_stuck_write`, `set_tool_enabled`,
 `set_checks`, `set_sensors`, `counter_step_back`,
@@ -247,12 +247,24 @@ that trace. The points that matter for the bridge, in short:
   the system, and `script/firmware-check` compares it with the build's
   `HAS_TOOLCHANGER` and `HAS_INDX`. The feed system says whether `select_tool` can pick a
   tool, whether the preview's tools-mapping screen applies, what a
-  print's tool change does, which tool a move counts on, and which tool's
-  sensor the idle sensor clear reads.
+  print's tool change does, which tool a move counts on, which tool's
+  sensor the idle sensor clear reads, and where the picked tool rests after
+  a menu load or unload.
+- On a toolchanger, a menu `load` or `unload` picks its tool first, as the
+  printer's menu does. The pick reads `IDLE` and opens no dialog, so the
+  idle sensor clear runs on the newly picked tool before the operation
+  starts: a stored type over an empty sensor counts an unload. INDX docks
+  the tool when the operation ends, and the XL leaves it picked. A load
+  the preview waits for picks its tool inside the dialog, with no clear,
+  and INDX docks it after too. A reload in a print neither picks nor docks.
+  `park_tool` parks the picked tool, as the Pick/park menu does.
+- `extrude` and `retract` move only the picked tool, as the menu's Move E
+  does. With no tool picked they answer 409, and on another tool 400.
 - The selected tool can be none, which stands for a toolchanger with no
-  tool picked, though nothing leaves it so. Then no filament moves or
-  counts, the idle sensor clear doesn't run, and a print's end neither
-  retracts nor auto-retracts. The page shows the tool as "none".
+  tool picked: an INDX after a menu load or unload, or either toolchanger
+  after `park_tool`. Then no filament moves or counts, the idle sensor
+  clear doesn't run, and a print's end neither retracts nor auto-retracts.
+  The page shows the tool as "none".
 - MINI, MK3.5 and MK3.5S report the material with no counters. The
   `no_endpoint` firmware mode answers 404, like stock firmware.
 

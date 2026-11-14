@@ -647,7 +647,8 @@ class SimPrinter:
     job: UserJob | SyncJob | None = None
     job_counter: int = 0
     # The picked tool, or None for a toolchanger with no tool picked: then no filament moves
-    # and the idle sensor clear doesn't run (`SimPrinter.feed`).
+    # and the idle sensor clear doesn't run (`SimPrinter.feed`). INDX docks its tool after a
+    # menu load or unload, and `park_tool` parks it on either toolchanger.
     selected_tool: int | None = 0
     message: str | None = None
     homed: bool = False
@@ -703,12 +704,9 @@ class SimPrinter:
         (`lib/Marlin/Marlin/src/module/planner.cpp`). Every move the simulator makes goes
         through here.
 
-        With no tool picked nothing moves: a toolchanger can't move E without a tool, and
-        the hook needs one too (`bsod("E move without tool")` and `currently_selected()` in
-        the same function).
+        Every caller picks `tool` first, as the firmware does: a toolchanger's E move with
+        no tool picked is a `bsod("E move without tool")` in the same function.
         """
-        if self.feed.credited(self, tool) is None:
-            return
         if mm > 0:
             self._deretract(tool)
         elif mm < 0:
@@ -1032,13 +1030,18 @@ class SimPrinter:
             purge_mm = _positive(purge_mm, "purge_mm")
         extra = self.settings.jam_purge_mm if waiting and job.waits_for(Reason.JAM) else 0.0
         if waiting and isinstance(job, UserJob) and job.previewing:
-            # The preview's Yes runs `M701` (`queue_filament_gcodes` in
+            # The preview's Yes runs `M701 T<n>` (`queue_filament_gcodes` in
             # `src/common/marlin_print_preview.cpp`): a plain load, with no prime, and no
             # auto-retract because `is_printing()` is already true there
-            # (`load_finalize_process` in `src/marlin_stubs/pause/pause.cpp`).
+            # (`load_finalize_process` in `src/marlin_stubs/pause/pause.cpp`). It picks
+            # the tool inside its dialog (`Pause::tool_change`, `pause.cpp:1447-1468`), so
+            # no idle sensor clear runs at the pick.
+            self._pick(t)
             steps = self._load_steps(purge_mm, extra, False, auto_retract=False)
             job.enter(JobPhase.PREVIEW_LOAD)
         else:
+            if not waiting:
+                self._menu_pick(t)
             steps = self._load_steps(purge_mm, extra, waiting)
         t.process = LoadProcess(steps, material)
         self._next_load_step(t, t.process)  # a load with no slow or fast feed types at once
@@ -1099,6 +1102,7 @@ class SimPrinter:
             t.path.loaded, t.path.gap = False, self.model.gap_mm
             return
         self._log("action", f"unload T{tool}")
+        self._menu_pick(t)
         steps = self._unload_steps(t, "unload")
         self._settle(t, steps, None)
         t.process = UnloadProcess(steps, self.settings.unload_seconds)
@@ -1123,12 +1127,37 @@ class SimPrinter:
 
     def select_tool(self, tool: int) -> None:
         t = self._tool(tool)
-        self._check_select(t)
-        self.selected_tool = tool
+        self._check_select()
         self._log("action", f"select T{tool}")
+        self._pick(t)
         cleared = self.feed.idle_clear_tool(self)
         if self.power is not Power.OFF and cleared is not None:
             self._idle_sensor_clear(cleared, sensor_fault_counts=True)
+
+    def park_tool(self) -> None:
+        """Park the picked tool from the Pick/park menu (`P0 S1 L0` in
+        `src/gui/screen/screen_tool_pick_park.cpp`), leaving none picked."""
+        self._check_park()
+        self._log("action", f"park T{self.selected_tool}")
+        self.selected_tool = None
+
+    def _pick(self, t: SimTool) -> None:
+        """Pick `t` up unless it's picked already. A pick moves no counted filament: the
+        XL's moves no E, and INDX's head-lock moves are service moves, which the planner
+        never counts (`toolchanger_xl.cpp`, `toolchanger_indx.cpp`, `planner.cpp:2194-2198`)."""
+        if self.selected_tool != t.index:
+            self.feed.pick(self, t)
+
+    def _menu_pick(self, t: SimTool) -> None:
+        """The pick before a menu load or unload: `T<n> S1 L0 D0`, sent before `M701` or
+        `M702` with no dialog open (`show_tool_selector_dialog` in
+        `src/gui/MItem_filament.cpp`). So the idle sensor clear runs on the newly picked
+        tool before the operation starts, as it does after `select_tool`. On a tool that's
+        already picked nothing changes."""
+        if self.selected_tool == t.index:
+            return
+        self._pick(t)
+        self._idle_sensor_clear(t, sensor_fault_counts=True)
 
     # Actions on prints.
 
@@ -1504,14 +1533,26 @@ class SimPrinter:
         self._need_power()
         if self.job is not None or self.state not in IDLE_STATES:
             raise Busy(f"manual moves need an idle printer, not {self.state}")
+        # Move E moves only the picked tool, and with none picked it shows "No tool" and
+        # sends no E (`ScreenMenuMove::loop` and `plan_moves` in
+        # `src/gui/screen_menu_move.cpp`).
+        if self.selected_tool is None:
+            raise Busy("no tool picked")
+        if t.index != self.selected_tool:
+            raise Invalid(f"T{t.index} isn't the picked tool")
         if not t.path.loaded:
             raise Invalid(f"T{t.index} has no filament")
 
-    def _check_select(self, t: SimTool) -> None:
+    def _check_select(self) -> None:
         if not self.feed.selectable:
             raise Invalid(f"{self.model.name} has one tool")
         if self.job is not None or self.state is State.BUSY:
             raise Busy(f"can't pick a tool while {self.state}")
+
+    def _check_park(self) -> None:
+        self._check_select()
+        if self.selected_tool is None:
+            raise Busy("no tool picked")
 
     def _check_runout(self, t: SimTool) -> None:
         self._need_power()
@@ -1591,6 +1632,7 @@ class SimPrinter:
             "cancel": self._check_cancel,
             "dismiss": self._check_dismiss,
             "home": self._check_home,
+            "park_tool": self._check_park,
             "reboot": self._need_power,
             "clear_jam": self._check_clear_jam,
             "tap_through": self._check_tap_through,
@@ -1607,7 +1649,7 @@ class SimPrinter:
             "retract": lambda: self._check_move(t),
             "runout": lambda: self._check_sensor_runout(t),
             "jam": lambda: self._check_runout(t),
-            "select_tool": lambda: self._check_select(t),
+            "select_tool": self._check_select,
             # The fault switches take any enabled tool, in any state.
             "set_sensor_fault": lambda: None,
             "set_stuck_write": lambda: None,
@@ -1669,6 +1711,7 @@ class SimPrinter:
         self._run_steps(t, p.steps)  # what rounding left
         t.process = None
         self._physical_unload(t, "unload")
+        self.feed.rest(self)  # `M702` docks after every unload on INDX
         self._process_done()
 
     def _next_load_step(self, t: SimTool, p: LoadProcess) -> None:
@@ -1677,6 +1720,11 @@ class SimPrinter:
         if not p.steps:
             t.path.loaded, t.process = True, None
             self._log("load", f"T{t.index} loaded: extruded {int(t.extruded)}")
+            # `M701` docks on INDX unless it resumes a print, so a menu load and the
+            # preview's load do and a reload in a print doesn't (`M701_2.cpp:135-140`).
+            job = self.job
+            if job is None or job.phase is JobPhase.PREVIEW_LOAD:
+                self.feed.rest(self)
             self._process_done()
 
     def _process_done(self) -> None:

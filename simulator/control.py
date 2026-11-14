@@ -29,6 +29,7 @@ ACTIONS = frozenset(
         "extrude",
         "retract",
         "select_tool",
+        "park_tool",
         "start_print",
         "pause",
         "resume",

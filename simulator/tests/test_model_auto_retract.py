@@ -106,6 +106,7 @@ def test_the_first_extrude_after_a_nextruder_load_counts_15_more(model):
 
 def test_the_first_extrude_after_an_indx_load_counts_nothing_more():
     sim, p = idle_loaded("8.10.0")
+    p.select_tool(0)  # the load docked it
     # The 8 mm deretract refills the 8 mm gap (gap 0); then the 10 mm extrude counts.
     assert counted(p, lambda: p.extrude(0, 10)) == pytest.approx(10)
     assert tracker(p) == (0, True, 0)
@@ -160,12 +161,14 @@ def test_an_indx_unload_purges_then_rams():
 
 def test_an_indx_unload_after_an_extrude():
     sim, p = idle_loaded("8.10.0")
+    p.select_tool(0)  # the load docked it
     p.extrude(0, 10)  # gap 0, 0 stored
     assert counted(p, lambda: unload(sim, p)) == pytest.approx(2 + 17)
 
 
 def test_an_indx_unload_with_the_tracker_lost_counts_nothing():
     sim, p = idle_loaded("8.10.0")
+    p.select_tool(0)  # the load docked it
     p.retract(0, 30)  # gap 27, invalid, nothing stored
     # The purge: gap 25. The ramming feeds back nothing first: +8 gap 17; +8 gap 9; -20
     # gap 27; -3 27; +3 24; +19 5; +2 3; -20 23; -3 26; +3 23; -6 27; -8 27. Nothing
@@ -344,6 +347,8 @@ def test_a_boot_hands_the_stored_distance_to_the_tracker(model, boot, extrude):
     sim, p = idle_loaded(model)
     p.reboot()
     assert tracker(p) == boot
+    if p.selected_tool is None:
+        p.select_tool(0)  # INDX docked it after the load
     assert counted(p, lambda: p.extrude(0, 10)) == pytest.approx(extrude)
 
 
@@ -438,6 +443,7 @@ def test_a_cancel_after_a_flexible_runout_doesnt_auto_retract():
 
 def test_indx_unloads_a_cleared_flexible_tool_with_its_flexible_sequence():
     sim, p = idle_loaded("8.10.0", name="FLEX")  # gap 0, nothing stored
+    p.select_tool(0)  # the load docked it, and the idle clear reads only the picked tool
     p.set_sensor_fault(0, True)
     sim.tick(1)
     sim.tick(1)
