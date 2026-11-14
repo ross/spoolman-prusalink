@@ -2312,7 +2312,7 @@ class SimPrinter:
 
     def _ask_print(self, job: UserJob) -> None:
         """The "G-code incompatible" screen (`stateFromPrinterCheck`), then the rest."""
-        rows = print_checks(self.feed.tool_mapping, self._uses(job), self._tool_views()).rows
+        rows = print_checks(self.feed.maps_tools(self), self._uses(job), self._tool_views()).rows
         if rows:
             self._preview_question(job, Reason.PREVIEW, rows)
         else:
@@ -2326,7 +2326,7 @@ class SimPrinter:
         applies, with nothing wrong too: only a remote start that is fully compatible skips
         it (`checks_done` in `src/common/marlin_print_preview.cpp`).
         """
-        checks = print_checks(self.feed.tool_mapping, self._uses(job), self._tool_views())
+        checks = print_checks(self.feed.maps_tools(self), self._uses(job), self._tool_views())
         if checks.mapped:
             job.mapping = self._mapping_report(job, checks.mapping)
             self._wait(job, job.mapping[0])
@@ -2366,7 +2366,8 @@ class SimPrinter:
         """The wrong-filament screen (`stateFromFilamentType`), which a printer with tool
         mapping leaves to its tools-mapping screen."""
         uses, views = self._uses(job), self._tool_views()
-        rows = [] if tool_mapping(self.feed.tool_mapping, uses, views) else wrong_types(uses, views)
+        mapped = tool_mapping(self.feed.maps_tools(self), uses, views)
+        rows = [] if mapped else wrong_types(uses, views)
         if rows:
             self._preview_question(job, Reason.WRONG_FILAMENT, rows)
         else:
@@ -2393,10 +2394,8 @@ class SimPrinter:
 
     @property
     def profile(self) -> Slicer | None:
-        """The multi-tool slicer profile the printer prints with, on a toolchanger only. An
-        XL with one tool isn't one (`toolchanger`), and its single-tool profiles inherit
-        `*commonXL*`, whose end G-code doesn't park, so it prints as a direct printer does."""
-        return self.model.slicer if self.toolchanger else None
+        """The multi-tool slicer profile the printer prints with, as its feed system says."""
+        return self.feed.profile(self)
 
     def _slicer(self, job: UserJob) -> Slicer | None:
         """The print's slicer profile, with the print's overrides."""

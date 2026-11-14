@@ -25,8 +25,17 @@ class Feed(StrEnum):
 
 class FeedSystem:
     selectable: ClassVar[bool]  # the user can pick a tool (select_tool)
-    tool_mapping: ClassVar[bool]  # the preview's tools-mapping screen applies (HAS_TOOL_MAPPING)
     docks: ClassVar[bool] = False  # whether the picked tool goes back to a dock (INDX)
+
+    def maps_tools(self, p: SimPrinter) -> bool:
+        """Whether the preview's tools-mapping screen applies (`HAS_TOOL_MAPPING`). A direct
+        printer has no tool mapping."""
+        return False
+
+    def profile(self, p: SimPrinter) -> Slicer | None:
+        """The multi-tool slicer profile `p` prints with. A direct printer has none: its
+        single-tool profiles add no moves the simulator models."""
+        return None
 
     def tool_change(
         self, p: SimPrinter, old: SimTool, new: SimTool, slicer: Slicer, first: bool
@@ -78,14 +87,21 @@ class Direct(FeedSystem):
     """One tool fed straight from its spool: a print's segments all use tool 0."""
 
     selectable = False
-    tool_mapping = False
 
 
 class Toolchanger(FeedSystem):
     """Several tools, each with its own spool, that a print picks up in turn (XL, INDX)."""
 
     selectable = True
-    tool_mapping = True
+
+    def maps_tools(self, p: SimPrinter) -> bool:
+        return True
+
+    def profile(self, p: SimPrinter) -> Slicer | None:
+        """On a toolchanger only. An XL with one tool isn't one (`SimPrinter.toolchanger`),
+        and its single-tool profiles inherit `*commonXL*`, whose end G-code doesn't park, so
+        it prints as a direct printer does."""
+        return p.model.slicer if p.toolchanger else None
 
     def pick(self, p: SimPrinter, tool: SimTool) -> None:
         """Pick `tool` up, parking the picked one first. Neither moves counted filament."""
