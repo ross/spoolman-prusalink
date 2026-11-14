@@ -383,7 +383,8 @@ written.
   tools-mapping screen.
 - **What happens**: On the tools-mapping screen, Print with a used tool
   empty first asks to turn the filament sensors off, and only that lets
-  the print go on (F28, F29). A single-tool printer's
+  the print go on. When the file names a type for the empty tool, a type
+  question follows, which Ignore answers (F28, F29). A single-tool printer's
   filament-not-inserted screen offers the same, and the print goes on
   alike (F29). The print then runs through the empty tool, and the tracker
   counts every move on that tool with no material, a toolchanger's pickup
@@ -395,7 +396,8 @@ written.
   spool: 76 mm in the test, on top of its load.
 - **Evidence**: On a toolchanger, shown in the simulator by
   `test_a_print_through_an_empty_tool_holds_its_usage` in
-  `tests/test_toolchanger_prints.py`, on an INDX. On a single-tool
+  `tests/test_toolchanger_prints.py`, on an INDX, which pins the charge:
+  the held 76 mm plus the load's 70. On a single-tool
   printer, read in the firmware source (F29): the simulator doesn't model
   that path.
 - **Scenario rows**: C7, T2.

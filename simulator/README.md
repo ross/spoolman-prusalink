@@ -198,9 +198,14 @@ that trace. The points that matter for the bridge, in short:
   two tools enabled, asks one tools-mapping question with every per-tool
   row, the type included, and asks it with nothing wrong too. While that
   question is up the printer isn't printing, so the idle sensor clear runs
-  on the picked tool. Nothing loads there. Print with a used tool empty asks
-  again, to turn the filament sensors off: `tap_through` does, and `cancel`
-  goes back to the tools-mapping screen.
+  on the picked tool. Nothing loads there. Print then asks once for each
+  kind of failed row, across all the tools: a used tool empty asks to turn
+  the filament sensors off, which `tap_through` does, and then a used tool
+  holding another type asks too, an empty one included when its segment
+  names a type. `tap_through` answers Ignore, and `cancel` goes back to the
+  tools-mapping screen with the sensors as they are. The screen keeps the
+  rows it showed when it opened, so Print asks the same questions again. A
+  disabled used tool leaves Abort the only way off the screen.
   `tap_through` answers Print or Ok, and `cancel` answers Abort or No,
   which ends in `IDLE` with no job and the ID used up. `checks` governs
   none of these: the firmware's severities are fixed.
@@ -316,9 +321,11 @@ Choices made where the firmware was silent or the plan left it open:
   toolchanger. The load can't be cancelled.
 - A print's end auto-retracts the picked tool even when it has no
   filament, as the simulator does for a loaded one. The source doesn't
-  say otherwise, but a trace hasn't shown it. The firmware refuses to turn
-  the sensors off when a print joins spools, which the simulator doesn't
-  model.
+  say otherwise, but a trace hasn't shown it.
+- The simulator has no spool join. The firmware refuses to turn the
+  sensors off when a print joins spools.
+- Stuck-filament detection isn't modeled. It's on by default, except on
+  INDX, where it's off.
 - The preview doesn't model an uncalibrated INDX nozzle cleaner, which
   refuses every print, the unfinished-selftest screen, the
   new-firmware screen (`M115 U`, which continues by itself after 30 s),

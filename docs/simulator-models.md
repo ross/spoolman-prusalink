@@ -113,9 +113,10 @@ firmware update.
   A segment can name a filament type, and a tool holding another one asks.
   On the XL and INDX these rows are one tools-mapping question, which a
   print it applies to asks with nothing wrong too, and the idle sensor
-  clear runs on the picked tool while it's up. Print past a tool with no
-  filament turns every filament sensor off, and the print then counts on
-  that tool with no material. A printer's `sensors` switch turns off the
+  clear runs on the picked tool while it's up. Print there asks once for
+  each kind of failed row: a tool with no filament asks to turn every
+  filament sensor off, then a tool holding another type asks. The print
+  then counts on the empty tool with no material. A printer's `sensors` switch turns off the
   runout, the idle sensor clear and the preview's filament question.
 - It serves `/api/version`, `/api/v1/info`, `/api/v1/status`, `/api/v1/job`
   and `/api/v1/filament`. `/api/v1/info` always reports `mmu` as false.

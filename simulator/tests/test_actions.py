@@ -7,7 +7,16 @@ from collections.abc import Callable
 
 import pytest
 
-from simulator.model import Busy, Invalid, PrintSpec, Segment, SimPrinter, SimTool, Simulation
+from simulator.model import (
+    Busy,
+    Invalid,
+    JobPhase,
+    PrintSpec,
+    Segment,
+    SimPrinter,
+    SimTool,
+    Simulation,
+)
 from simulator.preview import Severity
 from simulator.tests.test_model import one_segment
 from simulator.tests.util import loaded, make, run, sliced
@@ -124,10 +133,14 @@ def cold_bed():
 
 
 def multi_tool_print():
+    """An XL mid-print on two tools, past Print on the tools-mapping screen."""
     tools = [loaded(0), loaded(1), SimTool(2), loaded(3, enabled=False)]
     sim, p = make("3.1.0", tools)
     p.start_print(PrintSpec([Segment(0, 100), Segment(1, 100)], preheat_s=0))
+    run(sim, 1)
+    p.tap_through()  # Print
     run(sim, 1.8)
+    assert p.job.phase is JobPhase.PRINTING
     return sim, p
 
 
@@ -139,13 +152,15 @@ def multi_tool_unloading():
 
 
 def preheat_empty():
-    """A toolchanger's print preheats on an empty tool once Print is pressed on the
-    tools-mapping screen, so a runout has no filament to run out."""
+    """A toolchanger's print preheats on an empty tool once Print on the tools-mapping
+    screen has turned the sensors off, so a runout has no filament to run out."""
     sim, p = make("3.1.0", [SimTool(0), loaded(1)])
     p.start_print(one_segment(100, preheat_s=60))
     run(sim, 1)
-    p.tap_through()
+    p.tap_through()  # Print
+    p.tap_through()  # turn the sensors off
     run(sim, 1)
+    assert p.job.phase is JobPhase.PREHEAT and p.selected_tool == 0
     return sim, p
 
 

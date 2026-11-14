@@ -164,8 +164,10 @@ class Reason(StrEnum):
     PREVIEW = "preview"  # the print preview asks about a file's failed checks
     TOOLS_MAPPING = "tools mapping"  # a toolchanger's preview asks about the tools a print uses
     WRONG_FILAMENT = "wrong filament"  # the preview asks about a tool holding another type
-    # Print on the tools-mapping screen with a used tool empty asks to turn the sensors off.
+    # Print on the tools-mapping screen asks about each kind of failed check once: a used
+    # tool empty asks to turn the sensors off, then a used tool of another type asks too.
     SENSORS_OFF = "filament sensors off"
+    MAPPING_TYPE = "wrong filament type"
     PARSE_ERROR = "parse error"  # a sync job's G-code can't run
     JAM = "jam"
     RUNOUT = "runout"
@@ -183,6 +185,7 @@ PHASE_REASONS = {
             Reason.TOOLS_MAPPING,
             Reason.WRONG_FILAMENT,
             Reason.SENSORS_OFF,
+            Reason.MAPPING_TYPE,
             Reason.PARSE_ERROR,
             Reason.JAM,
         }
@@ -192,13 +195,11 @@ PHASE_REASONS = {
     ),
     JobPhase.AWAIT_RESUME: frozenset({Reason.COLD_BED}),
 }
+# The questions of the firmware's tools-mapping phase, while it isn't printing.
+MAPPING_QUESTIONS = frozenset({Reason.TOOLS_MAPPING, Reason.SENSORS_OFF, Reason.MAPPING_TYPE})
 # The questions the print preview asks with Abort and Print or Ok, which `tap_through` and
 # `cancel` answer.
-PREVIEW_QUESTIONS = frozenset(
-    {Reason.PREVIEW, Reason.TOOLS_MAPPING, Reason.WRONG_FILAMENT, Reason.SENSORS_OFF}
-)
-# The questions of the firmware's tools-mapping phase, while it isn't printing.
-MAPPING_QUESTIONS = frozenset({Reason.TOOLS_MAPPING, Reason.SENSORS_OFF})
+PREVIEW_QUESTIONS = MAPPING_QUESTIONS | {Reason.PREVIEW, Reason.WRONG_FILAMENT}
 
 
 @dataclass(frozen=True)
@@ -214,7 +215,7 @@ class Attention:
 
     def __str__(self) -> str:
         match self.reason:
-            case Reason.PREVIEW | Reason.TOOLS_MAPPING | Reason.WRONG_FILAMENT | Reason.SENSORS_OFF:
+            case reason if reason in PREVIEW_QUESTIONS:
                 detail = self.detail or "nothing wrong"
                 return f"{self.reason}{' (abort only)' if self.fatal else ''}: {detail}"
             case Reason.PARSE_ERROR:
@@ -518,6 +519,8 @@ class UserJob(SimJob):
     clean_at: float | None = None  # RECOVER time left when the nozzle clean purges
     restore_gap: float | None = None  # the tool's gap when a filament change began
     previewing: bool = True  # until the preview lets the print begin
+    # The tools-mapping screen and the questions its Print asks, set when the screen opens.
+    mapping: list[Attention] = field(default_factory=list)
 
     def progress(self) -> int:
         return int(100 * self.fed_mm / self.spec.total_mm)
@@ -1179,9 +1182,9 @@ class SimPrinter:
     def cancel(self) -> None:
         self._check_cancel()
         job = self.job
-        if isinstance(job, UserJob) and job.waits_for(Reason.SENSORS_OFF):
+        if isinstance(job, UserJob) and job.attention in job.mapping[1:]:
             self._log("action", "cancel: back to the tools-mapping screen")
-            self._after_incompatible(job)
+            self._wait(job, job.mapping[0])
             return
         if self._at_preview(job) or job.phase is JobPhase.BLIP:
             # Abort or No at the preview, or a stop before the print begins, which
@@ -1280,29 +1283,18 @@ class SimPrinter:
         self._log("action", f"tap through: {job.attention}")
         if isinstance(job, UserJob) and job.waits_for(Reason.PREVIEW):
             self._after_incompatible(job)
-        elif isinstance(job, UserJob) and job.waits_for(Reason.TOOLS_MAPPING):
-            self._mapping_print(job)
-        elif job.waits_for(Reason.SENSORS_OFF):
-            self.set_sensors(False)
-            self._begin(job)
+        elif isinstance(job, UserJob) and job.attention in job.mapping:
+            if job.waits_for(Reason.SENSORS_OFF):
+                self.set_sensors(False)  # it stays off after the print
+            following = job.mapping[job.mapping.index(job.attention) + 1 :]
+            if following:
+                self._wait(job, following[0])
+            else:
+                self._begin(job)
         elif any(job.waits_for(r) for r in PREVIEW_QUESTIONS):
             self._begin(job)
         else:
             self._park(job, State.STOPPED)
-
-    def _mapping_print(self, job: UserJob) -> None:
-        """Print on the tools-mapping screen. A used tool with no filament first asks to
-        turn every filament sensor off, which stays off after the print; Cancel goes back to
-        the screen (`on_button_click` in `src/gui/screen/print/frame_tool_mapping.cpp`,
-        `gui_confirm_incompatibility` in
-        `src/feature/compatibility_checks/gcode_compatibility.cpp`)."""
-        views = self._tool_views()
-        empty = [i for i in sorted(self._uses(job)) if views[i].enabled and not views[i].loaded]
-        if empty:
-            rows = [Failed(f"T{i} has no filament", False) for i in empty]
-            self._preview_question(job, Reason.SENSORS_OFF, rows)
-        else:
-            self._begin(job)
 
     # Power and faults.
 
@@ -1708,7 +1700,7 @@ class SimPrinter:
     def _begin(self, job: UserJob | SyncJob) -> None:
         """Start the job the preview let through: the blip, then the job itself."""
         if isinstance(job, UserJob):
-            job.previewing = False
+            job.previewing, job.mapping = False, []
         if self.settings.start_blip:
             job.enter(JobPhase.BLIP)
             job.remaining = self.settings.blip_seconds
@@ -1743,8 +1735,10 @@ class SimPrinter:
         }
 
     def _preview_question(self, job: UserJob, reason: Reason, rows: list[Failed]) -> None:
-        detail = "; ".join(r.text for r in rows) or None
-        job.enter(JobPhase.HOLD, Attention(reason, detail=detail, fatal=any(r.fatal for r in rows)))
+        self._wait(job, _question(reason, rows))
+
+    def _wait(self, job: UserJob, attention: Attention) -> None:
+        job.enter(JobPhase.HOLD, attention)
         self._log("job", f"job {job.id} waits: {job.attention}")
         self._show_state()
 
@@ -1766,13 +1760,39 @@ class SimPrinter:
         """
         checks = print_checks(self.model.max_tools, self._uses(job), self._tool_views())
         if checks.mapped:
-            self._preview_question(job, Reason.TOOLS_MAPPING, checks.mapping)
+            job.mapping = self._mapping_report(job, checks.mapping)
+            self._wait(job, job.mapping[0])
         elif checks.empty:
             job.enter(JobPhase.WAIT_LOAD, Attention(Reason.NO_FILAMENT, checks.empty[0]))
             self._log("job", f"job {job.id} waits: {job.attention}")
             self._show_state()
         else:
             self._check_types(job)
+
+    def _mapping_report(self, job: UserJob, rows: list[Failed]) -> list[Attention]:
+        """The tools-mapping screen, then the questions its Print asks.
+
+        Print confirms every failed check, each kind once for all the tools, in the order of
+        `VirtualToolCheck` in `src/feature/compatibility_checks/gcode_compatibility.hpp`: a
+        used tool with no filament asks to turn the sensors off, then a used tool holding
+        another type asks Cancel or Ignore. Cancel at either goes back to the screen, with the
+        sensors as they are. The answers come from the report the screen made when it
+        opened, which only a remap renews, so turning the sensors off doesn't clear its
+        filament row. A disabled used tool is fatal: Print shows only an error whose Cancel
+        returns to the screen, and with no remap modeled only Abort leaves it.
+        (`on_button_click` and `update_mapping` in
+        `src/gui/screen/print/frame_tool_mapping.cpp`, `gui_confirm_all_incompatibilities`
+        in `compatibility_checks_common.hpp`, `visit_failed_checks` and
+        `gui_confirm_incompatibility` in `gcode_compatibility.cpp`.)
+        """
+        uses, views = self._uses(job), self._tool_views()
+        empty = [i for i in sorted(uses) if not views[i].loaded]
+        asks = [
+            (Reason.SENSORS_OFF, [Failed(f"T{i} has no filament", False) for i in empty]),
+            (Reason.MAPPING_TYPE, wrong_types(uses, views)),
+        ]
+        screen = _question(Reason.TOOLS_MAPPING, rows)
+        return [screen, *(_question(reason, rows) for reason, rows in asks if rows)]
 
     def _check_types(self, job: UserJob) -> None:
         """The wrong-filament screen (`stateFromFilamentType`), which a printer with tool
@@ -1965,6 +1985,11 @@ def _setting_kind(default: Any) -> str:
     return "number" if default is not None else "optional"  # a number, or null for the model's
 
 
+def _question(reason: Reason, rows: list[Failed]) -> Attention:
+    detail = "; ".join(r.text for r in rows) or None
+    return Attention(reason, detail=detail, fatal=any(r.fatal for r in rows))
+
+
 def _refusal(check: Callable[[], None]) -> str | None:
     try:
         check()
@@ -2013,6 +2038,10 @@ def _tool_from(d: dict) -> SimTool:
     return SimTool(**d)
 
 
+def _attention_from(a: dict) -> Attention:
+    return Attention(Reason(a["reason"]), a["tool"], a["detail"], a["fatal"])
+
+
 def _job_from(d: dict | None) -> UserJob | SyncJob | None:
     if d is None:
         return None
@@ -2021,9 +2050,10 @@ def _job_from(d: dict | None) -> UserJob | SyncJob | None:
     d["phase"] = JobPhase(d["phase"])
     d["end_state"] = State(d["end_state"])
     if (a := d["attention"]) is not None:
-        d["attention"] = Attention(Reason(a["reason"]), a["tool"], a["detail"], a["fatal"])
+        d["attention"] = _attention_from(a)
     if kind == "sync":
         return SyncJob(**d)
+    d["mapping"] = [_attention_from(a) for a in d["mapping"]]
     if d["paused_from"] is not None:
         d["paused_from"] = JobPhase(d["paused_from"])
     spec = dict(d["spec"])

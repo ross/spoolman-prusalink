@@ -217,9 +217,75 @@ def test_a_toolchanger_asks_on_its_mapping_screen_and_loads_nothing(model):
     assert str(p.job.attention) == ("tools mapping: T1 has no filament; T1 holds ---, not PLA")
     assert seen(p) == ("ATTENTION", 1, "PAUSED")
     p.tap_through()  # Print: nothing loads at the preview on a toolchanger
-    assert p.job.waits_for(Reason.SENSORS_OFF) and seen(p) == ("ATTENTION", 1, "PAUSED")
-    p.tap_through()
+    assert str(p.job.attention) == "filament sensors off: T1 has no filament"
+    assert seen(p) == ("ATTENTION", 1, "PAUSED")
+    p.tap_through()  # turn them off
+    # The empty tool's type is none, which isn't the file's: the type check fails too.
+    assert str(p.job.attention) == "wrong filament type: T1 holds ---, not PLA"
+    assert seen(p) == ("ATTENTION", 1, "PAUSED") and not p.sensors
+    p.tap_through()  # Ignore
     assert not p.job.previewing and p.job.phase is JobPhase.BLIP
+
+
+def mapping_screen(model, tools, materials):
+    """A print with one segment per tool, each naming its material, on the mapping screen."""
+    sim, p = make(model, tools)
+    segments = [Segment(i, 10, m) for i, m in enumerate(materials)]
+    p.start_print(PrintSpec(segments, preheat_s=0))
+    sim.tick(0.5)
+    assert p.job.waits_for(Reason.TOOLS_MAPPING)
+    return sim, p
+
+
+@pytest.mark.parametrize("model", ["3.1.0", "8.10.0"])
+def test_a_wrong_type_on_the_mapping_screen_asks_once_for_every_tool(model):
+    sim, p = mapping_screen(model, [loaded(0, PLA), loaded(1, PLA)], ["PETG", "ASA"])
+    screen = "tools mapping: T0 holds PLA, not PETG; T1 holds PLA, not ASA"
+    assert str(p.job.attention) == screen
+    p.tap_through()  # Print
+    asked = "wrong filament type: T0 holds PLA, not PETG; T1 holds PLA, not ASA"
+    assert str(p.job.attention) == asked
+    assert seen(p) == ("ATTENTION", 1, "PAUSED") and p.sensors
+    p.cancel()  # Cancel: back to the screen, not the end of the print
+    assert str(p.job.attention) == screen and seen(p) == ("ATTENTION", 1, "PAUSED")
+    p.tap_through()  # Print again asks again
+    assert p.job.waits_for(Reason.MAPPING_TYPE)
+    p.tap_through()  # Ignore
+    assert p.job.phase is JobPhase.BLIP and p.sensors
+    sim.tick(100)
+    assert p.state is State.FINISHED and p.tools[0].material == PLA
+
+
+def test_an_empty_tool_the_file_names_no_type_for_asks_only_for_the_sensors():
+    sim, p = mapping_screen("3.1.0", [loaded(0, PLA), empty(1)], ["PLA", None])
+    assert str(p.job.attention) == "tools mapping: T1 has no filament"
+    p.tap_through()  # Print
+    assert p.job.waits_for(Reason.SENSORS_OFF)
+    p.tap_through()  # turn them off
+    assert p.job.phase is JobPhase.BLIP and not p.sensors
+
+
+def test_cancel_at_the_type_question_leaves_the_sensors_off():
+    sim, p = mapping_screen("8.10.0", [loaded(0, PLA), empty(1)], ["PLA", "PLA"])
+    screen = "tools mapping: T1 has no filament; T1 holds ---, not PLA"
+    assert str(p.job.attention) == screen
+    p.tap_through()  # Print
+    p.tap_through()  # turn the sensors off
+    assert p.job.waits_for(Reason.MAPPING_TYPE)
+    p.cancel()  # Cancel
+    # The screen keeps the report it made when it opened, filament row and all, and the
+    # sensors stay off.
+    assert str(p.job.attention) == screen and not p.sensors
+    sim.tick(10)
+    assert p.job.waits_for(Reason.TOOLS_MAPPING) and p.tools[1].extruded == 0
+    # So Print asks to turn them off again, then about the type.
+    p.tap_through()
+    assert p.job.waits_for(Reason.SENSORS_OFF)
+    p.tap_through()
+    assert p.job.waits_for(Reason.MAPPING_TYPE)
+    p.cancel()
+    p.cancel()  # Abort
+    assert p.job is None and p.state is State.IDLE and not p.sensors
 
 
 def two_tools(model):
@@ -302,6 +368,8 @@ def test_the_idle_sensor_clear_runs_on_the_mapping_screen():
         ([empty()], [Segment(0, 10)], 1, True),
         ([loaded(0)], [Segment(0, 10, "PETG")], 0, False),
         ([loaded(0), empty(1)], [Segment(0, 10), Segment(1, 10)], 0, False),
+        # The type question after the sensors were turned off.
+        ([loaded(0), empty(1)], [Segment(0, 10), Segment(1, 10, "PLA")], 2, False),
     ],
 )
 def test_a_snapshot_keeps_a_print_waiting_at_the_preview(tools, spec, taps, loading):
@@ -319,8 +387,11 @@ def test_a_snapshot_keeps_a_print_waiting_at_the_preview(tools, spec, taps, load
     other.restore(data)
     copy = other.printers["p"]
     assert copy.job == p.job and copy.state is p.state
-    assert copy.tools == p.tools
+    assert copy.tools == p.tools and copy.sensors is p.sensors
     # The copy goes on as the original would.
+    for printer in (copy, p):
+        if printer.job.waits_for(Reason.MAPPING_TYPE):
+            printer.cancel()  # back to the screen the snapshot kept
     other.tick(20)
     sim.tick(20)
     assert copy.job == p.job and copy.state is p.state

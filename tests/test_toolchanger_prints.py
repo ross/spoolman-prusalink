@@ -94,10 +94,11 @@ async def test_a_print_through_an_empty_tool_holds_its_usage(tmp_path, caplog):
     assert [r for r in records if "event" in r] == []
     assert fake.flag(1) is None and fake.flag(2) is None
 
-    # Open question: the held 76 mm never left a spool, yet the bridge charges it to the
-    # next spool reported in T1, with the load's own count, once T1 is loaded.
+    # A known fault, BF24 in docs/bridge-findings.md: the held 76 mm never left a spool,
+    # yet the bridge charges it to the next spool reported in T1, with the load's own
+    # count, once T1 is loaded. A fix changes this line.
     await station.swap_cycle(tool=1, source="preset", name="PLA")
     await bridge.poll()
     load = station.counter_at(1) - 576
-    assert totals(fake)[2] >= load
+    assert totals(fake)[2] == 576 - 500 + load
     await bridge.aclose()
