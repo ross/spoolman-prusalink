@@ -3519,7 +3519,8 @@ bool should_enable(FilamentSensorID id) {
 }
 """  # noqa: E501 (verbatim firmware lines)
 
-# `marlin_server.cpp`, excerpts: `pre_finalize_print`, its unload, and the single-tool start.
+# `marlin_server.cpp`, excerpts: `pre_finalize_print`, its unload, the single-tool start, and
+# the preview's Print and Inactive results.
 MARLIN_SERVER_CPP = """\
 static bool pre_finalize_print([[maybe_unused]] bool finished) {
 #if HAS_ANFC()
@@ -3628,6 +3629,12 @@ void safely_unload_filament_from_nozzle_to_mmu() {
                 // It would require homing the axes first, moving to [maxx-10, -4] and slowly purging while moving towards the origin
             }
 #endif
+
+        case PrintPreview::Result::Print:
+        case PrintPreview::Result::Inactive:
+            did_not_start_print = false;
+            server.print_state = State::PrintInit;
+            break;
 """  # noqa: E501 (verbatim firmware lines)
 
 # The tag radio's MMU condition.

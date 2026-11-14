@@ -622,15 +622,18 @@ WATCHED = (
         "045f566761af0f0a",
         UPSTREAM_7D8BF685,
     ),
-    # The print preview with an MMU: the question to unload first, when FINDA sees filament,
-    # and the single-tool shortcut past it; then its answers. The answers sit in the
-    # preview's whole state machine, so that row also trips on unrelated changes.
+    # The print preview with an MMU: the question to unload first, unless FINDA's sensor
+    # reads no filament, so while the MMU connects too, and the single-tool shortcut past
+    # it; then its answers. The answers sit in the preview's whole state machine, so that
+    # row also trips on unrelated changes. No is `Result::Inactive`, which the server
+    # starts like Print.
     Watched(
         "the MMU's preview question",
         "src/common/marlin_print_preview.cpp",
         "function",
         "PrintPreview::stateFromFilamentPresence",
-        "SimPrinter._ask_mmu_unload and _mmu_shortcut in simulator/model.py",
+        "SimPrinter._ask_mmu_unload and _mmu_shortcut in simulator/model.py: asked with the"
+        " MMU on, while it connects whatever FINDA sees",
         "e6e4aab68afb170b",
         UPSTREAM_7D8BF685,
     ),
@@ -642,6 +645,15 @@ WATCHED = (
         "SimPrinter.tap_through, unload_first and _process_done in simulator/model.py: No"
         " prints with no mapping screen, Yes unloads and then the checks are done",
         "f19a65b3c6c48c0a",
+        UPSTREAM_7D8BF685,
+    ),
+    Watched(
+        "the MMU preview's No",
+        "src/common/marlin_server.cpp",
+        "statement",
+        "case PrintPreview::Result::Print:",
+        "SimPrinter.tap_through in simulator/model.py: No at the MMU's question prints",
+        "be51a6c5eecc7226",
         UPSTREAM_7D8BF685,
     ),
     # The menu turns the MMU on only with a working extruder sensor.
