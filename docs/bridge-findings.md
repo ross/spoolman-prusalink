@@ -777,7 +777,8 @@ panic (F38 to F46). The MMU's scenario rows are T12 to T17.
 - **Evidence**: Read in the firmware source and the stock slicer profile;
   shown in the simulator by
   `test_an_mmu_tool_change_charges_the_outgoing_slot_the_firmware_feed` in
-  `tests/test_mmu.py`. The feed's last move stops at the sensor, between
+  `tests/test_mmu.py`, and through a real Spoolman by
+  `integration/test_tools.py::test_t12_two_color_mmu_print`. The feed's last move stops at the sensor, between
   36 and 50 mm, which only hardware could tell.
 - **Scenario rows**: T12.
 - **To reproduce**: That test: a print on slots 0 and 1, 20 mm each, in the

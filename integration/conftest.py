@@ -24,6 +24,7 @@ from integration.faults import SpoolmanFaults
 from integration.printers import FIRST, PLA_WHITE, SECOND, Load, Spec, Station, start
 from integration.station import SETTINGS
 from simulator.config import tool_location
+from simulator.mmu import MMU_SLOTS
 from simulator.model import (
     MODELS,
     PrintSpec,
@@ -520,20 +521,21 @@ def world_tools(request: pytest.FixtureRequest) -> int:
 
 
 @pytest.fixture
-def world_model(request: pytest.FixtureRequest, world_tools: int) -> str:
+def world_model(request: pytest.FixtureRequest, world_tools: int, world_mmu: bool) -> str:
     """The printer type code `world`'s printer reports, such as `1.4.0` for an MK4.
 
     By default it's a Core One L with one tool and a Core One L INDX with more. A test
     asks for any model the simulator has, such as an MK4 (`1.4.0`), with
     `@pytest.mark.parametrize("world_model", ["1.4.0"], indirect=True)`, and
-    `world_tools` can go up to the model's most. Spool A and the printer have a UUID
-    only on a model whose tool 0 keeps one, such as the Core One L, and not with
-    `world_fields` "fresh".
+    `world_tools` can go up to the model's most, or its MMU3's slots with `world_mmu`.
+    Spool A and the printer have a UUID only on a model whose tool 0 keeps one, such as
+    the Core One L, and not with `world_fields` "fresh".
     """
     default = SINGLE_TOOL_MODEL if world_tools == 1 else MULTI_TOOL_MODEL
     code = getattr(request, "param", default)
     assert code in MODELS, f"world_model {code!r} isn't a simulated model"
-    most = MODELS[code].max_tools
+    assert not world_mmu or MODELS[code].takes_mmu, f"{MODELS[code].name} takes no MMU3"
+    most = MMU_SLOTS if world_mmu else MODELS[code].max_tools
     assert world_tools <= most, f"{MODELS[code].name} has at most {most} tools"
     return code
 
@@ -569,6 +571,18 @@ def world_fields(request: pytest.FixtureRequest) -> str:
     return fields
 
 
+@pytest.fixture
+def world_mmu(request: pytest.FixtureRequest) -> bool:
+    """Whether `world`'s printer "it" has an MMU3: off by default.
+
+    A test on a model that takes one, named with `world_model`, asks for it with
+    `@pytest.mark.parametrize("world_mmu", [True], indirect=True)`. Its tools are then the
+    MMU's slots: spool A's PLA is slot 0's type, and with `world_tools` at 2 spool D's
+    PETG is slot 1's. Nothing is in the extruder and no slot is selected.
+    """
+    return getattr(request, "param", False)
+
+
 # --- Several printers (docs/scenarios.md X rows; see integration/printers.py) ---
 @pytest.fixture
 def world_printers(request: pytest.FixtureRequest) -> int:
@@ -596,6 +610,7 @@ async def world(
     world_fields: str,
     world_model: str,
     world_printer: dict,
+    world_mmu: bool,
 ):
     """The starting point every scenario shares.
 
@@ -615,6 +630,8 @@ async def world(
     With `world_printers` at 2 a second Core One L, printer "b", shares the simulation:
     tool 0 loaded with spool E's white PLA and UUID, E in `<prefix> LB`. See
     integration/printers.py.
+
+    With `world_mmu` printer "it" has an MMU3, and its tools are the slots.
     """
     locations = [tool_location(prefix, index, world_tools) for index in range(world_tools)]
     shelf = f"{prefix} shelf"
@@ -635,6 +652,7 @@ async def world(
         [Load("A", PLA, locations[0], 1000.0, None if bare else str(uuid.uuid4()))],
         world_printer,
         empty=locations[2:],
+        mmu=world_mmu,
     )
     if world_tools > 1:
         it.loads.append(Load("D", PETG_GREEN, locations[1], 500.0))

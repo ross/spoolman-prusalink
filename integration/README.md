@@ -281,6 +281,7 @@ end Status.
 | T5 | `test_tools.py::test_t5_tool_the_printer_does_not_report` | A configured tool the printer doesn't report: noted once, the other tool still charged. |
 | T6 | `test_tools.py::test_t6_writes_on_a_multi_tool_model_are_refused` | Writes on a multi-tool model: warned at boot, and a due write flags the spool instead. |
 | T7 | `test_tools.py::test_t7_reboot_restarts_every_tool` | Reboot on a multi-tool printer: each tool's counter restarts, and nothing is charged. |
+| T12 | `test_tools.py::test_t12_two_color_mmu_print` | Two-color MMU print: each slot's spool is charged its count, the change's feed too. |
 | C1 | `test_counters.py::test_c1_reboot_keeps_usage_held_at_the_reboot` | Reboot between prints: usage held then is kept, and goes to the next active spool. |
 | C1 | `test_counters.py::test_c1_usage_held_over_a_reboot_joins_the_open_swap` | Usage held over a reboot with a swap open: charged to the old spool, moved with it. |
 | C1 | `test_counters.py::test_c1_usage_held_over_a_reboot_joins_the_provisional_charge` | Usage held over a reboot with a provisional charge open: it joins that charge. |
