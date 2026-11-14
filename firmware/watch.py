@@ -257,7 +257,8 @@ WATCHED = (
         "src/common/power_panic.cpp",
         "function",
         "resume_loop",
-        "SimPrinter._recover, _unpark and _nozzle_clean in simulator/model.py",
+        "SimPrinter._recover, _unpark and _nozzle_clean in simulator/model.py, which have no"
+        " MMU step",
         "1c614228e7ef6377",
         UPSTREAM_7D8BF685,
     ),
@@ -678,6 +679,16 @@ WATCHED = (
         "using ScreenMenuFilamentMMU__ =",
         "SimPrinter._check_load in simulator/model.py",
         "b907808f273c2844",
+        UPSTREAM_7D8BF685,
+    ),
+    # A `T` while the MMU connects goes ahead and waits for the MMU's answer.
+    Watched(
+        "the MMU's readiness wait",
+        "lib/Marlin/Marlin/src/feature/prusa/MMU2/mmu2_mk4.cpp",
+        "function",
+        "MMU2::WaitForMMUReady",
+        "SimPrinter._mmu_change in simulator/model.py: a T while the MMU connects",
+        "21e2e2aaec06103b",
         UPSTREAM_7D8BF685,
     ),
 )

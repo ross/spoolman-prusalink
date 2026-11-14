@@ -1175,10 +1175,19 @@ class SimPrinter:
         freed the old filament. A slot's filament in the extruder with no slot selected, as
         after a boot, gets a change from none too, with no retract and no error: that the
         MMU then unloads it cleanly is inferred.
+
+        A `T` while the MMU connects, as in a print resumed after a power cut, waits for the
+        MMU's answer (`WaitForMMUReady` lets it through, then `manage_response`), and the
+        feed is planned on the MMU's progress messages, which come once it's Active. So the
+        feed counts on no slot, not slot 0. That's inferred, and the wait isn't timed: the
+        MMU is Active at once.
         """
         if self.selected_tool == new.index:
             self._log("job", f"T{new.index}: slot {new.index} already selected")
             return
+        if not self.mmu.active:
+            self._log("job", f"T{new.index} waits for the MMU to connect")
+            self._tick_mmu(self.mmu.connecting)
         old = self.selected_tool
         self._run_steps(new, self._mmu_change_steps(selected=old is not None))
         self._log("job", f"tool change {'none' if old is None else f'T{old}'} -> T{new.index}")
@@ -2656,10 +2665,8 @@ class SimPrinter:
         """Advance this printer by dt; return whether anything was running."""
         if self.power is Power.OFF or dt <= 0:
             return False
-        active = False
-        if self.mmu is not None and self.mmu.connecting > 0:
-            active = True
-            self._tick_mmu(dt)
+        active = self.mmu is not None and self.mmu.connecting > 0
+        elapsed = dt
         for t in self.tools.values():
             if t.process is not None:
                 active = True
@@ -2670,6 +2677,10 @@ class SimPrinter:
         if self.job is not None:
             active = True
             self._tick_job(dt)
+        # The MMU's connecting window counts down after the tick's moves, which it covered:
+        # a window that ends with the tick still credits them to slot 0.
+        if self.mmu is not None and self.mmu.connecting > 0:
+            self._tick_mmu(elapsed)
         self._idle_clear_selected()
         return active
 

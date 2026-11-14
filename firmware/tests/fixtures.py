@@ -3063,6 +3063,19 @@ bool MMU2::tool_change(uint8_t slot) {
     }
     return true;
 }
+
+bool MMU2::WaitForMMUReady() {
+    switch (State()) {
+    case xState::Stopped:
+        return false;
+    case xState::Connecting:
+    case xState::Bootloader:
+        // shall we wait until the MMU reconnects?
+        // fire-up a fsm_dlg and show "MMU not responding"?
+    default:
+        return true;
+    }
+}
 """  # noqa: E501 (verbatim firmware lines)
 
 # `multi_filament_change.cpp`, excerpts.
