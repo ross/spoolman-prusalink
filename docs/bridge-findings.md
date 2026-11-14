@@ -776,6 +776,10 @@ workstream 5. The MMU's scenario rows are T12, T13, T14 and T17.
   219 at 0.95. The rest is the firmware's feed and the stampings: 2 x
   (206.9 + 15) = 443.8 mm on slot 0, and 206.9 + 2 x 15 = 236.9 mm on
   slot 1, whose last stamping comes at the end with no feed after it.
+- **Open question**: Whether the charge a fix aims for counts the
+  slicer's 17 mm and 32 mm loads. The printer counts them, but most of
+  that filament fills the path to the nozzle and comes back at the next
+  unload.
 - **Status**: Open.
 
 ### BF17. MMU: nothing is counted after a boot until a tool change or load
