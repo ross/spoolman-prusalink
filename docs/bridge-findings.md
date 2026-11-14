@@ -75,7 +75,7 @@ written.
 | 2 | BF7 | An INDX with an uncalibrated nozzle cleaner refuses every print |
 | 3 | | None of its own |
 | 4 | BF16 | MMU: each tool change over-charges the outgoing slot |
-| 4 | BF29 | MMU: a load after an unload in the same boot counts up to 40 mm less |
+| 4 | BF29 | MMU: a load or print start after an unload in the same boot counts up to 40 mm less |
 | 4 | BF15 | MMU: swaps are invisible |
 | 4 | BF28 | MMU: turning the MMU off clears slot 0, whichever slot was loaded |
 | 4 | BF17 | MMU: nothing is counted after a boot until a tool change or load |
@@ -706,9 +706,9 @@ written.
 
 Each MMU finding applies to the MK4 family, the Core One and the Core One
 L with an MMU3 turned on in the printer's settings. The simulator models
-the MMU's switch, its selected slot and its idle operations (F38, F39,
-F41); its prints come later in workstream 5. The MMU's scenario rows are
-T13, T14 and T17.
+the MMU's switch, its selected slot, its idle operations and its prints
+(F38 to F42, F46); runouts, `M600` and power panic come later in
+workstream 5. The MMU's scenario rows are T12, T13, T14 and T17.
 
 ### BF15. MMU: swaps are invisible
 
@@ -733,27 +733,35 @@ T13, T14 and T17.
 - **Scenario rows**: S1, S2, S9, S13, T13.
 - **To reproduce**: That test: with spool 3 moved into slot 0's location,
   slot 0 is ejected and preloaded with PETG. No unload is recorded, spool 3
-  stays staged, and the next Load To Nozzle's 44 mm goes to spool 1, which
-  is flagged for the printer's PETG.
+  stays staged, and the next print's 135 mm goes to spool 1, which is
+  flagged for the printer's PETG.
 - **Status**: Open.
 
 ### BF16. MMU: each tool change over-charges the outgoing slot
 
-- **What happens**: At a tool change the firmware plans about 190 mm to
-  reach the filament sensor (`maximumAllowedExtruderMove`,
-  `mmu2_mk4.cpp:55, 1528, 1590`), then up to 57 mm more, while the old
-  slot is still selected. The 57 mm is 7 mm past the sensor
-  (`mmu2_mk4.cpp:1583`, `MMU2_TOOL_CHANGE_LOAD_LENGTH` in
-  `mmu2_config.h:35`) and 50 mm of feed (`MMU2_FEED_DISTANCE`,
-  `mmu2_config.h:69`, `mmu2_mk4.cpp:524-533`). The planner counts at plan
-  time, so the old slot is credited with it (`mmu2_mk4.cpp:674`).
-- **Effect**: Roughly 200 mm, less the gap, charged to the outgoing slot's
-  spool per change, and more on a retry. That's about 0.6 g of 1.75 mm PLA
-  per change.
-- **Evidence**: Inferred from the source. The size depends on how long the
-  push to the sensor takes, which only hardware could tell.
-- **Scenario rows**: None yet. T1 and T2 are the multi-tool equivalents.
-- **To reproduce**: Needs workstream 5.
+- **What happens**: At a tool change in a print the firmware retracts
+  80 mm, then feeds 189.9, 7 and up to 50 mm to bring the new slot's
+  filament to the extruder, while the old slot is still selected
+  (`mmu2_mk4.cpp:568-679, 681-702`, `mmu2_config.h:35, 44, 69`). The
+  planner counts at plan time, at most 40 mm past the gap, so the old slot
+  is credited 193 to 207 mm, 206.9 with the nominal 50 (F40). The
+  slicer's wipe-tower stamping adds 15 mm per stamping past the same
+  40 mm cap: one per change for PLA, two for PETG (F46). The first change
+  of a print, from no slot, credits nothing, and a failed load's retries
+  add nothing.
+- **Effect**: The outgoing slot's spool is charged 221.9 x 0.95 = 210.8
+  mm more per change for PLA and 236.9 x 0.95 = 225.1 mm for PETG, about
+  0.63 g.
+- **Evidence**: Read in the firmware source and the stock slicer profile;
+  shown in the simulator by
+  `test_an_mmu_tool_change_charges_the_outgoing_slot_the_firmware_feed` in
+  `tests/test_mmu.py`. The feed's last move stops at the sensor, between
+  36 and 50 mm, which only hardware could tell.
+- **Scenario rows**: T12.
+- **To reproduce**: That test: a print on slots 0 and 1, 20 mm each, in the
+  order 0, 1, 0, 1, makes three changes. Slot 0 counts 657.65 mm and slot
+  1 467.38, so the bridge charges 624 and 444 mm, where the model, the
+  start, the loads, the purges and the rammings come to 234.8 and 147.6.
 - **Status**: Open.
 
 ### BF17. MMU: nothing is counted after a boot until a tool change or load
@@ -857,7 +865,7 @@ T13, T14 and T17.
   a 100 mm move after the switch-off charges 95 mm to slot 0's spool.
 - **Status**: Open.
 
-### BF29. MMU: a load after an unload in the same boot counts up to 40 mm less
+### BF29. MMU: a load or print start after an unload in the same boot counts up to 40 mm less
 
 - **What happens**: A tool change's feed runs with no slot selected, so it
   counts nothing and leaves the tracker's gap where it was (F39). After
@@ -867,12 +875,16 @@ T13, T14 and T17.
   `mmu2_mk4.cpp:568-679, 961-987`).
 - **Effect**: About 38 mm, 0.11 g of 1.75 mm PLA, isn't charged to the
   loaded slot's spool, and how much depends on what ran earlier in the
-  boot. A print's start after an unload counts less the same way.
+  boot. A print's start after an unload, including the unload at the end
+  of an earlier print, counts 30 mm of its 70 the same way.
 - **Evidence**: Read in the firmware source; shown in the simulator by
-  `test_a_load_to_nozzle_after_an_unload_counts_7` in `tests/test_mmu.py`.
+  `test_a_load_to_nozzle_after_an_unload_counts_7` and
+  `test_a_second_mmu_print_in_one_boot_counts_less_at_its_start` in
+  `tests/test_mmu.py`.
 - **Scenario rows**: T17.
-- **To reproduce**: That test: Load To Nozzle, Unload Filament and Load To
-  Nozzle again on slot 0 charge 44, 19 and 7 mm.
+- **To reproduce**: Those tests. Load To Nozzle, Unload Filament and Load
+  To Nozzle again on slot 0 charge 44, 19 and 7 mm. The same two-color
+  print twice in one boot charges slot 0's spool 624 mm, then 587.
 - **Status**: Open.
 
 ## Minor

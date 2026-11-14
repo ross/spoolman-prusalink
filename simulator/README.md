@@ -128,12 +128,16 @@ and name the parameter.
 type the file names for that tool, and the optional `duration_s`,
 `preheat_s`, `color_changes_mm` and `name`. On a printer with a multi-tool
 slicer profile, `prime_mm` and `toolchange_purge_mm` replace the profile's
-prime and tool-change purge; elsewhere they answer 400. On a toolchanger,
+prime and tool-change purge; elsewhere they answer 400. On an MMU the prime
+is the purge line. `single_tool_file`, on an MMU only, is a file that
+prints on tool 0 alone and has no MMU profile, as one sliced for the
+printer without the MMU; it takes neither override. On a toolchanger,
 `spool_join` is a list of `{"tool": A, "to": B}`: when tool A runs out, the
 print goes on with tool B. Each tool joins on once and is joined to once,
 no chain loops, and B can't be a tool the segments use. The page's start
-form takes a segment per line as `tool:mm` or `tool:mm:TYPE`, and on a
-toolchanger the two overrides and the joins as `A>B, C>D`.
+form takes a segment per line as `tool:mm` or `tool:mm:TYPE`, the two
+overrides on a toolchanger or with the MMU on, the joins as `A>B, C>D` on a
+toolchanger, and a single-tool file box.
 
 The state lists each printer's and each tool's actions under `actions`, each
 with null when the printer would take it now or the reason it would refuse
@@ -246,7 +250,21 @@ that trace. The points that matter for the bridge, in short:
   count nothing, the gap stays where it was, and `/api/v1/status` reads
   `flow` 0. The idle sensor clear and the tag reader are off while the MMU
   is on, and a print's end with it connected doesn't auto-retract. An MMU
-  printer refuses a print and the menu's plain load, and takes the sync job.
+  printer refuses the menu's plain load.
+- A print on an MMU runs the stock MMU3 profile's moves and the firmware's
+  tool changes (F40, F42, F46). It's refused while the MMU connects. The
+  start retracts 2 mm with no slot selected, then `T<first>` feeds the slot
+  with no slot credited, and the 17 mm load and the purge line count on it.
+  At each change the old slot rams, parks and cools, the firmware retracts
+  80 mm and feeds 189.9, 7 and 50 mm, all on the old slot, and the new slot
+  loads 32 mm and purges. A `T` to the selected slot does nothing. A
+  multi-color print's end rams and parks the last slot, and every print
+  then runs `M702`, which unloads into the MMU. A single-tool file gets the
+  firmware's `T0` and 35 mm when no slot is selected, and a finished one
+  unloads into the MMU. A stopped print or sync job unloads too, while it
+  reads `PRINTING`; a finished sync job leaves the filament. A color
+  change, `change_filament` and `runout` are refused on an MMU for now, and
+  `jam` always is: the MMU's jam isn't read.
 - The MMU menu's operations need the MMU on and connected and the printer
   idle, and each reads `BUSY` until it's done (F41).
   `load_to_nozzle` is Load To Nozzle: it unloads the selected slot, feeds

@@ -197,7 +197,9 @@ firmware update.
 - An MMU3 is a unit: the `mmu` printer key, `set_mmu`, five slots sharing
   one filament path, the slots listed by the setting, and the selected slot
   that counts E moves (slot 0 while the MMU connects, none after a boot).
-  Its operations and prints are still missing.
+  Its idle operations and its prints run (F40 to F42, F46); a runout,
+  `M600`, a spool join, power panic and the preview's unload question are
+  still missing.
 - Tests: the unit harness and the integration fixtures take a model and a
   tool count. `tests/test_families.py` runs one story (a print with a tool
   change, a swap, a reboot) on the Core One L, MK4S, iX, XL, Core One L INDX
@@ -363,13 +365,11 @@ The simulator has none of this.
 ### What the slicer adds
 
 These are the stock profiles' E moves, measured in G-code that PrusaSlicer
-2.9.7 sliced with the stock profiles (vendor bundle 2.5.16). The MMU3 row
-is still worked out from the profile values, until the MMU's slicer profile
-brings the measured ones.
+2.9.7 sliced with the stock profiles (vendor bundle 2.5.16).
 
 | Printer | At the start | At a tool change | At the end |
 | --- | --- | --- | --- |
-| MMU3 | `T<first>`, a 17 mm load, then about 53 mm of priming | On the old slot: about 21 mm of ramming, then a net 84 mm retract. `T<n>`. On the new slot: a 32 mm load, then the wipe tower's purge, at least 6 mm for PLA and 15 mm for PETG | `M702`: the firmware unloads, for every print |
+| MMU3 | A 2 mm retract for the nozzle cleanup, with no slot selected yet. `T<first>`, a 17 mm load, then the purge line: 53 mm on the MK4S (2 + 7 + 36 + 4 + 4), 51 mm on the Core One and Core One L (5 for the 7). A second `T<first>`, which changes nothing | On the old slot: ramming, 20.95 mm for PLA and 22.04 mm for PETG, then retracts of 15, 28, 8 and 4 mm, cooling moves of +20 and -20 (two for PLA, three for PETG) with a +50 +5 -55 stamping between each pair, and a 29 mm retract, a net 84 mm. `T<n>`. On the new slot: 6.4, 22.4 and 3.2 mm, a 32 mm load, then the wipe tower's purge: on layer 1's first change 54.63 mm for PLA and 58.45 mm for PETG, after it 29.95 mm and 34.72 mm | A multi-color print rams and parks the last slot as at a change, with no `T`. Every print then retracts 0.7 mm (PETG 0.8) and runs `M702`, the firmware's unload |
 | XL | 39 mm of priming (30 + 9) per tool the print uses, the first tool last. Before it, the first tool retracts 2 mm for the nozzle cleanup. After it, the first tool retracts 0.8 mm and each other tool 20 mm, which comes back at its first pick. Unused tools aren't primed | On the old tool: 4.16 mm of ramming, then a 20 mm retract (the filament's `filament_retract_length_toolchange`, not the printer's 1.2). `P0 S1 L2 D0`, `T<n> S1 L0 D0`. On the new tool: a 20 mm deretract, then the tower purge: 9.24 mm on the first layer, 7.01 mm after it | The tower rams the last tool once more (4.16 mm) and retracts 0.8 mm. Then the end G-code parks it (`P0 S1`), with no E move. A one-tool print has no tower, so no ramming |
 | INDX | `G427` purges every used tool in the firmware: 25 mm (`G750 E25`), then an auto-retract. Then the slicer primes the first tool: 1.6 mm, a 5.49 mm flush (1.1 times 12 mm³), then a 0.8 mm retract | At the purge station, since the stock profile has no wipe tower. On the old tool: a 0.8 mm retract, then the firmware's 8 mm retract in `G27 R8`, and `P0`. On the new tool: on its first pick 1.6 mm, then a 4.16 mm purge, then a 0.8 mm retract. On later picks, 1.6 mm (lock), 8 mm, and 0.8 mm before the 4.16 mm purge and the 0.8 mm retract | Retracts 0.8 mm, then parks (`P0 S1`). No other E move |
 
@@ -384,7 +384,10 @@ model in `M862.3` and add `M862.6 P "MMU3"`. The INDX profiles add
 `M862.6 P"INDX lock"`.
 
 The simulator holds these as profile data (`simulator/slicer.py`), on
-`ModelInfo.slicer` for the XL and INDX models. `script/firmware-check`
+`ModelInfo.slicer` for the XL and INDX models and on `ModelInfo.mmu_slicer`
+for every model that takes an MMU: the MK4, MK3.9 and MK3.9S take the MK4S
+numbers, and the Core One L takes the Core One's. A segment of PETG takes
+PETG's moves, and any other type PLA's. `script/firmware-check`
 doesn't compare it, since it isn't firmware. The bundle has no Core One L
 INDX, so both INDX models use the Core One INDX numbers. A one-tool XL
 turns its toolchanger off and keeps Dwarf 0 picked
@@ -479,14 +482,23 @@ from the feed system and the profile, not one global purge:
 - Toolchanger: the slicer's ramming and retract on the outgoing tool, then
   its deretract and purge on the incoming one. On INDX the firmware's
   `G27 R8` retracts the outgoing tool too, and a later pick feeds it back.
-- MMU: the firmware's feed on the outgoing slot, then the slicer's load and
-  purge on the incoming one.
+- MMU: the slicer's ramming and park on the outgoing slot, the firmware's
+  80 mm retract and its 189.9 + 7 + 50 mm feed, which count on the outgoing
+  slot, then the slicer's load and purge on the incoming one. The first
+  change of a print, from no slot, counts nothing, and a `T` to the
+  selected slot does nothing (F40).
+- MMU, at the start and end: a file that prints on tool 0 alone
+  (`PrintSpec.single_tool_file`, which has no profile) gets the firmware's
+  `T0` and 35 mm load when no slot is selected. A stopped print, and a
+  finished single-tool file, unload into the MMU (`M702 W2`) while the
+  printer reads `PRINTING`. A finished multi-color print and the sync job
+  leave that to the file (F42).
 
 The slicer's part (priming, ramming, the load after a change, the wipe
 tower, the end G-code's park or unload) is profile data with the stock
 profiles' values, and a print can override its prime and its tool-change
-purge (`PrintSpec.prime_mm`, `toolchange_purge_mm`). The toolchangers' is
-built; the MMU's waits for Workstream 5. The priming runs once, when the
+purge (`PrintSpec.prime_mm`, `toolchange_purge_mm`); on an MMU the prime
+is the purge line. Both are built. The priming runs once, when the
 print first starts feeding (`UserJob.primed`), so a pause, a power-panic
 resume or a filament change doesn't run it again. Segments have no layers:
 a tool's first pick in the print stands for the first layer, which on the
@@ -636,9 +648,11 @@ Left to the work:
 - The single-tool power-panic resume: the source gives a plain Core One L
   the 8 mm fed back, not a 25 mm purge, and the simulator follows the
   source. The F12 trace confirms it.
-- PrusaSlicer's purge per change on an MMU3, which [slicer run](#slicer-runs)
-  1 measured and the MMU's slicer profile brings. On the toolchangers it's
-  `filament_minimal_purge_on_wipe_tower`.
+- The MMU3 profile's numbers on the MK4, MK3.9, MK3.9S and Core One L,
+  which the slicer runs didn't slice, and a three-color PETG print, the HF
+  and 0.6 nozzle presets, and layers with no change.
+- Whether the firmware ever plans a second 189.9 mm move at an MMU tool
+  change, which a longer bowden would need. The simulator plans one.
 - Whether INDX's `G1 E1.6` lock move after a pickup reaches the nozzle or
   only seats the lock. The firmware counts it as any move, and so does the
   simulator; a trace of a tool change would settle it.
