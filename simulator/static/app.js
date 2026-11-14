@@ -200,7 +200,9 @@ function renderTool(p, t) {
 
   let h = '<tr class="t">' +
     '<td class="' + (p.selected_tool === i ? 'sel' : '') + '">' + (p.selected_tool === i ? '&#9654;' : '') + i + '</td>' +
-    '<td>' + (t.enabled ? 'on' : '<span class="dis">off</span>') + '</td>' +
+    '<td>' + (t.enabled && !t.listed
+      ? '<span class="dis" title="an MMU slot, and the MMU is off">unlisted</span>'
+      : t.enabled ? 'on' : '<span class="dis">off</span>') + '</td>' +
     '<td>' + (t.loaded ? 'yes' : '<span class="muted">no</span>') + '</td>' +
     '<td class="mat">' + matHtml(t.material, false) + '</td>' +
     '<td class="mat">' + matHtml(t.kept_type || t.previous, true) + '</td>' +
@@ -212,6 +214,11 @@ function renderTool(p, t) {
   h += '<tr class="sub"><td colspan="9"><div class="toolbtns">' +
     btn('Load', 'load_form', Object.assign({ tool: i, cls: isOpen(p, 'load' + i) ? 'on' : '' }, loadGate)) +
     btn('Unload', 'unload', gate(a, 'unload', { tool: i })) +
+    (p.mmu
+      ? btn('Load to nozzle', 'load_to_nozzle', gate(a, 'load_to_nozzle', { tool: i })) +
+        btn('Eject', 'eject', gate(a, 'eject', { tool: i })) +
+        btn('Cut', 'cut', gate(a, 'cut', { tool: i }))
+      : '') +
     btn('Extrude', 'extrude', gate(a, 'extrude', { tool: i })) +
     btn('Retract', 'retract', gate(a, 'retract', { tool: i })) +
     btn('Runout', 'runout', gate(a, 'runout', { tool: i })) +
@@ -270,6 +277,9 @@ function renderPrinter(p) {
     '<small class="muted">boot ' + esc(p.boot_id) + '</small>' +
     '<small class="homed">' + (p.homed ? 'homed' : '<span class="muted">not homed</span>') + '</small>' +
     '<small class="picked">tool <b>' + esc(p.selected_tool == null ? 'none' : p.selected_tool) + '</b></small>' +
+    (p.mmu ? '<small title="the MMU: its menu setting, and the slot whose filament is in the extruder">MMU <b>' +
+      (!p.mmu.on ? 'off' : p.mmu.active ? 'active' : 'connecting ' + Number(p.mmu.connecting).toFixed(1) + ' s') +
+      '</b>' + (p.mmu.fed == null ? '' : ', slot ' + esc(p.mmu.fed) + ' fed') + '</small>' : '') +
     '<small class="muted" title="the model\'s values, which an empty setting uses">ratio ' +
     Number(m.feed_ratio).toFixed(4) + ', load ' + esc(m.slow_load_mm) + ' + ' + esc(m.fast_load_mm) +
     ', purge ' + esc(m.purge_mm) + ' mm' + (p.high_flow ? ' (high-flow)' : '') + '</small></div>';
@@ -290,8 +300,12 @@ function renderPrinter(p) {
       h += '<small>' + Number(job.fed_mm || 0).toFixed(0) + '/' + Number(job.total_mm).toFixed(0) + ' mm</small>';
     }
     if (attn) {
-      // A question that Tap through answers isn't an error: say how to go on.
-      const hint = attn + (canTap ? '. Tap through to go on, or Cancel' : '');
+      // A question that Tap through answers isn't an error: say how to go on. The MMU's
+      // unload question has two answers that go on.
+      const mmuAsks = at.reason === 'filament in the MMU';
+      const hint = attn + (!canTap ? '' : mmuAsks
+        ? ' Unload first unloads it (Yes), Tap through prints with it (No), or Cancel'
+        : '. Tap through to go on, or Cancel');
       h += '<span class="attn' + (canTap ? ' ask' : '') + '" title="' + esc(hint) + '">' + esc(hint) + '</span>';
     }
   } else {
@@ -309,27 +323,39 @@ function renderPrinter(p) {
     btn('Home', 'home', gate(a, 'home')) +
     btn('Park tool', 'park_tool', gate(a, 'park_tool', { title: 'the Pick/park menu: park the picked tool' })) +
     btn('Change all', 'toggle', gate(a, 'change_all', { form: 'changeall', cls: isOpen(p, 'changeall') ? 'on' : '' })) +
+    (p.mmu ? btn('Preload all', 'toggle', gate(a, 'preload_all', { form: 'preloadall', cls: isOpen(p, 'preloadall') ? 'on' : '' })) : '') +
     btn('Reboot', 'reboot', gate(a, 'reboot')) +
     btn('Power-loss resume', 'power_loss', gate(a, 'reboot', { title: 'reboot, keeping the job' })) +
     '<label title="the bed cools during the outage, so the print waits for Resume"><input type="checkbox" data-k="cold"' +
     (getv(p.name, 'cold', false) ? ' checked' : '') + '>cold bed</label>' +
     btn('Tap through', 'tap_through', gate(a, 'tap_through', { cls: canTap ? 'on' : '' })) +
+    (p.mmu ? btn('Unload first', 'unload_first', gate(a, 'unload_first', {
+      cls: a.unload_first == null ? 'on' : '', title: "Yes at the preview's question: unload the MMU's filament, then go on",
+    })) : '') +
     btn('Clear jam', 'clear_jam', gate(a, 'clear_jam')) +
     btn('Filament sensors', 'sensors', { cls: p.sensors ? 'on' : '', title: 'the menu switch for every filament sensor' }) +
+    (p.mmu ? btn('MMU', 'mmu', gate(a, 'set_mmu', { cls: p.mmu.on ? 'on' : '', title: 'the MMU menu switch' })) : '') +
     btn('Counter step back', 'toggle', { form: 'counter', cls: isOpen(p, 'counter') ? 'on' : '' }) +
     btn('Set extruded_at_unload', 'toggle', { form: 'eau', cls: isOpen(p, 'eau') ? 'on' : '' }) +
     '</div>';
 
   if (isOpen(p, 'start')) {
+    const mmuOn = Boolean(p.mmu && p.mmu.on);
     h += '<div class="form">' +
       '<label>segments (tool:mm or tool:mm:TYPE per line)<textarea data-k="start.segments">' + esc(getv(p.name, 'start.segments', '0:1000')) + '</textarea></label>' +
       '<label>duration s' + inp(p, 'start.duration', '', 'type="number" step="any"') + '</label>' +
       '<label>preheat s' + inp(p, 'start.preheat', '', 'type="number" step="any"') + '</label>' +
       '<label>color changes mm (a, b)' + inp(p, 'start.cc', '', 'type="text"') + '</label>' +
+      (p.toolchanger || mmuOn
+        ? '<label title="the slicer profile\'s prime; empty for the stock one">' + (mmuOn ? 'purge line mm' : 'prime mm') + inp(p, 'start.prime', '', 'type="number" step="any"') + '</label>' +
+          '<label title="the slicer profile\'s tool-change purge; empty for the stock one">tool-change purge mm' + inp(p, 'start.tcpurge', '', 'type="number" step="any"') + '</label>'
+        : '') +
       (p.toolchanger
-        ? '<label title="the slicer profile\'s prime; empty for the stock one">prime mm' + inp(p, 'start.prime', '', 'type="number" step="any"') + '</label>' +
-          '<label title="the slicer profile\'s tool-change purge; empty for the stock one">tool-change purge mm' + inp(p, 'start.tcpurge', '', 'type="number" step="any"') + '</label>' +
-          '<label title="when tool a runs out, the print goes on with tool b">spool joins (a&gt;b, c&gt;d)' + inp(p, 'start.joins', '', 'type="text"') + '</label>'
+        ? '<label title="when tool a runs out, the print goes on with tool b">spool joins (a&gt;b, c&gt;d)' + inp(p, 'start.joins', '', 'type="text"') + '</label>'
+        : '') +
+      (mmuOn
+        ? '<label title="a file sliced without the MMU profile: tool 0 alone, which the firmware loads and unloads"><input type="checkbox" data-k="start.single"' +
+          (getv(p.name, 'start.single', false) ? ' checked' : '') + '>single-tool file</label>'
         : '') +
       '<label>file name' + inp(p, 'start.name', 'part.bgcode', 'type="text"') + '</label>' +
       btn('Start', 'start_submit', {}) + '</div>';
@@ -346,7 +372,12 @@ function renderPrinter(p) {
       '<label>tools (a, b)' + inp(p, 'changeall.tools', p.tools.filter((t) => t.enabled).map((t) => t.index).join(', '), 'type="text"') + '</label>' +
       '<label>preset' + inp(p, 'changeall.name', 'PLA') + '</label>' +
       '<label>color' + inp(p, 'changeall.color', '', 'type="text" placeholder="#rrggbb"') + '</label>' +
+      (p.mmu ? '<label title="the slots whose type the dialog clears">unload (a, b)' + inp(p, 'changeall.unload', '', 'type="text"') + '</label>' : '') +
       btn('Change', 'changeall_submit', {}) + '</div>';
+  }
+  if (isOpen(p, 'preloadall')) {
+    h += '<div class="form"><label>preset' + inp(p, 'preloadall.name', 'PLA') + '</label>' +
+      btn('Preload all', 'preloadall_submit', {}) + '</div>';
   }
   if (isOpen(p, 'eau')) {
     h += '<div class="form"><label>tool' + toolSel('eau.tool') + '</label>' +
@@ -440,6 +471,7 @@ function startBody(name) {
     joins.push({ tool: Number(m[1]), to: Number(m[2]) });
   }
   if (joins.length) body.spool_join = joins;
+  if (getv(name, 'start.single', false)) body.single_tool_file = true;
   const cc = String(getv(name, 'start.cc', '')).split(',').map((x) => x.trim()).filter(Boolean).map(Number);
   if (cc.some((x) => !Number.isFinite(x))) throw new Error('Color changes must be numbers');
   if (cc.length) body.color_changes_mm = cc;
@@ -463,11 +495,18 @@ function loadBody(name, i) {
   return body;
 }
 
+function toolList(s) {
+  const tools = String(s).split(',').map((x) => x.trim()).filter(Boolean).map(Number);
+  if (tools.some((x) => !Number.isInteger(x))) throw new Error('Tools must be whole numbers');
+  return tools;
+}
+
 function changeAllBody(name, p) {
   const all = p.tools.filter((t) => t.enabled).map((t) => t.index).join(', ');
-  const tools = String(getv(name, 'changeall.tools', all)).split(',').map((x) => x.trim()).filter(Boolean).map(Number);
-  if (tools.some((x) => !Number.isInteger(x))) throw new Error('Tools must be whole numbers');
+  const tools = toolList(getv(name, 'changeall.tools', all));
   const body = { tools, name: String(getv(name, 'changeall.name', 'PLA')).trim() };
+  const unload = p.mmu ? toolList(getv(name, 'changeall.unload', '')) : [];
+  if (unload.length) body.unload = unload;
   const color = String(getv(name, 'changeall.color', '')).trim();
   if (color) body.color = color;
   return body;
@@ -490,17 +529,22 @@ function onClick(e) {
       case 'toggle': return toggle(b.dataset.form);
       case 'load_form': return toggle('load' + tool);
       case 'pause': case 'resume': case 'cancel': case 'dismiss': case 'reboot': case 'home':
-      case 'tap_through': case 'clear_jam': case 'park_tool':
+      case 'tap_through': case 'unload_first': case 'clear_jam': case 'park_tool':
         return go(act, {});
       case 'sensors': return go('set_sensors', { value: !p.sensors });
+      case 'mmu': return go('set_mmu', { value: !p.mmu.on });
       case 'power_loss': return go('reboot', { keep_job: true, cold_bed: !!getv(name, 'cold', false) });
       case 'start_submit':
         return go('start_print', startBody(name), () => { pst(name).open.start = false; renderCard(name); });
       case 'changeall_submit':
         return go('change_all', changeAllBody(name, p), () => { pst(name).open.changeall = false; renderCard(name); });
+      case 'preloadall_submit':
+        return go('preload_all', { name: String(getv(name, 'preloadall.name', 'PLA')).trim() },
+          () => { pst(name).open.preloadall = false; renderCard(name); });
       case 'load_submit':
         return go('load', loadBody(name, tool), () => { pst(name).open['load' + tool] = false; renderCard(name); });
       case 'unload': case 'runout': case 'select_tool': case 'change_filament':
+      case 'load_to_nozzle': case 'eject': case 'cut':
         return go(act, { tool });
       case 'extrude': case 'retract': {
         const mm = numOrNull(getv(name, 'mm', '10'));

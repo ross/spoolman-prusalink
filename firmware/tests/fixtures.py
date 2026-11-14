@@ -99,6 +99,11 @@ inline constexpr const char *m115 = "M115";
 inline constexpr const char *total_toolchanges = "total toolchanges";
 #endif
 }; // namespace gcode_info
+
+        /// @brief Value for this extruder was given in G-code
+        inline bool given() const {
+            return filament_used_g.has_value();
+        }
 """
 
 OPTIONS_CMAKE = """\
@@ -241,6 +246,20 @@ set_feature_for_printers(HAS_NOZZLE_CLEANER "iX" "COREONE_INDX" "COREONEL_INDX")
 set_feature_for_printers(HAS_NOZZLE_CLEANER_LITE "XL" "COREONE" "COREONEL")
 if(HAS_TOOLCHANGER OR HAS_MMU2)
   define_boolean_option(HAS_TOOL_MAPPING yes)
+endif()
+
+if(${BOARD} STREQUAL "XBUDDY" AND HAS_MMU2)
+  # for XBUDDY based printers, UART6 is being used either for puppies/MODBUS or directly for the MMU
+  if(HAS_PUPPIES)
+    # UART already occupied by the puppies/MODBUS
+    set(HAS_MMU2_OVER_UART NO)
+  else()
+    # UART used for the MMU
+    set(HAS_MMU2_OVER_UART YES)
+  endif()
+else()
+  # other boards: set to NO, whatever new edge cases that may bring...
+  set(HAS_MMU2_OVER_UART NO)
 endif()
 """
 
@@ -1512,6 +1531,57 @@ std::to_array<WorkflowStep>({
         result = &workflow;
         break;
     }
+
+void Pause::mmu_load_start_process([[maybe_unused]] Response response) {
+    if (load_type == LoadType::load) {
+        if (!MMU2::mmu2.load_filament_to_nozzle(settings.virtual_tool().to_raw())) {
+            // TODO tell user that he has already loaded filament if he really wants to continue
+            // TODO check fsensor .. how should I behave if filament is not detected ???
+            // some error?
+            set(LoadState::load_finalize);
+            return;
+        }
+        mark_filament_as_loaded();
+
+        set(LoadState::color_correct_ask);
+    } else if (load_type == LoadType::filament_change) {
+        setPhase(PhasesLoadUnload::LoadFilamentIntoMMU);
+        set(LoadState::mmu_load_ask);
+    }
+
+    return;
+}
+
+void Pause::mmu_unload_start_process([[maybe_unused]] Response response) {
+    if (load_type == LoadType::unload) {
+        MMU2::mmu2.unload();
+        set(LoadState::_finished);
+
+    } else if (load_type == LoadType::filament_change) {
+        const auto virtual_tool = VirtualToolIndex::currently_selected_opt();
+
+        // No filament loaded in MMU, we can't continue, as we don't know what slot to load
+        if (!virtual_tool.has_value()) {
+            set(LoadState::unload_finish_or_change);
+            return;
+        }
+
+        settings.virtual_tool_ = *virtual_tool;
+
+        MMU2::mmu2.unload();
+        MMU2::mmu2.eject_filament(virtual_tool->to_raw());
+        set(LoadState::unload_finish_or_change);
+    }
+
+    return;
+}
+
+void Pause::mmu_load_process([[maybe_unused]] Response response) {
+    MMU2::mmu2.load_filament(settings.virtual_tool().to_raw());
+    MMU2::mmu2.load_filament_to_nozzle(settings.virtual_tool().to_raw());
+
+    set(LoadState::color_correct_ask);
+}
 """
 
 PRINTER_MODEL_CPP = """\
@@ -2001,6 +2071,22 @@ void GCodeInfo::parse_m862(GcodeBuffer::String cmd) {
         visit_tool([&](auto &info) { info.requires_high_flow_nozzle = *requires_high_flow_nozzle; });
     }
 }
+
+bool GCodeInfo::is_singletool_gcode() const {
+    // Tool 0 needs to be given in comments and used
+    if (!per_extruder_info[0].used()) {
+        return false;
+    }
+
+    // Other tools need to not be given in comments at all
+    for (uint8_t e = 1; e < std::size(per_extruder_info); e++) {
+        if (per_extruder_info[e].given()) {
+            return false;
+        }
+    }
+
+    return true;
+}
 """  # noqa: E501 (verbatim firmware lines)
 
 
@@ -2247,6 +2333,2247 @@ PRESETS_JSON = """\
 }
 """  # noqa: E501 (verbatim firmware lines)
 
+# The two MMU functions in src/common/tool_index.cpp.
+TOOL_INDEX_CPP = """\
+template <>
+bool VirtualToolIndex::is_enabled() const {
+    [[maybe_unused]] const auto &self = static_cast<const VirtualToolIndex &>(*this);
+
+#if HAS_TOOLCHANGER()
+    return self.to_physical().is_enabled();
+
+#elif HAS_MMU2()
+    static_assert(PhysicalToolIndex::count == 1);
+    if (config_store().mmu2_enabled.get()) {
+        // MMU has five slots, the virtual tool count should match
+        static_assert(VirtualToolIndex::count == 5);
+
+        // MMU is enabled - we have access to all virtual tools and can toolchange between them
+        return true;
+
+    } else {
+        // Without the MMU, we only have one virtual tool available (there's nothing that would do the toolchange)
+        return self.to_raw() == 0;
+    }
+#else
+    // Single nozzle, single slot - nothing to get disabled
+    static_assert(PhysicalToolIndex::count == 1);
+    static_assert(VirtualToolIndex::count == 1);
+    return true;
+#endif
+}
+
+std::variant<VirtualToolIndex, NoTool> PhysicalExtension::currently_selected_virtual_tool() const {
+    const auto &self = static_cast<const PhysicalToolIndex &>(*this);
+
+#if HAS_MMU2()
+    static_assert(PhysicalToolIndex::count == 1);
+    if (MMU2::mmu2.Enabled()) {
+        const auto e = MMU2::mmu2.get_current_tool();
+        if (e == MMU2::FILAMENT_UNKNOWN) {
+            return NoTool {};
+        } else {
+            return VirtualToolIndex::from_raw(e);
+        }
+    }
+#else
+    static_assert(PhysicalToolIndex::count == VirtualToolIndex::count);
+#endif
+
+    return VirtualToolIndex::from_raw(self.to_raw());
+}
+"""  # noqa: E501 (verbatim firmware lines)
+
+# The MMU's switch in src/marlin_stubs/pause/M70X_mmu.cpp.
+M70X_MMU_CPP = """\
+/**
+ * @brief turn mmu on
+ *
+ */
+void filament_gcodes::mmu_on() {
+    config_store().mmu2_enabled.set(true);
+
+#if HAS_ANFC() && !HAS_ANFC_FOR_MULTIPLE_TOOLS()
+    // Remove link to a NFC Tag
+    for (const VirtualToolIndex tool : VirtualToolIndex::all()) {
+        FilamentType { AdHocFilamentType { tool } }.modify_parameters([](FilamentTypeParameters &p) {
+            p.openprinttag_uid_hash = buddy::openprinttag::ToolTag::no_tag_hash;
+        });
+    }
+#endif
+
+    MMU2::mmu2.Start();
+
+    // To ensure SideFS (MMU's FS) is properly set up in FS handler
+    // logical_sensor_states_ has to update with logical filament sensors already reconfigured and enabled
+    FSensors_instance().request_enable_state_update();
+}
+
+/**
+ * @brief turn mmu off
+ *
+ */
+void filament_gcodes::mmu_off() {
+    config_store().mmu2_enabled.set(false);
+
+    // MMU uses config_store.filament_type to store what's preloaded in the MMU
+    // When we turn the MMU off, it should now actually store what's in the nozzle.
+    // If there is nothing in the nozzle, clear the setting.
+    // BFW-5199
+    if (!FSensors_instance().has_filament_surely(LogicalFilamentSensor::extruder)) {
+        config_store().set_filament_type(VirtualToolIndex::from_raw(0), {});
+    }
+
+    MMU2::mmu2.Stop();
+
+    // Update logical FS states
+    FSensors_instance().request_enable_state_update();
+}
+"""  # noqa: E501 (verbatim firmware lines)
+
+# The E move's count in `Planner::buffer_segment`, without the function around it.
+PLANNER_CPP = """\
+    /// Extruder movement without a tool picked doesn't make any sense
+    if(!tools.physical_tool.has_value()) {
+      bsod("E move without tool");
+    }
+
+    [[maybe_unused]] const float delta_e_mm = (xyze.e - position_float.e) * get_move_e_factor(tools, hints.move);
+
+#if HAS_INDX()
+    buddy::indx_tool_lock_hack().track_extruder_move(delta_e_mm, Badge<Planner>{});
+#endif
+
+#if HAS_FILAMENT_TRACKER()
+    if(tools.virtual_tool.has_value()) {
+      // Note: This is not >>ideal<<, because although the moves get planned, they might get discarded through (gcode_exceptions/quick_stop)
+      // Most notably, this will track some extra filament usage if user intterupts purging
+      // Tying this directly to the immediate motor positions might be better, but one would also need to also handle the origin resets
+      // Live steps/mm against the stock extruder's calibration, so G-codes changing steps (M92) or flow are tracked right.
+      // A custom extruder with user-set steps/mm would need its own calibrated value (e.g. an experimental
+      // menu item stored in EEPROM next to the steps/mm); not supported.
+      static constexpr float inv_calibrated_steps_per_mm = 1.0f / CALIBRATED_AXIS_STEPS_PER_UNIT_E0;
+      buddy::filament_tracker().track_extruder_move(*tools.virtual_tool, {
+        .commanded_mm = delta_e_mm,
+        .feed_ratio = settings.axis_steps_per_mm[E_AXIS_N(tools.extruder)] * inv_calibrated_steps_per_mm,
+      });
+    }
+#endif
+"""  # noqa: E501 (verbatim firmware lines)
+
+# Part of the status renderer's printer object.
+STATUS_RENDERER_CPP = """\
+            // XYZE, mm
+            JSON_FIELD_FFIXED("axis_z", marlin_vars().logical_curr_pos[2], 1) JSON_COMMA;
+            if (!marlin_client::is_printing()) {
+                JSON_FIELD_FFIXED("axis_x", marlin_vars().logical_curr_pos[0], 1) JSON_COMMA;
+                JSON_FIELD_FFIXED("axis_y", marlin_vars().logical_curr_pos[1], 1) JSON_COMMA;
+            }
+            JSON_FIELD_INT("flow", VirtualToolIndex::currently_selected_opt().transform([] (auto tool) { return marlin_vars().virtual_tools[tool].flow_factor.get(); }).value_or(0)) JSON_COMMA;
+            JSON_FIELD_INT("speed", marlin_vars().print_speed) JSON_COMMA;
+            JSON_FIELD_INT("fan_hotend", marlin_vars().active_hotend().heatbreak_fan_rpm) JSON_COMMA;
+            JSON_FIELD_INT("fan_print", marlin_vars().active_hotend().print_fan_rpm);
+"""  # noqa: E501 (verbatim firmware lines)
+
+# `get_info`, the `/api/v1/info` renderer.
+BASIC_GETS_CPP = """\
+JsonResult get_info(size_t resume_point, JsonOutput &output) {
+    char hostname[HOSTNAME_LEN + 1];
+    netdev_get_hostname(netdev_get_active_id(), hostname, sizeof hostname);
+    float nozzle_diameter = config_store().get_nozzle_diameter(PhysicalToolIndex::from_raw(0));
+    auto mmu2_enabled =
+#if HAS_MMU2()
+        config_store().mmu2_enabled.get();
+#else
+        false;
+#endif
+    serial_nr_t serial {};
+    otp_get_serial_nr(serial);
+
+    // Keep the indentation of the JSON in here!
+    // clang-format off
+    JSON_START;
+    JSON_OBJ_START;
+        JSON_FIELD_FFIXED("nozzle_diameter", static_cast<double>(nozzle_diameter), 2) JSON_COMMA;
+        JSON_FIELD_BOOL("mmu", mmu2_enabled) JSON_COMMA;
+        JSON_FIELD_STR("serial", serial.begin()) JSON_COMMA;
+        JSON_FIELD_STR("hostname", hostname) JSON_COMMA;
+        JSON_FIELD_INT("min_extrusion_temp", EXTRUDE_MINTEMP);
+    JSON_OBJ_END;
+    JSON_END;
+    // clang-format on
+}
+"""
+
+# `mmu2_config.h`.
+MMU2_CONFIG_H = """\
+#pragma once
+#include <stdint.h>
+#ifndef UNITTEST
+    #include <option/has_loadcell.h>
+#else
+    // @@TODO find a better way of separating load cell and MMU for unit tests
+    // Beware - unit tests have been developed for Try-Load, therefore we pretend LoadCell is not present
+    #define HAS_LOADCELL() 0
+#endif
+
+#if HAS_LOADCELL()
+// we may want to return to try-load sequences on MK4 if E-motor stall turns out to be unreliable
+// #define USE_TRY_LOAD
+#else
+    #define USE_TRY_LOAD
+#endif
+
+#define DEFAULT_SAFETYTIMER_TIME_MINS 30
+
+///////////////////////////////////////////
+
+// MMU Error pause position
+#define MMU_ERR_X_PAUSE_POS  125
+#define MMU_ERR_Y_PAUSE_POS  0
+#define MMU_ERR_Z_PAUSE_LIFT 20
+
+// As discussed with our PrusaSlicer profile specialist
+// - ToolChange shall not try to push filament into the very tip of the nozzle
+// to have some space for additional G-code to tune the extruded filament length
+// in the profile
+// Beware - this value is used to initialize the MMU logic layer - it will be sent to the MMU upon line up (written into its 8bit register 0x0b)
+// However - in the G-code we can get a request to set the extra load distance at runtime to something else (M708 A0xb Xsomething).
+// The printer intercepts such a call and sets its extra load distance to match the new value as well.
+// The same applies to Pulley slow feed rate (register 0x14)
+static constexpr uint8_t MMU2_TOOL_CHANGE_LOAD_LENGTH = 5; // mm
+static constexpr float MMU2_LOAD_TO_NOZZLE_FEED_RATE = 20.0F; // mm/s
+
+static constexpr float MMU2_UNLOAD_TO_FINDA_FEED_RATE = 120.0F; // mm/s
+
+// The first the MMU does is initialise its axis. Meanwhile the E-motor will unload 20mm of filament in approx. 1 second.
+static constexpr float MMU2_RETRY_UNLOAD_TO_FINDA_LENGTH = 20.0f; // mm
+static constexpr float MMU2_RETRY_UNLOAD_TO_FINDA_FEED_RATE = 20.0f; // mm/s
+
+static constexpr float MMU2_RETRY_UNLOAD_FINISH_LENGTH = -80.0f; // mm
+
+static constexpr float MMU2_EXTRUDER_NOZZLE_LENGTH = 20.F;
+#ifdef USE_TRY_LOAD
+    #ifndef UNITTEST
+        #if not PRINTER_IS_PRUSA_MK3_5()
+            #error "Beware - this part has been tuned for MK35 (copied from MK3S), it probably won't work for MK4 anymore"
+        #endif
+    #endif
+static constexpr float MMU2_FILAMENT_SENSOR_POSITION = 0; // mm
+static constexpr float MMU2_EXTRUDER_PTFE_LENGTH = 42.3f; // mm
+static constexpr float MMU2_EXTRUDER_HEATBREAK_LENGTH = 17.7f; // mm
+static constexpr float MMU2_VERIFY_LOAD_TO_NOZZLE_TWEAK = -15.F; // mm used to shorten/lenghten (negative number -> shorten) the distange of verify load to nozzle
+static constexpr float MMU2_CHECK_FILAMENT_PRESENCE_EXTRUSION_LENGTH = MMU2_EXTRUDER_PTFE_LENGTH + MMU2_EXTRUDER_HEATBREAK_LENGTH + MMU2_VERIFY_LOAD_TO_NOZZLE_TWEAK + MMU2_FILAMENT_SENSOR_POSITION;
+
+static constexpr float MMU2_VERIFY_LOAD_TO_NOZZLE_FEED_RATE = 50.F;
+
+    #define MMU2_LOAD_TO_NOZZLE_SEQUENCE                                       \\
+        {                                                                      \\
+            { MMU2_EXTRUDER_HEATBREAK_LENGTH, MMU2_LOAD_TO_NOZZLE_FEED_RATE }, \\
+            { MMU2_EXTRUDER_NOZZLE_LENGTH + 40, 5.F }                          \\
+        }
+#else
+static constexpr float MMU2_EXTRUDER_HEATBREAK_LENGTH = 67.F;
+// ram the filament as deep as possible while checking for any obstacles
+static constexpr float MMU2_FEED_DISTANCE = 50.F; // 50mm
+
+// Obviously, we want to go as fast as possible, but...
+// Beware - the speed has been carefully picked from a broad range to make sure it always detects something.
+// The main issue is the fact, that the loadcell's sampling rate is close to the frequency of force spikes generated by the skipping motor.
+// To overcome this, a few tricks have been applied:
+// - lower detection threshold - may also allow the loadcell to "see" when the filament hits the main plate plastic part (when the forces are much lower)
+// - pick a specific speed which is a bit different than the sampling rate
+static constexpr float MMU2_FEED_RATE = 31.F; // 31mm/s
+
+    #define MMU2_LOAD_TO_NOZZLE_SEQUENCE                                             \\
+        {                                                                            \\
+            { MMU2_EXTRUDER_HEATBREAK_LENGTH - MMU2_FEED_DISTANCE, MMU2_FEED_RATE }, \\
+            { MMU2_EXTRUDER_NOZZLE_LENGTH + 10, 5.F }                                \\
+        }
+#endif
+
+static constexpr uint8_t MMU2_NO_TOOL = 99;
+
+typedef float feedRate_t;
+
+struct E_Step {
+    float extrude; ///< extrude distance in mm
+    feedRate_t feedRate; ///< feed rate in mm/s
+};
+
+static constexpr E_Step ramming_sequence[] = FILAMENT_MMU2_RAMMING_SEQUENCE;
+static constexpr E_Step load_to_nozzle_sequence[] = MMU2_LOAD_TO_NOZZLE_SEQUENCE;
+"""  # noqa: E501 (verbatim firmware lines)
+
+# `mmu2_mk4.h`, excerpts.
+MMU2_MK4_H = """\
+    /// Default nominal unload fsensor trigger distance.
+    /// As this largely depends on the slicer profile, a register for setting a custom value is provided along with it.
+    static constexpr float nominalEMotorFSOff = 14.0F;
+    /// The "register" allowing user tweaking of the nominal trigger distance. Set a custom value through M708 A0x81 Xsomething.
+    float nominalEMotorFSOffReg = nominalEMotorFSOff;
+    /// A record of the last E-motor position when fsensor turned off while unloading
+    float unloadEPosOnFSOff = nominalEMotorFSOff;
+
+#ifdef UNITTEST
+    // Unit tests - avoid talking to the bootloader on the serial
+    #define MMU_USE_BOOTLOADER() 0
+#elif HAS_MMU2_OVER_UART()
+    // Only MK4 with MMU over UART may try to talk to the bootloader on the serial
+    #define MMU_USE_BOOTLOADER() 1
+#else
+    // CORE One with MMU over MODBUS - avoid talking to the bootloader on the serial
+    #define MMU_USE_BOOTLOADER() 0
+#endif
+"""  # noqa: E501 (verbatim firmware lines)
+
+# `mmu2_mk4.cpp`, excerpts.
+MMU2_MK4_CPP = """\
+namespace {
+
+static constexpr float maximumAllowedExtruderMove = 189.9f; // we cannot plan anything longer than 190mm, stay on the safe side
+
+bool MMU2::FeedWithEStallDetection() {
+    // Obviously, we want to go as fast as possible, but...
+    // Beware - the speed has been carefully picked from a broad range to make sure it always detects something.
+    // The main issue is the fact, that the loadcell's sampling rate is close to the frequency of force spikes generated by the skipping motor.
+    // To overcome this, a few tricks have been applied:
+    // - lower detection threshold - may also allow the loadcell to "see" when the filament hits the main plate plastic part (when the forces are much lower)
+    // - pick a specific speed which is a bit different than the sampling rate
+    static constexpr float feedRate = MMU2_FEED_RATE;
+
+    // ram the filament as deep as possible while checking for any obstacles
+
+    #ifndef UNITTEST
+    // get the best out of the HX717
+    Loadcell::HighPrecisionEnabler enableHighPrecision(loadcell, /*enable*/ true);
+    #endif
+
+    // save state of EStall detection flags including the detection threshold
+    EStallDetectionStateLatch esdsl;
+
+    // block invocation of M1601 in Marlin::idle()
+    BlockEStallDetection blocker;
+
+    auto &emsd = EMotorStallDetector::Instance();
+
+    // activate the detector
+    emsd.SetEnabled();
+    // whatever happened before is not interesting
+    emsd.ClearDetected();
+    // lower the detection threshold to overcome the sampling rate limitation - see explanation above
+    emsd.SetDetectionThreshold(500'000.F);
+
+    // plan the move and tweak by the amount of presumably remaining molten filament in the melt zone
+    float remainingFilament = std::clamp(unloadEPosOnFSOff, 0.F, nominalEMotorFSOffReg); // anything below nominal distance will get subtracted from the load
+    float compensatedFeedDistance = MMU2_FEED_DISTANCE - nominalEMotorFSOffReg + remainingFilament;
+
+    { // dump the compensated feed distance into the syslog for verification
+        char msg[32];
+        snprintf(msg, sizeof(msg), "CompensatedFeedDistance=%2.1f", (double)compensatedFeedDistance);
+        LogEchoEvent_P(msg);
+    }
+
+    extruder_move(compensatedFeedDistance, feedRate);
+    while (planner_any_moves()) {
+        if (emsd.DetectedRaw()) {
+            planner_abort_queued_moves(); // stop instantly
+            // @@TODO save the position where it tripped to allow retraction of the same amount
+            return false;
+        }
+        safe_delay_keep_alive(0);
+        if (planner_draining()) {
+            return false; // power panic or a similar issue happened, bail out fast
+        }
+    }
+    return CheckFailLoadToExtr(true);
+}
+
+bool MMU2::ToolChangeCommonOnce(uint8_t slot) {
+    static_assert(MAX_RETRIES > 1); // need >1 retries to do the cut in the last attempt
+    std::optional<float> firstUnloadEPosOnFSOff;
+    for (uint8_t retries = MAX_RETRIES; retries; --retries) {
+        for (;;) {
+            Disable_E0(); // it may seem counterintuitive to disable the E-motor, but it gets enabled in the planner whenever the E-motor is to move
+            tool_change_extruder = slot;
+
+            allowPrematureFinish = true;
+
+            // The idea here is to activate the MMU earlier than the printer is actually ready to unload the filament,
+            // because engaging of the MMU's Idler takes ~1 second.
+            // Thefore the MMU prepares the Idler into a close intermediate position and waits for printer's fsensor to turn off.
+            // Once the FS is off, the MMU engages the Idler fully (which is much faster than engaging from the parking position),
+            // pulls the filament out and pushes a new one in.
+            // If the FS doesn't turn off within 4 seconds, the MMU reports an error.
+            // Therefore we issue the MMU command ToolChange at this spot - even before the filament is freed from the drive gear.
+            // Also, this is the only reason why MMU FW 3.0.3 is incompatible with 3.0.4 - it's an important change of the unload process.
+            // But - we save a significant amount of time per toolchange -> shorter print times.
+            logic.ToolChange(slot);
+
+            // The gcode is expected to do ramming which ends with the filament
+            // tip still in extruder gears. Rotate the extruder some more to
+            // get the filament (including a potential string) completely out
+            // after we've blocked the runout.
+            if (extruder != MMU2_NO_TOOL) {
+                extruder_move(MMU2_RETRY_UNLOAD_FINISH_LENGTH, logic.PulleySlowFeedRate());
+
+                // Monitor the fsensor - detect the current E-motor stepper position when fsensor turns off.
+                // That switch has some ideal (or expected) distance,
+                // but in case some of the filament remains in the melt zone the distance gets shorter.
+                // The main problem here is the fact, that we need to call the whole marlin infrastructure and there is no simple place to hook into.
+                // Therefore I had to copy planner.synchronize(), which is a nasty hack.
+                UnloadDistanceDetector udd;
+                planner_synchronize_hook(udd);
+
+                // Save just the very first unload attempt - that's the "amount" of filament left in the melt zone.
+                // Repeated unload and reload attempts are not interesting for the compensation later.
+                if (!firstUnloadEPosOnFSOff.has_value()) {
+                    firstUnloadEPosOnFSOff = udd.FSTriggerDistance();
+                }
+#ifndef UNITTEST
+                // Record as a metric each attempt
+                metric_record_float(&metric_unloadDistanceFSOff, unloadEPosOnFSOff);
+#endif
+            }
+            if (manage_response(true, true)) {
+                allowPrematureFinish = false;
+                if (planner_draining()) {
+                    // Power panic. Give up fast.
+                    return false;
+                } else {
+                    break;
+                }
+            }
+            // otherwise: failed to perform the command - unload first and then let it run again
+            IncrementMMUFails();
+
+            // just in case we stood in an error screen for too long and the hotend got cold
+            ResumeHotendTemp();
+            // if the extruder has been parked, it will get unparked once the ToolChange command finishes OK
+            // - so no ResumeUnpark() at this spot
+            UnloadInner(PreUnloadPolicy::RelieveFilament);
+            // if we run out of retries, we must do something ... may be raise an error screen and allow the user to do something
+            // but honestly - if the MMU restarts during every toolchange,
+            // something else is seriously broken and stopping a print is probably our best option.
+        }
+        if (VerifyFilamentEnteredPTFE()) {
+            // make sure we don't assert on not having a value (shouldn't be possible)
+            unloadEPosOnFSOff = firstUnloadEPosOnFSOff.value_or(nominalEMotorFSOffReg);
+            return true; // success
+        } else { // Prepare a retry attempt
+            loadFilamentStarted = false;
+
+            while (!manage_response(true, true)) {
+                // Must wait for the MMU to finish its operation
+                // - the PrematureFinish-exit from manage_response brought a nasty edge case
+                // - but since this is "just" error recovery, it can wait a bit longer
+            }
+
+            UnloadInner(PreUnloadPolicy::ExtraRelieveHotFilament);
+            if (retries == 2 && cutter_enabled()) {
+                CutFilamentInner(slot); // try cutting filament tip at the last attempt
+            }
+        }
+    }
+    return false; // couldn't accomplish the task
+}
+
+void MMU2::ToolChangeCommon(uint8_t slot) {
+    UpdateCurrentFilamentType(slot);
+    SaveResumePos();
+    while (!ToolChangeCommonOnce(slot)) { // while not successfully fed into extruder's PTFE tube
+        if (planner_draining()) {
+            return; // power panic happening, pretend the G-code finished ok
+        }
+        // failed autoretry, report an error by forcing a "printer" error into the MMU infrastructure - it is a hack to leverage existing code
+        // @@TODO theoretically logic layer may not need to be spoiled with the printer error - may be just the manage_response needs it...
+        logic.SetPrinterError(ErrorCode::LOAD_TO_EXTRUDER_FAILED);
+        // We only have to wait for the user to fix the issue and press "Retry".
+        // Please see CheckUserInput() for details how we "leave" manage_response.
+        // If manage_response returns false at this spot (MMU operation interrupted aka MMU reset)
+        // we can safely continue because the MMU is not doing an operation now.
+        static_cast<void>(manage_response(true, true)); // yes, I'd like to silence [[nodiscard]] warning at this spot by casting to void
+    }
+
+    extruder = slot; // filament change is finished
+    // @@TODO SpoolJoin::spooljoin.setSlot(slot);
+
+    ++toolchange_counter;
+    IncrementMMUChanges();
+}
+
+void MMU2::UnloadObeyAutoRetracted() {
+    CommandInProgressGuard cipg(CommandInProgress::UnloadFilament, commandInProgressManager);
+    SaveResumePos();
+    if (!marlin_is_retracted()) {
+        // if not already auto-retracted, do the ramming ourself
+        WaitForHotendTargetTempBeep();
+        UnloadInner(PreUnloadPolicy::Ramming);
+    } else {
+        // otherwise it's not even necessary to wait for temperature, the filament can be pulled out of the nube directly
+        // Allow cold extrusion since Tx only loads to the gears not nozzle
+        mapi::ColdExtrudeGuard cold_extrude_guard;
+        UnloadInner(PreUnloadPolicy::RelieveFilament);
+    }
+}
+
+void MMU2::UnloadInner(PreUnloadPolicy preUnloadPolicy) {
+    UpdateCurrentFilamentType(extruder); // this is probably the only place where we need to rely on the "extruder" variable matching the currently unloaded slot
+    FSensorBlockRunout blockRunout;
+    BlockEStallDetection blockEStallDetection;
+
+    switch (preUnloadPolicy) {
+    case PreUnloadPolicy::Ramming:
+        filament_ramming();
+        break;
+    case PreUnloadPolicy::ExtraRelieveHotFilament:
+#ifdef USE_TRY_LOAD
+        // try-load printers' ExtraRelieveHotFilament move was always the same as RelieveFilament
+#else
+        // BFW-7473: Assume the filament somehow made it into the melt zone (we have no reliable way of knowing),
+        // but the E-motor skipped during the move.
+        // Therefore, the relieve move must be extra slow in order to allow the filament tip to cool down
+        // and not get wound up on the drive gear -> hence the slow feedrate
+        extruder_move(-60.F, 10.F);
+#endif
+        [[fallthrough]]; // The rest of the relieve move will be done in the following RelieveFilament branch of this switch at a faster pace
+    case PreUnloadPolicy::RelieveFilament:
+        extruder_move(
+#ifdef USE_TRY_LOAD
+            // try-loads are symmetrical
+            -40.F,
+#else
+            // But E-stall detection is not symmetrical - it needs to retract way more (because the filament may still be somewhere in the nozzle)
+            // Theoretically, we should be able to retract the same distance as the failed load (when the E-motor skipped) + some extra margin
+            -120.F,
+#endif
+            60.F);
+        planner_synchronize();
+        break;
+    case PreUnloadPolicy::Nothing:
+        break;
+    };
+
+    // we assume the printer managed to relieve filament tip from the gears,
+    // so repeating that part in case of an MMU restart is not necessary
+    for (;;) {
+        Disable_E0();
+        logic.UnloadFilament();
+        if (manage_response(false, true)) {
+            break;
+        }
+        IncrementMMUFails();
+    }
+    MakeSound(Confirm);
+
+    // no active tool
+    extruder = MMU2_NO_TOOL;
+    tool_change_extruder = MMU2_NO_TOOL;
+}
+
+bool MMU2::unload() {
+    if (!WaitForMMUReady()) {
+        return false;
+    }
+
+    UnloadObeyAutoRetracted();
+
+    ScreenUpdateEnable();
+    marlin_finalize_unload();
+    return true;
+}
+
+bool MMU2::load_filament_to_nozzle(uint8_t slot) {
+    if (!WaitForMMUReady()) {
+        return false;
+    }
+
+    FullScreenMsgLoad(slot);
+    {
+        // used for MMU-menu operation "Load to Nozzle"
+        CommandInProgressGuard cipg(ExtendedCommandInProgress::LoadToNozzle, commandInProgressManager);
+
+        if (extruder != MMU2_NO_TOOL) { // we already have some filament loaded - free it + shape its tip properly
+            UnloadObeyAutoRetracted();
+        }
+        WaitForHotendTargetTempBeep(); // heat up to target temp of the new filament
+        {
+            FSensorBlockRunout blockRunout;
+            BlockEStallDetection blockEStallDetection;
+            ToolChangeCommon(slot);
+
+            // Finish loading to the nozzle with finely tuned steps.
+            execute_load_to_nozzle_sequence();
+        }
+        MakeSound(Confirm);
+    }
+    ScreenUpdateEnable();
+    return true;
+}
+
+void MMU2::execute_load_to_nozzle_sequence() {
+    planner_synchronize();
+    // Compensate for configurable Extra Loading Distance
+    // @@TODO 8bit needs this: planner_set_current_position_E(planner_get_current_position_E() - (logic.ExtraLoadDistance() - MMU2_FILAMENT_SENSOR_POSITION));
+    execute_extruder_sequence(load_to_nozzle_sequence, sizeof(load_to_nozzle_sequence) / sizeof(load_to_nozzle_sequence[0]), ExtendedProgressCode::LoadingToNozzle);
+}
+
+bool MMU2::OnMMUProgressMsgChanged(ProgressCode pc) {
+    ReportProgress(pc);
+    switch (pc) {
+    case ProgressCode::UnloadingToFinda:
+        if ((CommandInProgress)logic.CommandInProgress() == CommandInProgress::UnloadFilament
+            || ((CommandInProgress)logic.CommandInProgress() == CommandInProgress::ToolChange)) {
+            // If MK3S sent U0 command, ramming sequence takes care of releasing the filament.
+            // If Toolchange is done while printing, PrusaSlicer takes care of releasing the filament
+            // If printing is not in progress, ToolChange will issue a U0 command.
+            break;
+        } else {
+            // We're likely recovering from an MMU error
+            planner_synchronize();
+            unloadFilamentStarted = true;
+            HelpUnloadToFinda();
+        }
+        break;
+    case ProgressCode::FeedingToFSensor:
+        // prepare for the movement of the E-motor
+        // make sure we start at the same position every time - better for debugging.
+        // GCode is not affected, it does it's own G92 E0 after the MMU toolchange
+        marlin_resetE();
+        extruder_move(maximumAllowedExtruderMove, logic.PulleySlowFeedRate()); // start the extuder
+        loadFilamentStarted = true;
+        break;
+    case ProgressCode::DisengagingIdler: // only happens after the fsensor triggered correctly -> safe to kill the E-moves
+        if (loadFilamentStarted) {
+            loadFilamentStarted = false;
+            // make sure we kill the moves in case we lost some packets on the communication
+            // which should have been processed in OnMMUProgressMsgSame
+            planner_abort_queued_moves();
+            return allowPrematureFinish; // exit manage_response prematurely
+        }
+        break;
+    default:
+        // do nothing yet
+        break;
+    }
+    return false;
+}
+
+void __attribute__((noinline)) MMU2::HelpUnloadToFinda() {
+    extruder_move(-MMU2_RETRY_UNLOAD_TO_FINDA_LENGTH, MMU2_RETRY_UNLOAD_TO_FINDA_FEED_RATE);
+}
+
+bool MMU2::OnMMUProgressMsgSame(ProgressCode pc) {
+    switch (pc) {
+    case ProgressCode::UnloadingToFinda:
+        if (unloadFilamentStarted && !planner_any_moves()) { // Only plan a move if there is no move ongoing
+            switch (WhereIsFilament()) {
+            case FilamentState::AT_FSENSOR:
+            case FilamentState::IN_NOZZLE:
+            case FilamentState::UNAVAILABLE: // actually Unavailable makes sense as well to start the E-move to release the filament from the gears
+                HelpUnloadToFinda();
+                break;
+            default:
+                unloadFilamentStarted = false;
+            }
+        }
+        break;
+    case ProgressCode::FeedingToFSensor:
+        if (loadFilamentStarted) {
+            switch (WhereIsFilament()) {
+            case FilamentState::AT_FSENSOR:
+                // fsensor triggered, finish FeedingToExtruder state
+                loadFilamentStarted = false;
+                planner_abort_queued_moves();
+                {
+#if PRINTER_IS_PRUSA_MK3_5()
+                    // on the MK3.5 due to fsensor filtering delay (compared to MK3S),
+                    // we are getting 0.175mm of extra loaded filament per 1mm/s speed increase of slow loading speed.
+                    // i.e. for 20mm/s we get roughly 4mm of extra loaded filament
+                    float loadingSpeedCompensation = 0.175f * logic.PulleySlowFeedRate();
+#else
+                    // no change for MK4 and MK3.9, fsensor is different there
+                    static constexpr float loadingSpeedCompensation = 0.F;
+#endif
+                    extruder_move(logic.ExtraLoadDistance() + 2 - loadingSpeedCompensation, logic.PulleySlowFeedRate());
+                }
+                return allowPrematureFinish; // let the ExtraLoadDistance move finish and then bail out prematurely
+                break;
+            case FilamentState::NOT_PRESENT:
+                // fsensor not triggered, continue moving extruder
+                if (!planner_any_moves()) { // Only plan a move if there is no move ongoing
+                    extruder_move(maximumAllowedExtruderMove, logic.PulleySlowFeedRate()); // start the extruder
+                }
+                break;
+            case FilamentState::UNAVAILABLE:
+                // @@TODO houston, we have a problem, fsensor unavailable, the MMU cannot continue doing anything without it
+                // log an error and wait for the worst
+                break;
+            default:
+                // Abort here?
+                break;
+            }
+        }
+        break;
+    default:
+        // do nothing yet
+        break;
+    }
+    return false;
+}
+
+bool MMU2::cut_filament(uint8_t slot, bool enableFullScreenMsg /*= true*/) {
+    if (!WaitForMMUReady()) {
+        return false;
+    }
+
+    UpdateCurrentFilamentType(slot);
+    if (enableFullScreenMsg) {
+        FullScreenMsgCut(slot);
+    }
+    {
+        if (FindaDetectsFilament()) {
+            unload();
+        }
+
+        CommandInProgressGuard cipg(CommandInProgress::CutFilament, commandInProgressManager);
+        CutFilamentInner(slot);
+        extruder = MMU2_NO_TOOL;
+        tool_change_extruder = MMU2_NO_TOOL;
+        MakeSound(SoundType::Confirm);
+    }
+    ScreenUpdateEnable();
+    return true;
+}
+
+bool MMU2::eject_filament(uint8_t slot, bool enableFullScreenMsg /* = true */) {
+    if (!WaitForMMUReady()) {
+        return false;
+    }
+
+    UpdateCurrentFilamentType(slot);
+    if (enableFullScreenMsg) {
+        FullScreenMsgEject(slot);
+    }
+    {
+        if (FindaDetectsFilament()) {
+            unload();
+        }
+
+        CommandInProgressGuard cipg(CommandInProgress::EjectFilament, commandInProgressManager);
+        SaveResumePos();
+        for (;;) {
+            Disable_E0();
+            logic.EjectFilament(slot);
+            if (manage_response(false, true)) {
+                break;
+            }
+            IncrementMMUFails();
+        }
+        extruder = MMU2_NO_TOOL;
+        tool_change_extruder = MMU2_NO_TOOL;
+        MakeSound(Confirm);
+    }
+    ScreenUpdateEnable();
+    return true;
+}
+
+bool MMU2::tool_change(uint8_t slot) {
+    if (!WaitForMMUReady()) {
+        return false;
+    }
+
+    if (slot != extruder) {
+        if (/*FindaDetectsFilament()*/
+            /*!IS_SD_PRINTING && !usb_timer.running()*/
+            !marlin_printingIsActive()) {
+            // If Tcodes are used manually through the serial
+            // we need to unload manually as well -- but only if FINDA detects filament
+            unload();
+        }
+
+        CommandInProgressGuard cipg(CommandInProgress::ToolChange, commandInProgressManager);
+        FSensorBlockRunout blockRunout;
+        BlockEStallDetection blockEStallDetection;
+        planner_synchronize();
+        ToolChangeCommon(slot);
+    }
+    return true;
+}
+
+bool MMU2::tool_change_full(uint8_t slot) {
+    if (!WaitForMMUReady()) {
+        return false;
+    }
+
+    if (slot != extruder) {
+        planner_synchronize();
+
+        pos3d resume_pos = planner_current_position();
+
+        if (all_axes_homed()) {
+            nozzle_park();
+        }
+
+        unload();
+
+        CommandInProgressGuard cipg(CommandInProgress::ToolChange, commandInProgressManager);
+        FSensorBlockRunout blockRunout;
+        BlockEStallDetection blockEStallDetection;
+        planner_synchronize();
+        ToolChangeCommon(slot);
+
+        execute_load_to_nozzle_sequence();
+
+        if (all_axes_homed()) {
+            // Unpark the nozzle
+            motion_do_blocking_move_to_xy(resume_pos.xyz[0], resume_pos.xyz[1], feedRate_t(NOZZLE_PARK_XY_FEEDRATE));
+            motion_do_blocking_move_to_z(resume_pos.xyz[2], feedRate_t(NOZZLE_PARK_Z_FEEDRATE));
+        }
+    }
+
+    return true;
+}
+
+bool MMU2::WaitForMMUReady() {
+    switch (State()) {
+    case xState::Stopped:
+        return false;
+    case xState::Connecting:
+    case xState::Bootloader:
+        // shall we wait until the MMU reconnects?
+        // fire-up a fsm_dlg and show "MMU not responding"?
+    default:
+        return true;
+    }
+}
+
+void __attribute__((noinline)) MMU2::mmu_loop_inner(bool reportErrors) {
+    mmu2Serial.check_recovery();
+
+    #if MMU_USE_BOOTLOADER()
+    if (state == xState::Bootloader) {
+        bootloader->loop();
+
+        if (!bootloader->is_active()) {
+            bootloader_result_ = bootloader->result();
+            bootloader.reset();
+            state = xState::Connecting;
+            logic.Start();
+        }
+
+    } else
+    #endif
+    {
+        logicStepLastStatus = LogicStep(reportErrors); // it looks like the mmu_loop doesn't need to be a blocking call
+    }
+
+    CheckErrorScreenUserInput();
+}
+"""  # noqa: E501 (verbatim firmware lines)
+
+# `multi_filament_change.cpp`, excerpts.
+MULTI_FILAMENT_CHANGE_CPP = """\
+void Config::execute() const {
+    // If we have nothing to do, we can exit right now
+    if (std::ranges::all_of(items, [](const auto &i) { return i.action == Action::keep; })) {
+        return;
+    }
+
+    marlin_server::FSM_Holder fsm { PhaseWait::print_status_message };
+
+    StrongIndexArray<FilamentType, VirtualToolIndex::count, VirtualToolIndex, VirtualToolIndex::to_raw_static> old_filaments;
+    for (auto tool : VirtualToolIndex::all()) {
+        old_filaments[tool] = config_store().get_filament_type(tool);
+    }
+
+#if HAS_TOOLCHANGER()
+    // Start preheating all nozzles
+    for (auto tool : VirtualToolIndex::all().skip_all_disabled()) {
+        const auto &item = items[tool];
+        if (item.action == Action::keep) {
+            continue;
+        }
+
+        const uint16_t temperature = max(FilamentType { item.new_filament }.parameters().nozzle_temperature, old_filaments[tool].parameters().nozzle_temperature);
+        thermalManager.setTargetHotend(temperature, tool.to_physical());
+    }
+#endif
+
+    // Lift Z to prevent unparking and parking of each tool
+    // without a pre-raise, every iteration would do its own Z movement (raise + lower)
+    GcodeSuite::process_subcommands_now_P("G27 P0 Z40");
+
+    /* MMU2 Reimplementation
+
+        MMU should be in unloaded state right now (as every start of print)
+        For all selected tools (in this case tool == MMU's filament slot) change filament
+        This means MMU will go through selected tools and load to the slot (NOT load to extruder)
+    */
+
+    // Carry out the changes
+    for (auto tool : VirtualToolIndex::all().skip_all_disabled()) {
+        const auto &item = items[tool];
+        switch (item.action) {
+
+        case Action::keep:
+            break;
+
+        case Action::unload: {
+#if HAS_MMU2()
+            config_store().set_filament_type(tool, FilamentType::none);
+#else
+            filament_gcodes::M702_unload(
+                std::nullopt,
+                Z_AXIS_LOAD_POS,
+                RetAndCool_t::Return,
+                tool,
+                false);
+#endif
+            break;
+        }
+
+        case Action::change: {
+#if HAS_MMU2()
+            // preload the MMU slot
+            filament_gcodes::mmu_load(tool.to_raw());
+
+            config_store().set_filament_type(tool, filament::apply_load_color(FilamentType { item.new_filament }, tool, item.color));
+#else
+            const FilamentType new_filament { item.new_filament };
+            if (old_filaments[tool] != FilamentType::none) {
+                filament_gcodes::M1600_change_filament(
+                    new_filament,
+                    tool,
+                    RetAndCool_t::Return,
+                    filament_gcodes::AskFilament_t::Never,
+                    item.color);
+            } else {
+                filament_gcodes::M701_load(filament_gcodes::M701LoadArgs {
+                    .filament_to_be_loaded = new_filament,
+                    .z_min_pos = Z_AXIS_LOAD_POS,
+                    .op_preheat = RetAndCool_t::Return,
+                    .virtual_tool = tool,
+                    .color_to_be_loaded = item.color,
+                });
+            }
+#endif
+            break;
+        }
+        }
+    }
+}
+"""  # noqa: E501 (verbatim firmware lines)
+
+# `screen_menu_mmu_preload_all.cpp`, excerpts.
+MMU_PRELOAD_ALL_CPP = """\
+void MI_FILAMENT::click(IWindowMenu &) {
+    // Set filament type for all MMU slots and issue preload commands
+    for (auto slot : VirtualToolIndex::all()) {
+        config_store().set_filament_type(slot, filament_type);
+        marlin_client::gcode_printf("M704 P%d", slot.to_raw());
+
+        // Wait while there are more than one command in queue to prevent race conditions
+        while (marlin_vars().gqueue > 1) {
+            gui::TickLoop();
+            DialogHandler::Access().Loop();
+            gui_loop();
+        }
+    }
+
+    // Wait for all preload operations to finish
+    while (marlin_vars().is_processing.get()) {
+        gui::TickLoop();
+        DialogHandler::Access().Loop();
+        gui_loop();
+    }
+
+    Screens::Access()->close_screen();
+}
+"""
+
+# `screen_menu_filament_mmu.cpp`, excerpts.
+FILAMENT_MMU_CPP = """\
+void ScreenMenuFilamentMMU::windowEvent(window_t *sender, GUI_event_t event, void *param) {
+    if (event == GUI_event_t::LOOP) {
+        bool filament_in_nozzle = FSensors_instance().WhereIsFilament() == MMU2::FilamentState::AT_FSENSOR;
+
+        // Some operations are not available when filament is loaded all the
+        // way to the nozzle (the MMU can't move then).
+        //
+        // Update the status ‒ both because it can change from a submenu and in
+        // theory by a gcode sent remotely from eg. Connect.
+        Item<MI_MMU_CUT_FILAMENT>().set_enabled(!filament_in_nozzle);
+        Item<MI_MMU_EJECT_FILAMENT>().set_enabled(!filament_in_nozzle);
+        Item<MI_MMU_PRELOAD>().set_enabled(!filament_in_nozzle);
+    }
+
+    ScreenMenu::windowEvent(sender, event, param);
+}
+"""  # noqa: E501 (verbatim firmware lines)
+
+# `MItem_mmu.cpp`, excerpts.
+MITEM_MMU_CPP = """\
+MI_MMU_LOAD_TO_NOZZLE_I::MI_MMU_LOAD_TO_NOZZLE_I(VirtualToolIndex tool)
+    : MI_MMU_ITEM_WITH_SLOT(tool.to_raw(), N_("Load Filament %i")) {
+    filament_type_ = FilamentType::for_tool(tool);
+
+    StringBuilder info_sb { info_buffer_ };
+    filament_type_.build_name_with_info(info_sb);
+
+    extension_ = MenuItemColorSwatchExtension {
+        .text = string_view_utf8::MakeRAM(info_buffer_.data()),
+        .color = filament_type_.parameters().color,
+        .show_null_color = false,
+    };
+    extension_width = extension_.compute_width();
+
+    set_enabled(filament_type_ != FilamentType::none);
+}
+
+void MI_MMU_LOAD_TO_NOZZLE_I::printExtension(Rect16 extension_rect, Color color_text, Color color_back, ropfn raster_op) const {
+    (void)color_text;
+    extension_.draw(*this, extension_rect, color_back, raster_op);
+}
+
+void MI_MMU_LOAD_TO_NOZZLE_I::click(IWindowMenu &) {
+    ArrayStringBuilder<MAX_CMD_SIZE> gcode;
+    gcode.append_string("M701 S\\"");
+    filament_type_.build_encoded_gcode_param(gcode);
+    gcode.append_printf("\\" W2 P%i", slot_i_);
+    gui_try_gcode_with_msg(gcode.str());
+}
+
+void MI_MMU_ENABLE::OnChange([[maybe_unused]] size_t old_index) {
+    if (value() && !config_store().is_mmu_rework.get() && !set_mmu_rework(true)) {
+        set_value(false);
+        return;
+
+    } else if (value() && !FSensors_instance().is_working(LogicalFilamentSensor::extruder)) {
+        MsgBoxWarning(_("Can't enable MMU: calibrate and enable the printer's filament sensor first."), Responses_Ok);
+        set_value(false);
+        return;
+    }
+
+    marlin_client::gcode(value() ? "M709 S1" : "M709 S0");
+}
+"""  # noqa: E501 (verbatim firmware lines)  # noqa: E501 (verbatim firmware lines)
+
+# The MMU's start in `app_setup`.
+APPMAIN_CPP = """\
+static void app_setup(void) {
+    metric_record_event(&metric_app_start);
+
+#if HAS_MMU2()
+    if (config_store().mmu2_enabled.get()) {
+        MMU2::mmu2.Start();
+    }
+#endif
+}
+"""
+
+# The filament sensors' MMU setting, idle clear, switch-off and forced sensors.
+FILAMENT_SENSORS_HANDLER_CPP = """\
+void FilamentSensors::reconfigure_sensors_if_needed(bool force) {
+    const auto new_tool = stdext::get_optional<PhysicalToolIndex>(PhysicalToolIndex::currently_selected());
+    const auto new_tool_index = new_tool ? new_tool->to_raw() : PhysicalToolIndex::count;
+
+    if (!force && new_tool_index == tool_index) {
+        return;
+    }
+
+    tool_index = new_tool_index;
+
+    has_mmu =
+#if HAS_MMU2()
+        config_store().mmu2_enabled.get(); // there is a slight semantic difference:
+    // - mmu2_enabled in eeprom describes the "intent" to enable MMU on the machine (this flag is true even when the MMU is not communicating)
+    // - mmu2.Enabled() is true when the MMU is operational (i.e. powered up and initial communication handshake accomplished)
+    // at this spot of filament runout logic, using the "intent" is better because:
+    // - you cannot start a print with MMU in the "connecting" stage
+    // - when communication drops out during print, an error screen occurrs and must be resolved to continue -> runout are completely irrelevant at that moment
+    // - enabling MMU in the eeprom ("intent") is an atomic operation, while it takes ~10s for the MMU to become operational
+#else
+        false;
+#endif
+
+    extruder_fs_independent =
+#if PRINTER_IS_PRUSA_iX()
+        // iX always has the "MMU rework"
+        false;
+#elif HAS_MMU2()
+        !config_store().is_mmu_rework.get();
+#else
+            true;
+#endif
+
+    using LFS = LogicalFilamentSensor;
+    auto &ls = logical_sensors_;
+
+    const auto extruder_fs = new_tool ? GetExtruderFSensor(*new_tool) : nullptr;
+    const auto side_fs = new_tool ? GetSideFSensor(*new_tool) : nullptr;
+
+    const bool side_fs_enabled = side_fs && side_fs->is_enabled();
+
+    ls[LFS::extruder] = extruder_fs;
+    ls[LFS::side] = side_fs;
+    ls[LFS::primary_runout] = side_fs_enabled ? side_fs : extruder_fs;
+    ls[LFS::closest_to_nozzle] = extruder_fs ?: side_fs;
+    ls[LFS::closest_to_nozzle_independent] = (extruder_fs && extruder_fs_independent) ? extruder_fs : side_fs;
+}
+
+void FilamentSensors::process_events() {
+    if (isEvLocked()) {
+        return;
+    }
+
+    const auto check_runout = [&](LogicalFilamentSensor s) {
+        auto sen = sensor(s);
+        if (sen == nullptr) {
+            return false;
+        }
+
+        const auto event = sen->last_event();
+        if (m600_sent || event != IFSensor::Event::filament_removed) {
+            return false;
+        }
+
+#if HAS_CRASH_DETECTION()
+        if (crash_s.get_state() != Crash_s::PRINTING) {
+            // Only allow runouts in print and outside of crash recovery
+            return false;
+        }
+#endif
+
+        m600_sent = true;
+
+        const auto tool = VirtualToolIndex::currently_selected_opt();
+
+        if (tool.has_value()) {
+            marlin_server::gcode_interrupt(GCodeLiteral { .gcode = "M600 A P T%.0f", .parameter = static_cast<float>(tool->to_raw()) });
+            log_info(FSensor, "Injected runout for T: %u", tool->to_raw());
+        } else {
+            return false;
+        }
+
+        return true;
+    };
+
+    const auto check_autoload = [&]() {
+        const auto is_insert_event = [&](LogicalFilamentSensor s) {
+            const auto si = sensor(s);
+            return si && si->last_event() == IFSensor::Event::filament_inserted;
+        };
+
+        if (!(
+                (
+                    // Trigger autoload from extruder FS only if the filament is not missing in the side FS
+                    (is_insert_event(LogicalFilamentSensor::extruder) && !no_filament_surely(LogicalFilamentSensor::side)
+                        // On the MMU rework, the "FS autoload" configuration item is hidden (BFW-4290)
+                        // So there's no way to enable it when it has been disabled in prior.
+                        // Keep the option enabled for power users, in the spirit of the OG task assignment
+                        && (config_store().fs_autoload_enabled.get() || !extruder_fs_independent))
+
+                    // Trigger autoload from side FS only if there is no filament in the extruder
+                    || (is_insert_event(LogicalFilamentSensor::side) && !has_filament_surely(LogicalFilamentSensor::extruder) && config_store().fs_autoload_enabled.get())
+                    //
+                    )
+                && !has_mmu
+                && !autoload_sent
+                && !marlin_server::is_processing()
+                && !isAutoloadLocked())
+            //
+        ) {
+            return false;
+        }
+
+        autoload_sent = true;
+
+#if HAS_ANFC()
+        const auto opt_uid_hash = buddy::openprinttag::autoload_auto_assign_tool_tag_hash.load();
+        const auto opt_tag = VirtualToolIndex::currently_selected_opt().and_then(buddy::openprinttag::ToolTag::for_tool_ephemeral);
+        if (opt_tag.has_value() && opt_tag->uid_hash() == opt_uid_hash) {
+            // Make sure we don't lose any data when casting to float
+            static_assert(std::numeric_limits<float>::digits >= std::numeric_limits<decltype(opt_uid_hash)>::digits);
+            marlin_server::inject(GCodeLiteral { .gcode = "M1701 G%.0f", .parameter = (float)opt_uid_hash });
+        } else
+#endif
+        {
+            marlin_server::inject(GCodeLiteral { .gcode = "M1701" });
+        }
+
+        log_info(FSensor, "Injected autoload");
+
+        return true;
+    };
+
+    if (marlin_server::is_printing()) {
+        if (check_runout(LogicalFilamentSensor::primary_runout)) {
+            return;
+        }
+
+        // With an MMU, don't check for runout on the extruder sensor, it would be too late for anything
+        if (!has_mmu && check_runout(LogicalFilamentSensor::extruder)) {
+            return;
+        }
+    } else {
+        // During MMU standard operation, there is no filament loaded to the nozzle when not printing.
+        // So it's not a good idea to reset what filament types we have stored.
+        if (!has_mmu && no_filament_surely(LogicalFilamentSensor::closest_to_nozzle) && tool_index < PhysicalToolIndex::count) {
+            const auto physical_tool = PhysicalToolIndex::from_raw(tool_index);
+            const auto virtual_tool = stdext::get_optional<VirtualToolIndex>(physical_tool.currently_selected_virtual_tool());
+            if (virtual_tool.has_value()) {
+                config_store().set_filament_type(*virtual_tool, FilamentType::none);
+            }
+        }
+
+        if (check_autoload()) {
+            return;
+        }
+    }
+}
+
+void FilamentSensors::process_enable_state_update() {
+    enable_state_update_processing = true;
+    enable_state_update_pending = false;
+
+    for_all_sensors([](IFSensor &s, PhysicalToolIndex, bool) {
+        s.set_enabled(should_enable(s.id()));
+    });
+
+#if HAS_MMU2()
+    if (config_store().mmu2_enabled.get() && !config_store().fsensor_enabled.get()) {
+        // MMU requires enabled filament sensor to work, turn it off if the fsensors got disabled
+        marlin_server::enqueue_gcode("M709 S0");
+    }
+#endif
+
+    enable_state_update_processing = false;
+}
+
+bool should_enable(FilamentSensorID id) {
+#if HAS_MMU2()
+    /// MMU override: when MMU is active, both extruder and side sensors
+    /// are required regardless of per-sensor enable bits.
+    if (config_store().mmu2_enabled.get()) {
+        return true;
+    }
+#endif
+
+    if (!config_store().fsensor_enabled.get()) {
+        return false;
+    }
+
+    if (id.position == FilamentSensorID::Position::side) {
+        return config_store().fsensor_side_enabled_bits.get() & (1 << id.index);
+    } else {
+        return config_store().fsensor_extruder_enabled_bits.get() & (1 << id.index);
+    }
+}
+"""  # noqa: E501 (verbatim firmware lines)
+
+# `marlin_server.cpp`, excerpts: `pre_finalize_print`, its unload, the single-tool start,
+# the preview's Print and Inactive results, and the G-code queue's length as a client
+# reads it.
+MARLIN_SERVER_CPP = """\
+static bool pre_finalize_print([[maybe_unused]] bool finished) {
+#if HAS_ANFC()
+    buddy::openprinttag::filament_usage_tracker().flush({
+        .tools = AllTools {},
+        .warn_on_failure = true,
+    });
+#endif
+
+#if HAS_AUTO_RETRACT()
+    // During multi tool printing, slicer handles retraction/ramming and keeps FW in the dark
+    // FilamentTracker keeps track of retracted distances on each hotend
+    // This overwrites retracted distances in persistent storage with temporary ones from FilamentTracker
+    for (auto tool : PhysicalToolIndex::all()) {
+        const auto dist = buddy::filament_tracker().get_retracted_distance(tool);
+        // Do not save filament_tracker value before it was validated
+        if (dist.has_value()) {
+            // update only used hotends
+            buddy::auto_retract().set_retracted_distance(tool, dist);
+        }
+    }
+#endif
+
+#if HAS_MMU2()
+    if (MMU2::mmu2.Enabled()) {
+        // Unloading from nozzle is handled by Slicer, do not use auto_retract (frequent filament changes cause filament_tracker cannot properly hold valid value)
+        // When we are running single-filament gcode with MMU, we should unload current filament.
+        if (!finished || GCodeInfo::getInstance().is_singletool_gcode()) {
+            safely_unload_filament_from_nozzle_to_mmu();
+        }
+    } else
+#endif
+
+#if HAS_AUTO_RETRACT()
+        if (true) {
+        buddy::auto_retract().maybe_retract_from_nozzle();
+    } else
+#endif
+    {
+    }
+
+#if HAS_NOZZLE_CLEANER()
+    // Skip nozzle cleaning if no tool is picked (e.g. tool already parked during pause on INDX)
+    if (!std::holds_alternative<NoTool>(PhysicalToolIndex::currently_selected())) {
+        if (!nozzle_cleaner::load_and_execute(nozzle_cleaner::Sequence::clean)) {
+            return false;
+        }
+        mapi::park(mapi::get_parking_position(mapi::ParkPosition::park).without_z_move());
+    }
+#endif
+
+#if HAS_INDX()
+    // Park the tool to its dock and persist the state to eeprom.
+    // Done here (still with axes homed) so tool_change's ensure_safe_move() doesn't trigger another G28.
+    tool_change(NoTool {}, tool_return_t::no_return);
+    prusa_toolchanger.persist_last_picked_tool(PhysicalToolIndex::currently_selected(), true);
+#endif
+
+#if HAS_CHAMBER_VENTS()
+    buddy::chamber().close_vents_after_print();
+#endif
+
+    disable_e_steppers();
+    disable_xy_steppers();
+
+    return true;
+}
+
+void safely_unload_filament_from_nozzle_to_mmu() {
+    if (MMU2::WhereIsFilament() == MMU2::FilamentState::NOT_PRESENT) {
+        return; // no filament loaded, nothing to do
+    }
+    const uint16_t original_temp = thermalManager.degTargetHotend(active_extruder);
+    enqueue_gcode("M702 W2");
+    enqueue_gcode_printf("M104 S%" PRIu16, original_temp);
+}
+
+#if HAS_MMU2()
+            if (MMU2::mmu2.Enabled() && GCodeInfo::getInstance().is_singletool_gcode() && MMU2::mmu2.get_current_tool() == MMU2::FILAMENT_UNKNOWN) {
+                // POC: Handle singletool G-code which doesn't have T commands in it
+                // In case we don't have other filament loaded!
+                // Unfortunately we don't have the nozzle heated, an ugly workaround is to enqueue an M109 :(
+
+                const uint16_t preheat_temp = GCodeInfo::getInstance().get_hotend_preheat_temp().value_or(215U);
+                enqueue_gcode_printf("M109 S%" PRIu16, preheat_temp); // speculatively, use PLA temp for MMU prints, anything else is highly unprobable at this stage
+                enqueue_gcode("T0"); // tool change T0 (can be remapped to anything)
+                enqueue_gcode("G92 E0"); // reset extruder position to 0
+
+                bool is_relative = gcode.axis_is_relative(AxisEnum::E_AXIS);
+
+                enqueue_gcode("M82"); // set E to absolute positions
+    #if HAS_NEXTRUDER()
+                enqueue_gcode("G1 E25 F1860"); // push filament into the nozzle - load distance from fsensor into nozzle tuned (hardcoded) for now
+                enqueue_gcode("G1 E35 F300"); // slowly push another 10mm (absolute E)
+    #elif PRINTER_IS_PRUSA_MK3_5()
+                enqueue_gcode("G1 E50 F1860"); // push filament into the nozzle - load distance from fsensor into nozzle tuned (hardcoded) for now
+                enqueue_gcode("G1 E62 F300"); // slowly push another 12mm (absolute E)
+    #else
+        #error
+    #endif
+                if (is_relative) {
+                    enqueue_gcode("M83"); // set E back to relative positions
+                }
+
+                // In case of need, we can perform a custom purge line from the other end of the heatbed
+                // It would require homing the axes first, moving to [maxx-10, -4] and slowly purging while moving towards the origin
+            }
+#endif
+
+        case PrintPreview::Result::Print:
+        case PrintPreview::Result::Inactive:
+            did_not_start_print = false;
+            server.print_state = State::PrintInit;
+            break;
+
+    marlin_vars().gqueue = queue.length;
+
+static bool _process_server_request(const Request &request) {
+    const uint8_t client_id = request.client_id;
+    if (client_id >= MARLIN_MAX_CLIENTS) {
+        return true;
+    }
+
+    const bool processed = _process_server_valid_request(request);
+
+    // force update of marlin variables after proecssing request -> to ensure client can read latest variables after request completion
+    _server_update_vars();
+
+    if (request.response_required) {
+        marlin_client::marlin_client_events[client_id].set(make_mask(processed ? Event::Acknowledge : Event::NotAcknowledge));
+    }
+    return processed;
+}
+"""  # noqa: E501 (verbatim firmware lines)
+
+# The tag radio's MMU condition.
+REQUEST_MANAGER_CPP = """\
+    static_assert(!HAS_INDX(), "Revisit all HAS_ANFC_FOR_MULTIPLE_TOOLS block (especially code below) when implementing NFC for 'multi-tool' printers.");
+#if (HAS_MMU2() && !HAS_ANFC_FOR_MULTIPLE_TOOLS())
+    // Turn NFC antenna off if MMU is active
+    // !!This code should be temporary!!
+    const bool want_radio = !config_store().mmu2_enabled.get();
+#else
+    const bool want_radio = true;
+#endif
+"""  # noqa: E501 (verbatim firmware lines)
+
+# Whether a tool has a tag reader.
+TOOL_TAG_BUDDY_CPP = """\
+bool has_tool_openprinttag_reader([[maybe_unused]] VirtualToolIndex tool) {
+
+#if HAS_MMU2() && !HAS_ANFC_FOR_MULTIPLE_TOOLS()
+    return !config_store().mmu2_enabled.get();
+#else
+    return true;
+#endif
+}
+"""
+
+# The MMU's filament menu.
+SCREEN_MENU_FILAMENT_MMU_HPP = """\
+using ScreenMenuFilamentMMU__ = ScreenMenu<GuiDefaults::MenuFooter, MI_RETURN,
+    MI_LOADED_FILAMENT,
+    MI_MMU_PRELOAD,
+    MI_MMU_PRELOAD_ALL,
+    MI_MMU_LOAD_TO_NOZZLE,
+    MI_MMU_UNLOAD_FILAMENT,
+    MI_MMU_EJECT_FILAMENT,
+    MI_MMU_CUT_FILAMENT,
+    // MI_PURGE, doing purges in MMU mode is not only unsupported but dangerous and doesn't play well with the preferred workflow of the MMU-enabled machine
+    // debug items, but the functionality will be used by the error screens - hidden in release builds
+    MI_MMU_SW_RESET,
+    MI_MMU_HW_RESET,
+    MI_MMU_POWER_CYCLE,
+    MI_FILAMENT_MANAGEMENT>;
+"""  # noqa: E501 (verbatim firmware lines)
+
+M600_CPP = """\
+void M600_manual(const GCodeParser2 &p) {
+    const std::optional<VirtualToolIndex> virtual_tool = stdext::get_optional<VirtualToolIndex>(PrusaGcodeSuite::get_target_virtual_from_command_p(p));
+    if (!virtual_tool.has_value()) {
+        return;
+    }
+    VirtualToolIndex target_tool = *virtual_tool;
+
+    XYZval<float, LogicalPosTag> logical_park_point { NAN, NAN, NAN };
+
+    // Lift Z axis
+    p.store_option_if_present('Z', logical_park_point.z);
+
+    // Move XY axes to filament change position or given position
+    p.store_option_if_present('X', logical_park_point.x);
+    p.store_option_if_present('Y', logical_park_point.y);
+
+    const auto park_point = logical_park_point.asNative();
+
+    auto park_position = mapi::get_parking_position(mapi::ParkPosition::filament_change);
+    if (!std::isnan(park_point.x)) {
+        park_position.x = park_point.x;
+    }
+    if (!std::isnan(park_point.y)) {
+        park_position.y = park_point.y;
+    }
+    if (!std::isnan(park_point.z)) {
+        park_position.z = park_point.z;
+    }
+
+    const xyze_float_t no_return = { { { NAN, NAN, NAN, current_position.e } } };
+
+    M600_execute(park_position,
+        target_tool,
+        p.option<bool>('N') ? no_return : current_position,
+        p.option<float>('U'),
+        p.option<float>('L'),
+        p.option<float>('E').transform(fabsf),
+        p.option<Color>('C'),
+        p.option<FilamentType>('S'),
+        false);
+}
+"""  # noqa: E501 (verbatim firmware lines)
+
+SCREEN_M600_CPP = """\
+void MI_M600::click([[maybe_unused]] IWindowMenu &window_menu) {
+#if HAS_TOOLCHANGER()
+    if (prusa_toolchanger.is_toolchanger_enabled()) {
+        const auto tool = select_tool_dialog({
+            .allow_return = true,
+        });
+        if (tool.has_value() && inject(*tool)) {
+            Screens::Access()->close_screen();
+        }
+        return;
+    }
+#endif
+    match(
+        VirtualToolIndex::currently_selected(),
+        [](VirtualToolIndex virtual_tool) { inject(virtual_tool); },
+        [](NoTool) { debug_assert(false); /* theoretically reachable edge case - do nothing */ });
+}
+"""
+
+# `marlin_print_preview.cpp`, excerpts: the filament check before a print and the preview's
+# state machine, with the MMU's unload question and its answers.
+MARLIN_PRINT_PREVIEW_CPP = """\
+IPrintPreview::State PrintPreview::stateFromFilamentPresence() const {
+
+#if HAS_MMU2()
+    if (FSensors_instance().HasMMU()) {
+        if (!config_store().fsensor_enabled.get()) {
+            return State::checks_done;
+        }
+
+        buddy::gcode_compatibility::CompatibilityReport report;
+        report.generate_toolmapping_only({});
+
+        // with MMU, its only possible to check that filament is properly unloaded, no check of filaments presence in each "tool"
+        if (FSensors_instance().MMUReadyToPrint()) {
+            return State::checks_done;
+        } else if (GCodeInfo::getInstance().is_singletool_gcode()
+            && FSensors_instance().WhereIsFilament() == MMU2::FilamentState::AT_FSENSOR
+            // only allow this shortcut print start if filament type is matching
+            && !report.failed(buddy::gcode_compatibility::VirtualToolCheck::filament_type) //
+        ) {
+            // beware: State::checks_done shows the toolmapping screen.
+            // We don't want that in MMU mode printing a single material gcode with filament already loaded in the nozzle.
+            // In such a case we want to avoid toolmapping and start the print right away instead -> set State::done and not checks_done
+            return State::done;
+        } else {
+            // Request removal of the inserted filament, esp. when:
+            // - starting a multi-material print
+            // - singlematerial print's material type not matching the inserted filament
+            return State::mmu_filament_inserted_wait_user;
+        }
+    } else
+#endif
+    {
+        if (!config_store().fsensor_enabled.get()) {
+            return stateFromFilamentType();
+        }
+        if (tools_mapping::is_tool_mapping_possible()) {
+            return stateFromFilamentType(); // filament loaded/type checks are handled by the tools_mapping screen
+        }
+
+        // no MMU, do regular check of filament presence in each tool
+        for (auto virtual_tool : VirtualToolIndex::all()) {
+            if (check_extruder_need_filament_load_tools_mapping(virtual_tool)) {
+                return State::filament_not_inserted_wait_user;
+            }
+        }
+        return stateFromFilamentType();
+    }
+}
+
+PrintPreview::Result PrintPreview::Loop() {
+    if (GetState() == State::inactive) {
+        return Result::Inactive;
+    }
+
+    const uint32_t curr_ms = ticks_ms();
+    if (ticks_diff(curr_ms, last_run) < max_run_period_ms) {
+        return stateToResult();
+    }
+    last_run = curr_ms;
+    const Response response = GetResponse();
+
+    auto &gcode_info = GCodeInfo::getInstance();
+
+    switch (GetState()) {
+
+    case State::inactive: // cannot be, but have it defined to enumerate all states
+        return Result::Inactive;
+
+    case State::init:
+        gcode_info_scan::start_scan();
+
+        // Reset print progress to 0. Need to be at this point because Connect is already starting to snitch the info.
+        oProgressData.mInit();
+
+        ChangeState(State::loading);
+        if (skip_if_able > marlin_server::PreviewSkipIfAble::no) {
+            // if skip print confirmation was requested, mark the print as started immediately.
+            // If not, it will be started later when user clicks print
+            return Result::MarkStarted;
+        }
+        break;
+
+    case State::download_wait: {
+        if (response == Response::Quit) {
+            gcode_info_scan::cancel_scan();
+            ChangeState(State::inactive);
+            return Result::Abort;
+        }
+
+        if (gcode_info.has_error()) {
+            ChangeState(State::file_error_wait_user);
+            break;
+
+        } else if (!gcode_info.can_be_printed()) {
+            // Wait till we have downloaded enough
+            break;
+        }
+
+        const auto prefetch_ready = marlin_server::media_prefetch.check_ready_to_start_print();
+        if (prefetch_ready == MediaPrefetchManager::ReadyToStartPrintResult::needs_fetching) {
+            // Make sure we have the prefetch buffer full before start the print
+            // If we got into the "downloading" phase, do the prefetch checking here, because we're waiting for the file to download more
+            marlin_server::media_prefetch.issue_fetch();
+            break;
+
+        } else if (prefetch_ready == MediaPrefetchManager::ReadyToStartPrintResult::error) {
+            // This is a bit hacky way, but the error reporting is done through gcode_info, so we gotta put the error there.
+            gcode_info.set_error(N_("The file is corrupt."));
+            ChangeState(State::file_error_wait_user);
+            break;
+        }
+
+        ChangeState(State::loading);
+        break;
+    }
+
+    case State::loading: {
+        if (gcode_info_scan::scan_start_result() == gcode_info_scan::ScanStartResult::not_started) {
+            // Wait for the gcode scan to start
+            break;
+        }
+
+        if (gcode_info.has_error()) {
+            ChangeState(State::file_error_wait_user);
+            break;
+
+#if HAS_E2EE_SUPPORT()
+        } else if (gcode_info.has_identity_info()) {
+            ChangeState(State::untrusted_identity);
+            break;
+#endif
+        } else if (!gcode_info.can_be_printed()) {
+            // The file is not fully downloaded, wait till we have downloaded enough for printing
+            ChangeState(State::download_wait);
+            break;
+
+        } else if (!gcode_info.is_loaded()) {
+            // Wait for the gcode info to fully load
+            break;
+        }
+        const auto prefetch_ready = marlin_server::media_prefetch.check_ready_to_start_print();
+        if (prefetch_ready == MediaPrefetchManager::ReadyToStartPrintResult::needs_fetching) {
+            // Make sure we have the prefetch buffer full before start the print
+            // If we got into the "downloading" phase, do the prefetch checking here, because we're waiting for the file to download more
+            marlin_server::media_prefetch.issue_fetch();
+            break;
+
+        } else if (prefetch_ready == MediaPrefetchManager::ReadyToStartPrintResult::error) {
+            // This is a bit hacky way, but the error reporting is done through gcode_info, so we gotta put the error there.
+            gcode_info.set_error(N_("The file is corrupt."));
+            ChangeState(State::file_error_wait_user);
+            break;
+        }
+
+#if HAS_SELFTEST()
+        // We're ready to print now
+        ChangeState((skip_if_able > marlin_server::PreviewSkipIfAble::no) ? stateFromSelftestCheck() : State::preview_wait_user);
+#else
+        // #error dead code found by automatic analyses (see BFW-5461)
+        ChangeState(State::preview_wait_user);
+#endif
+        break;
+    }
+
+    case State::preview_wait_user:
+        switch (response) {
+
+        case Response::Continue: // no difference in state machine, some checks will not be run if tools_mapping is possible
+        case Response::Print:
+            ChangeState(stateFromSelftestCheck());
+            if (skip_if_able == marlin_server::PreviewSkipIfAble::no) {
+                // If print wasn't maked as started immediately, mark it now
+                return Result::MarkStarted;
+            }
+            break;
+
+        case Response::Back:
+            ChangeState(State::inactive);
+            return Result::Abort;
+
+        default:
+            break;
+        }
+
+        // Periodically kindly ask the prefetch thread to check if the file is still valid and update GCodeInfo::has_error
+        if (ticks_diff(curr_ms, last_still_valid_check_ms) > 1000 && !still_valid_check_job.is_active()) {
+            last_still_valid_check_ms = curr_ms;
+
+            still_valid_check_job.issue([](AsyncJobExecutionControl &) {
+                GCodeInfo::getInstance().check_still_valid();
+            });
+        }
+
+        // Still check for file validity - file could be downloaded enough for the info to show,
+        // but the transfer might fail and we want to prevent the user from start the print then
+        if (gcode_info.has_error()) {
+            ChangeState(State::file_error_wait_user);
+            break;
+        }
+        break;
+
+    case State::unfinished_selftest_wait_user:
+        switch (response) {
+
+        case Response::Ignore:
+            ChangeState(stateFromUpdateCheck());
+            break;
+
+        case Response::Calibrate:
+            marlin_server::request_calibrations_screen();
+            // There is currently no way to keep the FSM open while GUI screen
+            // such as `Calibrations & Tests` is being shown.
+            // Let's just close the FSM and be done with it.
+            ChangeState(State::inactive);
+            return Result::Abort;
+
+        case Response::_none:
+            break;
+
+        default:
+            bsod_unreachable();
+        }
+        break;
+
+    case State::new_firmware_available_wait_user:
+        switch (response) {
+
+        case Response::Continue:
+            ChangeState(stateFromPrinterCheck());
+            break;
+
+        default:
+            // TODO this should be handled more generally with a possibility to set timeout for specific state, but this should work for now and is MUCH easier
+            if (ticks_ms() >= new_firmware_open_ms + new_firmware_timeout_ms) {
+                ChangeState(stateFromPrinterCheck());
+            }
+            break;
+        }
+        break;
+
+#if HAS_TOOL_MAPPING()
+    case State::tools_mapping_wait_user:
+        switch (response) {
+
+        case Response::Abort:
+            ChangeState(State::inactive);
+            tools_mapping_cleanup();
+            return Result::Abort;
+
+        case Response::Print:
+            tools_mapping_cleanup(true);
+            ChangeState(State::done);
+            break;
+
+        default:
+            break;
+        }
+        break;
+#endif
+
+    case State::gcode_invalid_wait_user:
+    case State::gcode_invalid_wait_user_abort:
+        switch (response) {
+
+        case Response::Print:
+            // Resume the check chain right after the printer check that sent us here.
+#if HAS_WASTEBIN_FILL_TRACKING()
+            ChangeState(stateFromWastebinCheck());
+#else
+            ChangeState(stateFromFilamentPresence());
+#endif
+            break;
+
+        case Response::Abort:
+            ChangeState(State::inactive);
+            return Result::Abort;
+
+        default:
+            break;
+        }
+        break;
+
+#if HAS_WASTEBIN_FILL_TRACKING()
+    case State::wastebin_overfill_wait_user:
+        switch (response) {
+
+        case Response::Print:
+            // Print anyway and keep mid-print monitoring on.
+            ChangeState(stateFromFilamentPresence());
+            break;
+
+        case Response::Ignore:
+            // Print anyway and stop monitoring for this print (e.g. remote user who will empty later).
+            WastebinWatcher::instance().set_ignored_for_print(true);
+            ChangeState(stateFromFilamentPresence());
+            break;
+
+        case Response::Empty:
+            // Outside a print M1986 leaves the head parked; the start gcode homes anyway.
+            marlin_server::enqueue_gcode("M1986");
+            ChangeState(State::wastebin_emptying);
+            break;
+
+        case Response::_none:
+            break;
+
+        default:
+            bsod_unreachable();
+        }
+        break;
+
+    case State::wastebin_emptying:
+        // M1986 runs as a gcode; wait for the gcode queue to drain before continuing.
+        if (marlin_server::is_processing()) {
+            break;
+        }
+        ChangeState(stateFromFilamentPresence());
+        break;
+#endif
+
+    case State::filament_not_inserted_wait_user:
+        switch (response) {
+
+        case Response::FS_disable:
+            FSensors_instance().set_enabled_global(false);
+            ChangeState(State::checks_done);
+            break;
+
+        case Response::No:
+            ChangeState(State::inactive);
+            return Result::Abort;
+
+        case Response::Yes:
+            if (!queue_filament_gcodes(QueueFilamentGCodesMode::load)) {
+                // The function changed the FSM state, reassert
+                ChangeState(State::filament_not_inserted_wait_user);
+                break;
+            }
+            ChangeState(State::filament_not_inserted_load);
+            break;
+
+        default:
+            break;
+        }
+        break;
+
+    case State::filament_not_inserted_load:
+        if (!filament_gcodes::InProgress::Active()) {
+            ChangeState(stateFromFilamentType());
+        }
+        break;
+
+#if HAS_MMU2()
+    case State::mmu_filament_inserted_wait_user:
+        switch (response) {
+
+        case Response::No:
+            ChangeState(State::inactive);
+            return Result::Inactive;
+
+        case Response::Yes: {
+
+            ChangeState(State::mmu_filament_inserted_unload);
+            // If filament is really loaded, MMU knows exactly the physical slot index.
+            // Silently assume, that the MMU is up and running -> therefore it's Set_Get_Selector_Slot register has already been read upon comm start
+            const uint8_t physical_slot_index = MMU2::mmu2.SelectorSlot();
+            // M702 translates given tool index through toolmapping -> need to hack around it (invert it).
+            // The tool_mapper should either return the same index in case of a freshly booted printer (or no mapping changes)
+            // or a valid mapping from the last print (which is also correct in this case).
+            const uint8_t gcode_slot_index = tool_mapper.to_gcode(physical_slot_index);
+            marlin_server::enqueue_gcode_printf("M702 W0 T%" PRIu8, gcode_slot_index); // unload, no return or cooldown
+        } break;
+
+        default:
+            break;
+        }
+        break;
+
+    case State::mmu_filament_inserted_unload:
+        if (!filament_gcodes::InProgress::Active()) {
+            ChangeState(State::checks_done);
+        }
+        break;
+#endif
+
+    case State::wrong_filament_wait_user: // change / ignore / abort
+        switch (response) {
+
+        case Response::Change:
+            if (!queue_filament_gcodes(QueueFilamentGCodesMode::change)) {
+                // The function changed the FSM state, reassert
+                ChangeState(State::wrong_filament_wait_user);
+                break;
+            }
+            ChangeState(State::wrong_filament_change);
+            break;
+
+        case Response::Ok:
+            ChangeState(State::checks_done);
+            break;
+
+        case Response::Abort:
+            ChangeState(State::inactive);
+            return Result::Abort;
+
+        default:
+            break;
+        }
+        break;
+
+    case State::wrong_filament_change:
+        if (!filament_gcodes::InProgress::Active()) {
+            PreheatStatus::Result res = PreheatStatus::ConsumeResult();
+            if (res == PreheatStatus::Result::Aborted || res == PreheatStatus::Result::DidNotFinish) {
+                ChangeState(State::wrong_filament_wait_user); // Return back to wrong filament type dialog
+            } else {
+                ChangeState(State::checks_done);
+            }
+        }
+        break;
+
+#if HAS_E2EE_SUPPORT()
+    case State::untrusted_identity:
+        if (response == Response::Abort) {
+            ChangeState(State::inactive);
+            return Result::Abort;
+        } else if (response == Response::Yes) {
+            const auto &info = gcode_info.get_identity_info();
+            if (info.one_time) {
+                e2ee::save_identity_key_temporary(info);
+            } else {
+                e2ee::save_identity_key(info);
+            }
+            ChangeState(State::preview_wait_user);
+            break;
+        } else if (response == Response::No) {
+            e2ee::save_identity_key_temporary(gcode_info.get_identity_info());
+            ChangeState(State::preview_wait_user);
+            break;
+        }
+        break;
+#endif
+
+    case State::file_error_wait_user:
+        // Only one possible response -> abort
+        if (response == Response::Abort) {
+            ChangeState(State::inactive);
+            return Result::Abort;
+        }
+        break;
+
+    case State::checks_done:
+#if PRINTER_IS_PRUSA_iX()
+        // We've removed reset_bounding_rect at the end of the print for the iX (in marlin_server.cpp::finalize_print).
+        // So now, just to make sure, we reset the bounding rect at the start if we don't see it being set in the gcode.
+        // BFW-5085
+        if (!GCodeInfo::getInstance().get_bed_preheat_area().has_value()) {
+            PrintArea::reset_bounding_rect();
+        }
+#endif
+
+        if (tools_mapping::is_tool_mapping_possible()) {
+#if HAS_SPOOL_JOIN() && HAS_TOOL_MAPPING()
+            buddy::gcode_compatibility::CompatibilityReport compatibility;
+            compatibility.generate_toolmapping_only({});
+
+            // we can skip tools mapping if there is not warning/error in global tools mapping
+            if ((skip_if_able >= marlin_server::PreviewSkipIfAble::tool_mapping) && compatibility.compatibility_level() == buddy::compatibility_checks::CompatibilityLevel::fully_compatible) {
+                ChangeState(State::done);
+            } else {
+                ChangeState(State::tools_mapping_wait_user);
+            }
+
+            // start preheating bed to save time in absorbing heat
+            if (GCodeInfo::getInstance().get_bed_preheat_temp().has_value()) {
+                if (GCodeInfo::getInstance().get_bed_preheat_area().has_value()) {
+                    PrintArea::set_bounding_rect(GCodeInfo::getInstance().get_bed_preheat_area().value());
+                }
+
+                marlin_server::set_target_bed(GCodeInfo::getInstance().get_bed_preheat_temp().value());
+            }
+            break;
+#endif
+        }
+        // else go to print, checks are done
+        ChangeState(State::done);
+        break;
+    case State::done:
+        ChangeState(State::inactive);
+        return Result::Print;
+    }
+    return stateToResult();
+}
+"""  # noqa: E501 (verbatim firmware lines)
+
+# `protocol_logic.cpp`, excerpt.
+PROTOCOL_LOGIC_CPP = """\
+void ProtocolLogic::PlanGenericRequest(RequestMsg rq) {
+    plannedRq = rq;
+    if (!ExpectsResponse()) {
+        ActivatePlannedRequest();
+    } // otherwise wait for an empty window to activate the request
+}
+
+bool ProtocolLogic::ActivatePlannedRequest() {
+    switch (plannedRq.code) {
+    case RequestMsgCodes::Button:
+        // only issue the button to the MMU and do not restart the state machines
+        SendButton(plannedRq.value);
+        plannedRq = RequestMsg(RequestMsgCodes::unknown, 0);
+        return true;
+    case RequestMsgCodes::Read:
+        SendReadRegister(plannedRq.value, ScopeState::ReadRegisterSent);
+        plannedRq = RequestMsg(RequestMsgCodes::unknown, 0);
+        return true;
+    case RequestMsgCodes::Write:
+        SendWriteRegister(plannedRq.value, plannedRq.value2, ScopeState::WriteRegisterSent);
+        plannedRq = RequestMsg(RequestMsgCodes::unknown, 0);
+        return true;
+    case RequestMsgCodes::unknown:
+        return false;
+    default: // commands
+        currentScope = Scope::Command;
+        SetRequestMsg(plannedRq);
+        plannedRq = RequestMsg(RequestMsgCodes::unknown, 0);
+        CommandRestart();
+        return true;
+    }
+}
+"""
+
+SPOOL_JOIN_CPP = """\
+bool SpoolJoin::do_join(VirtualToolIndex current_virtual_tool) {
+    std::unique_lock lock(mutex);
+    auto new_raw_virtual_tool = spool_join.get_spool_2_unlocked(current_virtual_tool.to_raw());
+    if (!new_raw_virtual_tool.has_value()) {
+        return false;
+    }
+    const auto new_virtual_tool = VirtualToolIndex::from_raw(new_raw_virtual_tool.value());
+
+    log_info(Marlin, "Spool join from %d to %d (z=%f)", current_virtual_tool.to_raw(), new_virtual_tool.to_raw(), planner.get_axis_position_mm(AxisEnum::Z_AXIS));
+    PrintStatusMessageGuard statusGuard;
+    statusGuard.update<PrintStatusMessage::joining_spool>({});
+
+    planner.synchronize();
+
+    
+    [[maybe_unused]] const XYZval<float, LogicalPosTag> return_pos = current_position.asLogical().xyz();
+
+    
+    
+    const auto gcode_tool = stdext::get_optional<GcodeToolIndex>(tool_mapper.to_gcode(current_virtual_tool));
+    if (!gcode_tool.has_value()) {
+        return false;
+    }
+    if (!tool_mapper.set_mapping(*gcode_tool, new_virtual_tool)) {
+        return false;
+    }
+    tool_mapper.set_enable(true);
+
+    static_assert((HAS_INDX() + HAS_DWARF() + HAS_MMU2()) == 1, "This code assumes exactly one of these toolchanger types");
+
+#if HAS_TOOLCHANGER()
+    const auto current_physical_tool = current_virtual_tool.to_physical();
+    const auto new_physical_tool = new_virtual_tool.to_physical();
+
+    const auto nozzle_temp = thermalManager.degTargetHotend(current_physical_tool);
+
+    const auto orig_e_pos = current_position.e;
+
+    bool should_park = true;
+    #if HAS_CRASH_DETECTION()
+    
+    
+    should_park &= (crash_s.get_state() != Crash_s::RECOVERY);
+    #endif
+
+    const float target_retracted_distance = buddy::filament_tracker().get_retracted_distance(current_physical_tool).value_or(0);
+
+    
+    thermalManager.setTargetHotend(nozzle_temp, new_physical_tool);
+
+    if (should_park) {
+        
+        mapi::park(mapi::ParkingPosition { .z = mapi::ParkingPosition::AtLeast { .above_print = TOOLCHANGE_ZRAISE } });
+    }
+
+    
+    {
+        FS_EventAutolock fs_lock;
+        BlockEStallDetection estall_lock;
+
+        pause::Settings settings;
+        settings.SetExtruder(current_virtual_tool);
+
+        
+        settings.SetRetractLength(0.f);
+
+        settings.SetParkPoint(mapi::get_parking_position(mapi::ParkPosition::unload));
+
+        
+        Pause::Instance().perform(Pause::LoadType::unload_spool_join, settings);
+    }
+
+    
+    thermalManager.setTargetHotend(0, current_physical_tool);
+
+    const auto wait_for_temp = [&] {
+        if (nozzle_temp != 0) {
+            thermalManager.wait_for_hotend(new_physical_tool, { .no_wait_for_cooling = false, .fan_cooling = true });
+        }
+    };
+
+    #if !HAS_INDX()
+    
+    tool_change(NoTool {}, tool_return_t::no_return, tool_change_lift_t::no_lift, false);
+
+    
+    wait_for_temp();
+    #endif
+
+    
+    tool_change(new_virtual_tool, tool_return_t::no_return, tool_change_lift_t::no_lift, false);
+
+    #if HAS_NOZZLE_CLEANER()
+    nozzle_cleaner::load_and_execute(nozzle_cleaner::Sequence::enter_cleaner);
+
+    wait_for_temp();
+
+    nozzle_cleaner::load_and_execute(nozzle_cleaner::Sequence::purge_clean);
+    nozzle_cleaner::load_and_execute(nozzle_cleaner::Sequence::clean);
+    nozzle_cleaner::load_and_execute(nozzle_cleaner::Sequence::exit_cleaner);
+
+    #else
+    wait_for_temp();
+    prusa_toolchanger.purge_tool(new_physical_tool);
+
+    #endif
+
+    if (should_park) {
+        
+        do_blocking_move_to(return_pos.asNative());
+    }
+
+    
+    mapi::restore_retracted_distance(target_retracted_distance, buddy::standard_feedrates::current_extruder(buddy::standard_feedrates::Extruder::retract));
+
+    
+    sync_e_position_to(orig_e_pos);
+
+#elif HAS_MMU2()
+    MMU2::mmu2.tool_change_full(new_virtual_tool.to_raw());
+#else
+    #error "unknown printer"
+#endif
+
+    print_status_message().show_temporary<PrintStatusMessage::spool_joined>({});
+    return true;
+}
+"""  # noqa: E501 (verbatim firmware lines)
+
+FILAMENT_SENSOR_MMU_CPP = """\
+void FSensorMMU::cycle() {
+    
+    switch (mmu2.State()) {
+    case xState::Active:
+        state = mmu2.FindaDetectsFilament() ? FilamentSensorState::HasFilament : FilamentSensorState::NoFilament;
+        break;
+    case xState::Connecting:
+    case xState::Bootloader:
+        state = FilamentSensorState::NotInitialized;
+        break;
+    case xState::Stopped:
+        state = FilamentSensorState::Disabled;
+        break;
+    }
+}
+"""  # noqa: E501 (verbatim firmware lines)
+
+PRINTER_STATE_CPP = """\
+optional<ErrCode> load_unload_attention_while_printing([[maybe_unused]] const fsm::BaseData &data) {
+#if HAS_MMU2()
+    if (config_store().mmu2_enabled.get()) {
+        
+        switch (GetEnumFromPhaseIndex<PhasesLoadUnload>(data.GetPhase())) {
+        case PhasesLoadUnload::MMU_ERRWaitingForUser:
+            return ErrCode::CONNECT_MMU_LOAD_UNLOAD_ERROR;
+            
+        case PhasesLoadUnload::LoadFilamentIntoMMU:
+        case PhasesLoadUnload::IsColor:
+        case PhasesLoadUnload::IsColorPurge:
+            return ErrCode::CONNECT_FILAMENT_RUNOUT;
+    #if HAS_LOADCELL()
+        case PhasesLoadUnload::FilamentStuck:
+            return ErrCode::ERR_MECHANICAL_STUCK_FILAMENT_DETECTED;
+    #endif
+    #if HAS_SIDE_FSENSOR()
+        case PhasesLoadUnload::LoadingObstruction_stoppable:
+        case PhasesLoadUnload::LoadingObstruction_unstoppable:
+            return ErrCode::ERR_MECHANICAL_LOADING_OBSTRUCTION;
+    #endif
+        default:
+            return nullopt;
+        }
+    }
+#endif
+    
+    switch (GetEnumFromPhaseIndex<PhasesLoadUnload>(data.GetPhase())) {
+#if HAS_LOADCELL() && HAS_EXTRUDER_FSENSOR()
+    case PhasesLoadUnload::FilamentStuck:
+        return ErrCode::ERR_MECHANICAL_STUCK_FILAMENT_DETECTED;
+#endif
+#if HAS_SIDE_FSENSOR() && HAS_EXTRUDER_FSENSOR()
+    case PhasesLoadUnload::LoadingObstruction_stoppable:
+    case PhasesLoadUnload::LoadingObstruction_unstoppable:
+        return ErrCode::ERR_MECHANICAL_LOADING_OBSTRUCTION;
+#endif
+    default:
+        return ErrCode::CONNECT_FILAMENT_RUNOUT;
+    }
+}
+"""
+
+# `queue.cpp`, excerpt.
+GCODE_QUEUE_CPP = """\
+/**
+ * Get the next command in the queue, optionally log it to SD, then dispatch it
+ */
+void GCodeQueue::advance() {
+
+  // Process immediate commands
+  if (process_injected_command()) {
+    delay(1); // Safety measure to avoid locking async job in inject queue (buffering a file)
+    return;
+  }
+
+  // Return if the G-code buffer is empty
+  if (!length) {
+    delay(1);
+    return;
+  }
+
+  last_executed_sdpos = queue.get_current_sdpos();
+  gcode.process_next_command();
+  executed_commmand_count++;
+
+  // The queue may be reset by a command handler or by code invoked by idle() within a handler
+  if (length) {
+    --length;
+    if (++index_r >= BUFSIZE) index_r = 0;
+  }
+
+}
+"""
+
 FILES = {
     read.MODELS_FILE: MODELS_HPP,
     read.GCODE_INFO_FILE: GCODE_INFO_HPP,
@@ -2284,8 +4611,34 @@ FILES = {
     "include/device/board.h": BOARD_H,
     "src/common/gcode/gcode_info.cpp": GCODE_INFO_CPP,
     "src/common/tools_mapping.cpp": TOOLS_MAPPING_CPP,
+    "src/common/tool_index.cpp": TOOL_INDEX_CPP,
+    "src/marlin_stubs/pause/M70X_mmu.cpp": M70X_MMU_CPP,
+    "lib/Marlin/Marlin/src/module/planner.cpp": PLANNER_CPP,
+    "lib/WUI/nhttp/status_renderer.cpp": STATUS_RENDERER_CPP,
+    "lib/WUI/link_content/basic_gets.cpp": BASIC_GETS_CPP,
+    read.MMU_CONFIG_FILE: MMU2_CONFIG_H,
+    read.MMU_FILE: MMU2_MK4_CPP,
+    read.MMU_HEADER_FILE: MMU2_MK4_H,
+    "src/common/multi_filament_change.cpp": MULTI_FILAMENT_CHANGE_CPP,
+    "src/gui/screen/screen_menu_mmu_preload_all.cpp": MMU_PRELOAD_ALL_CPP,
+    "src/gui/screen_menu_filament_mmu.cpp": FILAMENT_MMU_CPP,
+    "src/common/appmain.cpp": APPMAIN_CPP,
+    "src/feature/filament_sensor/filament_sensors_handler.cpp": FILAMENT_SENSORS_HANDLER_CPP,
+    "src/common/marlin_server.cpp": MARLIN_SERVER_CPP,
+    "src/common/marlin_print_preview.cpp": MARLIN_PRINT_PREVIEW_CPP,
+    "src/gui/MItem_mmu.cpp": MITEM_MMU_CPP,
+    "src/feature/openprinttag/request_manager.cpp": REQUEST_MANAGER_CPP,
+    "src/feature/openprinttag/tool_tag_buddy.cpp": TOOL_TAG_BUDDY_CPP,
+    "src/gui/screen_menu_filament_mmu.hpp": SCREEN_MENU_FILAMENT_MMU_HPP,
+    "src/marlin_stubs/pause/M600.cpp": M600_CPP,
+    "src/gui/screen/screen_m600.cpp": SCREEN_M600_CPP,
+    "lib/Marlin/Marlin/src/module/prusa/spool_join.cpp": SPOOL_JOIN_CPP,
+    "src/feature/filament_sensor/filament_sensor_mmu.cpp": FILAMENT_SENSOR_MMU_CPP,
+    "src/state/printer_state.cpp": PRINTER_STATE_CPP,
     read.IMAGES_FILE: PRESETS_JSON,
     read.PAUSE_SETTINGS_FILE: PAUSE_SETTINGS_HPP,
+    "lib/Marlin/Marlin/src/gcode/queue.cpp": GCODE_QUEUE_CPP,
+    "lib/Marlin/Marlin/src/feature/prusa/MMU2/protocol_logic.cpp": PROTOCOL_LOGIC_CPP,
 }
 
 

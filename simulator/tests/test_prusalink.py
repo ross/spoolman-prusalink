@@ -12,7 +12,7 @@ from aiohttp.test_utils import TestClient, TestServer
 from simulator import prusalink
 from simulator.model import Firmware, PrintSpec, Segment, SimTool, State
 from simulator.tests.test_model import PETG, shown, tool0
-from simulator.tests.util import KEY, PLA, loaded, make
+from simulator.tests.util import KEY, PLA, loaded, make, make_mmu
 
 AUTH = {"X-Api-Key": KEY}
 UPLOAD = {**AUTH, "Print-After-Upload": "?1", "Overwrite": "?1", "Content-Type": "text/x.gcode"}
@@ -449,3 +449,19 @@ async def test_a_cancel_during_the_scan_ends_idle_over_http(setup):
     p.start_print(PrintSpec([Segment(0, 10)]))
     _, status = await get(client, "/api/v1/status")
     assert status["job"]["id"] == 2
+
+
+def test_info_reports_the_mmu_setting_and_status_its_flow():
+    _, p = make()
+    assert prusalink.info(p)["mmu"] is False
+    assert prusalink.status(p)["printer"]["flow"] == 100
+    _, p = make_mmu(mmu_connect_seconds=5)
+    assert prusalink.info(p)["mmu"] is True
+    assert prusalink.status(p)["printer"]["flow"] == 0  # Active, no slot selected
+    p.reboot()
+    assert prusalink.info(p)["mmu"] is True  # the setting, connecting or not
+    assert prusalink.status(p)["printer"]["flow"] == 100  # slot 0 while connecting
+    p.mmu.connecting = 0
+    p.set_mmu(False)
+    assert prusalink.info(p)["mmu"] is False
+    assert [t["index"] for t in prusalink.filament(p)["tools"]] == [0]

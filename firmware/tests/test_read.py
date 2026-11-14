@@ -992,11 +992,117 @@ def test_defines_fail_closed(text, problem):
         read.defines(text, ["A"], macros(B=False, X=True))
 
 
-def test_e_steps_and_pause_lengths_name_the_file():
+@pytest.mark.parametrize(
+    ("text", "values", "count"),
+    [
+        (fixtures.CONFIGURATION_NEXTRUDER_H, {"HAS_MMU2": True}, 6),
+        (fixtures.CONFIGURATION_NEXTRUDER_H, {"HAS_MMU2": False}, 1),
+        (fixtures.CONFIGURATION_MK3_5_H, {"HAS_MMU2": True}, 6),
+        (fixtures.CONFIGURATION_CORE_ONE_H, {"HAS_MMU2": True, "HAS_INDX": False}, 6),
+        (fixtures.CONFIGURATION_CORE_ONE_H, {"HAS_MMU2": False, "HAS_INDX": True}, 9),
+    ],
+)
+def test_extruders(text, values, count):
+    assert read.extruders(text, macros(**values), "Configuration_X.h") == count
+
+
+def test_e_steps_extruders_and_pause_lengths_name_the_file():
     with pytest.raises(Unreadable, match="can't read a.h: no #define DEFAULT_AXIS_STEPS"):
         read.e_steps("", macros(), "a.h")
+    with pytest.raises(Unreadable, match="can't read c.h: no #define EXTRUDERS"):
+        read.extruders("", macros(), "c.h")
     with pytest.raises(Unreadable, match="can't read b.h: no #define PARK_PAUSE_PRIME_LENGTH"):
         read.pause_lengths("", macros(), "b.h")
+
+
+MMU_NAMES = (
+    "MMU2_TOOL_CHANGE_LOAD_LENGTH",
+    "MMU2_FEED_DISTANCE",
+    "MMU2_EXTRUDER_HEATBREAK_LENGTH",
+    "MMU2_EXTRUDER_NOZZLE_LENGTH",
+)
+
+
+def test_cpp_constants():
+    values = macros(USE_TRY_LOAD=False, UNITTEST=False)
+    found = read.cpp_constants(fixtures.MMU2_CONFIG_H, MMU_NAMES, values, "c.h")
+    assert found == (5.0, 50.0, 67.0, 20.0)
+    names = ["maximumAllowedExtruderMove"]
+    assert read.cpp_constants(fixtures.MMU2_MK4_CPP, names, values, "m.cpp") == (189.9,)
+    names = ["nominalEMotorFSOff"]
+    assert read.cpp_constants(fixtures.MMU2_MK4_H, names, values, "m.h") == (14.0,)
+    # The try-load build's heatbreak.
+    try_load = macros(USE_TRY_LOAD=True, UNITTEST=False, PRINTER_IS_PRUSA_MK3_5=True)
+    found = read.cpp_constants(
+        fixtures.MMU2_CONFIG_H, ["MMU2_EXTRUDER_HEATBREAK_LENGTH"], try_load, "c"
+    )
+    assert found == (17.7,)
+
+
+@pytest.mark.parametrize(
+    ("text", "problem"),
+    [
+        ("", "A is declared 0 times for the build"),
+        ("static constexpr float A = 1;\nstatic constexpr float A = 2;", "A is declared 2 times"),
+        ("#ifdef X\nstatic constexpr float A = 1;\n#endif", "A is declared 0 times"),
+        (
+            "#ifndef X\nstatic constexpr float A = 1.5F;\n#else\nconstexpr int A = 2;\n#endif",
+            "can't read 'constexpr int A = 2;'",
+        ),
+        ("static constexpr float A = B + 1;", "can't read 'static constexpr float A = B"),
+        ("static constexpr float AB = 1, A = 2;", "can't read"),
+        ("#ifdef NEW\nstatic constexpr float A = 1;\n#endif", r"unknown macro NEW\(\)"),
+    ],
+)
+def test_cpp_constants_fail_closed(text, problem):
+    with pytest.raises(Unreadable, match=problem):
+        read.cpp_constants(text, ["A"], macros(X=False), "a.h")
+
+
+def test_cpp_constants_ignore_uses_and_comparisons():
+    text = "static constexpr float A = -2.f;\nfloat b = A;\nbool c = A == b;\n"
+    assert read.cpp_constants(text, ["A"], macros(), "a.h") == (-2.0,)
+
+
+@pytest.mark.parametrize(("loadcell", "defined"), [(True, False), (False, True)])
+def test_is_defined(loadcell, defined):
+    values = macros(HAS_LOADCELL=loadcell, UNITTEST=False)
+    assert read.is_defined(fixtures.MMU2_CONFIG_H, "USE_TRY_LOAD", values, "c.h") is defined
+
+
+def test_is_defined_fails_closed():
+    with pytest.raises(Unreadable, match="can't read c.h: #undef A"):
+        read.is_defined("#define A\n#undef A\n", "A", macros(), "c.h")
+    with pytest.raises(Unreadable, match=r"unknown macro NEW\(\)"):
+        read.is_defined("#ifdef NEW\n#define A\n#endif\n", "A", macros(), "c.h")
+
+
+MMU_RAMMING = ((20, 1500), (-50, 2700), (-5, 50), (-50, 1500))
+
+
+def test_mmu_ramming():
+    for text in (fixtures.ADVANCED_NEXTRUDER_H, fixtures.ADVANCED_CORE_ONE_H):
+        found = read.mmu_ramming(text, macros(HAS_PAUSE=True, HAS_NOZZLE_CLEANER=True), "a.h")
+        assert found == MMU_RAMMING
+
+
+@pytest.mark.parametrize(
+    ("text", "problem"),
+    [
+        ("", "FILAMENT_MMU2_RAMMING_SEQUENCE is defined 0 times"),
+        ("#if X()\n#define FILAMENT_MMU2_RAMMING_SEQUENCE { { 1, 60 / 60.F } }\n#endif", "0 times"),
+        ("#define FILAMENT_MMU2_RAMMING_SEQUENCE {}", "can't read"),
+        ("#define FILAMENT_MMU2_RAMMING_SEQUENCE { { 1, 60 } }", "can't read"),
+        ("#define FILAMENT_MMU2_RAMMING_SEQUENCE { { 1, 60 / 60.F }, { x } }", "can't read"),
+        ("#define FILAMENT_MMU2_RAMMING_SEQUENCE { x { 1, 60 / 60.F } }", "can't read"),
+        ("#define FILAMENT_MMU2_RAMMING_SEQUENCE { { 1, 0 / 60.F } }", "can't read"),
+        ("#define FILAMENT_MMU2_RAMMING_SEQUENCE { { 1, 60 / 60.F } } + 1", "can't read"),
+        ("#undef FILAMENT_MMU2_RAMMING_SEQUENCE", "#undef FILAMENT_MMU2_RAMMING_SEQUENCE"),
+    ],
+)
+def test_mmu_ramming_fails_closed(text, problem):
+    with pytest.raises(Unreadable, match=problem):
+        read.mmu_ramming(text, macros(X=False), "a.h")
 
 
 NEXTRUDER_RUNOUT = ((7, 1500), (-50, 2700), (-5, 50), (-50, 1500))

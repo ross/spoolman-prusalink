@@ -12,6 +12,7 @@ import httpx
 
 from integration.station import SETTINGS, Station
 from simulator.config import tool_location
+from simulator.mmu import MmuUnit
 from simulator.model import (
     MODELS,
     Firmware,
@@ -183,7 +184,7 @@ def fill(tool, material):
     tool.fill(material)
 
 
-def add_station(sim, name="default", model="8.1.0", tools=1, *, auto_retract=False):
+def add_station(sim, name="default", model="8.1.0", tools=1, *, auto_retract=False, mmu=False):
     """Add a printer to `sim`, by default a Core One L with one tool.
 
     `tools` is a count, or the `SimTool`s themselves, indexed from 0. With a count, tool
@@ -193,6 +194,10 @@ def add_station(sim, name="default", model="8.1.0", tools=1, *, auto_retract=Fal
     The auto-retract is off by default: most tests move the counter by hand, and the
     auto-retract at the end of each job would add a count of its own. A test that runs
     the simulator's own loads, unloads and prints turns it on.
+
+    With `mmu` the printer has an MMU3, switched on and Active, with no slot selected and
+    nothing in the extruder. Its tools are the slots, and tool 0's filament is only the
+    type stored for slot 0.
     """
     if isinstance(tools, int):
         tools = [SimTool.loaded_with(0, PLA, extruded=1000.0)] + [
@@ -207,8 +212,9 @@ def add_station(sim, name="default", model="8.1.0", tools=1, *, auto_retract=Fal
         firmware=Firmware.FULL if info.counters else Firmware.NO_COUNTERS,
         boot_id=1,
         tools={tool.index: tool for tool in tools},
-        selected_tool=info.first_tool(sum(tool.enabled for tool in tools)),
+        selected_tool=None if mmu else info.first_tool(sum(tool.enabled for tool in tools)),
         auto_retract=auto_retract,
+        mmu=MmuUnit() if mmu else None,
     )
     sim.add(printer)
     return Station(sim, printer)
@@ -224,17 +230,17 @@ def tool_locations(prefix, tools):
 PRINTER_KEYS = {f.name for f in fields(PrinterConfig)}
 
 
-def make(tmp_path, spools, *, model="8.1.0", tools=1, auto_retract=False, **cfg):
+def make(tmp_path, spools, *, model="8.1.0", tools=1, auto_retract=False, mmu=False, **cfg):
     """A bridge on a fake Spoolman and one simulated printer, "default", served in process.
 
-    Returns the bridge, the fake Spoolman and the printer's `Station`. `model`, `tools`
-    and `auto_retract` go to `add_station`, and the tools' locations follow
+    Returns the bridge, the fake Spoolman and the printer's `Station`. `model`, `tools`,
+    `auto_retract` and `mmu` go to `add_station`, and the tools' locations follow
     `tool_locations(LOC, tools)`. A sync job the bridge uploads runs only as the test
     ticks: `Station.finish_job()` runs it to its end.
     """
     fake = FakeSpoolman(spools)
     sim = Simulation(Settings(**SETTINGS))
-    printer = add_station(sim, "default", model, tools, auto_retract=auto_retract)
+    printer = add_station(sim, "default", model, tools, auto_retract=auto_retract, mmu=mmu)
     printer_cfg = PrinterConfig(
         name="default",
         url="http://printer",

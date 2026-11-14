@@ -184,15 +184,19 @@ numbers: steps per mm, filament change lengths, ramming sequences, the nozzle cl
 purge, the auto-retract's fully-retracted threshold, whether it can unload cold, the
 purge before an unload, and the power-panic resume's purge. It also keeps its G-code compatibility group, whether its build
 has a compatibility mode, whether its build has power panic, its feed system (direct, XL or INDX), and the `M862.6` feature names its build knows. The simulator
-also lists the flexible presets, every G-code model name with its group, and the shortest
-purge a load runs. `firmware/compare.py` itself keeps each build's main board, which its
+also lists the flexible presets, every G-code model name with its group, the shortest
+purge a load runs, and the MMU's slot count, which the check compares with an MMU build's
+`EXTRUDERS`. The simulator also keeps the MMU3's tool-change and load lengths and its
+ramming, which the MK4, Core One and Core One L builds share. `firmware/compare.py` itself keeps each build's main board, which its
 board macros follow.
 `script/firmware-check` rebuilds the tables from the firmware source and lists each
 difference. A weekly workflow runs it.
 
 After you change a copied table, run the check. If a difference is intended, add it to
 `EXPECTED` in `firmware/compare.py`. The check also fails when an expected difference no
-longer occurs.
+longer occurs. When the firmware's side of a table changes, look up the flag or table in
+"Behaviors that rest on one flag or function" in `docs/printer-behaviors.md`, which names
+the simulator code and the bridge findings that the change moves.
 
 A few copied rules are code in the firmware, which the check can't rebuild as a table. For
 each, `WATCHED` in `firmware/watch.py` records a fingerprint of the firmware code it came
@@ -201,7 +205,9 @@ read at. When the check reports a changed region, do these steps in order:
 
 1. In a firmware checkout, run `git fetch` if the checkout doesn't have the newer commit,
    then run the `git diff` that the check prints.
-2. Re-read the copy that the check names.
+2. Re-read the copy that the check names, and look up the region in "Behaviors that rest
+   on one flag or function" in `docs/printer-behaviors.md`, which names the simulator code
+   and the bridge findings that a change there moves.
 3. If the rule changed, update the copy.
 4. Record the new fingerprint and commit that the check prints.
 

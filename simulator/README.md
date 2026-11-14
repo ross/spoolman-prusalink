@@ -79,13 +79,18 @@ for a high-flow nozzle, `sensors` for the menu's switch of every filament
 sensor, `picked_tool` for the tool picked at start, and `[[printers.tools]]`
 entries that can start loaded with a material and counters. `picked_tool`
 names an enabled tool; left out, a direct printer has tool 0 picked and a
-toolchanger has none. `checks` is `ignore`, `warn` (the
+toolchanger has none. `mmu = true` gives a model that takes an MMU3, the
+MK3.9, MK3.9S, MK4, MK4S, Core One and Core One L, an MMU that starts on and
+connected. Its tools are then the MMU's slots 0 to 4, each entry's material
+is that slot's stored type, and `picked_tool` names the slot whose filament
+is in the extruder; left out, no slot is loaded or selected. An MMU needs
+`sensors` on, and its slots can't be disabled. `checks` is `ignore`, `warn` (the
 default) or `abort`, and it stands for every setting in the printer's menu
 that governs a check of a file's `M862` lines. The top-level settings are
 timing and lengths: the time scale, how fast loads and prints move filament,
 the extra purge of a jam, the preheat and
-park times, the power-panic resume's wait and phases, and whether the start
-blip is on. The feed ratio and a load's slow, fast and purge
+park times, the power-panic resume's wait and phases, how long an MMU takes
+to connect (`mmu_connect_seconds`), and whether the start blip is on. The feed ratio and a load's slow, fast and purge
 lengths are overrides: left out, each printer uses its model's value, which
 the page shows on the printer's card. On the page or through
 `/api/settings`, an empty value or `null` unsets an override. The purge
@@ -106,12 +111,12 @@ curl -X POST -H 'Content-Type: application/json' \
   http://127.0.0.1:8000/api/printers/core-one-l/load
 ```
 
-Actions: `load`, `unload`, `extrude`, `retract`, `select_tool`,
-`park_tool`, `change_all`, `start_print`, `pause`, `resume`, `cancel`, `dismiss`, `home`, `runout`, `jam`,
+Actions: `load`, `unload`, `load_to_nozzle`, `eject`, `cut`, `extrude`, `retract`,
+`select_tool`, `park_tool`, `change_all`, `preload_all`, `start_print`, `pause`, `resume`, `cancel`, `dismiss`, `home`, `runout`, `jam`,
 `change_filament`, `clear_jam`, `reboot`, `set_power`, `set_fault`, `set_firmware`,
 `set_sensor_fault`, `set_stuck_write`, `set_tool_enabled`,
-`set_checks`, `set_sensors`, `counter_step_back`,
-`set_extruded_at_unload`, `tap_through`. Parameter names are the keyword arguments of the methods with
+`set_checks`, `set_sensors`, `set_mmu`, `counter_step_back`,
+`set_extruded_at_unload`, `tap_through`, `unload_first`. Parameter names are the keyword arguments of the methods with
 those names in `model.py`, and their type hints say what each takes: JSON
 `true` or `false` for a bool, an integer such as `3` (not `3.0`) for an int,
 any finite number for a float, and a listed value for an enum. An action the
@@ -123,12 +128,18 @@ and name the parameter.
 type the file names for that tool, and the optional `duration_s`,
 `preheat_s`, `color_changes_mm` and `name`. On a printer with a multi-tool
 slicer profile, `prime_mm` and `toolchange_purge_mm` replace the profile's
-prime and tool-change purge; elsewhere they answer 400. On a toolchanger,
+prime and tool-change purge; elsewhere they answer 400. On an MMU the prime
+is the purge line. `single_tool_file`, on an MMU only, is a file that
+prints on tool 0 alone and has no MMU profile, as one sliced for the
+printer without the MMU; it takes neither override. Only such a file is
+single-tool to the firmware: a one-color MMU3 profile file lists all five
+slots, so it isn't, even on slot 0. On a toolchanger,
 `spool_join` is a list of `{"tool": A, "to": B}`: when tool A runs out, the
 print goes on with tool B. Each tool joins on once and is joined to once,
 no chain loops, and B can't be a tool the segments use. The page's start
-form takes a segment per line as `tool:mm` or `tool:mm:TYPE`, and on a
-toolchanger the two overrides and the joins as `A>B, C>D`.
+form takes a segment per line as `tool:mm` or `tool:mm:TYPE`, the two
+overrides on a toolchanger or with the MMU on, the joins as `A>B, C>D` on a
+toolchanger, and a single-tool file box.
 
 The state lists each printer's and each tool's actions under `actions`, each
 with null when the printer would take it now or the reason it would refuse
@@ -229,6 +240,81 @@ that trace. The points that matter for the bridge, in short:
   `sensors` is the menu's switch for every filament sensor. Off, there's no
   runout, no idle sensor clear and no filament question at the preview, and
   it stays off until `set_sensors` turns it on.
+- An MMU3's slots share one filament path, sensor and gap (F38, F39).
+  `set_mmu` is the menu's switch, which a print or any operation blocks.
+  With it on, `/api/v1/info` reports `mmu` as true and `/api/v1/filament`
+  lists the five slots; with it off, slot 0 alone. Turning it off clears
+  slot 0's type, an unload, unless the extruder's sensor sees filament.
+  Turning the sensors off turns it off too. Turning it on, or a boot with it
+  on, leaves no slot selected while the MMU connects for
+  `mmu_connect_seconds`, and E moves count on slot 0 meanwhile. Once it's
+  connected, moves count on the selected slot; with none selected they
+  count nothing, the gap stays where it was, and `/api/v1/status` reads
+  `flow` 0. The idle sensor clear and the tag reader are off while the MMU
+  is on, and a print's end with it connected doesn't auto-retract. An MMU
+  printer refuses the menu's plain load.
+- A print on an MMU runs the stock MMU3 profile's moves and the firmware's
+  tool changes (F40, F42, F46). It's refused while the MMU connects. The
+  start retracts 2 mm with no slot selected, then `T<first>` feeds the slot
+  with no slot credited, and the 17 mm load and the purge line count on it.
+  At each change the old slot rams, parks and cools, the firmware retracts
+  80 mm and feeds 189.9, 7 and 50 mm, all on the old slot, and the new slot
+  loads 32 mm and purges. A `T` to the selected slot does nothing. A
+  multi-color print's end rams and parks the last slot, and every print
+  then runs `M702`, which unloads into the MMU. A single-tool file gets the
+  firmware's `T0` and 35 mm when no slot is selected, and a finished one
+  unloads into the MMU. A stopped print or sync job unloads too, while it
+  reads `PRINTING`; a finished sync job leaves the filament.
+- A `runout` on an MMU is FINDA's, so it takes the slot whose filament is
+  fed (F44). On the selected slot it's the MMU's `M600`, as are
+  `change_filament` and a color change: the park retracts 8 mm, the MMU's
+  ramming counts on the slot, the unit ejects it, and the printer waits in
+  `ATTENTION` for the filament to be loaded into the MMU. No type is
+  written, so no unload counts. `load` with no source then reloads the same
+  slot, reading `PRINTING` while it runs: the feed counts nothing, the load to the nozzle counts 7 mm past
+  the 40 mm gap and the prime 4, and the print waits `PAUSED` for the
+  resume, which feeds the 8 mm back. With a spool join from the slot, the
+  join unloads the slot into the MMU, changes to the join's slot from no
+  slot and loads it to the nozzle, while it reads `PRINTING`, and the print
+  goes on with the join's slot; the joins' rules are the toolchangers'.
+  With no slot selected, as after a power-panic resume, a runout injects
+  nothing and `change_filament` and a color change do nothing. The
+  firmware leaves its `m600_sent` set after such a runout, which may block
+  later runouts; that isn't modeled. `change_filament` names the selected
+  slot only. A reload takes no `purge_mm`, and `jam` is refused: the MMU's
+  jam isn't read.
+- The preview on an MMU (F43). With the MMU connected, no used slot is
+  checked for filament, and a print always gets the tools-mapping screen.
+  When FINDA sees filament, a slot fed past the selector, the preview first
+  asks to unload it, holding the job in `ATTENTION` with its ID: a print
+  from the page and a sync job alike. While the MMU connects, FINDA's
+  sensor isn't read yet, so the question asks whatever FINDA sees; only an
+  upload's sync job can start then. A `single_tool_file` of slot 0's type
+  with filament at the extruder's sensor skips the question and the
+  mapping screen and prints at once. `tap_through` answers No, which prints
+  with the filament in place and no mapping screen. `unload_first` answers
+  Yes: the MMU unloads the filament over `unload_seconds`, counting on the
+  selected slot or on none, reading `BUSY` with no job, and `cancel` waits
+  for it; then the mapping screen or the job. `cancel` at the question
+  ends in `IDLE` as at any preview question. A power cut during the unload
+  drops the job and leaves the filament in.
+- The MMU menu's operations need the MMU on and connected and the printer
+  idle, and each reads `BUSY` until it's done (F41).
+  `load_to_nozzle` is Load To Nozzle: it unloads the selected slot, feeds
+  the new slot to the extruder with no slot selected, selects it, and loads
+  17 and then 30 mm, which count on the slot, then writes back the slot's
+  own type. It refuses while the extruder holds filament and no slot is
+  selected, as after a boot: unload that filament first. `unload` takes the
+  filament in the extruder, the fed slot's, back into the MMU, whether or not
+  a slot is selected: it rams, or only relieves the pressure when the
+  filament is fully auto-retracted, and leaves no slot selected. It writes no type, so no
+  unload counts. `eject`, `cut` and each preload take `unload_seconds` and
+  move nothing the bridge counts. `eject`, `cut` and `change_all` refuse while
+  the extruder holds filament. `preload_all` preloads every slot in turn with
+  the preset `name`: it stores the type on slots 0 and 1 at once and on each
+  later slot when the preload two before it ends, as the firmware's menu
+  waits on the G-code queue. A power cut keeps the types stored so far and
+  drops the preloads left.
 - Every print start shows `PRINTING`, then a brief `IDLE` with no job, then
   `PRINTING`. `FINISHED` and `STOPPED` persist until dismissed, and the job
   disappears from `/api/v1/status` and `/api/v1/job` as soon as a print ends.
@@ -238,8 +324,8 @@ that trace. The points that matter for the bridge, in short:
   scanned. Then the print preview checks the `M862` lines in the file's
   first 200 G-code lines: the model by compatibility group (`M862.3`), the
   G-code level (`M862.5`), and the features (`M862.6`): input shaper on
-  every build but the iX, the INDX lock on INDX, an MMU3 file with the MMU
-  off, and a feature the build doesn't know. A failed check that `checks`
+  every build but the iX, the INDX lock on INDX, an MMU3 file unless the
+  MMU is on and connected, and a feature the build doesn't know. A failed check that `checks`
   doesn't ignore holds the job in `ATTENTION`, with its ID in
   `/api/v1/status` and `PAUSED` in `/api/v1/job`, and one screen lists
   every failed check. Under `warn`, `tap_through` answers Print: the start
@@ -296,7 +382,8 @@ that trace. The points that matter for the bridge, in short:
   the preview waits for picks its tool inside the dialog, with no clear,
   and INDX docks it after too. A reload in a print neither picks nor docks.
   `park_tool` parks the picked tool, as the Pick/park menu does.
-- `change_all` is the Filament menu's Change all on a toolchanger. It takes
+- `change_all` is the Filament menu's Change all on a toolchanger, and its
+  Preload To MMU on an MMU. It takes
   `tools`, a list of enabled tools, and the preset `name` with an optional
   `color`, the same for every chosen tool; the other tools keep their
   filament. The tools change one at a time in index order, and the printer
@@ -306,7 +393,10 @@ that trace. The points that matter for the bridge, in short:
   inside the dialog, so no idle sensor clear runs at the pick. INDX docks
   each tool after its load, and the XL ends with the last tool picked. A
   reboot or power cut drops what's left, and a power-panic resume waits
-  until the last tool is done. The page's **Change all** opens the form.
+  until the last tool is done. On an MMU, each chosen slot preloads and
+  then stores the new type, with no unload counted, and `unload` lists the
+  slots whose type the dialog clears, which counts an unload. A power cut
+  mid-preload writes no type. The page's **Change all** opens the form.
 - `change_filament` is the Tune menu's Change filament, `M600 T<n>`, on any
   enabled tool once a print is printing. On the picked tool it's the
   filament change a runout runs. On another tool it picks that tool, runs
@@ -429,8 +519,8 @@ Choices made where the firmware was silent or the plan left it open:
   purge when a cleaning fails on a printer with a nozzle cleaner; it
   retracts to the full distance (20 mm on a Nextruder, 8 mm on INDX) with
   no ramming, whatever the switch says, and stores that distance for the next feed to feed back.
-- Temperatures, `G12` other than INDX's power-panic purge, the mesh bed
-  leveling retract and the MMU don't move filament in the simulator.
+- Temperatures, `G12` other than INDX's power-panic purge and the mesh bed
+  leveling retract don't move filament in the simulator.
 - A power cut during a runout's or a jam's dialog retracts 8 mm, as any
   cut in a print does. The firmware skips that retract when the runout or
   jam interrupted a move, which runs it through the crash recovery
@@ -447,12 +537,20 @@ Choices made where the firmware was silent or the plan left it open:
   try finds everything ready, the firmware starts the resume over the new
   print: its check that the printer is idle is a debug assertion
   (`resume_print` in `power_panic.cpp`). The simulator doesn't model that.
+- A second power cut during the resume's recovery or unpark loses the print
+  in the simulator, on every model, where the firmware keeps the saved state
+  through the resume and resumes again (`power_panic.cpp:228-237, 270-279,
+  732, 946-983`).
+- A `T` while the MMU connects waits for it on every model. The Core
+  One's MMU, on MODBUS, connects that way. The MK4 family's, on UART, first
+  runs its bootloader for up to 10 s, where the firmware's `T` doesn't
+  wait: its feed can count on slot 0, and the slot is set though the MMU
+  never changed slots. The bootloader phase isn't modeled.
 - One `checks` setting stands for the firmware's settings per kind of check
   (model, compatibility mode, G-code level, input shaper and firmware). The
   checks share one screen and the worst severity decides it, so one setting
   shows the bridge every outcome.
-- The MMU is always off, so a file with `M862.6 P"MMU3"` fails on a build
-  that knows the MMU3. A file that declares the `HT Hotend` is taken as
+- A file that declares the `HT Hotend` is taken as
   satisfied: whether the hotend is high-temperature is printer state the
   simulator doesn't hold.
 - A print started from the page isn't a sliced file and has no `M862`
@@ -475,6 +573,11 @@ Choices made where the firmware was silent or the plan left it open:
 - A print's end auto-retracts the picked tool even when it has no
   filament, as the simulator does for a loaded one. The source doesn't
   say otherwise, but a trace hasn't shown it.
+- What the preview's Yes unloads while the MMU connects, or once it's
+  connected with FINDA clear after a question asked while it connected,
+  isn't in the source: `SelectorSlot()` assumes the MMU is up
+  (`marlin_print_preview.cpp:709-711`). `unload_first` is refused then;
+  No and Cancel work.
 - The tools-mapping screen doesn't check a spool join's tools. The
   firmware checks each tool in a join's chain for filament and type, and
   refuses a join whose earlier tool has no working sensor, so the sensors

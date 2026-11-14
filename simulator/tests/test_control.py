@@ -339,7 +339,17 @@ def test_a_stream_queue_drops_the_oldest():
             "start_print",
             {"segments": [], "speed": 2},
             "start_print takes color_changes_mm, duration_s, name, preheat_s, prime_mm, segments,"
-            " spool_join, toolchange_purge_mm, not speed",
+            " single_tool_file, spool_join, toolchange_purge_mm, not speed",
+        ),
+        (
+            "start_print",
+            {"segments": [{"tool": 0, "slicer_mm": 1}], "single_tool_file": 1},
+            "start_print single_tool_file must be true or false, got 1",
+        ),
+        (
+            "start_print",
+            {"segments": [{"tool": 0, "slicer_mm": 1}], "single_tool_file": True},
+            "a single-tool file needs an MMU switched on",
         ),
     ],
 )
@@ -363,7 +373,7 @@ async def test_checked_parameters_reach_the_action_as_their_types(setup):
     )
     assert p.job.spec == spec
     assert p.job.spec.name == "part.bgcode"
-    assert p.job.spec.spool_join == []
+    assert p.job.spec.spool_join == [] and not p.job.spec.single_tool_file
     assert (await client.post("/api/printers/p/set_fault", json={"fault": "error"})).status == 200
     assert p.fault is Fault.ERROR
     assert (await client.post("/api/printers/p/set_checks", json={"value": "abort"})).status == 200

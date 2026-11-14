@@ -34,6 +34,16 @@ def test_example_loads():
     assert [t.enabled for t in indx.tools] == [True, True, True, False, True]
 
 
+def test_the_examples_commented_mmu_printer_loads(tmp_path):
+    text = EXAMPLE.read_text()
+    block = text[text.index("# [[printers]]", text.index("# An MK4S with an MMU3")) :]
+    uncommented = "\n".join(line.removeprefix("#").removeprefix(" ") for line in block.splitlines())
+    sim = build(load(write(tmp_path, text + uncommented)))
+    p = sim.printers["mk4s-mmu"]
+    assert p.mmu.active and p.mmu.fed == 2 and p.selected_tool == 2
+    assert [p.tools[i].material.name for i in (0, 1, 2)] == ["PLA", "PETG", "PLA"]
+
+
 def test_defaults(tmp_path):
     cfg = load(write(tmp_path, printer()))
     assert (cfg.host, cfg.control_port, cfg.settings) == ("127.0.0.1", 8000, {})
@@ -243,7 +253,46 @@ BAD = {
     "printers not a list": ("printers = 1\n", "printers must be a list"),
     "missing model": ("[[printers]]\nname = 'p'\n", "printers[0] needs a model"),
     "empty api key": (printer('api_key = ""'), "printers[0].api_key can't be empty"),
+    "bad mmu": (printer("mmu = 1", model="1.4.1"), "printers[0].mmu must be true or false"),
+    "mmu on a model without one": (
+        printer("mmu = true", model="1.3.5"),
+        "printers[0].mmu needs a model that takes an MMU3 (MK3.9, MK3.9S, MK4, MK4S, COREONE,"
+        " COREONEL), not 1.3.5",
+    ),
+    "mmu with the sensors off": (
+        printer("mmu = true\nsensors = false", model="1.4.1"),
+        "printers[0].mmu needs the filament sensors on",
+    ),
+    "mmu slot out of range": (
+        printer("mmu = true\n" + tool("index = 5"), model="1.4.1"),
+        "printers[0].tools[0].index must be below 5, the most tools model 1.4.1 has, got 5",
+    ),
+    "mmu slot disabled": (
+        printer("mmu = true\n" + tool("index = 1\nenabled = false"), model="1.4.1"),
+        "printers[0].tools[0].enabled can't be false: an MMU slot can't be disabled",
+    ),
+    "too many mmu slots": (
+        printer("mmu = true\n" + "".join(tool(f"index = {i}") for i in range(6)), model="1.4.1"),
+        "printers[0].tools has 6 entries, more than the 5 that model 1.4.1 has",
+    ),
 }
+
+
+def test_an_mmu_printer_holds_slot_types_and_the_slot_in_the_extruder(tmp_path):
+    slots = tool('index = 0\nmaterial = { name = "PLA" }') + tool(
+        'index = 3\nmaterial = { name = "PETG" }'
+    )
+    text = printer("mmu = true\npicked_tool = 3\n" + slots, model="1.4.1") + printer(
+        "mmu = true\n" + slots, model="7.1.0", name="q"
+    )
+    sim = build(load(write(tmp_path, text)))
+    p, q = sim.printers["p"], sim.printers["q"]
+    assert p.mmu.active and p.selected_tool == 3 and p.mmu.fed == 3 and p.mmu.path.loaded
+    assert sorted(p.tools) == [0, 1, 2, 3, 4]
+    assert p.tools[0].material.name == "PLA" and p.tools[3].material.name == "PETG"
+    # A slot's configured material is its stored type only: nothing is in the extruder.
+    assert q.selected_tool is None and q.mmu.fed is None and not q.mmu.path.loaded
+    assert all(t.path is q.mmu.path for t in q.tools.values())
 
 
 @pytest.mark.parametrize("case", list(BAD))

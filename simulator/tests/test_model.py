@@ -800,7 +800,8 @@ def test_parse_error_holds_and_tap_through_stops():
 
 
 def test_m865_on_missing_tool_is_a_parse_error():
-    sim, p = make()
+    # The iX build has no MMU, so one tool. An MMU build takes L0 to L4 (F22).
+    sim, p = make("4.1.0")
     run_sync(sim, p, sliced(p, 'M865 X R N"PLA" L3\n'))
     assert str(p.job.attention).startswith("parse error")
 

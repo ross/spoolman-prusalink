@@ -9,7 +9,7 @@ a time.
 
 ## Reading an entry
 
-Each finding has an ID from BF1 to BF27, for "bridge finding". The single
+Each finding has an ID from BF1 to BF29, for "bridge finding". The single
 letters are taken by the scenario rows in [scenarios.md](scenarios.md) and
 the printer behaviors (F) in [printer-behaviors.md](printer-behaviors.md).
 An ID stays with its finding when the finding moves stage or is fixed.
@@ -75,10 +75,12 @@ written.
 | 2 | BF7 | An INDX with an uncalibrated nozzle cleaner refuses every print |
 | 3 | | None of its own |
 | 4 | BF16 | MMU: each tool change over-charges the outgoing slot |
+| 4 | BF29 | MMU: a load or print start after an unload in the same boot counts up to 40 mm less |
 | 4 | BF15 | MMU: swaps are invisible |
-| 4 | BF17 | MMU: nothing is counted after a boot until a tool change or load |
+| 4 | BF28 | MMU: turning the MMU off clears slot 0, whichever slot was loaded |
+| 4 | BF17 | MMU: after a boot, slot 0 is charged while the MMU connects, then nothing until a load or tool change |
 | 4 | BF20 | MMU printers are on the supported list as single-tool models |
-| 4 | BF18 | MMU: the sync job can wait on a question and unload the filament |
+| 4 | BF18 | MMU: the sync job can wait on the unload question and leave the filament |
 | 4 | BF19 | MMU: slots 1 to 4 keep no UUIDs |
 | 5 | BF6 | A failed `M865` is silent |
 | 5 | BF21 | `READY` in `IDLE_STATES` never arrives |
@@ -305,13 +307,22 @@ written.
   `sync_delay` holds the job at the first idle poll after the boot. The
   job then runs at the first later poll after the printer has been idle
   that long, so whether it misses the window depends on when that poll
-  comes. `sync_delay` is 0 by default.
+  comes. `sync_delay` is 0 by default. With an MMU3, the sync job waits
+  at the preview's question to unload the MMU's filament first and reads
+  `ATTENTION` until someone answers (F43, BF18): while the MMU still
+  connects after the boot, whatever FINDA sees, and once it's Active
+  because the cut's slot is still at FINDA. If No runs the job while the
+  MMU still connects, its end isn't the MMU's: it auto-retracts, which
+  counts on slot 0 (F45).
 - **Effect**: The user's print is lost: it never resumes, and the printer
   ends the sync job `FINISHED`. If the autostart resumes anyway, the two
   jobs collide in a way the source doesn't define.
 - **Evidence**: Read in the firmware source. Shown in the simulator by
   `test_a_sync_job_in_the_window_drops_the_resume` in
-  `tests/test_power_panic.py`, which pins it on a Core One L. To be
+  `tests/test_power_panic.py`, which pins it on a Core One L, and on an
+  MMU by `test_a_sync_job_in_the_window_on_a_connecting_mmu_waits_on_the_question`
+  in `tests/test_mmu.py` and the window tests in
+  `simulator/tests/test_mmu_power_panic.py`. To be
   confirmed on the printer: whether PrusaLink answers before the
   autostart's first try. The F12 trace shows the window, and has to be
   taken before the INDX upgrade.
@@ -325,7 +336,8 @@ written.
 
 - **Printers**: Every Nextruder: the MK3.9 and MK4 families, Core One,
   Core One Oak, Core One L, iX and XL. INDX counts its auto-retract
-  exactly.
+  exactly. With an MMU3, Load To Nozzle auto-retracts on the slot it
+  loaded (F41).
 - **What happens**: After an idle load and at the end of every print, the
   sync job included, a Nextruder runs its auto-retract ramming. It first
   feeds back what the tracker says is retracted, then counts 23 mm: an
@@ -505,10 +517,13 @@ written.
   a runout waits for its reload resumes the print on its own, through the
   tool the runout emptied (F12). A cut during Tune > Change filament on
   another tool, or during a spool join's unload, does the same on that
-  tool until the file's next tool change (F34, F35). The bridge holds that usage because the tool reports no
-  material (C7). When filament is next loaded in that tool, the bridge
-  charges the held usage, with the load's own count, to the spool
-  reported there.
+  tool until the file's next tool change (F34, F35). The bridge holds that
+  usage because the tool reports no material (C7). When filament is next
+  loaded in that tool, the bridge charges the held usage, with the load's
+  own count, to the spool reported there. An MMU's runout writes no type,
+  so a cut while it waits holds nothing: slot 0 keeps its type, and the
+  resumed print counts on slot 0 while the MMU connects and on no slot
+  after (F44, BF17).
 - **Effect**: The new spool is charged for filament that came from no
   spool: in the test, the held 84 mm on top of the load's own count.
 - **Evidence**: On a toolchanger, shown in the simulator by
@@ -525,7 +540,10 @@ written.
   `test_a_cut_while_a_runout_waits_for_the_reload` in the same file: the
   swap the runout opened stays open, the bridge holds the resumed print's
   usage, and charges it with the next load's count to the spool reported
-  then.
+  then. On an MMU, by
+  `test_a_cut_while_an_mmu_runout_waits_charges_nothing_after` in
+  `tests/test_mmu.py`: no unload is recorded, no usage is held, and spool 1
+  is charged only what slot 0 counted before the runout.
 - **Scenario rows**: C7, T2, P12.
 - **To reproduce**: Those tests, today, on a toolchanger and after a power
   cut. On the Core One L,
@@ -702,113 +720,263 @@ written.
 ## MMU3
 
 Each MMU finding applies to the MK4 family, the Core One and the Core One
-L with an MMU3 turned on in the printer's settings. None can be shown
-before workstream 5, and the scenarios have no MMU rows yet.
+L with an MMU3 turned on in the printer's settings. The simulator models
+the MMU's switch, its selected slot, its idle operations, its prints, the
+preview's unload question, its runouts, `M600` and spool joins, and power
+panic (F38 to F46). The MMU's scenario rows are T12 to T17.
 
 ### BF15. MMU: swaps are invisible
 
-- **What happens**: Tool changes, MMU unloads, ejects, cuts, `M600` and
-  spool joins leave `unload_count` alone, and the idle sensor clear is off.
-  Only turning the MMU off with an empty nozzle, the change-all unload and
-  a cold pull count one (`store_definition.cpp:258-262`,
-  `filament_sensors_handler.cpp:306`). A slot's type is what's loaded in
-  the slot (`M70X_mmu.cpp:80-82`), so swapping the spool that feeds a slot
-  shows nothing.
-- **Effect**: The bridge never sees a slot's spool change. A spool moved
-  into the slot's location stays staged (S13, S9), and the old spool is
-  charged for the new one until a claim moves it.
-- **Evidence**: Read in the firmware source; the bridge's side is
-  inferred.
-- **Scenario rows**: S1, S2, S9, S13.
-- **To reproduce**: Needs workstream 5.
+- **What happens**: An unload counts only where a slot's type is written
+  to none (`store_definition.cpp:258-263`). A tool change, Unload
+  Filament, Eject, Cut, `M600` and a spool join write no type. Load To
+  Nozzle writes back the slot's own type. Preload To MMU writes the new
+  type over the old one after its preload, with no none between
+  (`multi_filament_change.cpp:151-239`, F41). The idle sensor clear is off
+  by the MMU's setting, even while it connects
+  (`filament_sensors_handler.cpp:161-182, 303-312`). What does count: `M709
+  S0` with an empty extruder sensor, on slot 0 only (BF28), Preload's
+  unload choice, a cold pull on slot 0, a filament-stuck unload on the
+  selected slot, and `M865 I` with an empty type.
+- **Effect**: The usual swap, Eject and then Preload with the new type,
+  shows the printer only a type change. A spool moved into the slot's
+  location stays staged (S13, S9), and the old spool is charged for the
+  new one, with a drift flag for the new type, until a claim moves it. A
+  swap at a runout shows the printer nothing at all: the `M600` ejects the
+  slot and reloads it with its type kept (F44), so the new spool stays
+  staged and the old one is charged, with no flag.
+- **Evidence**: Read in the firmware source; shown in the simulator by
+  `test_an_mmu_slot_swap_by_eject_and_preload_counts_no_unload` and
+  `test_an_mmu_runout_swap_counts_no_unload` in `tests/test_mmu.py`.
+- **Scenario rows**: S1, S2, S9, S13, T13.
+- **To reproduce**: That test: with spool 3 moved into slot 0's location,
+  slot 0 is ejected and preloaded with PETG. No unload is recorded, spool 3
+  stays staged, and the next print's 103 mm goes to spool 1, which is
+  flagged for the printer's PETG. The second test swaps spool 3 in while a
+  runout waits for its reload: the print's 125 mm goes to spool 1, with no
+  flag.
 - **Status**: Open.
 
 ### BF16. MMU: each tool change over-charges the outgoing slot
 
-- **What happens**: At a tool change the firmware plans about 190 mm to
-  reach the filament sensor (`maximumAllowedExtruderMove`,
-  `mmu2_mk4.cpp:55, 1528, 1590`), then up to 57 mm more, while the old
-  slot is still selected. The 57 mm is 7 mm past the sensor
-  (`mmu2_mk4.cpp:1583`, `MMU2_TOOL_CHANGE_LOAD_LENGTH` in
-  `mmu2_config.h:35`) and 50 mm of feed (`MMU2_FEED_DISTANCE`,
-  `mmu2_config.h:69`, `mmu2_mk4.cpp:524-533`). The planner counts at plan
-  time, so the old slot is credited with it (`mmu2_mk4.cpp:674`).
-- **Effect**: Roughly 200 mm, less the gap, charged to the outgoing slot's
-  spool per change, and more on a retry. That's about 0.6 g of 1.75 mm PLA
-  per change.
-- **Evidence**: Inferred from the source. The size depends on how long the
-  push to the sensor takes, which only hardware could tell.
-- **Scenario rows**: None yet. T1 and T2 are the multi-tool equivalents.
-- **To reproduce**: Needs workstream 5.
+- **What happens**: At a tool change in a print the firmware retracts
+  80 mm and feeds up to 50 mm (`ToolChangeCommonOnce`, `mmu2_mk4.cpp:568-679`,
+  through `FeedWithEStallDetection`, `:492-546`), and plans
+  the 189.9 mm move to the filament sensor and 7 mm past it as the MMU
+  reports its progress (`maximumAllowedExtruderMove`, `:55`, planned at
+  `:1528` in `OnMMUProgressMsgChanged` and `:1590` in
+  `OnMMUProgressMsgSame`; `ExtraLoadDistance() + 2`, `:1583`;
+  `mmu2_config.h:35, 44, 69`). All of it runs while the old slot is still
+  selected (`mmu2_mk4.cpp:681-702`). The planner counts each move at plan
+  time, less whatever is left of the gap, which is at most 40 mm (F39),
+  so the old slot is credited 193 to 207 mm, 206.9 with the nominal 50
+  (F40). The feed leaves the gap at 0, so the new slot's 32 mm slicer
+  load then counts in full, though most of it fills the path to the
+  nozzle. The slicer's wipe-tower stamping on the old slot also counts
+  15 mm of each stamping past the gap: one stamping per change for PLA,
+  two for PETG (F46). The first change of a print, from no slot, credits
+  nothing, and a failed load's retries add nothing.
+- **Effect**: The outgoing slot's spool is charged 221.9 x 0.95 = 210.8
+  mm more per change for PLA and 236.9 x 0.95 = 225.1 mm for PETG, about
+  0.63 g.
+- **Evidence**: Read in the firmware source and the stock slicer profile;
+  shown in the simulator by
+  `test_an_mmu_tool_change_charges_the_outgoing_slot_the_firmware_feed` in
+  `tests/test_mmu.py`, and through a real Spoolman by
+  `integration/test_tools.py::test_t12_two_color_mmu_print`. The feed's last move stops at the sensor, between
+  36 and 50 mm, which only hardware could tell.
+- **Scenario rows**: T12.
+- **To reproduce**: That test: a print on slots 0 and 1, 20 mm each, in the
+  order 0, 1, 0, 1, makes three changes, and each slot rams out twice:
+  slot 0 at both changes to slot 1, and slot 1 at its change to slot 0
+  and at the end. In commanded mm, slot 0 counts 657.65 and slot 1
+  467.38, and the counters read 624 and 444 at 0.95, which the bridge
+  charges. The start, the model, the loads, the purges and the rammings
+  come to 213.85 mm on slot 0 (70 + 40 + 32 + 29.95 + 2 x 20.95) and
+  230.48 mm on slot 1 (2 x 32 + 54.63 + 29.95 + 40 + 2 x 20.95), 203 and
+  219 at 0.95. The rest is the firmware's feed and the stampings: 2 x
+  (206.9 + 15) = 443.8 mm on slot 0, and 206.9 + 2 x 15 = 236.9 mm on
+  slot 1, whose last stamping comes at the end with no feed after it.
+- **Open question**: Whether the charge a fix aims for counts the
+  slicer's 17 mm and 32 mm loads. The printer counts them, but most of
+  that filament fills the path to the nozzle and comes back at the next
+  unload.
 - **Status**: Open.
 
-### BF17. MMU: nothing is counted after a boot until a tool change or load
+### BF17. MMU: after a boot, slot 0 is charged while the MMU connects, then nothing until a load or tool change
 
-- **What happens**: The selected slot decides which tool is credited, and
-  it's "none" after an unload and after every boot. Extrusion with no slot
-  selected isn't counted (`mmu2_mk4.cpp:175, 674`, `planner.cpp:2207`).
-  A power-panic resume is a boot too.
-- **Effect**: Usage between a boot and the next tool change or load is
-  never charged. A resumed single-color print is charged nothing from the
-  resume on.
-- **Evidence**: Read in the firmware source.
-- **Scenario rows**: C1, P12.
-- **To reproduce**: Needs workstream 5.
+- **What happens**: The planner counts each move on the selected virtual
+  tool. That's slot 0 while the MMU's setting is on but the MMU isn't
+  Active, as while it connects after a boot or `M709 S1`, and then the
+  selected slot, or none (`tool_index.cpp:140-158`,
+  `planner.cpp:2194-2220`). Every boot, `M709 S1`, unload, eject and cut
+  leaves no slot selected, and only a tool change or a load selects one
+  (`mmu2_mk4.cpp:155, 175, 674, 869-871, 913, 1013`). A power-panic resume
+  is a boot, and the power-panic data holds nothing about the slot (F45).
+  The resume's 8 mm feed back counts on slot 0 while the MMU still
+  connects, else on none. The resumed print counts on
+  slot 0 until the MMU is Active, whichever slot prints, then on none. Its
+  next tool change runs from no slot: the old slot's wipe-tower unload,
+  before the `T`, counts on slot 0 or on none, the firmware's feed counts
+  on none, and the new slot counts from its load on.
+- **Effect**: Usage from a boot to the next load or tool change is charged
+  to slot 0's spool while the MMU connects, whichever slot printed, and
+  isn't charged at all after. A resumed one-color print is charged nothing
+  after its first seconds. In the simulator, with the MMU connecting for
+  10 s and the test's print at 5 mm/s, a print cut in slot 1's segment
+  counts 35.5 mm commanded, 33.7 counted, on slot 0 after the boot, and
+  nothing on slot 1 to the print's end. That's the 8 mm feed back, 3.5 s
+  after the boot in the simulator's timing (its 1.5 s window and 2 s
+  recovery), and the 27.5 mm slot 1 prints from the print's restart, 4.5 s
+  after the boot, until the MMU is Active.
+- **Evidence**: Read in the firmware source; shown in the simulator by
+  `test_an_mmu_print_resumed_after_a_cut_is_charged_nothing_until_a_tool_change`
+  and `test_the_resume_feed_back_lands_on_slot_0_while_the_mmu_connects`
+  in `tests/test_mmu.py`, and by
+  `simulator/tests/test_mmu_power_panic.py`. How long the MMU takes to
+  connect is inferred, about 10 s from a comment at
+  `filament_sensors_handler.cpp:179`, and it decides how much lands on
+  slot 0.
+- **Scenario rows**: C1, P12, T15.
+- **To reproduce**: Those tests. A print on slots 0 and 1, cut 30 mm into
+  slot 0's 100 mm segment and resumed with the MMU Active, charges spool 1
+  nothing after the cut, and spool 2 211 mm from slot 1's load on. A print
+  on slot 2 resumed while the MMU connects charges spool 1, in slot 0,
+  7 mm for the feed back, and spool 3 nothing after the cut.
 - **Status**: Open.
 
-### BF18. MMU: the sync job can wait on a question and unload the filament
+### BF18. MMU: the sync job can wait on the unload question and leave the filament
 
-- **What happens**: With an MMU and filament at the nozzle, the preview
-  asks to unload first, unless the filament sensors are off. The shortcut
-  for a single-tool file of the loaded type doesn't apply: the sync job
-  uses no tool (`gcode_info.cpp:611-615`). Yes unloads; no starts the job
-  as it is (`marlin_print_preview.cpp:228-256, 699-708`). The stock MMU3
-  end G-code unloads after every print, so this needs a printer left
-  loaded by hand.
-- **Effect**: The sync job waits in `ATTENTION` and goes the way of BF5.
-  Answering yes unloads the filament for a job that moves none.
-- **Evidence**: Read in the firmware source.
-- **Scenario rows**: W1, W5.
-- **To reproduce**: Needs workstream 5, which adds the preview's unload
-  question.
+- **What happens**: With the MMU Active and FINDA seeing filament, any
+  slot's filament past the selector, the preview asks to unload it first
+  (F43). That's most often after Load To Nozzle: a stock MMU3 print ends
+  with `M702`, which clears FINDA. While the MMU connects after a boot, it
+  asks whatever FINDA sees (BF26). The shortcut for a single-tool file
+  doesn't apply, since the sync job's metadata names no tool
+  (`gcode_info.cpp:611-625`). The job waits in `ATTENTION` with its ID.
+  Yes unloads into the MMU, reading `BUSY`, then turns the heaters off and
+  runs the job. No runs it with the filament in place
+  (`marlin_print_preview.cpp:228-257, 698-728`). A finished sync job
+  neither unloads nor auto-retracts with the MMU Active, so the next job
+  asks again; a stopped one unloads while reading `PRINTING` (F42,
+  `marlin_server.cpp:1067-1075`). The bridge uploads once and waits while
+  the printer reads `ATTENTION`.
+- **Effect**: Each write after Load To Nozzle holds the printer at a
+  question until someone answers, with no flag and no time-out: the bridge
+  never uploads again and never tells the user. Answering Yes unloads the
+  filament for a job that moves none. A stop at the question goes the way
+  of BF5.
+- **Evidence**: Read in the firmware source; shown in the simulator by
+  `test_a_sync_job_on_a_loaded_mmu_waits_on_the_unload_question` in
+  `tests/test_mmu.py`.
+- **Scenario rows**: T16, W1, W5.
+- **To reproduce**: That test: after Load To Nozzle on slot 0, a color
+  write uploads one job, which waits at the question through 20 minutes
+  of polls with no second upload and no flag. No then runs it, the color
+  lands, and slot 0's filament stays in the extruder.
 - **Status**: Open.
 
 ### BF19. MMU: slots 1 to 4 keep no UUIDs
 
 - **What happens**: `M865` takes `L` from 0 to 4 on an MMU build, and
-  stores the type for that slot (`M865.cpp:194-196`,
+  stores the type for that slot (`M865.cpp:64, 194-196`,
   `store_definition.cpp:243-279`). An ad-hoc write stores the name,
-  temperatures and color for any slot, but the UUIDs only for slot 0. For
-  another slot it skips them, behind a `debug_assert` that fires on a
-  debug build (`filament.cpp:380-402`). The tag reader is off with an MMU
-  on, so slot 0 can keep UUIDs from an earlier tag load but gets no new
-  ones from a tag (`request_manager.cpp:263-266`). The bridge writes
-  `M865 L<n>` for each configured tool, and `M865.1` on tool 0 of a model
-  that keeps UUIDs.
-- **Effect**: Writes to every slot land, apart from UUIDs, which the
-  bridge writes on tool 0 only. Slot 0 is written, UUID included, but
-  never reports a new tag. What the bridge makes of UUIDs slot 0 kept
-  from an earlier tag load is to be confirmed.
-- **Evidence**: Read in the firmware source. The bridge's side is to be
+  temperatures and color for any slot, but the UUIDs only for slot 0. Any
+  ad-hoc write to slot 1 or higher, not only one with UUIDs, skips them
+  behind a `debug_assert` that fires on a debug build
+  (`filament.cpp:251-275, 379-403`). Only the Core One and Core One L keep
+  UUIDs at all; the MK4 has no tag reader. While the MMU is on, the tag
+  radio is off and no slot has a tag reader, so slot 0 keeps UUIDs from an
+  earlier tag load but gets no new ones
+  (`request_manager.cpp:262-269`, `tool_tag_buddy.cpp:11-18`). `M709 S1`
+  clears every slot's tag link (F38). The bridge writes `M865 L<n>` for
+  each configured tool, and mints and writes `M865.1` on tool 0 alone of a
+  model that keeps UUIDs.
+- **Effect**: None today. Every slot's type and color land, and tool 0's
+  UUID lands on slot 0, so the printer matches every spool after one job
+  and nothing is flagged. Slots 1 to 4 keep no UUID, so a spool there can't
+  be identified by one (Q10), and slot 0 never reports a new tag. What the
+  bridge makes of UUIDs slot 0 kept from an earlier tag load is to be
   confirmed.
+- **Evidence**: Read in the firmware source; shown in the simulator by
+  `test_mmu_writes_land_on_every_slot_and_uuids_on_slot_0` in
+  `tests/test_mmu.py`, on a Core One.
 - **Scenario rows**: W1, W5, Q10, Q11.
-- **To reproduce**: Needs workstream 5.
+- **To reproduce**: That test: five spools with five colors on a Core One
+  with its MMU on. One job writes `L0` to `L4` and `M865.1 I0` with the
+  UUID the bridge minted for slot 0's spool, and no other spool gets one.
+  After it, slot 0 holds that UUID, slots 1 to 4 none, and the next poll
+  uploads nothing.
 - **Status**: Open.
 
 ### BF20. MMU printers are on the supported list as single-tool models
 
-- **What happens**: With an MMU on, `/api/v1/filament` lists five tools,
-  one per slot (`tool_index.cpp:84-102`), and `/api/v1/info` reports
-  `mmu` as true (`basic_gets.cpp:229-253`). The bridge doesn't read
-  `/api/v1/info`. `PRINTER_MODELS` in `printer_sync.py` lists these types
-  as single-tool and writable, so `model_problem` lets writes through.
+- **Printers**: MK3.9, MK3.9S, MK4, MK4S, Core One and Core One L with an
+  MMU3.
+- **What happens**: `/api/v1/filament` lists the five slots as tools 0 to 4
+  while the MMU's setting is on, connected or not, and tool 0 alone while
+  it's off (`tool_index.cpp:84-109`). `/api/v1/info` reports `mmu` as the
+  setting, true while the MMU connects too (`basic_gets.cpp:229-247`). The
+  bridge doesn't read `/api/v1/info`. `PRINTER_MODELS` in `printer_sync.py`
+  lists these types as single-tool and writable, so `model_problem` lets
+  writes through, and the job's `M865 L1` to `L4` land on the slots
+  (`M865.cpp:64, 194-196`).
 - **Effect**: The bridge writes to an MMU printer as to a single-tool one,
   which leads to BF18 and BF19, and nothing tells the user an MMU isn't
   supported. Charging per slot follows the config's tool map.
-- **Evidence**: Read in the firmware source and `printer_sync.py`.
+- **Evidence**: Read in the firmware source and `printer_sync.py`, and
+  shown in the simulator.
 - **Scenario rows**: W10, T6.
-- **To reproduce**: Needs workstream 5. The simulator's `/api/v1/info`
-  always reports `mmu` as false today.
+- **To reproduce**:
+  `test_the_bridge_writes_to_an_mmu_printer_as_a_single_tool_model` in
+  `tests/test_mmu.py`: an MK4S with its MMU on reads `mmu` as true and lists
+  five tools. A drift write uploads one job with `L0` to `L4`, which runs and
+  sets every slot's type.
+- **Status**: Open.
+
+### BF28. MMU: turning the MMU off clears slot 0, whichever slot was loaded
+
+- **What happens**: `M709 S0` writes none to slot 0 unless the extruder's
+  sensor surely sees filament (`M70X_mmu.cpp:77-92`, F38). With an empty
+  nozzle that's an unload on slot 0, whichever slot was used last. With
+  another slot's filament in the nozzle, slot 0 keeps its type, and the
+  printer, now a single-tool one, counts every move on slot 0
+  (`tool_index.cpp:140-158`).
+- **Effect**: With an empty nozzle the bridge records an unload on slot
+  0's spool, which never left the MMU, and flags it. With slot 2 loaded,
+  the bridge charges slot 2's filament to slot 0's spool, with no flag
+  while slot 0's type matches it.
+- **Evidence**: Read in the firmware source; shown in the simulator by
+  `test_turning_the_mmu_off_with_an_empty_nozzle_unloads_slot_0` and
+  `test_turning_the_mmu_off_with_slot_2_loaded_charges_slot_0` in
+  `tests/test_mmu.py`. That the loaded slot's filament is then charged to
+  slot 0 is inferred: nothing reads the slot back.
+- **Scenario rows**: T14.
+- **To reproduce**: Those tests. With an empty nozzle, the ledger shows
+  an unload and an unconfirmed swap on slot 0's spool. With slot 2 loaded,
+  a 100 mm move after the switch-off charges 95 mm to slot 0's spool.
+- **Status**: Open.
+
+### BF29. MMU: a load or print start after an unload in the same boot counts up to 40 mm less
+
+- **What happens**: A tool change's feed runs with no slot selected, so it
+  counts nothing and leaves the tracker's gap where it was (F39). After
+  any MMU unload the gap is 40 mm, so the load that follows fills it
+  first: Load To Nozzle counts 7 mm of its 47, where the first load after
+  a boot, from a gap of 0, counts all 47 (F41,
+  `mmu2_mk4.cpp:568-679, 961-987`).
+- **Effect**: About 38 mm, 0.11 g of 1.75 mm PLA, isn't charged to the
+  loaded slot's spool, and how much depends on what ran earlier in the
+  boot. A print's start after an unload, including the unload at the end
+  of an earlier print, counts 30 mm of its 70 the same way.
+- **Evidence**: Read in the firmware source; shown in the simulator by
+  `test_a_load_to_nozzle_after_an_unload_counts_7` and
+  `test_a_second_mmu_print_in_one_boot_counts_less_at_its_start` in
+  `tests/test_mmu.py`.
+- **Scenario rows**: T17.
+- **To reproduce**: Those tests. Load To Nozzle, Unload Filament and Load
+  To Nozzle again on slot 0 charge 44, 19 and 7 mm. The same two-color
+  print twice in one boot charges slot 0's spool 624 mm, then 587.
 - **Status**: Open.
 
 ## Minor

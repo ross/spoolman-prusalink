@@ -18,8 +18,9 @@ if TYPE_CHECKING:
 
 
 def tool_problem(p: SimPrinter, commands: list[gcode.Command]) -> str | None:
-    # The firmware takes any index the model can have, enabled or not.
-    last = p.model.max_tools - 1
+    # The firmware takes any index the build can have, enabled or not, and every MMU slot
+    # whether the MMU is on or off.
+    last = p.model.m865_tools - 1
     for c in commands:
         if not isinstance(c, gcode.SetFilament):
             continue
@@ -50,7 +51,7 @@ def apply(p: SimPrinter, commands: list[gcode.Command]) -> None:
 
 
 def _apply_filament(p: SimPrinter, c: gcode.SetFilament) -> None:
-    if not 0 <= c.tool < p.model.max_tools:
+    if not 0 <= c.tool < p.model.m865_tools:
         p._log("gcode", f"M865 L{c.tool} dropped: no such tool")
         return
     # The config store has a slot for every tool the model can have, so a write to a

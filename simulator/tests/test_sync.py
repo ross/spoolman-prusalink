@@ -4,11 +4,13 @@ from __future__ import annotations
 
 from dataclasses import replace
 
+import pytest
+
 from simulator import gcode, sync
 from simulator.model import Material, SimTool
 from simulator.tests.test_model import PETG, temperatures, tool0
 from simulator.tests.test_model_edges import TAG, messages
-from simulator.tests.util import PLA, loaded, make
+from simulator.tests.util import PLA, loaded, make, make_mmu
 
 # What M865 R resets the temperatures to.
 RESET = {"nozzle": 215, "preheat": 170, "bed": 60}
@@ -87,7 +89,7 @@ def test_unload_of_an_empty_type_is_not_counted():
 
 
 def test_m865_for_a_tool_the_model_lacks_is_dropped():
-    sim, p = make()
+    sim, p = make("4.1.0")  # no MMU build, so one tool
     sync.apply(p, gcode.parse('M865 X R N"PLA" L4'))
     assert messages(sim) == ["M865 L4 dropped: no such tool"]
     assert list(p.tools) == [0]
@@ -128,3 +130,24 @@ def test_m865_copy_onto_another_tool_drops_the_uuids():
         None,
         None,
     )
+
+
+@pytest.mark.parametrize("on", [True, False])
+def test_m865_writes_slot_4_on_an_mk4s_with_the_mmu_on_or_off(on):
+    sim, p = make_mmu()
+    if not on:
+        p.set_mmu(False)
+    sync.apply(p, gcode.parse('M865 N"PETG" L4'))
+    assert p.tools[4].material.name == "PETG"
+    assert sync.tool_problem(p, gcode.parse('M865 N"PETG" L5')) == (
+        "M865 names tool 5; MK4S has tools 0 to 4"
+    )
+
+
+@pytest.mark.parametrize(("code", "kept"), [("7.1.0", True), ("1.4.1", False)])
+def test_mmu_uuids_land_on_slot_0_of_a_core_one_only(code, kept):
+    sim, p = make_mmu(code)
+    sync.apply(p, gcode.parse(f'M865 X R N"PLA" L0\nM865 X R N"PLA" L1\nM865.1 I0 C"{TAG}"'))
+    sync.apply(p, gcode.parse(f'M865.1 I1 C"{TAG}"'))
+    assert p.tools[0].material.instance_uuid == (TAG if kept else None)
+    assert p.tools[1].material.instance_uuid is None

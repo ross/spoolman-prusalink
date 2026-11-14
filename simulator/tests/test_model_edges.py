@@ -74,13 +74,12 @@ def test_tag_load_validates_its_fields():
     assert (m.nozzle, m.preheat, m.bed, m.instance_uuid) == (200, 150, 50, None)
 
 
-def test_tag_load_on_another_tool_than_0_has_no_product_uuids():
+def test_only_tool_0_of_a_tag_reading_model_can_load_from_a_tag():
+    # The models with a tag reader are MMU builds: with no MMU on, tool 1 is a slot the
+    # printer doesn't have, and with the MMU on the radio is off.
     sim, p = make("8.1.0", [SimTool(0), SimTool(1)])
-    p.load(1, source="tag", name="PETG", color="#186BB5", uuid=TAG)
-    sim.tick(100)
-    m = p.tools[1].material
-    assert (m.name, m.color) == ("PETG", "#186bb5")
-    assert m.instance_uuid is None and m.material_uuid is None and m.package_uuid is None
+    with pytest.raises(Invalid, match="T1 is an MMU slot, and the MMU is off"):
+        p.load(1, source="tag", name="PETG", color="#186BB5", uuid=TAG)
 
 
 def test_a_load_while_one_is_running_is_refused():
@@ -353,7 +352,7 @@ TOOL_KEYS = {
 def test_a_tool_reports_and_snapshots_its_path_flat():
     # The page and saved snapshots read the path's fields at the tool's level.
     sim, p = make()
-    assert set(p.to_json()["tools"][0]) == TOOL_KEYS | {"actions"}
+    assert set(p.to_json()["tools"][0]) == TOOL_KEYS | {"actions", "listed"}
     assert set(sim.snapshot()["printers"][0]["tools"][0]) == TOOL_KEYS
 
 

@@ -37,11 +37,15 @@ ACTIONS = frozenset(
     {
         "load",
         "unload",
+        "load_to_nozzle",
+        "eject",
+        "cut",
         "extrude",
         "retract",
         "select_tool",
         "park_tool",
         "change_all",
+        "preload_all",
         "start_print",
         "pause",
         "resume",
@@ -61,9 +65,11 @@ ACTIONS = frozenset(
         "set_tool_enabled",
         "set_checks",
         "set_sensors",
+        "set_mmu",
         "counter_step_back",
         "set_extruded_at_unload",
         "tap_through",
+        "unload_first",
     }
 )
 
@@ -231,6 +237,10 @@ def _print_spec(body: dict) -> PrintSpec:
             "start_print toolchange_purge_mm", body.get("toolchange_purge_mm"), float | None
         ),
         spool_join=_joins(body.get("spool_join")),
+        single_tool_file=_check(
+            "start_print single_tool_file", body.get("single_tool_file"), bool | None
+        )
+        or False,
     )
 
 

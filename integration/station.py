@@ -37,6 +37,7 @@ SETTINGS = dict(
     preheat_seconds=0.5,
     print_rate_mm_s=100.0,
     start_blip=True,
+    mmu_connect_seconds=0.2,
 )
 
 # The simulator's clock task ticks in steps of this many seconds, so tests do too.

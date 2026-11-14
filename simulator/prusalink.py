@@ -15,6 +15,7 @@ from typing import Any, Literal
 import httpx
 from aiohttp import web
 
+from simulator.feed import MMU
 from simulator.model import (
     Busy,
     Fault,
@@ -118,7 +119,7 @@ def status(p: SimPrinter) -> dict:
         "temp_nozzle": 0.0,
         "target_nozzle": 0.0,
         "axis_z": 0.0,
-        "flow": 100,
+        "flow": _flow(p),
         "speed": 100,
         "fan_hotend": 0,
         "fan_print": 0,
@@ -137,6 +138,12 @@ def status(p: SimPrinter) -> dict:
             "time_printing": int(job.time_printing),
         }
     return out
+
+
+def _flow(p: SimPrinter) -> int:
+    """The selected tool's flow factor, or 0 with none (`status_renderer.cpp:74`). Only the
+    MMU's none is modeled: a toolchanger with no tool picked reads 100 here."""
+    return 0 if p.feed is MMU and MMU.credited(p, p.tools[0]) is None else 100
 
 
 def job(p: SimPrinter) -> dict | None:
@@ -185,7 +192,7 @@ def filament(p: SimPrinter) -> dict | None:
     counters = p.firmware is Firmware.FULL
     tools = []
     for tool in sorted(p.tools.values(), key=lambda t: t.index):
-        if not tool.enabled:
+        if not p.listed(tool):
             continue
         entry: dict[str, Any] = {"index": tool.index}
         if counters:
@@ -220,7 +227,8 @@ def version(p: SimPrinter) -> dict:
 def info(p: SimPrinter) -> dict:
     return {
         "nozzle_diameter": NOZZLE_DIAMETER,
-        "mmu": False,
+        # The setting, connecting or not (`basic_gets.cpp:229-247`).
+        "mmu": p.mmu is not None and p.mmu.on,
         "serial": f"SIM-{p.name}",
         "hostname": p.name,
         "min_extrusion_temp": 170,

@@ -29,6 +29,7 @@
 # recover_seconds = 2.0             # BUSY while a power-panic resume heats and homes
 # unpark_seconds = 1.0              # PAUSED while the head unparks on a power-panic resume
 # start_blip = true                 # the brief IDLE between scanning and preheating
+# mmu_connect_seconds = 10.0        # how long an MMU connects after a boot or switching on
 
 # The port defaults to control_port + 1 + the printer's position in this file.
 
@@ -42,6 +43,7 @@ model = "8.1.0"                     # Core One L: holds an instance UUID on tool
 # high_flow = false                 # a high-flow nozzle doubles the load's purge, but not on INDX
 # auto_retract = true               # false turns the auto-retract off where the model can
 # sensors = true                    # false turns every filament sensor off, as the menu does
+# mmu = false                       # true: an MMU3, on a model that takes one
 # picked_tool = 0                   # the tool picked at start: 0 here, none on a toolchanger
 
 [[printers.tools]]
@@ -81,3 +83,29 @@ enabled = false
 
 [[printers.tools]]
 index = 4
+
+# An MK4S with an MMU3: its tools are the MMU's slots, and each material is the type the
+# slot holds. picked_tool is the slot whose filament is in the extruder.
+# [[printers]]
+# name = "mk4s-mmu"
+# model = "1.4.1"
+# mmu = true
+# picked_tool = 2
+#
+# [[printers.tools]]
+# index = 0
+# material = { name = "PLA", color = "#73737b" }
+#
+# [[printers.tools]]
+# index = 1
+# material = { name = "PETG", color = "#1f6fb2" }
+#
+# [[printers.tools]]
+# index = 2
+# material = { name = "PLA", color = "#d0342c" }
+#
+# [[printers.tools]]
+# index = 3
+#
+# [[printers.tools]]
+# index = 4

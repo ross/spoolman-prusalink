@@ -13,6 +13,7 @@ from simulator.model import (
     JobPhase,
     Join,
     PrintSpec,
+    Reason,
     Segment,
     SimPrinter,
     SimTool,
@@ -20,7 +21,7 @@ from simulator.model import (
 )
 from simulator.preview import Severity
 from simulator.tests.test_model import one_segment
-from simulator.tests.util import loaded, make, run, sliced
+from simulator.tests.util import PLA, loaded, make, make_mmu, run, sliced
 
 PRINTER_CALLS: dict[str, Callable[[SimPrinter], None]] = {
     "start_print": lambda p: p.start_print(one_segment(10)),
@@ -34,6 +35,9 @@ PRINTER_CALLS: dict[str, Callable[[SimPrinter], None]] = {
     "reboot": lambda p: p.reboot(),
     "clear_jam": lambda p: p.clear_jam(),
     "tap_through": lambda p: p.tap_through(),
+    "set_mmu": lambda p: p.set_mmu(not (p.mmu and p.mmu.on)),
+    "preload_all": lambda p: p.preload_all("PETG"),
+    "unload_first": lambda p: p.unload_first(),
 }
 TOOL_CALLS: dict[str, Callable[[SimPrinter, int], None]] = {
     "load": lambda p, i: p.load(i, source="preset", name="PLA"),
@@ -45,6 +49,9 @@ TOOL_CALLS: dict[str, Callable[[SimPrinter, int], None]] = {
     "jam": lambda p, i: p.jam(i),
     "change_filament": lambda p, i: p.change_filament(i),
     "select_tool": lambda p, i: p.select_tool(i),
+    "load_to_nozzle": lambda p, i: p.load_to_nozzle(i),
+    "eject": lambda p, i: p.eject(i),
+    "cut": lambda p, i: p.cut(i),
     "set_sensor_fault": lambda p, i: p.set_sensor_fault(i, True),
     "set_stuck_write": lambda p, i: p.set_stuck_write(i, True),
     "set_tool_enabled": lambda p, i: p.set_tool_enabled(i, not p.tools[i].enabled),
@@ -271,7 +278,97 @@ def indx_unloading():
     return sim, p
 
 
+def mmu_loaded():
+    """An MK4S whose MMU is Active, with slot 2 loaded to the nozzle and selected."""
+    return make_mmu(types={0: PLA, 2: PLA}, slot=2)
+
+
+def mmu_connecting():
+    """The MMU after a boot: slot 2's filament still in the extruder, no slot selected."""
+    sim, p = mmu_loaded()
+    p.reboot()
+    assert not p.mmu.active
+    return sim, p
+
+
+def mmu_off():
+    """The MMU switched off: slot 0 is the printer's one tool, and slots 1 to 4 aren't
+    listed."""
+    sim, p = make_mmu(slot=0)
+    p.set_mmu(False)
+    return sim, p
+
+
+def mmu_empty():
+    """An MK4S whose MMU is Active with the extruder empty: slots 0 and 2 typed."""
+    return make_mmu(types={0: PLA, 2: PLA})
+
+
+def mmu_loading():
+    """The MMU loads slot 2 to the nozzle, so the printer reads BUSY."""
+    sim, p = mmu_empty()
+    p.load_to_nozzle(2)
+    return sim, p
+
+
+def mmu_loaded_unselected():
+    """After a boot, slot 2's filament is in the extruder with no slot selected."""
+    sim, p = make_mmu(types={0: PLA, 2: PLA}, slot=2, mmu_connect_seconds=0)
+    p.reboot()
+    assert p.mmu.active and p.mmu.path.loaded and p.selected_tool is None
+    return sim, p
+
+
+def mmu_preloading():
+    """A Preload To MMU of slots 1 and 3 runs on slot 1, with slot 3 queued."""
+    sim, p = mmu_empty()
+    p.change_all([1, 3], name="PETG")
+    assert p.queue
+    return sim, p
+
+
+def mmu_sync_job():
+    sim, p = make_mmu()
+    p.upload("x.gcode", sliced(p, ""), print_after=True, overwrite=False)
+    run(sim, 1)
+    assert p.job is not None
+    return sim, p
+
+
+def mmu_unload_question():
+    """A sync job on an MMU with slot 2 loaded waits on the preview's unload question."""
+    sim, p = mmu_loaded()
+    p.upload("x.gcode", sliced(p, ""), print_after=True, overwrite=False)
+    run(sim, 1)
+    assert p.job.waits_for(Reason.MMU_LOADED)
+    return sim, p
+
+
+def mmu_preview_unloading():
+    """Yes at the unload question: the MMU unloads, BUSY with the job hidden."""
+    sim, p = mmu_unload_question()
+    p.unload_first()
+    return sim, p
+
+
+def mmu_sensors_off():
+    sim, p = make_mmu()
+    p.set_sensors(False)
+    return sim, p
+
+
 SITUATIONS = [
+    mmu_loaded,
+    mmu_empty,
+    mmu_loading,
+    mmu_loaded_unselected,
+    mmu_preloading,
+    mmu_connecting,
+    mmu_off,
+    mmu_sync_job,
+    mmu_unload_question,
+    mmu_preview_unloading,
+    mmu_sensors_off,
     idle,
     loading,
     printing,

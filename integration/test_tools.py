@@ -1,7 +1,8 @@
-"""Multi-tool printers, on a simulated Core One L INDX: docs/scenarios.md rows T1 to T7.
+"""Multi-tool printers, on a simulated Core One L INDX: docs/scenarios.md rows T1 to T7,
+and T12 on an MK4S with an MMU3.
 
-No INDX is at hand, so these run against the simulator only, which follows the firmware
-source (docs/printer-behaviors.md, F19 to F23).
+No INDX or MMU3 is at hand, so these run against the simulator only, which follows the
+firmware source (docs/printer-behaviors.md, F19 to F23 and F38 to F46).
 """
 
 from __future__ import annotations
@@ -272,3 +273,40 @@ async def test_t7_reboot_restarts_every_tool(world: World):
     records = await print_both(w)
     assert w.charged(records, "A") == w.counter_at(0)
     assert w.charged(records, "D") == w.counter_at(1)
+
+
+@pytest.mark.parametrize("world_model", ["1.4.1"], indirect=True)
+@pytest.mark.parametrize("world_mmu", [True], indirect=True)
+async def test_t12_two_color_mmu_print(world: World):
+    """Two-color MMU print: each slot's spool is charged its count, the change's feed too."""
+    w = world
+    await baseline(w)
+    assert w.printer.mmu.active and w.printer.selected_tool is None
+
+    # Slot 0 holds A's PLA and slot 1 D's PETG. The MK4S's MMU3 profile, from gap 0 after
+    # the boot: slot 0's start, 17 and the 53 mm purge line, then its 100 mm; at the change,
+    # PLA's ramming 20.9518 and one stamping's 15, then the firmware's feed of slot 1's
+    # filament, 189.9 + 7 + 50 less the 40 mm gap, 206.9, all on slot 0:
+    # 412.8518 * 0.95 = 392.21. Slot 1: the 32 mm load and PETG's first purge, 58.45, its
+    # 50 mm, and at the end the tower's last unload, PETG's ramming 22.045 and two
+    # stampings' 30: 192.495 * 0.95 = 182.87. The end's `M702` counts nothing from gap 40.
+    mark = w.mark()
+    spec = PrintSpec([Segment(0, 100, "PLA"), Segment(1, 50, "PETG")], duration_s=4)
+    await w.start_print(spec)
+    await finish(w)
+    await w.poll()
+    records = w.since(mark)
+    assert (w.counter_at(0), w.counter_at(1)) == (1392, 682)
+    assert w.charged(records, "A") == 392 and w.charged(records, "D") == 182
+    assert {r["tool"] for r in charges(records, w.spools["A"])} == {0}
+    assert {r["tool"] for r in charges(records, w.spools["D"])} == {1}
+    # The change isn't an unload, and the end unloads into the MMU with no type written.
+    assert [e.text for e in w.sim.events if e.text.startswith("tool change")] == [
+        "tool change none -> T0",
+        "tool change T0 -> T1",
+    ]
+    assert w.tool_at(0).unload_count == 0 and w.tool_at(1).unload_count == 0
+    assert w.printer.selected_tool is None
+    assert events(records) == []
+    assert await w.flag("A") is None
+    assert await w.flag("D") is None

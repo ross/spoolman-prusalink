@@ -28,9 +28,19 @@ from simulator.compatibility import (
     XL_CHECKS,
     GCodeChecks,
 )
-from simulator.feed import FEED_SYSTEMS, Feed, FeedSystem
+from simulator.feed import FEED_SYSTEMS, MMU, Feed, FeedSystem
+from simulator.mmu import (
+    MMU_RAMMING,
+    MMU_SLOTS,
+    RELIEVE_MM,
+    UNLOAD_FINISH_MM,
+    MmuUnit,
+    change_feed,
+    nozzle_load,
+)
 from simulator.preview import (
     Failed,
+    PrintChecks,
     Severity,
     ToolView,
     preview,
@@ -38,13 +48,22 @@ from simulator.preview import (
     tool_mapping,
     wrong_types,
 )
-from simulator.slicer import INDX_SLICER, XL_SLICER, Moves, Slicer
+from simulator.slicer import (
+    CORE_ONE_MMU_SLICER,
+    INDX_SLICER,
+    MK4S_MMU_SLICER,
+    XL_SLICER,
+    MmuSlicer,
+    Moves,
+    Slicer,
+)
 from simulator.tool import (
     AUTO_RETRACT_STEP,
     CORE_ONE_EXTRUDER,
     CORE_ONE_PRESETS,
     DEFAULT_TEMPERATURES,
     DERETRACT_STEP,
+    DESELECT_STEP,
     EPSILON,
     INDX_EXTRUDER,
     INDX_PRESETS,
@@ -58,6 +77,7 @@ from simulator.tool import (
     MK4_EXTRUDER,
     PRESET_ALIASES,
     RETRACTED_STEP,
+    SELECT_STEP,
     TYPE_STEP,
     XL_DEV_KIT_EXTRUDER,
     XL_EXTRUDER,
@@ -66,6 +86,7 @@ from simulator.tool import (
     LoadProcess,
     LoadStep,
     Material,
+    MmuProcess,
     Ramming,
     SimTool,
     Temperatures,
@@ -129,6 +150,7 @@ class JobPhase(StrEnum):
     AWAIT_RESUME = "AWAIT_RESUME"  # ATTENTION: the bed went cold during the outage
     UNPARK = "UNPARK"  # PAUSED briefly while the head unparks after a power-panic resume
     PREVIEW_LOAD = "PREVIEW_LOAD"  # BUSY with no job: the preview's filament-not-inserted load
+    PREVIEW_UNLOAD = "PREVIEW_UNLOAD"  # BUSY with no job: the preview's unload into the MMU
     JOIN = "JOIN"  # ATTENTION while a spool join unloads the old tool, then back to PRINTING
 
 
@@ -151,6 +173,11 @@ PHASE_STATES = {
     # The load's own screen covers the preview, and with no print running yet it reads BUSY
     # (`get_state` in `src/state/printer_state.cpp`), which has no job.
     JobPhase.PREVIEW_LOAD: State.BUSY,
+    # The unload's `Load_unload` screen outranks the preview's, and with no print running yet
+    # it reads BUSY (`fsm_states.cpp:20-58, 108-123`, `printer_state.cpp:152-177`). Before
+    # and after it the preview's question may read ATTENTION for a moment, which the
+    # simulator leaves out.
+    JobPhase.PREVIEW_UNLOAD: State.BUSY,
     # The join's unload runs in a `Load_unload` dialog while printing, which reads ATTENTION
     # (`get_state` in `src/state/printer_state.cpp:238-243`).
     JobPhase.JOIN: State.ATTENTION,
@@ -182,6 +209,7 @@ class Reason(StrEnum):
     RUNOUT = "runout"
     COLOR_CHANGE = "color change"
     NO_FILAMENT = "no filament"  # the preview's filament-not-inserted screen
+    MMU_LOADED = "filament in the MMU"  # the preview asks to unload the MMU's filament first
     COLD_BED = "cold bed"  # the bed went cold during a power panic
 
 
@@ -195,6 +223,7 @@ PHASE_REASONS = {
             Reason.WRONG_FILAMENT,
             Reason.SENSORS_OFF,
             Reason.MAPPING_TYPE,
+            Reason.MMU_LOADED,
             Reason.PARSE_ERROR,
             Reason.JAM,
         }
@@ -206,9 +235,10 @@ PHASE_REASONS = {
 }
 # The questions of the firmware's tools-mapping phase, while it isn't printing.
 MAPPING_QUESTIONS = frozenset({Reason.TOOLS_MAPPING, Reason.SENSORS_OFF, Reason.MAPPING_TYPE})
-# The questions the print preview asks with Abort and Print or Ok, which `tap_through` and
-# `cancel` answer.
-PREVIEW_QUESTIONS = MAPPING_QUESTIONS | {Reason.PREVIEW, Reason.WRONG_FILAMENT}
+# The questions the print preview asks, which `tap_through` and `cancel` answer: Print or Ok
+# and Abort, or for the MMU's question No, which prints, and a stop. `unload_first` answers
+# the MMU's Yes.
+PREVIEW_QUESTIONS = MAPPING_QUESTIONS | {Reason.PREVIEW, Reason.WRONG_FILAMENT, Reason.MMU_LOADED}
 
 
 @dataclass(frozen=True)
@@ -224,6 +254,10 @@ class Attention:
 
     def __str__(self) -> str:
         match self.reason:
+            case Reason.MMU_LOADED if self.tool is None:
+                return "filament in the MMU: unload it first?"
+            case Reason.MMU_LOADED:
+                return f"filament from slot {self.tool} in the MMU: unload it first?"
             case reason if reason in PREVIEW_QUESTIONS:
                 detail = self.detail or "nothing wrong"
                 return f"{self.reason}{' (abort only)' if self.fatal else ''}: {detail}"
@@ -263,6 +297,24 @@ class ModelInfo:
     # print can override; None on a direct printer. Not firmware, so `script/firmware-check`
     # doesn't compare it.
     slicer: Slicer | None = field(default=None, kw_only=True)
+    # The stock PrusaSlicer MMU3 profile's moves outside the model, which a print can
+    # override; None where the model has none. Not firmware, so `script/firmware-check`
+    # doesn't compare it.
+    mmu_slicer: MmuSlicer | None = field(default=None, kw_only=True)
+
+    @property
+    def takes_mmu(self) -> bool:
+        """Whether a printer of this model can have an MMU3 attached (`SimPrinter.mmu`): the
+        models with a stock MMU3 slicer profile. Of the other HAS_MMU2 builds' models, the
+        MK3.5's have no usage counters, and the firmware says "MMU is not expected on Oak"
+        (`include/common/printer_model_data.hpp:227-233`)."""
+        return self.mmu_slicer is not None
+
+    @property
+    def m865_tools(self) -> int:
+        """How many tools `M865 I` and `L` take: every slot on an MMU build, the MMU on or
+        off, else the build's tools (`VirtualToolIndex::count`, `M865.cpp:64, 194-196`)."""
+        return MMU_SLOTS if self.mmu else self.max_tools
 
     def first_tool(self, enabled: int) -> int | None:
         """The tool picked when the config names none, on a printer with `enabled` tools
@@ -320,7 +372,14 @@ MODELS = _models(
         checks=MK3_5_CHECKS,
     ),
     ModelInfo(
-        "1.3.9", "MK3.9", MK4_EXTRUDER, LOAD_CELL_PRESETS, mmu=True, group="mk4", checks=MK4_CHECKS
+        "1.3.9",
+        "MK3.9",
+        MK4_EXTRUDER,
+        LOAD_CELL_PRESETS,
+        mmu=True,
+        group="mk4",
+        checks=MK4_CHECKS,
+        mmu_slicer=MK4S_MMU_SLICER,
     ),
     ModelInfo(
         "1.3.10",
@@ -330,12 +389,27 @@ MODELS = _models(
         mmu=True,
         group="mk4s",
         checks=MK4_CHECKS,
+        mmu_slicer=MK4S_MMU_SLICER,
     ),
     ModelInfo(
-        "1.4.0", "MK4", MK4_EXTRUDER, LOAD_CELL_PRESETS, mmu=True, group="mk4", checks=MK4_CHECKS
+        "1.4.0",
+        "MK4",
+        MK4_EXTRUDER,
+        LOAD_CELL_PRESETS,
+        mmu=True,
+        group="mk4",
+        checks=MK4_CHECKS,
+        mmu_slicer=MK4S_MMU_SLICER,
     ),
     ModelInfo(
-        "1.4.1", "MK4S", MK4_EXTRUDER, LOAD_CELL_PRESETS, mmu=True, group="mk4s", checks=MK4_CHECKS
+        "1.4.1",
+        "MK4S",
+        MK4_EXTRUDER,
+        LOAD_CELL_PRESETS,
+        mmu=True,
+        group="mk4s",
+        checks=MK4_CHECKS,
+        mmu_slicer=MK4S_MMU_SLICER,
     ),
     ModelInfo(
         "2.1.0",
@@ -392,6 +466,7 @@ MODELS = _models(
         mmu=True,
         group="coreone",
         checks=CORE_ONE_CHECKS,
+        mmu_slicer=CORE_ONE_MMU_SLICER,
     ),
     ModelInfo(
         "7.2.0",
@@ -412,6 +487,7 @@ MODELS = _models(
         mmu=True,
         group="coreonel",
         checks=CORE_ONE_CHECKS,
+        mmu_slicer=CORE_ONE_MMU_SLICER,
     ),
     ModelInfo(
         "7.10.0",
@@ -474,6 +550,9 @@ class Settings:
     panic_idle_seconds: float = PANIC_RETRY_SECONDS
     recover_seconds: float = 2.0  # BUSY while a power-panic resume heats and homes
     unpark_seconds: float = 1.0  # PAUSED while the head unparks on a power-panic resume
+    # How long an MMU takes to become Active after a boot or `M709 S1`, inferred from the
+    # "~10s" in `filament_sensors_handler.cpp:179`. Until then moves count on slot 0.
+    mmu_connect_seconds: float = 10.0
     start_blip: bool = True
 
     def __post_init__(self) -> None:
@@ -534,10 +613,16 @@ class PrintSpec:
     preheat_s: float | None = None
     color_changes_mm: list[float] = field(default_factory=list)
     name: str = "part.bgcode"
-    # A toolchanger print's own prime and tool-change purge, in place of the stock
-    # profile's (`Slicer.overridden`); None keeps the profile's.
+    # A multi-tool print's own prime and tool-change purge, in place of the stock profile's
+    # (`Slicer.overridden`, `MmuSlicer.overridden`); None keeps the profile's.
     prime_mm: float | None = None
     toolchange_purge_mm: float | None = None
+    # A file sliced without the MMU3 profile for a printer with an MMU on: no `T`, no
+    # profile moves, every segment on tool 0, and filament used listed for tool 0 alone,
+    # which is what makes it single-tool (`GCodeInfo::is_singletool_gcode`). The firmware
+    # loads a slot for it at the start and unloads it at the end (`Mmu.prime`,
+    # `_end_of_print`). A print on tool 0 alone without it is an MMU3 profile file.
+    single_tool_file: bool = False
     # The print's spool joins, set at the tools-mapping screen, by Connect or by `M864` and
     # reset when the print ends (`marlin_server.cpp:1122`), so a print carries them.
     spool_join: list[Join] = field(default_factory=list)
@@ -550,11 +635,13 @@ class PrintSpec:
 @dataclass
 class Queued:
     """One operation a change all has still to run: the unload of the tool's old filament,
-    or the load of `material`."""
+    or the load of `material`. On an MMU, the preload of a slot, which writes `material`
+    when one is set, to slot `writes` or else its own, or the clear of a slot's type."""
 
     tool: int
-    kind: str  # "unload" or "load"
+    kind: str  # "unload" or "load"; on an MMU "preload" or "clear"
     material: Material | None = None
+    writes: int | None = None
 
 
 @dataclass(kw_only=True)
@@ -746,20 +833,44 @@ class SimPrinter:
     files: dict[str, str] = field(default_factory=dict)
     # What a change all has still to run after the running load or unload, in order.
     queue: list[Queued] = field(default_factory=list)
+    # An MMU3 attached, on a model that takes one. Then the printer has a tool per slot,
+    # each always enabled, and every slot's path is the unit's one path. A configured
+    # tool's loaded filament is only its slot's stored type: the unit says what's in the
+    # path, and `selected_tool` is the slot selected.
+    mmu: MmuUnit | None = None
 
     def __post_init__(self) -> None:
         # Not fields, so asdict() and snapshots leave them out.
         self._sim: Simulation | None = None
+        if self.mmu is not None:
+            for i in range(MMU_SLOTS):
+                tool = self.tools.setdefault(i, SimTool(i))
+                tool.path = self.mmu.path
         self._shown = self.state  # the state last logged
 
     @property
     def state(self) -> State:
         """The state PrusaLink reports, which follows from the job phase or the idle screen."""
         if self.job is not None:
+            if self._mmu_reloading():
+                return State.PRINTING
             return PHASE_STATES[self.job.phase]
         if any(t.process is not None for t in self.tools.values()):
             return State.BUSY
         return self.screen
+
+    def _mmu_reloading(self) -> bool:
+        """Whether an `M600`'s reload runs on an MMU. It reads `PRINTING`: the MMU's progress
+        moves the filament change to its `MMU_*` phases, and with the MMU on only its
+        questions and errors read `ATTENTION` (`load_unload_attention_while_printing`,
+        `src/state/printer_state.cpp:152-177`)."""
+        job, tool = self.job, self.job and self.job.wait_tool
+        return (
+            job.phase is JobPhase.WAIT_LOAD
+            and self.feed is MMU
+            and tool is not None
+            and self.tools[tool].process is not None
+        )
 
     @property
     def toolchanger(self) -> bool:
@@ -768,18 +879,29 @@ class SimPrinter:
         change to any other, and its stock profile's end G-code has no park
         (`autodetect_toolchanger_enabled` in `toolchanger_utils_xl.cpp`, `tool_change` in
         `toolchanger_xl.cpp`). INDX always docks."""
-        enabled = sum(t.enabled for t in self.tools.values())
+        enabled = sum(self.listed(t) for t in self.tools.values())
         return self.feed.selectable and (self.feed.docks or enabled > 1)
 
     @property
     def feed(self) -> FeedSystem:
-        """The rules of the model's feed system."""
-        return FEED_SYSTEMS[self.model.feed]
+        """The rules of the printer's feed system: the MMU's while one is switched on, else
+        the model's."""
+        return MMU if self.mmu and self.mmu.on else FEED_SYSTEMS[self.model.feed]
+
+    def listed(self, t: SimTool) -> bool:
+        """Whether `/api/v1/filament` lists `t`: an enabled tool whose slot is on."""
+        return t.enabled and self._slot_on(t.index)
+
+    def _slot_on(self, index: int) -> bool:
+        """Whether the build has tool `index` now (`VirtualToolIndex::is_enabled`,
+        `src/common/tool_index.cpp:84-109`). An MMU build has every slot while the MMU is
+        switched on, connecting too, and slot 0 alone while it's off or there's no MMU, though
+        `M865` still writes the other slots."""
+        return index == 0 or not self.model.mmu or (self.mmu is not None and self.mmu.on)
 
     def _head_tool(self) -> SimTool | None:
-        """The tool whose path the head's own moves run on: the picked tool, or None on a
-        toolchanger with none picked."""
-        return None if self.selected_tool is None else self.tools[self.selected_tool]
+        """The tool whose path the head's own moves run on, as the feed system says."""
+        return self.feed.head_tool(self)
 
     # Plumbing.
 
@@ -820,10 +942,17 @@ class SimPrinter:
     def _count(self, tool: SimTool, mm: float) -> None:
         """Count a move as the firmware's filament tracker does: only what goes past the
         model's gap counts, times the feed ratio (`FilamentPath.move`). The feed system says
-        which tool it counts on."""
+        which tool it counts on.
+
+        On an MMU with no slot credited the move runs, but the tracker sees none of it, so
+        the gap stays where it was (`if(tools.virtual_tool.has_value())` in
+        `Planner::buffer_segment`, `planner.cpp:2206-2219`).
+        """
         credited = self.feed.credited(self, tool)
-        # Every caller picks the tool first: the firmware's planner stops on this.
-        assert credited is not None, "E move without tool"
+        if credited is None:
+            # On a toolchanger every caller picks the tool first: the planner stops on this.
+            assert self.feed.moves_without_tool, "E move without tool"
+            return
         credited.extruded += tool.path.move(mm, self.model.gap_mm) * self.feed_ratio
 
     def _deretract(self, tool: SimTool) -> None:
@@ -935,6 +1064,10 @@ class SimPrinter:
             elif step.phase == DERETRACT_STEP:
                 self._deretract(tool)
                 self._track(tool, tool.path.tracked())
+            elif step.phase == SELECT_STEP:
+                self._select_slot(tool)
+            elif step.phase == DESELECT_STEP:
+                self._deselect_slot()
             else:  # RETRACTED_STEP
                 tool.path.auto_retracted = step.mm
                 self._log(
@@ -1018,6 +1151,105 @@ class SimPrinter:
             steps.append(LoadStep(AUTO_RETRACT_STEP))
         return steps
 
+    def _mmu_unload_steps(self) -> list[LoadStep]:
+        """The moves of an MMU unload, then its slot switch (`MMU2::UnloadObeyAutoRetracted`
+        and `MMU2::UnloadInner`, `mmu2_mk4.cpp:805-872`).
+
+        Filament that's fully auto-retracted is pulled out cold with one retract. Otherwise
+        the MMU's own ramming runs, which feeds 20 mm first; the planner's hook feeds a
+        stored distance back before it, but the ramming doesn't deretract first. The moves
+        count on the selected slot, or on none. Then the MMU unloads into the unit, which
+        leaves no slot selected.
+        """
+        if self.mmu.path.fully_retracted(self.model.extruder.full_retract_mm):
+            moves = [LoadStep("UNLOAD", RELIEVE_MM)]
+        else:
+            moves = [LoadStep("RAM", e) for e, _feedrate in MMU_RAMMING]
+        return [*moves, LoadStep(DESELECT_STEP)]
+
+    @staticmethod
+    def _mmu_change_steps(*, selected: bool) -> list[LoadStep]:
+        """A tool change's moves, then the slot switch (`MMU2::ToolChangeCommon` and
+        `ToolChangeCommonOnce`, `mmu2_mk4.cpp:568-679`). `selected` says whether a slot is
+        selected when the steps run.
+
+        With a slot selected the firmware first retracts `MMU2_RETRY_UNLOAD_FINISH_LENGTH`
+        on it. Then the feed pushes the new slot's filament into the extruder, but it's
+        planned before the switch, so it counts on the old slot, or on none and leaves the
+        gap where it was. The menu's Load To Nozzle runs these steps timed, after its own
+        unload; a print's `T` runs them at once (`_mmu_change`).
+        """
+        retract = [LoadStep("RETRACT", UNLOAD_FINISH_MM)] if selected else []
+        feed = [LoadStep("FEED", mm) for mm in change_feed()]
+        return [*retract, *feed, LoadStep(SELECT_STEP)]
+
+    def _mmu_reload_steps(self) -> list[LoadStep]:
+        """The reload of an `M600` on an MMU, once the user has loaded the slot into the MMU:
+        the unit's preload, which moves no printer filament, then the load to the nozzle,
+        which feeds with no slot selected, so its feed counts nothing, and selects the slot.
+        The Yes at the color question then primes and retracts, since the print runs
+        (`Pause::mmu_load_process` and `load_finalize_process`, `pause.cpp:962-967,
+        1029-1073`; `MMU2::load_filament_to_nozzle`, `mmu2_mk4.cpp:961-987`).
+
+        No type is written: only Purge More's purge writes one, which isn't modeled, and the
+        change never cleared it. The color question isn't modeled: the reload ends `PAUSED`
+        until the resume, as on every printer.
+        """
+        lengths = self.model.extruder.lengths
+        return [
+            *self._mmu_change_steps(selected=False),
+            *(LoadStep("LOAD", mm) for mm in nozzle_load()),
+            LoadStep("PRIME", lengths.prime_mm),
+            LoadStep("RETRACT", -lengths.retract_mm),
+        ]
+
+    def _mmu_change(self, new: SimTool) -> None:
+        """A print's `T<n>` on an MMU, `n` already through the tool mapping
+        (`MMU2::tool_change`, `mmu2_mk4.cpp:681-702`).
+
+        The slot already selected changes nothing at all. Otherwise the change runs at once,
+        as a print's moves do: a print doesn't unload first, since the slicer's moves have
+        freed the old filament. A slot's filament in the extruder with no slot selected, as
+        after a boot, gets a change from none too, with no retract and no error: that the
+        MMU then unloads it cleanly is inferred.
+
+        A `T` while the MMU connects, as in a print resumed after a power cut, waits for the
+        MMU's answer once `MMU2::Start` has handed over to the protocol, `xState::Connecting`
+        (`WaitForMMUReady` lets it through, then `manage_response`), and the feed is planned
+        on the MMU's progress messages, which come once it's Active. So the feed counts on no
+        slot, not slot 0. That's inferred, and the wait isn't timed: the MMU is Active at
+        once. The Core One's MMU, on MODBUS, connects that way from the start. The MK4
+        family's, on UART, first runs its bootloader for up to 10 s (`mmu2_mk4.h:24-33`,
+        `mmu2_mk4.cpp:181-184, 343-363`, `src/mmu2/mmu2_bootloader.cpp:93-109`). There a `T`'s
+        request goes out at once (`protocol_logic.cpp:783-812`) and `manage_response` returns
+        at its first pass, so the feed can count on slot 0, and the slot is set though the
+        MMU never changed slots. That phase isn't modeled: the `T` waits on every model.
+        """
+        if self.selected_tool == new.index:
+            self._log("job", f"T{new.index}: slot {new.index} already selected")
+            return
+        if not self.mmu.active:
+            self._log("job", f"T{new.index} waits for the MMU to connect")
+            self._tick_mmu(self.mmu.connecting)
+        old = self.selected_tool
+        self._run_steps(new, self._mmu_change_steps(selected=old is not None))
+        self._log("job", f"tool change {'none' if old is None else f'T{old}'} -> T{new.index}")
+
+    def _select_slot(self, t: SimTool) -> None:
+        """The end of a tool change: `t` is the selected slot, and its filament is past the
+        selector and in the extruder (`mmu2_mk4.cpp:674`)."""
+        self.selected_tool = self.mmu.fed = t.index
+        self.mmu.path.loaded = True
+        self._log("mmu", f"slot {t.index} selected")
+
+    def _deselect_slot(self) -> None:
+        """The end of an MMU unload: no slot selected, and the filament back in the unit.
+        `marlin_finalize_unload` forgets the auto-retract, and the gap stays where the
+        moves left it (`mmu2_mk4.cpp:869-884`, `mmu2_marlin2.cpp:144-151`)."""
+        self.selected_tool = self.mmu.fed = None
+        self.mmu.path.loaded, self.mmu.path.auto_retracted = False, None
+        self._log("mmu", "no slot selected")
+
     def _log(self, kind: str, text: str, data: dict | None = None) -> None:
         if self._sim:
             self._sim.log(self.name, kind, text, data)
@@ -1033,6 +1265,8 @@ class SimPrinter:
         tool = self.tools.get(index)
         if tool is None:
             raise Invalid(f"{self.name} has no tool {index!r}")
+        if not self._slot_on(index):
+            raise Invalid(f"T{index} is an MMU slot, and the MMU is off")
         if enabled and not tool.enabled:
             raise Invalid(f"tool {index} is disabled")
         return tool
@@ -1057,6 +1291,9 @@ class SimPrinter:
     def _physical_unload(self, tool: SimTool, why: str) -> None:
         self._count_unload(tool, why)
         tool.path.empty(self.model.gap_mm)
+        # The filament left the path, so no slot's filament is past the MMU's selector.
+        if self.mmu is not None:
+            self.mmu.fed = None
 
     def _idle_sensor_clear(self, tool: SimTool, *, sensor_fault_counts: bool) -> None:
         if not self.sensors:
@@ -1069,7 +1306,8 @@ class SimPrinter:
 
     def job_visible(self) -> bool:
         job = self.job
-        return job is not None and job.phase not in (JobPhase.BLIP, JobPhase.PREVIEW_LOAD)
+        hidden = (JobPhase.BLIP, JobPhase.PREVIEW_LOAD, JobPhase.PREVIEW_UNLOAD)
+        return job is not None and job.phase not in hidden
 
     def can_print(self) -> bool:
         # The firmware's rule is state-only: IDLE, READY, STOPPED or FINISHED. A print asked
@@ -1121,11 +1359,17 @@ class SimPrinter:
         for. While the printer is off the filament is pushed in by hand: the type is set
         at once and nothing is counted. `temperatures` is a tag's nozzle, preheat and bed
         temperatures; without it a tag load takes the preset's.
+
+        On an MMU only the reload runs, into the MMU, and it keeps the slot's type, which
+        the change never cleared (`_mmu_reload_steps`).
         """
         t = self._tool(tool)
         material = self._new_material(t, source, name, color, uuid, temperatures)
         self._check_load(t, keep=source is None)
-        what = f"{source} {describe(material)}" if source else f"keep {describe(t.kept())}"
+        if purge_mm is not None and self.feed is MMU:
+            raise Invalid("the MMU's reload has no purge to set")
+        kept = t.material if self.feed is MMU else t.kept()
+        what = f"{source} {describe(material)}" if source else f"keep {describe(kept)}"
         if self.power is Power.OFF:
             self._hand_load(t, material)
             return
@@ -1145,6 +1389,8 @@ class SimPrinter:
             self._pick(t)
             steps = self._load_steps(purge_mm, extra, False, auto_retract=False)
             job.enter(JobPhase.PREVIEW_LOAD)
+        elif self.feed is MMU:
+            steps = self._mmu_reload_steps()
         else:
             if not waiting:
                 self._menu_pick(t)
@@ -1176,12 +1422,16 @@ class SimPrinter:
             return Material(name, color, adhoc=color is not None, **temps)
         if not self.model.uuids:
             raise Invalid(f"{self.model.name} has no tag reader")
+        # The radio is off while the MMU is switched on (`request_manager.cpp:262-269`,
+        # `tool_tag_buddy.cpp:11-18`).
+        if self.feed is MMU:
+            raise Invalid("the tag reader is off while the MMU is on")
         value = check_uuid(uuid)
         tag_temps = self.model.preset_temperatures(name)
         if temps is not None:
             tag_temps = dict(zip(tag_temps, _check_temperatures(temps), strict=True))
-        if not self.model.holds_uuid(t.index):
-            return Material(name, color, **tag_temps)
+        # Only tool 0 can read a tag: the models with a reader are MMU builds, whose other
+        # slots are on only while the MMU is, and then the radio is off.
         # A real tag carries its product's UUIDs; derive stable ones from the name and color.
         return Material(
             name,
@@ -1207,8 +1457,13 @@ class SimPrinter:
             t.path.loaded, t.path.gap = False, self.model.gap_mm
             return
         self._log("action", f"unload T{tool}")
-        self._menu_pick(t)
-        self._start_unload(t)
+        if self.feed is MMU:
+            # The MMU menu's Unload Filament, `M702 W2`, picks no tool and unloads whatever
+            # slot is selected (`M701_2_parse.cpp:133-147`, `pause.cpp:969-973`).
+            self._start_unload(t, self._mmu_unload_steps())
+        else:
+            self._menu_pick(t)
+            self._start_unload(t, self._unload_steps(t, "unload"))
         self.screen = State.IDLE  # using the menu dismisses a finished or stopped screen
         self._show_state()
 
@@ -1216,12 +1471,18 @@ class SimPrinter:
         t.process = LoadProcess(steps, material)
         self._next_load_step(t, t.process)  # a load with no slow or fast feed types at once
 
-    def _start_unload(self, t: SimTool) -> None:
-        steps = self._unload_steps(t, "unload")
+    def _start_unload(self, t: SimTool, steps: list[LoadStep]) -> None:
         self._settle(t, steps, None)
         t.process = UnloadProcess(steps, self.settings.unload_seconds)
 
-    def change_all(self, tools: list[int], *, name: str, color: str | None = None) -> None:
+    def change_all(
+        self,
+        tools: list[int],
+        *,
+        name: str,
+        color: str | None = None,
+        unload: list[int] | None = None,
+    ) -> None:
         """Change the filament in the chosen tools to the preset `name`: Change all in the
         Filament menu, which sends `M9934` (`Config::execute` in
         `src/common/multi_filament_change.cpp`). The other tools keep theirs.
@@ -1233,20 +1494,36 @@ class SimPrinter:
         picks its tool inside its dialog (`Pause::tool_change`), so no idle sensor clear
         runs at the pick. INDX docks each tool after its load, and the XL ends with the
         last tool picked.
+
+        On an MMU it's the MMU menu's Preload To MMU, which sends the same `M9934` and reads
+        the same: each chosen slot is preloaded, which moves no printer filament, and its new
+        type is written after, with no unload counted over the old one. The slots in
+        `unload` only have their type cleared, which counts the unload and moves nothing
+        (`multi_filament_change.cpp:189-238`). Only an MMU takes `unload`.
         """
-        self._check_change_all()
+        self._check_change_all(unloads=bool(unload))
         chosen = sorted({self._tool(i).index for i in tools})
-        if not chosen:
+        cleared = sorted({self._tool(i).index for i in unload or []})
+        if not chosen and not cleared:
             raise Invalid("change all needs at least one tool")
+        if both := sorted(set(chosen) & set(cleared)):
+            raise Invalid(f"T{both[0]} can't both change and unload")
         queue: list[Queued] = []
-        for i in chosen:
+        for i in sorted({*chosen, *cleared}):
             t = self.tools[i]
+            if i in cleared:
+                queue.append(Queued(i, "clear"))
+                continue
             material = self._new_material(t, "preset", name, color, None, None)
+            if self.feed is MMU:
+                queue.append(Queued(i, "preload", material))
+                continue
             if t.material is not None:
                 queue.append(Queued(i, "unload"))
             queue.append(Queued(i, "load", material))
-        listed = ", ".join(f"T{i}" for i in chosen)
-        self._log("action", f"change all {listed} to {describe(material)}")
+        what = [f"{', '.join(f'T{i}' for i in chosen)} to {describe(material)}"] if chosen else []
+        what += [f"unload {', '.join(f'T{i}' for i in cleared)}"] if cleared else []
+        self._log("action", f"change all {'; '.join(what)}")
         self.queue = queue
         self.screen = State.IDLE  # using the menu dismisses a finished or stopped screen
         self._next_queued()
@@ -1254,14 +1531,105 @@ class SimPrinter:
 
     def _next_queued(self) -> None:
         """Start the change all's next operation, in the step the last one ended, so the
-        printer never reads IDLE between them."""
-        q = self.queue.pop(0)
-        t = self.tools[q.tool]
-        self._pick(t)
-        if q.kind == "unload":
-            self._start_unload(t)
-        else:
-            self._start_load(t, self._load_steps(None, 0.0, False), q.material)
+        printer never reads IDLE between them. An MMU's clear of a slot's type takes no
+        time, so the next operation follows it at once."""
+        while self.queue:
+            q = self.queue.pop(0)
+            t = self.tools[q.tool]
+            if q.kind == "clear":
+                self._count_unload(t, "change all unload")
+                continue
+            if q.kind == "preload":
+                seconds = self.settings.unload_seconds
+                t.process = MmuProcess("preload", seconds, q.material, q.writes)
+                return
+            self._pick(t)
+            if q.kind == "unload":
+                self._start_unload(t, self._unload_steps(t, "unload"))
+            else:
+                self._start_load(t, self._load_steps(None, 0.0, False), q.material)
+            return
+
+    def preload_all(self, name: str) -> None:
+        """The MMU menu's Preload All: for each slot in turn, the preset `name` is written
+        and `M704 P<slot>` queued, and the menu waits while the G-code queue holds more than
+        one command (`MI_FILAMENT::click`, `screen_menu_mmu_preload_all.cpp:27-49`). A
+        command stays in the queue's length while it runs (`queue.cpp:526-533`), and the
+        menu reads the length after each command it sends (`marlin_server.cpp:3538,
+        3820-3823`). So slots 0 and 1 are written at once, and slot k's type when slot
+        k - 2's preload ends. The preloads run in turn, as Preload To MMU's do, reading
+        `BUSY` throughout. The writes count nothing, and a power cut keeps those made. The
+        menu picks a type and no color."""
+        self._check_mmu_menu()
+        materials = {
+            i: self._new_material(t, "preset", name, None, None, None)
+            for i, t in self.tools.items()
+        }
+        self._log("action", f"preload all {name}")
+        slots = sorted(materials)
+        for i in slots[:2]:
+            self.tools[i].store(materials[i])
+            self._log("load", f"T{i} type set to {describe(self.tools[i].material)}")
+        self.queue = [
+            Queued(i, "preload", materials[slots[n + 2]], slots[n + 2])
+            if n + 2 < len(slots)
+            else Queued(i, "preload")
+            for n, i in enumerate(slots)
+        ]
+        self.screen = State.IDLE  # using the menu dismisses a finished or stopped screen
+        self._next_queued()
+        self._show_state()
+
+    def load_to_nozzle(self, tool: int) -> None:
+        """The MMU menu's Load To Nozzle for slot `tool`: `M701 S"<its type>" W2 P<slot>`
+        (`MI_MMU_LOAD_TO_NOZZLE_I`, `MItem_mmu.cpp:92-120`; `MMU2::load_filament_to_nozzle`,
+        `mmu2_mk4.cpp:961-987`).
+
+        A selected slot, the same one too, unloads first. The tool change then feeds the
+        slot with none selected, so its feed counts nothing, and the 47 mm load to the
+        nozzle counts on the slot past the gap the unload left: after any unload in the
+        same boot the gap is 40, so 7 mm count. The slot's own type is written back, which
+        counts nothing, and the auto-retract follows, as after any idle load
+        (`pause.cpp:422-430, 1029-1048`). That the type written is the stored one, not
+        `M701`'s, is inferred from the order of the calls; from the menu they're the same.
+        """
+        t = self._tool(tool)
+        self._check_load_to_nozzle(t)
+        self._log("action", f"load T{tool} to the nozzle")
+        steps = self._mmu_unload_steps() if self.selected_tool is not None else []
+        steps += [
+            # The unload first leaves no slot selected.
+            *self._mmu_change_steps(selected=False),
+            *(LoadStep("LOAD", mm) for mm in nozzle_load()),
+            LoadStep(TYPE_STEP),
+            LoadStep(AUTO_RETRACT_STEP),
+        ]
+        self._start_load(t, steps, replace(t.material))
+        self.screen = State.IDLE  # using the menu dismisses a finished or stopped screen
+        self._show_state()
+
+    def eject(self, tool: int) -> None:
+        """The MMU menu's Eject From MMU for slot `tool`, `M705` (`MMU2::eject_filament`,
+        `mmu2_mk4.cpp:989-1019`): the unit pushes the slot's filament out for the user to
+        take. It moves no printer filament and writes no type, so nothing counts."""
+        self._mmu_operation(tool, "eject")
+
+    def cut(self, tool: int) -> None:
+        """The MMU menu's Cut Filament for slot `tool`, `M706` (`MMU2::cut_filament`,
+        `mmu2_mk4.cpp:897-919`): the unit cuts the slot's filament tip. It moves no printer
+        filament and writes no type, so nothing counts."""
+        self._mmu_operation(tool, "cut")
+
+    def _mmu_operation(self, tool: int, op: str) -> None:
+        """Run an eject or a cut. The menu offers both only with the extruder empty, so the
+        unload the firmware runs first when FINDA sees filament never runs, and the slot
+        the end leaves selected is already none."""
+        t = self._tool(tool)
+        self._check_mmu_unloaded(op.capitalize())
+        self._log("action", f"{op} T{tool}")
+        t.process = MmuProcess(op, self.settings.unload_seconds)
+        self.screen = State.IDLE  # using the menu dismisses a finished or stopped screen
+        self._show_state()
 
     def _manual_move(self, tool: int, mm: float) -> tuple[SimTool, float]:
         t = self._tool(tool)
@@ -1331,10 +1699,13 @@ class SimPrinter:
             _positive(spec.duration_s, "duration_s")
         if spec.preheat_s is not None and spec.preheat_s < 0:
             raise Invalid("preheat_s can't be negative")
+        self._check_single_tool_file(spec)
         for key in ("prime_mm", "toolchange_purge_mm"):
             value = getattr(spec, key)
             if value is None:
                 continue
+            if spec.single_tool_file:
+                raise Invalid(f"{key} needs the MMU profile, which a single-tool file lacks")
             if self.profile is None:
                 raise Invalid(f"{key} needs a multi-tool slicer profile, which this printer lacks")
             if isinstance(value, bool) or not isinstance(value, int | float) or value < 0:
@@ -1344,20 +1715,32 @@ class SimPrinter:
         changes = sorted(x for x in spec.color_changes_mm if 0 < x < total)
         self._start_job(UserJob(name=spec.name, spec=spec, pending_color_changes=changes))
 
+    def _check_single_tool_file(self, spec: PrintSpec) -> None:
+        """A single-tool file is one sliced without the MMU3 profile, for a printer whose MMU
+        is on. The firmware tells it by its filament-used metadata: tool 0 used and no
+        other tool listed (`GCodeInfo::is_singletool_gcode`, `gcode_info.cpp:611-625`). An
+        MMU3 profile file lists all five slots, so it never is, even on slot 0 alone."""
+        if not spec.single_tool_file:
+            return
+        if self.feed is not MMU:
+            raise Invalid("a single-tool file needs an MMU switched on")
+        if any(s.tool != 0 for s in spec.segments):
+            raise Invalid("a single-tool file prints on tool 0 alone")
+
     def _check_joins(self, spec: PrintSpec) -> None:
         """Refuse spool joins the firmware wouldn't set (`SpoolJoin::add_join` in
         `lib/Marlin/Marlin/src/module/prusa/spool_join.cpp:71-105`).
 
-        A join needs a toolchanger that changes tools and two enabled tools. A tool is
-        joined to once, and no chain loops. A second join from one tool is refused here,
-        which is the simulator's simplification: the firmware appends it to the end of
-        that tool's chain (`:76-79`). The tools-mapping screen takes a
+        A join needs a toolchanger that changes tools, or an MMU switched on, and two
+        enabled tools. A tool is joined to once, and no chain loops. A second join from one
+        tool is refused here, which is the simulator's simplification: the firmware appends
+        it to the end of that tool's chain (`:76-79`). The tools-mapping screen takes a
         join's tool off any G-code tool first (`disconnect_virtual_tool` in
         `src/gui/screen/print/frame_tool_mapping.cpp`), and the simulator maps each G-code
         tool to its own tool, so a join's tool can't be one the print uses.
         """
         joins = spec.spool_join
-        if joins and not self.toolchanger:
+        if joins and not self.toolchanger and self.feed is not MMU:
             raise Invalid(f"a spool join needs a toolchanger, which {self.name} isn't")
         used = {s.tool for s in spec.segments}
         nexts: dict[int, int] = {}
@@ -1508,13 +1891,13 @@ class SimPrinter:
         The type is set before the purge, so a load stopped before then leaves the tool
         empty with no type, and one stopped after keeps its type and counts as loaded. A
         stopped unload leaves the filament in. This is a simplification of the firmware's
-        abort paths.
+        abort paths. On an MMU the slot switch says where the filament is, as at a boot.
         """
         p = t.process
         if p is None:
             return
         t.process = None
-        if isinstance(p, LoadProcess) and p.typed:
+        if isinstance(p, LoadProcess) and p.typed and self.feed is not MMU:
             t.path.loaded = True
         self._log("load", f"T{t.index} {p.kind} stopped by the cancel")
 
@@ -1531,18 +1914,56 @@ class SimPrinter:
         self._log("action", "home")
 
     def runout(self, tool: int) -> None:
+        """The filament of `tool` runs out during a print.
+
+        The runout sends `M600 A`, which joins when the print has a join from the tool and
+        is otherwise a filament change on it (`M600.cpp:125-148`). A jam sends `M1601`,
+        which never joins.
+
+        On an MMU the sensor that runs out is FINDA, and the runout names the selected slot.
+        With no slot selected, as after a power-panic resume, it injects nothing: the print
+        goes on, counting nothing as before (`process_events`,
+        `filament_sensors_handler.cpp:214-244, 294-302`). The filament's tail is taken to
+        leave the extruder at once. The flag that then blocks later runouts until cleared
+        (`m600_sent`) isn't modeled.
+        """
         t = self._tool(tool)
         self._check_sensor_runout(t)
         self._log("action", f"runout T{tool}")
-        # The runout sends `M600 A`, which joins when the print has a join from the tool
-        # and is otherwise a filament change on it (`M600.cpp:125-148`). A jam sends
-        # `M1601`, which never joins.
         job = self.job
+        if self.feed is MMU and self.selected_tool is None:
+            self._log("job", f"T{tool} ran out at FINDA with no slot selected: nothing injected")
+            self.mmu.fed, self.mmu.path.loaded = None, False
+            return
         join = next((j for j in job.spec.spool_join if j.tool == t.index), None)
         if join is None:
             self._filament_change(t, Reason.RUNOUT)
+        elif self.feed is MMU:
+            self._mmu_join(job, t, self.tools[join.to])
         else:
             self._spool_join(job, t, self.tools[join.to])
+
+    def _mmu_join(self, job: UserJob, old: SimTool, new: SimTool) -> None:
+        """A spool join on an MMU from the selected slot `old` to `new` (`SpoolJoin::do_join`,
+        `spool_join.cpp:239-365`; `MMU2::tool_change_full`, `mmu2_mk4.cpp:704-736`).
+
+        It maps the G-code tool that prints on `old` to `new`, then unloads `old` into the
+        MMU, changes to `new` from no slot, so the feed counts nothing, and loads it to the
+        nozzle. It runs inside the print with no dialog, so it reads `PRINTING`; nothing is
+        purged, no gap is restored and no type is written. When no G-code tool of the print
+        maps to `old`, as for a slot loaded before a print that doesn't use it, the join
+        gives up and `M600` changes the filament instead (`M600.cpp:139-147`).
+        """
+        tools = (s.tool for s in job.spec.segments)
+        g = next((g for g in tools if job.mapped.get(g, g) == old.index), None)
+        if g is None:
+            self._filament_change(old, Reason.RUNOUT)
+            return
+        job.mapped[g] = new.index
+        self._log("job", f"spool join T{old.index} -> T{new.index}")
+        self._run_steps(old, self._mmu_unload_steps())
+        self._mmu_change(new)
+        self._run_steps(new, [LoadStep("LOAD", mm) for mm in nozzle_load()])
 
     def _spool_join(self, job: UserJob, old: SimTool, new: SimTool) -> None:
         """Start a spool join from the picked tool `old` to `new` (`SpoolJoin::do_join` in
@@ -1619,12 +2040,19 @@ class SimPrinter:
         changes back at the resume. Picking the other tool heats it for the type
         `_type_to_load` finds; with none found its target is 0, so `Pause::filament_change`
         returns at once as too cold, and `M600` changes back with nothing changed.
+
+        On an MMU the item names the selected slot, and with none selected, as after a
+        power-panic resume, it sends nothing (`MI_M600::click`).
         """
         t = self._tool(tool)
-        self._check_change_filament()
+        self._check_change_filament(t)
         job = self.job
         self._log("action", f"change filament T{tool}")
-        if t.index != self.selected_tool:
+        if self.feed is MMU:
+            if self.selected_tool is None:
+                self._log("job", "no slot selected: nothing changes")
+                return
+        elif t.index != self.selected_tool:
             if self._type_to_load(t, job) is None:
                 self._log("job", f"T{tool} has no type to heat for: nothing changes")
                 return
@@ -1647,18 +2075,30 @@ class SimPrinter:
 
     def _filament_change(self, t: SimTool, reason: Reason) -> None:
         """The filament change on the picked tool `t` that every `M600` runs: a runout, a
-        jam that unloads, a color change in the file, and Tune > Change filament."""
+        jam that unloads, a color change in the file, and Tune > Change filament.
+
+        On an MMU, `t` is the selected slot. The unload is the MMU's, into the unit, then
+        the unit ejects the slot's filament for the user, which moves no printer filament.
+        No type is written, so nothing counts, and the slot keeps its type. The printer
+        reads `PRINTING` until it asks for the filament to be loaded into the MMU, which
+        reads `ATTENTION` (`Pause::mmu_unload_start_process` and `mmu_load_start_process`,
+        `pause.cpp:936-988`). The reload is the same slot's (`_mmu_reload_steps`).
+        """
         job = self.job
         # Only a print in progress changes filament, so the phase is PRINTING or PREHEAT.
         job.paused_from = job.phase
-        loads = self._type_to_load(t, job)
+        loads = None if self.feed is MMU else self._type_to_load(t, job)
         # The filament change records the tracker's distance, parks with a retract, then
         # rams and unloads (`Pause::filament_change` and `park_nozzle_and_notify` in
         # `src/marlin_stubs/pause/pause.cpp`).
         job.restore = (t.index, t.path.tracked())
         self._retract_to(t, self.model.extruder.lengths.retract_mm)
-        self._run_steps(t, self._unload_steps(t, "runout"))
-        self._physical_unload(t, str(reason))
+        if self.feed is MMU:
+            self._run_steps(t, self._mmu_unload_steps())
+            self._log("mmu", f"T{t.index} ejected: load it into the MMU")
+        else:
+            self._run_steps(t, self._unload_steps(t, "runout"))
+            self._physical_unload(t, str(reason))
         if loads is not None:
             t.kept_type = loads  # what the reload writes (`filament::set_type_to_load`)
         job.enter(JobPhase.WAIT_LOAD, Attention(reason, t.index))
@@ -1672,13 +2112,15 @@ class SimPrinter:
         self._show_state()
 
     def tap_through(self) -> None:
-        """Answer the screen's question: Print or Ok at the preview, or abort on a parse
-        error."""
+        """Answer the screen's question: Print or Ok at the preview, No at the MMU's unload
+        question, which prints with the filament where it is, or abort on a parse error."""
         self._check_tap_through()
         job = self.job
         self._log("action", f"tap through: {job.attention}")
         if isinstance(job, UserJob) and job.waits_for(Reason.PREVIEW):
             self._after_incompatible(job)
+        elif job.waits_for(Reason.PREVIEW):
+            self._after_sync_preview(job)
         elif isinstance(job, UserJob) and job.attention in job.mapping:
             if job.waits_for(Reason.SENSORS_OFF):
                 self.set_sensors(False)  # it stays off after the print
@@ -1692,6 +2134,28 @@ class SimPrinter:
         else:
             self._park(job, State.STOPPED)
 
+    def unload_first(self) -> None:
+        """Answer Yes at the MMU's unload question: `M702 W0`, which unloads into the MMU,
+        then the preview goes on to its tools-mapping screen, or prints
+        (`marlin_print_preview.cpp:698-728`).
+
+        The unload is the MMU's own, on the selected slot: the moves count on it, or on none
+        after a boot, and no type is written (`MMU2::unload`). It reads BUSY with no job,
+        and nothing stops it. `M702 W0` then turns the nozzle, the bed and the fan off,
+        which the simulator doesn't model.
+
+        What Yes unloads while the MMU connects isn't read: `SelectorSlot()` assumes the
+        MMU is up (`marlin_print_preview.cpp:709-711`). So the simulator refuses it then,
+        and once the MMU is Active, when FINDA sees no filament.
+        """
+        self._check_unload_first()
+        job = self.job
+        t = self.tools[self.mmu.fed]
+        self._log("action", f"unload first: T{t.index} into the MMU")
+        job.enter(JobPhase.PREVIEW_UNLOAD)
+        self._start_unload(t, self._mmu_unload_steps())
+        self._show_state()
+
     # Power and faults.
 
     def boot(self) -> None:
@@ -1704,13 +2168,20 @@ class SimPrinter:
         self.boot_id = new_boot_id()
         for t in self.tools.values():
             t.extruded, t.unload_count, t.extruded_at_unload = 0.0, 0, 0
-            if isinstance(t.process, LoadProcess):
-                t.path.loaded = True  # a load cut short leaves its filament in
+            # A load cut short leaves its filament in. On an MMU the slot switch says where
+            # the filament is: a load cut before it leaves the extruder as the unload before
+            # it left it, since where the unit's own feed stopped isn't modeled.
+            if isinstance(t.process, LoadProcess) and self.feed is not MMU:
+                t.path.loaded = True
             t.process = None
             t.path.boot(self.model.gap_mm)
         self.queue = []  # a change all doesn't survive the cut
         self.homed, self.message = False, None
         self._log("boot", f"boot id {self.boot_id}")
+        if self.mmu is not None and self.mmu.on:
+            # `app_setup` starts an MMU that's switched on (`appmain.cpp:186-190`). Its
+            # filament stays where it was.
+            self._start_mmu()
         enabled = [t.index for t in self.tools.values() if t.enabled]
         if self.feed.selectable and not self.toolchanger and enabled:
             # An XL that finds one Dwarf turns its toolchanger off and picks that tool
@@ -1933,8 +2404,69 @@ class SimPrinter:
         self._log("action", f"T{tool} {'enabled' if value else 'disabled'}")
 
     def set_sensors(self, value: bool) -> None:
+        """The menu's switch for every filament sensor. Turning them off with the MMU on
+        turns the MMU off too: the firmware queues `M709 S0`
+        (`filament_sensors_handler.cpp:328-332`), so it needs what `set_mmu` needs. The
+        sensors the MMU forces on still read when `mmu_off` looks (`should_enable`,
+        `:391-398`), which is inferred from the order of the calls."""
+        mmu_off = not value and self.feed is MMU
+        if mmu_off:
+            self._check_mmu(False)
         self.sensors = value
         self._log("action", f"filament sensors {'on' if value else 'off'}")
+        if mmu_off:
+            self._log("mmu", "MMU off: the filament sensors are off")
+            self._mmu_off()
+            self._show_state()
+
+    def set_mmu(self, value: bool) -> None:
+        """Switch the MMU on or off: `M709 S1` or `S0`, which the menu's switch sends
+        (`filament_gcodes::mmu_on` and `mmu_off`, `M70X_mmu.cpp:54-92`).
+
+        On, the MMU starts: no slot selected, connecting. The tag link each slot's ad-hoc
+        type keeps on a Core One isn't modeled. Off, slot 0's type is cleared, which counts
+        an unload, unless the extruder sensor surely sees filament: always slot 0,
+        whichever slot was loaded. The other slots keep their types and stop being listed,
+        and the printer feeds slot 0 as a single-tool one.
+        """
+        self._check_mmu(value)
+        self._log("action", f"MMU {'on' if value else 'off'}")
+        if value:
+            self.mmu.on = True
+            self._start_mmu()
+        else:
+            self._mmu_off()
+        self.screen = State.IDLE  # using the menu dismisses a finished or stopped screen
+        self._show_state()
+
+    def _start_mmu(self) -> None:
+        """`MMU2::Start`: no slot selected until a load, and slot 0 credited until the MMU
+        is Active (`mmu2_mk4.cpp:169-191`)."""
+        self.selected_tool = None
+        self.mmu.connecting = self.settings.mmu_connect_seconds
+        self._log("mmu", f"MMU connecting for {self.mmu.connecting:g} s")
+        self._tick_mmu(0.0)
+
+    def _tick_mmu(self, dt: float) -> None:
+        """Count the MMU's connecting window down by `dt`; log once when it's Active."""
+        mmu = self.mmu
+        mmu.connecting = max(mmu.connecting - dt, 0.0)
+        if mmu.connecting <= EPSILON:
+            mmu.connecting = 0.0
+            self._log("mmu", "MMU active")
+
+    def _mmu_off(self) -> None:
+        """`mmu_off`: the setting goes off, then slot 0 is cleared unless the extruder
+        sensor surely sees filament. `M709 S0` runs it with the MMU already off too
+        (`M707-9_parse.cpp:91-93`). A disabled sensor is never sure
+        (`filament_sensors_handler.hpp:80-84`), and the sensors are disabled when they're
+        switched off, unless the MMU was on and forced them on (`should_enable`,
+        `filament_sensors_handler.cpp:391-402`)."""
+        path, was_on = self.mmu.path, self.mmu.on
+        self.mmu.on, self.mmu.connecting = False, 0.0
+        if not path.loaded or path.sensor_fault or not (self.sensors or was_on):
+            self._count_unload(self.tools[0], "MMU off")
+        self.selected_tool = 0
 
     def set_checks(self, value: Severity) -> None:
         self.checks = Severity(value)
@@ -1958,6 +2490,12 @@ class SimPrinter:
         waiting = self.job is not None and self.job.wait_tool == t.index
         if keep and not waiting:
             raise Invalid("a load needs a source, tag or preset, outside a runout reload")
+        # The MMU's filament menu has no plain Load (`screen_menu_filament_mmu.hpp:11-24`),
+        # and the reload is the MMU's own, so nothing goes in by hand.
+        if self.feed is MMU:
+            if not keep:
+                raise Invalid("the MMU's filament menu has no plain load")
+            self._need_power()
         if t.process is not None:
             raise Busy("a load or unload is already running")
         if self.power is Power.OFF:
@@ -1968,6 +2506,12 @@ class SimPrinter:
             raise Busy("can't load during a print; run the tool out first")
 
     def _check_unload(self, t: SimTool) -> None:
+        # On an MMU it's the menu's Unload Filament, which unloads the slot in the extruder.
+        if self.feed is MMU:
+            self._check_mmu_menu()
+            if t.index != self.mmu.fed:
+                raise Invalid(f"T{t.index}'s filament isn't in the extruder")
+            return
         if not t.path.loaded:
             raise Invalid(f"T{t.index} has no filament")
         if t.process is not None:
@@ -1985,15 +2529,21 @@ class SimPrinter:
             raise Busy(f"manual moves need an idle printer, not {self.state}")
         # Move E moves only the picked tool, and with none picked it shows "No tool" and
         # sends no E (`ScreenMenuMove::loop` and `plan_moves` in
-        # `src/gui/screen_menu_move.cpp`).
-        if self.selected_tool is None:
+        # `src/gui/screen_menu_move.cpp`). An MMU's one extruder is always there, and moves
+        # whichever slot's filament is in it.
+        if self.feed is MMU:
+            if t.index != self.mmu.fed:
+                raise Invalid(f"T{t.index}'s filament isn't in the extruder")
+        elif self.selected_tool is None:
             raise Busy("no tool picked")
-        if t.index != self.selected_tool:
+        elif t.index != self.selected_tool:
             raise Invalid(f"T{t.index} isn't the picked tool")
         if not t.path.loaded:
             raise Invalid(f"T{t.index} has no filament")
 
     def _check_select(self) -> None:
+        if self.feed is MMU:
+            raise Invalid("an MMU selects a slot only by loading it")
         if not self.toolchanger:
             raise Invalid(f"{self.model.name} has one tool")
         if self.job is not None or self.state is State.BUSY:
@@ -2006,16 +2556,22 @@ class SimPrinter:
 
     def _check_runout(self, t: SimTool) -> None:
         self._need_power()
-        job = self.job
-        if not (isinstance(job, UserJob) and job.phase in (JobPhase.PRINTING, JobPhase.PREHEAT)):
-            raise Busy("a runout or jam needs a print in progress")
+        # The MMU's jam, a filament-stuck unload and its reload, isn't read.
+        if self.feed is MMU:
+            raise Invalid("a jam isn't modeled with the MMU on")
+        self._check_in_print()
         # Only the picked tool feeds, so only its sensor can see a runout or a jam.
         if t.index != self.selected_tool:
             raise Invalid(f"T{t.index} isn't the selected tool")
         if not t.path.loaded:
             raise Busy(f"T{t.index} has no filament")
 
-    def _check_change_filament(self) -> None:
+    def _check_in_print(self) -> None:
+        job = self.job
+        if not (isinstance(job, UserJob) and job.phase in (JobPhase.PRINTING, JobPhase.PREHEAT)):
+            raise Busy("a runout or jam needs a print in progress")
+
+    def _check_change_filament(self, t: SimTool) -> None:
         self._need_power()
         job = self.job
         # Tune > Change filament is enabled once the print has printed something
@@ -2024,14 +2580,37 @@ class SimPrinter:
         # (`screen_printing.cpp`), which the simulator doesn't model.
         if not (isinstance(job, UserJob) and job.phase is JobPhase.PRINTING):
             raise Busy("a filament change needs a print in progress")
+        # On an MMU it names the selected slot, and with none it does nothing
+        # (`MI_M600::click`).
+        selected = self.selected_tool
+        if self.feed is MMU and selected is not None and t.index != selected:
+            raise Invalid(f"Change filament on an MMU changes the selected slot, T{selected}")
 
     def _check_sensor_runout(self, t: SimTool) -> None:
         # A runout is the sensor seeing the filament go. A jam is found another way.
+        if self.feed is MMU:
+            self._check_finda_runout(t)
+            return
         self._check_runout(t)
         if not self.sensors:
             raise Busy("the filament sensors are off")
 
+    def _check_finda_runout(self, t: SimTool) -> None:
+        """On an MMU the runout sensor is FINDA, which sees the fed slot's filament
+        (`primary_runout`, `filament_sensors_handler.cpp:204`). It reads nothing while the
+        MMU connects (`FSensorMMU`, `filament_sensor_mmu.cpp:10-24`). The MMU keeps the
+        sensors on."""
+        self._need_power()
+        self._check_in_print()
+        if not self.mmu.active:
+            raise Busy("FINDA reads nothing while the MMU connects")
+        if t.index != self.mmu.fed:
+            raise Invalid(f"T{t.index}'s filament isn't at FINDA")
+
     def _check_disable(self, t: SimTool) -> None:
+        # An MMU build lists its slots by the MMU's setting alone (`listed`).
+        if self.mmu is not None:
+            raise Invalid("an MMU slot can't be disabled")
         job = self.job or self.resuming
         in_print = isinstance(job, UserJob) and t.index in {
             *(s.tool for s in job.spec.segments),
@@ -2042,19 +2621,75 @@ class SimPrinter:
         if t.index == self.selected_tool or in_print or t.process is not None or queued:
             raise Invalid(f"T{t.index} is in use")
 
-    def _check_change_all(self) -> None:
+    def _check_mmu(self, value: bool) -> None:
+        """Switching the MMU needs one attached and an idle printer. The menu turns it on
+        only with a working extruder sensor (`MItem_mmu.cpp:176-184`); `M709 S1` doesn't
+        check, but with the sensors off the firmware turns it straight off again
+        (`filament_sensors_handler.cpp:328-332`)."""
+        if self.mmu is None:
+            raise Invalid(f"{self.name} has no MMU")
+        self._need_power()
+        if self.job is not None or self.state not in IDLE_STATES:
+            raise Busy(f"can't switch the MMU while {self.state}")
+        if value and not self.sensors:
+            raise Busy("the MMU needs the filament sensors on")
+
+    def _check_change_all(self, *, unloads: bool = False) -> None:
         # Change all is in the Filament menu on a toolchanger only
-        # (`src/gui/screen_menu_filament.hpp`), and the menu needs an idle printer.
+        # (`src/gui/screen_menu_filament.hpp`), and the menu needs an idle printer. On an MMU
+        # it's the MMU menu's Preload To MMU.
+        if self.feed is MMU:
+            self._check_mmu_unloaded("Preload")
+            return
         if not self.toolchanger:
             raise Invalid(f"{self.model.name} has one tool")
+        if unloads:
+            raise Invalid("only an MMU's change all unloads a tool alone")
         self._need_power()
         if self.job is not None or self.state not in IDLE_STATES:
             raise Busy(f"can't change all while {self.state}")
+
+    def _check_mmu_menu(self) -> None:
+        """The MMU's filament menu needs an MMU switched on and Active, and an idle printer.
+        While the MMU connects, the simulator refuses its operations: what the firmware
+        does with one then isn't read."""
+        if self.mmu is None:
+            raise Invalid(f"{self.name} has no MMU")
+        if not self.mmu.on:
+            raise Invalid("the MMU is off")
+        self._need_power()
+        if self.job is not None or self.state not in IDLE_STATES:
+            raise Busy(f"the MMU's menu needs an idle printer, not {self.state}")
+        if not self.mmu.active:
+            raise Busy("the MMU is connecting")
+
+    def _check_mmu_unloaded(self, what: str) -> None:
+        """Preload To MMU, Eject and Cut are off while the extruder's sensor sees filament
+        (`ScreenMenuFilamentMMU::windowEvent`, `screen_menu_filament_mmu.cpp:18-30`)."""
+        self._check_mmu_menu()
+        if self.mmu.path.loaded:
+            raise Busy(f"{what} needs the extruder empty")
+
+    def _check_load_to_nozzle(self, t: SimTool) -> None:
+        # The menu's item is off for a slot with no type (`MItem_mmu.cpp:92-107`).
+        self._check_mmu_menu()
+        if t.material is None:
+            raise Invalid(f"T{t.index} has no type to load")
+        # The firmware frees the extruder only for a selected slot (`mmu2_mk4.cpp:971-973`).
+        # With filament in it and none selected, after a boot or a load by hand, it makes no
+        # move to free it, and what follows isn't in the source, so the simulator refuses:
+        # Unload Filament on the fed slot first. A print's `T` doesn't come here.
+        if self.mmu.path.loaded and self.selected_tool is None:
+            raise Busy("the extruder holds filament and no slot is selected; unload it first")
 
     def _check_start_print(self) -> None:
         self._need_power()
         if not self.can_print():
             raise Busy(f"can't print while {self.state}")
+        # What a `T` does while the MMU connects isn't read, so the simulator refuses a print
+        # started then. An upload's sync job still runs.
+        if self.feed is MMU and not self.mmu.active:
+            raise Busy("the MMU is connecting")
 
     def _check_pause(self) -> None:
         self._need_power()
@@ -2072,6 +2707,8 @@ class SimPrinter:
             raise Busy("nothing to cancel")
         if self.job.phase is JobPhase.PREVIEW_LOAD:
             raise Busy("the preview's load is running")
+        if self.job.phase is JobPhase.PREVIEW_UNLOAD:
+            raise Busy("the preview's unload is running")
 
     def _check_dismiss(self) -> None:
         self._need_power()
@@ -2088,6 +2725,16 @@ class SimPrinter:
         job = self.job
         if job is None or job.phase is not JobPhase.HOLD or not job.waits_for(Reason.JAM):
             raise Busy("no jam to clear")
+
+    def _check_unload_first(self) -> None:
+        self._need_power()
+        job = self.job
+        if job is None or not job.waits_for(Reason.MMU_LOADED):
+            raise Busy("no question to unload the MMU's filament first")
+        if not self.mmu.active:
+            raise Busy("what Yes unloads while the MMU connects isn't read; answer No or cancel")
+        if self.mmu.fed is None:
+            raise Busy("FINDA sees no filament to unload; answer No or cancel")
 
     def _check_tap_through(self) -> None:
         self._need_power()
@@ -2111,6 +2758,9 @@ class SimPrinter:
             "reboot": self._need_power,
             "clear_jam": self._check_clear_jam,
             "tap_through": self._check_tap_through,
+            "unload_first": self._check_unload_first,
+            "set_mmu": lambda: self._check_mmu(not (self.mmu and self.mmu.on)),
+            "preload_all": self._check_mmu_menu,
         }
         return {name: _refusal(check) for name, check in checks.items()}
 
@@ -2124,12 +2774,18 @@ class SimPrinter:
             "retract": lambda: self._check_move(t),
             "runout": lambda: self._check_sensor_runout(t),
             "jam": lambda: self._check_runout(t),
-            "change_filament": self._check_change_filament,
+            "change_filament": lambda: self._check_change_filament(t),
             "select_tool": self._check_select,
+            "load_to_nozzle": lambda: self._check_load_to_nozzle(t),
+            "eject": lambda: self._check_mmu_unloaded("Eject"),
+            "cut": lambda: self._check_mmu_unloaded("Cut"),
             # The fault switches take any enabled tool, in any state.
             "set_sensor_fault": lambda: None,
             "set_stuck_write": lambda: None,
         }
+        if not self._slot_on(t.index):
+            unlisted = _refusal(lambda: self._tool(t.index, enabled=False))
+            return {name: unlisted for name in [*checks, "set_tool_enabled"]}
         if not t.enabled:
             refused = {name: f"tool {t.index} is disabled" for name in checks}
             return {**refused, "set_tool_enabled": None}  # enabling is always allowed
@@ -2142,7 +2798,8 @@ class SimPrinter:
         """Advance this printer by dt; return whether anything was running."""
         if self.power is Power.OFF or dt <= 0:
             return False
-        active = False
+        active = self.mmu is not None and self.mmu.connecting > 0
+        elapsed = dt
         for t in self.tools.values():
             if t.process is not None:
                 active = True
@@ -2153,6 +2810,10 @@ class SimPrinter:
         if self.job is not None:
             active = True
             self._tick_job(dt)
+        # The MMU's connecting window counts down after the tick's moves, which it covered:
+        # a window that ends with the tick still credits them to slot 0.
+        if self.mmu is not None and self.mmu.connecting > 0:
+            self._tick_mmu(elapsed)
         self._idle_clear_selected()
         return active
 
@@ -2174,6 +2835,9 @@ class SimPrinter:
             if isinstance(p, UnloadProcess):
                 self._unload_tick(t, p, dt)
                 return
+            if isinstance(p, MmuProcess):
+                self._mmu_tick(t, p, dt)
+                return
             dt -= self._move(t, p.steps, rate * dt) / rate
             self._next_load_step(t, p)
 
@@ -2190,6 +2854,19 @@ class SimPrinter:
         self._run_steps(t, p.steps)  # what rounding left
         t.process = None
         self.feed.end_unload(self, t)
+        self._process_done()
+
+    def _mmu_tick(self, t: SimTool, p: MmuProcess, dt: float) -> None:
+        """Count an MMU operation down; at its end write its type, if it has one."""
+        p.remaining = max(p.remaining - dt, 0.0)
+        if p.remaining > EPSILON:
+            return
+        t.process = None
+        self._log("mmu", f"T{t.index} {p.op} done")
+        if p.material is not None:
+            to = t if p.writes is None else self.tools[p.writes]
+            to.store(p.material)
+            self._log("load", f"T{to.index} type set to {describe(to.material)}")
         self._process_done()
 
     def _next_load_step(self, t: SimTool, p: LoadProcess) -> None:
@@ -2213,6 +2890,10 @@ class SimPrinter:
             # The load's result isn't checked and no sensor is read again: the type check
             # follows (`filament_not_inserted_load` in `marlin_print_preview.cpp`).
             self._check_types(job)
+        elif job is not None and job.phase is JobPhase.PREVIEW_UNLOAD:
+            # The unload's result isn't checked either: the checks are done
+            # (`mmu_filament_inserted_unload` in `marlin_print_preview.cpp:724-728`).
+            self._checks_done(job)
         elif self.queue:
             self._next_queued()
         self._show_state()
@@ -2245,7 +2926,7 @@ class SimPrinter:
             if isinstance(job, UserJob):
                 self._ask_print(job)
             elif not self._ask(job):
-                self._begin(job)
+                self._after_sync_preview(job)
         elif job.phase is JobPhase.BLIP:
             self._after_blip(job)
         elif job.phase is JobPhase.PREHEAT:
@@ -2280,7 +2961,8 @@ class SimPrinter:
 
     def _ask(self, job: SyncJob) -> bool:
         """Check the file as the preview does; return whether it asks the user."""
-        rows = preview(self.model, job.gcode, self.checks)
+        active = self.mmu is not None and self.mmu.active
+        rows = preview(self.model, job.gcode, self.checks, mmu_active=active)
         if not rows:
             return False
         fatal = any(r.fatal for r in rows)
@@ -2300,9 +2982,24 @@ class SimPrinter:
         # A sensor that's off reads neither filament nor none, so no check fails on it.
         seen = {i: t.path.loaded or not self.sensors for i, t in self.tools.items()}
         return {
-            i: ToolView(t.enabled, seen[i], t.material.name if t.material else None)
+            i: ToolView(self.listed(t), seen[i], t.material.name if t.material else None)
             for i, t in self.tools.items()
         }
+
+    @property
+    def _loaded_checked(self) -> bool:
+        """Whether the preview asks about a used tool with no filament: not with the MMU
+        Active, as "the filaments are intentionally unloaded at the start of the print"
+        (`generate_toolmapping_only_noclear`, `gcode_compatibility.cpp:505-513`)."""
+        return not (self.mmu is not None and self.mmu.active)
+
+    def _print_checks(self, job: UserJob) -> PrintChecks:
+        return print_checks(
+            self.feed.maps_tools(self),
+            self._uses(job),
+            self._tool_views(),
+            loaded_checked=self._loaded_checked,
+        )
 
     def _preview_question(self, job: UserJob, reason: Reason, rows: list[Failed]) -> None:
         self._wait(job, _question(reason, rows))
@@ -2314,21 +3011,75 @@ class SimPrinter:
 
     def _ask_print(self, job: UserJob) -> None:
         """The "G-code incompatible" screen (`stateFromPrinterCheck`), then the rest."""
-        rows = print_checks(self.feed.maps_tools(self), self._uses(job), self._tool_views()).rows
+        rows = self._print_checks(job).rows
         if rows:
             self._preview_question(job, Reason.PREVIEW, rows)
         else:
             self._after_incompatible(job)
 
     def _after_incompatible(self, job: UserJob) -> None:
-        """The tools-mapping screen on a toolchanger, else the filament-not-inserted screen
-        (`stateFromFilamentPresence` and `checks_done`).
+        """The MMU's unload question, else the tools-mapping screen on a toolchanger or an
+        MMU, else the filament-not-inserted screen (`stateFromFilamentPresence` and
+        `checks_done`)."""
+        if not self._ask_mmu_unload(job):
+            self._checks_done(job)
+
+    def _after_sync_preview(self, job: SyncJob) -> None:
+        """A sync job past its file's checks: the MMU's unload question, else the job.
+        The job has no `filament used [g]`, so no tool check or mapping applies to it."""
+        if not self._ask_mmu_unload(job):
+            self._begin(job)
+
+    def _ask_mmu_unload(self, job: UserJob | SyncJob) -> bool:
+        """Ask to unload the MMU's filament first; return whether the preview stops here,
+        at the question or at the print's start.
+
+        With the MMU on, `stateFromFilamentPresence` asks nothing when the filament sensors
+        are off or `MMUReadyToPrint`: FINDA's sensor reads no filament, so no slot's
+        filament is past the selector (`marlin_print_preview.cpp:228-257`,
+        `filament_sensors_handler.cpp:360-363`). Turning the sensors off turns the MMU off,
+        so the MMU's own check covers the first. The MMU is on by its setting, connected or
+        not (`HasMMU`, `filament_sensors_handler.cpp:171-179`), and while it connects
+        FINDA's sensor reads not initialized, not no filament (`filament_sensor_mmu.cpp:
+        10-24`), so the question asks then whatever FINDA sees. A single-tool file, one
+        whose metadata names tool 0 alone, prints at once with no question and no
+        tools-mapping screen when the extruder's sensor sees filament and slot 0's type is
+        the one the file names. Otherwise the question reads ATTENTION with the job
+        (`print_preview_mapper.hpp:17-19`).
+        """
+        mmu = self.mmu
+        if mmu is None or not mmu.on or (mmu.active and mmu.fed is None):
+            return False
+        if isinstance(job, UserJob) and self._mmu_shortcut(job):
+            self._log("job", f"job {job.id}: T0's type is loaded, so the print starts at once")
+            self._begin(job)
+            return True
+        self._wait(job, Attention(Reason.MMU_LOADED, mmu.fed))
+        return True
+
+    def _mmu_shortcut(self, job: UserJob) -> bool:
+        """Whether a print skips the MMU's question: it's a single-tool file, whose metadata
+        lists tool 0 alone (`is_singletool_gcode`, `gcode_info.cpp:611-625`; a file from the
+        MMU3 profile lists all five), the extruder's sensor, not FINDA, sees filament, and
+        slot 0's type isn't another than the file names (`generate_toolmapping_only`)."""
+        if not job.spec.single_tool_file or not self.mmu.path.loaded:
+            return False
+        uses = self._uses(job)
+        return not wrong_types(uses, self._tool_views())
+
+    def _checks_done(self, job: UserJob | SyncJob) -> None:
+        """The preview's checks are done: the tools-mapping screen when tool mapping
+        applies, else the filament-not-inserted screen for an empty used tool, else the
+        type check (`checks_done` and `stateFromFilamentPresence`). A sync job starts.
 
         A print started at the printer shows the tools-mapping screen whenever tool mapping
         applies, with nothing wrong too: only a remote start that is fully compatible skips
         it (`checks_done` in `src/common/marlin_print_preview.cpp`).
         """
-        checks = print_checks(self.feed.maps_tools(self), self._uses(job), self._tool_views())
+        if isinstance(job, SyncJob):
+            self._begin(job)
+            return
+        checks = self._print_checks(job)
         if checks.mapped:
             job.mapping = self._mapping_report(job, checks.mapping)
             self._wait(job, job.mapping[0])
@@ -2356,7 +3107,7 @@ class SimPrinter:
         `gui_confirm_incompatibility` in `gcode_compatibility.cpp`.)
         """
         uses, views = self._uses(job), self._tool_views()
-        empty = [i for i in sorted(uses) if not views[i].loaded]
+        empty = [i for i in sorted(uses) if self._loaded_checked and not views[i].loaded]
         asks = [
             (Reason.SENSORS_OFF, [Failed(f"T{i} has no filament", False) for i in empty]),
             (Reason.MAPPING_TYPE, wrong_types(uses, views)),
@@ -2395,13 +3146,15 @@ class SimPrinter:
         self._show_state()
 
     @property
-    def profile(self) -> Slicer | None:
+    def profile(self) -> Slicer | MmuSlicer | None:
         """The multi-tool slicer profile the printer prints with, as its feed system says."""
         return self.feed.profile(self)
 
-    def _slicer(self, job: UserJob) -> Slicer | None:
-        """The print's slicer profile, with the print's overrides."""
-        slicer, spec = self.profile, job.spec
+    def _slicer(self, job: UserJob) -> Slicer | MmuSlicer | None:
+        """The print's slicer profile, with the print's overrides. A single-tool file was
+        sliced without one."""
+        spec = job.spec
+        slicer = None if spec.single_tool_file else self.profile
         return slicer and slicer.overridden(spec.prime_mm, spec.toolchange_purge_mm)
 
     def _park(self, job: UserJob | SyncJob, end: State) -> None:
@@ -2410,7 +3163,7 @@ class SimPrinter:
         (`pre_finalize_print`). A stopped print and a sync job run no end G-code."""
         if isinstance(job, UserJob) and end is State.FINISHED:
             self.feed.end_moves(self, job, self._slicer(job))
-        self._end_of_print()
+        self._end_of_print(job, end)
         self.feed.rest(self)
         job.enter(JobPhase.PARKING)
         job.remaining, job.end_state = self.settings.park_seconds, end
@@ -2418,7 +3171,7 @@ class SimPrinter:
             job.paused_from = None
         self._show_state()
 
-    def _end_of_print(self) -> None:
+    def _end_of_print(self, job: UserJob | SyncJob, end: State) -> None:
         """What a finished or stopped job does to the filament before it parks, a sync job
         too (`marlin_server.cpp`).
 
@@ -2431,17 +3184,30 @@ class SimPrinter:
         (`move_to_retracted_distance` in `src/common/mapi/motion.cpp`,
         `AutoRetract::maybe_retract_from_nozzle` in `src/feature/auto_retract/auto_retract.cpp`),
         and the valid gaps are still stored: that loop goes over every hotend.
+
+        With an MMU Active the auto-retract is skipped, whatever the slot: the slicer
+        unloads (`pre_finalize_print`, `marlin_server.cpp:1067-1083`). Instead, a stopped
+        job, a sync job too, and a finished single-tool file unload with `M702 W2`, unless
+        the extruder's sensor sees no filament (`safely_unload_filament_from_nozzle_to_mmu`,
+        `:850-857`). The unload runs on the selected slot, or counts nothing with none, and
+        it runs as the job parks, so it reads `PRINTING`. A finished MMU3 profile print leaves
+        it to its end G-code's `M702`, and a finished sync job leaves the filament where it
+        is. While the MMU connects, the auto-retract runs on slot 0 (`Mmu.credited`).
         """
         ex = self.model.extruder
         t = self._head_tool()
         if t is not None:
             self._retract_to(t, ex.lengths.retract_mm)
-        if not ex.auto_retracts:
-            return
-        for tool in self.tools.values():
-            if tool.path.gap_valid:
-                tool.path.auto_retracted = tool.path.gap
-        if t is not None:
+        if ex.auto_retracts:
+            for tool in self.tools.values():
+                if tool.path.gap_valid:
+                    tool.path.auto_retracted = tool.path.gap
+        if self.mmu is not None and self.mmu.active:
+            single = isinstance(job, UserJob) and job.spec.single_tool_file
+            if (end is State.STOPPED or single) and self.mmu.path.loaded:
+                self._log("job", "M702 W2: the end of the print unloads into the MMU")
+                self._run_steps(t, self._mmu_unload_steps())
+        elif ex.auto_retracts and t is not None:
             self._run_steps(t, [LoadStep(AUTO_RETRACT_STEP)])
 
     def _print_step(self, job: UserJob, dt: float) -> float:
@@ -2465,8 +3231,14 @@ class SimPrinter:
             dt -= need / rate
             job.time_printing += need / rate
             if change is not None and change <= target:
-                # It stays pending until the change ends (`resume`).
                 self._log("job", f"color change at {change:g} mm")
+                if self.feed is MMU and self.selected_tool is None:
+                    # The file's `M600` names no slot, so it does nothing
+                    # (`M600_manual`, `M600.cpp:162-166`).
+                    self._log("job", "no slot selected: nothing changes")
+                    job.pending_color_changes.pop(0)
+                    continue
+                # It stays pending until the change ends (`resume`).
                 self._filament_change(tool, Reason.COLOR_CHANGE)
                 return 0.0
             if job.segment == len(spec.segments) - 1:
@@ -2523,7 +3295,8 @@ class SimPrinter:
         job = None
         if self.job is not None:
             j = self.job
-            a = j.attention
+            # The question is answered once the MMU's reload runs.
+            a = None if self._mmu_reloading() else j.attention
             user = isinstance(j, UserJob)
             job = {
                 "id": j.id,
@@ -2571,12 +3344,27 @@ class SimPrinter:
             "checks": str(self.checks),
             "sensors": self.sensors,
             "actions": self.actions_json(),
-            "load_sources": ["tag", "preset"] if m.uuids else ["preset"],
+            "load_sources": ["tag", "preset"] if m.uuids and self.feed is not MMU else ["preset"],
+            "mmu": None if self.mmu is None else self._mmu_json(),
             "tools": [
-                {**_tool_json(t), "actions": self._tool_actions_json(t)}
+                {**self._tool_json(t), "actions": self._tool_actions_json(t)}
                 for t in sorted(self.tools.values(), key=lambda t: t.index)
             ],
         }
+
+    def _mmu_json(self) -> dict:
+        mmu = self.mmu
+        return {"on": mmu.on, "active": mmu.active, "connecting": mmu.connecting, "fed": mmu.fed}
+
+    def _tool_json(self, t: SimTool) -> dict:
+        """The tool as the page shows it. On an MMU every slot shares the extruder's path,
+        so a slot reads loaded only when its filament is the one in it. With the MMU off,
+        the printer feeds slot 0 as a single-tool one, and slot 0 owns the path."""
+        out = {**_tool_json(t), "listed": self.listed(t)}
+        if self.mmu is not None:
+            owner = self.mmu.fed if self.mmu.on else 0
+            out["loaded"] = t.path.loaded and t.index == owner
+        return out
 
 
 def _setting_kind(default: Any) -> str:
@@ -2613,6 +3401,8 @@ def _tool_json(t: SimTool) -> dict:
         out["process"] = None
     elif isinstance(p, LoadProcess):
         out["process"] = {"kind": "load", "phase": p.phase, "remaining_mm": p.remaining}
+    elif isinstance(p, MmuProcess):
+        out["process"] = {"kind": "mmu", "phase": p.phase, "remaining_s": p.remaining}
     else:
         out["process"] = {"kind": "unload", "phase": p.phase, "remaining_s": p.remaining}
     return out
@@ -2625,11 +3415,13 @@ def _material_from(d: dict | None) -> Material | None:
     return None if d is None else Material(**d)
 
 
-def _process_from(d: dict | None) -> LoadProcess | UnloadProcess | None:
+def _process_from(d: dict | None) -> LoadProcess | UnloadProcess | MmuProcess | None:
     if d is None:
         return None
     d = dict(d)
     kind = d.pop("kind")
+    if kind == "mmu":
+        return MmuProcess(**{**d, "material": _material_from(d["material"])})
     d["steps"] = [LoadStep(**st) for st in d["steps"]]
     if kind == "unload":
         return UnloadProcess(**d)
@@ -2681,6 +3473,10 @@ def _printer_dict(p: SimPrinter) -> dict:
     d = asdict(p)
     d["model"] = p.model.code
     d["tools"] = [_tool_dict(p.tools[i]) for i in sorted(p.tools)]
+    if p.mmu is not None:
+        # The slots share the unit's path, which `d["mmu"]` holds once.
+        path = {f.name for f in fields(FilamentPath)}
+        d["tools"] = [{k: v for k, v in t.items() if k not in path} for t in d["tools"]]
     if p.job is not None:
         d["job"]["kind"] = p.job.kind
     if p.resuming is not None:
@@ -2700,6 +3496,9 @@ def _printer_from(d: dict) -> SimPrinter:
     d["job"] = _job_from(d["job"])
     d["resuming"] = _job_from(d["resuming"])
     d["queue"] = [Queued(**{**q, "material": _material_from(q["material"])}) for q in d["queue"]]
+    if (mmu := d["mmu"]) is not None:
+        # `SimPrinter.__post_init__` points every slot at this one path again.
+        d["mmu"] = MmuUnit(**{**mmu, "path": FilamentPath(**mmu["path"])})
     return SimPrinter(**d)
 
 

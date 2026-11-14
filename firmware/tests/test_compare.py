@@ -16,6 +16,7 @@ from firmware.compare import (
     Difference,
     Expected,
     Firmware,
+    MmuBuild,
     Pause,
 )
 from firmware.source import Unreadable
@@ -24,11 +25,22 @@ from simulator import tool
 from simulator.compatibility import GCodeChecks
 from simulator.feed import Feed
 from simulator.model import MODELS, ModelInfo
+from simulator.slicer import MK4S_MMU_SLICER
 from simulator.tool import Extruder, Lengths
 from spoolman_prusalink.printer_sync import Preset, PrinterModel
 
 NO_COUNTERS = "no counters"
 MULTI_TOOL = "multi-tool"
+MMU_LENGTHS = {
+    "MMU2_TOOL_CHANGE_LOAD_LENGTH": 5.0,
+    "MMU2_RETRY_UNLOAD_FINISH_LENGTH": -80.0,
+    "MMU2_FEED_DISTANCE": 50.0,
+    "MMU2_EXTRUDER_HEATBREAK_LENGTH": 67.0,
+    "MMU2_EXTRUDER_NOZZLE_LENGTH": 20.0,
+    "maximumAllowedExtruderMove": 189.9,
+    "nominalEMotorFSOff": 14.0,
+}
+MMU_RAMMING = ((20, 1500), (-50, 2700), (-5, 50), (-50, 1500))
 
 NEXTRUDER_AUTO_RETRACT = (
     (8, 995),
@@ -198,6 +210,81 @@ def test_load_reads_the_power_panic_purge_on_indx_only(name):
     build = compare.load(fixtures.FakeSource()).builds[name]
     indx = name in ("COREONE_INDX", "COREONEL_INDX")
     assert build.panic_purge == (CleanerPurge(25.0, False) if indx else None)
+
+
+@pytest.mark.parametrize(
+    ("name", "extruders"),
+    [
+        ("MK3.5", 6),
+        ("MK4", 6),
+        ("COREONE", 6),
+        ("COREONEL", 6),
+        # Without HAS_MMU2.
+        ("MINI", None),
+        ("XL", None),
+        ("COREONE_INDX", None),
+    ],
+)
+def test_load_reads_extruders_on_mmu_builds_only(name, extruders):
+    assert compare.load(fixtures.FakeSource()).builds[name].extruders == extruders
+
+
+@pytest.mark.parametrize(
+    ("name", "mmu"),
+    [
+        ("MK4", MmuBuild(False, MMU_LENGTHS, MMU_RAMMING)),
+        ("COREONE", MmuBuild(False, MMU_LENGTHS, MMU_RAMMING)),
+        ("COREONEL", MmuBuild(False, MMU_LENGTHS, MMU_RAMMING)),
+        # No load cell: the try-load feed, whose constants aren't read.
+        ("MK3.5", MmuBuild(True, {}, MMU_RAMMING)),
+        ("MINI", None),
+        ("COREONE_INDX", None),
+    ],
+)
+def test_load_reads_the_mmu_on_mmu_builds_only(name, mmu):
+    assert compare.load(fixtures.FakeSource()).builds[name].mmu == mmu
+
+
+def test_the_current_mmu_copies_match_the_firmware():
+    copies = Copies.current()
+    assert copies.sim_mmu == MMU_LENGTHS
+    assert copies.sim_mmu_ramming == MMU_RAMMING
+
+
+def test_mmu_differences():
+    firmware, copies = synthetic()
+    mk4, core = firmware.builds["MK4"], firmware.builds["COREONE"]
+    mmu = frozenset({"HAS_MMU2"})
+    builds = {
+        **firmware.builds,
+        "MK4": replace(
+            mk4,
+            features=mk4.features | mmu,
+            mmu=MmuBuild(False, {**MMU_LENGTHS, "MMU2_FEED_DISTANCE": 40.0}, ((20, 1500),)),
+        ),
+        "COREONE": replace(core, features=core.features | mmu, mmu=MmuBuild(True, {}, MMU_RAMMING)),
+    }
+    sim = dict(copies.sim_models)
+    # The MK4 takes an MMU in the simulator. The Core One's model has one but doesn't take
+    # it, as the MK3.5's doesn't, so its try-load build isn't compared.
+    sim["1.4.0"] = replace(sim["1.4.0"], mmu=True, mmu_slicer=MK4S_MMU_SLICER)
+    sim["7.1.0"] = replace(sim["7.1.0"], mmu=True)
+    lengths = {k: v for k, v in MMU_LENGTHS.items() if k != "nominalEMotorFSOff"}
+    copies = replace(copies, sim_models=sim, sim_mmu={**lengths, "extra": 1.0})
+    found = compare.compare(replace(firmware, builds=builds), copies)
+    t = "simulator MMU"
+    assert [d for d in found if d.table == t] == [
+        Difference(t, None, "MK4", "MMU2_FEED_DISTANCE", 40.0, 50.0),
+        Difference(t, None, "MK4", "extra", MISSING, 1.0),
+        Difference(t, None, "MK4", "nominalEMotorFSOff", 14.0, MISSING),
+        Difference(t, None, "MK4", "ramming", ((20, 1500),), MMU_RAMMING),
+    ]
+    # A try-load build under a model that takes an MMU differs in its feed alone.
+    builds["MK4"] = replace(builds["MK4"], mmu=MmuBuild(True, {}, MMU_RAMMING))
+    found = compare.compare(replace(firmware, builds=builds), copies)
+    assert [d for d in found if d.table == t] == [
+        Difference(t, None, "MK4", "feed", "try-load", "E-stall"),
+    ]
 
 
 def test_feed_ratio():
@@ -430,6 +517,8 @@ def build(name, features, tools, gap_mm, presets):
         auto_retract=AutoRetract(20.0, True),
         unload_purge_mm=0.0,
         feature_names=INPUT_SHAPER,
+        extruders=None,
+        mmu=None,
     )
 
 
@@ -559,6 +648,8 @@ def synthetic():
         sim_aliases={"TPU": "FLEX"},
         sim_minimal_purge=1.0,
         main_boards={"MK4": "XBUDDY", "MINI": "BUDDY", "XL": "XLBUDDY", "COREONE": "XBUDDY"},
+        sim_mmu=MMU_LENGTHS,
+        sim_mmu_ramming=MMU_RAMMING,
     )
     return firmware, copies
 
@@ -622,7 +713,11 @@ def test_extruder_differences():
     mk4, xl, mini = (firmware.builds[b] for b in ("MK4", "XL", "MINI"))
     builds = {
         **firmware.builds,
-        "MK4": replace(mk4, features=mk4.features | {"HAS_SWITCHABLE_AUTO_RETRACT", "HAS_MMU2"}),
+        "MK4": replace(
+            mk4,
+            features=mk4.features | {"HAS_SWITCHABLE_AUTO_RETRACT", "HAS_MMU2"},
+            extruders=6,
+        ),
         "XL": replace(xl, cleaner_purge=CleanerPurge(25.0, True)),
         "MINI": replace(mini, panic_purge=CleanerPurge(25.0, True)),
     }
@@ -647,6 +742,8 @@ def test_extruder_differences():
     found = compare.compare(firmware, replace(copies, sim_models=sim))
     assert found == [
         Difference(s, "1.4.0", None, "mmu", True, False),
+        # The copy has no MMU, so `M865` takes its one tool.
+        Difference(s, "1.4.0", None, "EXTRUDERS", 6, 2),
         Difference(s, "1.4.0", None, "e_steps default", 380, 381),
         Difference(s, "1.4.0", None, "e_steps calibrated", 400, 401),
         Difference(s, "1.4.0", None, "lengths.purge_mm", 27, 28),
@@ -663,8 +760,8 @@ def test_extruder_differences():
         Difference(s, "7.1.0", None, "cleaner_auto_retract", False, True),
         Difference(s, "7.1.0", None, "panic_purge_mm", None, 25.0),
     ]
-    assert str(found[3]) == "1.4.0 lengths.purge_mm: firmware 27, copy 28"
-    assert str(found[5]) == "1.4.0 ramming.extra: firmware missing, copy ((1, 1),)"
+    assert str(found[4]) == "1.4.0 lengths.purge_mm: firmware 27, copy 28"
+    assert str(found[6]) == "1.4.0 ramming.extra: firmware missing, copy ((1, 1),)"
 
 
 def test_auto_retract_and_unload_purge_differences():
