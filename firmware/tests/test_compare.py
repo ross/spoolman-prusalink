@@ -200,6 +200,23 @@ def test_load_reads_the_power_panic_purge_on_indx_only(name):
     assert build.panic_purge == (CleanerPurge(25.0, False) if indx else None)
 
 
+@pytest.mark.parametrize(
+    ("name", "extruders"),
+    [
+        ("MK3.5", 6),
+        ("MK4", 6),
+        ("COREONE", 6),
+        ("COREONEL", 6),
+        # Without HAS_MMU2.
+        ("MINI", None),
+        ("XL", None),
+        ("COREONE_INDX", None),
+    ],
+)
+def test_load_reads_extruders_on_mmu_builds_only(name, extruders):
+    assert compare.load(fixtures.FakeSource()).builds[name].extruders == extruders
+
+
 def test_feed_ratio():
     builds = compare.load(fixtures.FakeSource()).builds
     assert builds["MK4"].feed_ratio == 0.95
@@ -430,6 +447,7 @@ def build(name, features, tools, gap_mm, presets):
         auto_retract=AutoRetract(20.0, True),
         unload_purge_mm=0.0,
         feature_names=INPUT_SHAPER,
+        extruders=None,
     )
 
 
@@ -622,7 +640,11 @@ def test_extruder_differences():
     mk4, xl, mini = (firmware.builds[b] for b in ("MK4", "XL", "MINI"))
     builds = {
         **firmware.builds,
-        "MK4": replace(mk4, features=mk4.features | {"HAS_SWITCHABLE_AUTO_RETRACT", "HAS_MMU2"}),
+        "MK4": replace(
+            mk4,
+            features=mk4.features | {"HAS_SWITCHABLE_AUTO_RETRACT", "HAS_MMU2"},
+            extruders=6,
+        ),
         "XL": replace(xl, cleaner_purge=CleanerPurge(25.0, True)),
         "MINI": replace(mini, panic_purge=CleanerPurge(25.0, True)),
     }
@@ -647,6 +669,8 @@ def test_extruder_differences():
     found = compare.compare(firmware, replace(copies, sim_models=sim))
     assert found == [
         Difference(s, "1.4.0", None, "mmu", True, False),
+        # The copy has no MMU, so `M865` takes its one tool.
+        Difference(s, "1.4.0", None, "EXTRUDERS", 6, 2),
         Difference(s, "1.4.0", None, "e_steps default", 380, 381),
         Difference(s, "1.4.0", None, "e_steps calibrated", 400, 401),
         Difference(s, "1.4.0", None, "lengths.purge_mm", 27, 28),
@@ -663,8 +687,8 @@ def test_extruder_differences():
         Difference(s, "7.1.0", None, "cleaner_auto_retract", False, True),
         Difference(s, "7.1.0", None, "panic_purge_mm", None, 25.0),
     ]
-    assert str(found[3]) == "1.4.0 lengths.purge_mm: firmware 27, copy 28"
-    assert str(found[5]) == "1.4.0 ramming.extra: firmware missing, copy ((1, 1),)"
+    assert str(found[4]) == "1.4.0 lengths.purge_mm: firmware 27, copy 28"
+    assert str(found[6]) == "1.4.0 ramming.extra: firmware missing, copy ((1, 1),)"
 
 
 def test_auto_retract_and_unload_purge_differences():

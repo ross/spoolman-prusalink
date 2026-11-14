@@ -192,6 +192,7 @@ class Build:
     auto_retract: AutoRetract | None  # None without HAS_AUTO_RETRACT
     unload_purge_mm: float  # what an unload purges before the ramming
     feature_names: frozenset[str]  # the `M862.6` names it knows
+    extruders: int | None  # `EXTRUDERS`, read on HAS_MMU2 builds only
 
     @property
     def counters(self) -> bool:
@@ -330,6 +331,9 @@ def load(source: Source) -> Firmware:
         retract = None
         if "HAS_AUTO_RETRACT" in has:
             retract = AutoRetract(*read.auto_retract(text(read.AUTO_RETRACT_FILE), values))
+        extruders = None
+        if "HAS_MMU2" in has:
+            extruders = read.extruders(text(configuration), values, configuration)
         builds[name] = Build(
             name=name,
             features=has,
@@ -344,6 +348,7 @@ def load(source: Source) -> Firmware:
             auto_retract=retract,
             unload_purge_mm=read.unload_purge(text(read.PAUSE_FILE), values),
             feature_names=read.feature_names(gcode_info, values),
+            extruders=extruders,
         )
     return Firmware(
         commit=source.commit,
@@ -604,6 +609,9 @@ def _compare_sim_models(
         if build.gap_mm is not None:
             differ(table, code, None, "gap_mm", build.gap_mm, model.gap_mm)
         differ(table, code, None, "mmu", "HAS_MMU2" in build.features, model.mmu)
+        if build.extruders is not None:
+            # The MMU's slots and `NoTool`: the tools `M865` takes, plus one.
+            differ(table, code, None, "EXTRUDERS", build.extruders, model.m865_tools + 1)
         panic = "HAS_POWER_PANIC" in build.features
         differ(table, code, None, "power_panic", panic, model.power_panic)
         # The model's own group, as `PrinterModelInfo::current` picks it on every build.

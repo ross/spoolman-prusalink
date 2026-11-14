@@ -992,9 +992,25 @@ def test_defines_fail_closed(text, problem):
         read.defines(text, ["A"], macros(B=False, X=True))
 
 
-def test_e_steps_and_pause_lengths_name_the_file():
+@pytest.mark.parametrize(
+    ("text", "values", "count"),
+    [
+        (fixtures.CONFIGURATION_NEXTRUDER_H, {"HAS_MMU2": True}, 6),
+        (fixtures.CONFIGURATION_NEXTRUDER_H, {"HAS_MMU2": False}, 1),
+        (fixtures.CONFIGURATION_MK3_5_H, {"HAS_MMU2": True}, 6),
+        (fixtures.CONFIGURATION_CORE_ONE_H, {"HAS_MMU2": True, "HAS_INDX": False}, 6),
+        (fixtures.CONFIGURATION_CORE_ONE_H, {"HAS_MMU2": False, "HAS_INDX": True}, 9),
+    ],
+)
+def test_extruders(text, values, count):
+    assert read.extruders(text, macros(**values), "Configuration_X.h") == count
+
+
+def test_e_steps_extruders_and_pause_lengths_name_the_file():
     with pytest.raises(Unreadable, match="can't read a.h: no #define DEFAULT_AXIS_STEPS"):
         read.e_steps("", macros(), "a.h")
+    with pytest.raises(Unreadable, match="can't read c.h: no #define EXTRUDERS"):
+        read.extruders("", macros(), "c.h")
     with pytest.raises(Unreadable, match="can't read b.h: no #define PARK_PAUSE_PRIME_LENGTH"):
         read.pause_lengths("", macros(), "b.h")
 

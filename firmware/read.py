@@ -558,6 +558,16 @@ def e_steps(text: str, macros: Macros, path: str) -> tuple[int, int]:
     return default, calibrated
 
 
+def extruders(text: str, macros: Macros, path: str) -> int:
+    """Return one build's `EXTRUDERS` from the `Configuration_<X>.h` at `path`: on an MMU
+    build, the MMU's slots and `NoTool`."""
+    try:
+        (count,) = defines(text, ("EXTRUDERS",), macros)
+    except ValueError as e:
+        raise Unreadable(path, str(e)) from None
+    return count
+
+
 def pause_lengths(text: str, macros: Macros, path: str) -> tuple[int, ...]:
     """Return one build's `PAUSE_LENGTHS`, in order, from the `_adv.h` file at `path`."""
     try:
