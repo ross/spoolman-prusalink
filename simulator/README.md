@@ -244,8 +244,13 @@ that trace. The points that matter for the bridge, in short:
 - A model's feed system, direct or toolchanger, holds the rules that differ
   between the two (`feed.py`). The XL and INDX models are toolchangers, and
   the rest are direct. The feed system says whether `select_tool` can pick a
-  tool, whether the preview's tools-mapping screen applies, and what a
-  print's tool change does.
+  tool, whether the preview's tools-mapping screen applies, what a
+  print's tool change does, which tool a move counts on, and which tool's
+  sensor the idle sensor clear reads.
+- The selected tool can be none, though nothing on today's printers leaves
+  it so. With none selected, no move counts and the gap stays, the idle
+  sensor clear doesn't run, and a print's end neither retracts nor
+  auto-retracts. The page shows the tool as "none".
 - MINI, MK3.5 and MK3.5S report the material with no counters. The
   `no_endpoint` firmware mode answers 404, like stock firmware.
 

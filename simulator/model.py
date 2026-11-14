@@ -629,7 +629,9 @@ class SimPrinter:
     screen: State = State.IDLE
     job: UserJob | SyncJob | None = None
     job_counter: int = 0
-    selected_tool: int = 0
+    # The picked tool, or None with no tool picked: then nothing counts and the idle sensor
+    # clear doesn't run (`SimPrinter.feed`).
+    selected_tool: int | None = 0
     message: str | None = None
     homed: bool = False
     # How the print preview treats a failed check that a setting governs: the firmware has
@@ -692,8 +694,13 @@ class SimPrinter:
 
     def _count(self, tool: SimTool, mm: float) -> None:
         """Count a move as the firmware's filament tracker does: only what goes past the
-        model's gap counts, times the feed ratio (`FilamentPath.move`)."""
-        tool.extruded += tool.path.move(mm, self.model.gap_mm) * self.feed_ratio
+        model's gap counts, times the feed ratio (`FilamentPath.move`). The feed system says
+        which tool it counts on; with none, the tracker doesn't see the move and the gap
+        stays."""
+        credited = self.feed.credited(self, tool)
+        if credited is None:
+            return
+        credited.extruded += tool.path.move(mm, self.model.gap_mm) * self.feed_ratio
 
     def _deretract(self, tool: SimTool) -> None:
         """Feed back an auto-retracted distance (`maybe_deretract_to_nozzle`).
@@ -1099,8 +1106,9 @@ class SimPrinter:
         self._check_select(t)
         self.selected_tool = tool
         self._log("action", f"select T{tool}")
-        if self.power is not Power.OFF:
-            self._idle_sensor_clear(t, sensor_fault_counts=True)
+        cleared = self.feed.idle_clear_tool(self)
+        if self.power is not Power.OFF and cleared is not None:
+            self._idle_sensor_clear(cleared, sensor_fault_counts=True)
 
     # Actions on prints.
 
@@ -1302,7 +1310,7 @@ class SimPrinter:
             t.path.boot(self.model.gap_mm)
         self.homed, self.message = False, None
         self._log("boot", f"boot id {self.boot_id}")
-        selected = self.tools.get(self.selected_tool)
+        selected = self.feed.idle_clear_tool(self)
         if idle_clear and selected is not None:
             self._idle_sensor_clear(selected, sensor_fault_counts=False)
 
@@ -1600,7 +1608,7 @@ class SimPrinter:
         # The firmware clears the type whenever it isn't printing and the picked tool's sensor
         # reads empty, so a type written to an empty tool shows only until the job ends.
         # `is_printing()` is false on the tools-mapping screen too (`marlin_server.cpp`).
-        t = self.tools.get(self.selected_tool)
+        t = self.feed.idle_clear_tool(self)
         job = self.job
         idle = job is None and self.state in IDLE_STATES
         mapping = job is not None and any(job.waits_for(r) for r in MAPPING_QUESTIONS)
@@ -1836,16 +1844,23 @@ class SimPrinter:
         stores each tool's valid tracker gap as its auto-retracted distance and
         auto-retracts the picked tool, which INDX skips: its 8 mm already counts as fully
         retracted.
+
+        With no tool picked, the retract and the auto-retract do nothing
+        (`move_to_retracted_distance` in `src/common/mapi/motion.cpp`,
+        `AutoRetract::maybe_retract_from_nozzle` in `src/feature/auto_retract/auto_retract.cpp`),
+        and the valid gaps are still stored: that loop goes over every hotend.
         """
         ex = self.model.extruder
-        t = self.tools[self.selected_tool]
-        self._retract_to(t, ex.lengths.retract_mm)
+        t = None if self.selected_tool is None else self.tools[self.selected_tool]
+        if t is not None:
+            self._retract_to(t, ex.lengths.retract_mm)
         if not ex.auto_retracts:
             return
         for tool in self.tools.values():
             if tool.path.gap_valid:
                 tool.path.auto_retracted = tool.path.gap
-        self._run_steps(t, [LoadStep(AUTO_RETRACT_STEP)])
+        if t is not None:
+            self._run_steps(t, [LoadStep(AUTO_RETRACT_STEP)])
 
     def _print_step(self, job: UserJob, dt: float) -> float:
         """Feed for dt, stopping at each segment end and color change. Return the time left."""

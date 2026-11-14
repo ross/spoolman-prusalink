@@ -34,6 +34,25 @@ class FeedSystem:
         # `check_for_events` in `filament_sensor.cpp`).
         p._track(new, p.settings.toolchange_purge_mm)
 
+    def credited(self, p: SimPrinter, tool: SimTool) -> SimTool | None:
+        """The tool a move on `tool`'s path counts on; None when nothing counts.
+
+        The planner counts a move only with a tool selected (`track_extruder_move` under
+        `tools.virtual_tool.has_value()` in `Planner::buffer_segment`,
+        `lib/Marlin/Marlin/src/module/planner.cpp`). The caller names the tool whose path
+        moves, so a menu load on a toolchanger's unpicked tool counts on that tool.
+        """
+        return None if p.selected_tool is None else tool
+
+    def idle_clear_tool(self, p: SimPrinter) -> SimTool | None:
+        """The tool whose sensor the idle clear reads, or None when it doesn't run.
+
+        The clear reads the picked tool only, so with none picked it doesn't run
+        (`src/feature/filament_sensor/filament_sensors_handler.cpp`). A selected index that
+        isn't a configured tool has no sensor to read.
+        """
+        return None if p.selected_tool is None else p.tools.get(p.selected_tool)
+
 
 class Direct(FeedSystem):
     """One tool fed straight from its spool: a print's segments all use tool 0."""
