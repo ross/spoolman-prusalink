@@ -28,6 +28,7 @@ from simulator.model import (
     Invalid,
     JobPhase,
     Join,
+    Material,
     PrintSpec,
     Reason,
     Segment,
@@ -429,6 +430,9 @@ def test_the_file_s_type_follows_the_join_to_its_tool():
     p.runout(0)
     run_join(sim, p)
     assert p.job.mapped == {0: 1} and p.tools[1].material is None
+    # The file's type no longer belongs to T0, which falls back to the type it had.
+    p.tools[0].kept_type = Material("ASA")
+    assert p._type_to_load(p.tools[0], p.job).name == "ASA"
     # A change on the join's tool reloads the file's type, though the tool had none.
     p.change_filament(1)
     p.load(1)
