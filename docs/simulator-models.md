@@ -393,9 +393,9 @@ confirm first.
 4. **Toolchanger events.** A menu load picks the tool and INDX docks it
    again, the picked tool at rest and at boot, the idle clear on the picked
    tool only and in the window before a power-panic resume, spool join,
-   `M600 T<n>`, change all, the slicer's priming and purges, and the
-   power-panic resume per build. The page gets the actions. Acceptance: T1 to T7 still pass, and each event has a simulator
-   test and a row in printer-behaviors.md.
+   `M600 T<n>`, change all, and the slicer's priming and purges. The page
+   gets the actions. Acceptance: T1 to T7 still pass, and each event has a
+   simulator test and a row in printer-behaviors.md.
 5. **MMU.** The MMU feed system, the switch in the config and on the page,
    slot operations (preload, load to nozzle, unload, eject), tool changes,
    runout, spool join, boot, and the preview's unload question.
