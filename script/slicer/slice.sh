@@ -20,9 +20,10 @@
 # with script/slicer/make3mf.py.
 #
 # The scratch data directory enables only the XL, Core One INDX, and 0.4 mm MMU3 models
-# (MK4S MMU3, Core One MMU3, Core One L MMU3). PrusaSlicer silently slices a preset whose
-# model isn't enabled as another printer, so the script fails when the G-code's printer
-# preset isn't the one requested. To slice another model, add it to the INI below.
+# (MK4S MMU3, Core One MMU3, Core One L MMU3). PrusaSlicer refuses a preset whose model
+# isn't enabled, or slices it as another printer and exits 0, so the script fails when the
+# G-code's printer preset isn't the one requested. To slice another model, add it to the
+# INI below.
 set -euo pipefail
 
 out_dir=
@@ -84,5 +85,5 @@ if [ "$used" != "$printer" ]; then
   echo "Sliced with printer preset '$used', not '$printer'. Is its model enabled in the INI above?" >&2
   exit 1
 fi
-echo "$(grep -m1 '^M862.3' "$out_dir/$name.gcode")" >&2
+grep -m1 '^M862.3' "$out_dir/$name.gcode" >&2
 echo "$out_dir/$name.gcode"
