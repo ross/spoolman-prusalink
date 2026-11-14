@@ -808,8 +808,8 @@ panic (F38 to F46). The MMU's scenario rows are T12 to T17.
   leaves no slot selected, and only a tool change or a load selects one
   (`mmu2_mk4.cpp:155, 175, 674, 869-871, 913, 1013`). A power-panic resume
   is a boot, and the power-panic data holds nothing about the slot (F45).
-  The resume's 8 mm feed back, 3.5 s after the boot, counts on slot 0
-  while the MMU still connects, else on none. The resumed print counts on
+  The resume's 8 mm feed back counts on slot 0 while the MMU still
+  connects, else on none. The resumed print counts on
   slot 0 until the MMU is Active, whichever slot prints, then on none. Its
   next tool change runs from no slot: the old slot's wipe-tower unload,
   before the `T`, counts on slot 0 or on none, the firmware's feed counts
@@ -818,9 +818,12 @@ panic (F38 to F46). The MMU's scenario rows are T12 to T17.
   to slot 0's spool while the MMU connects, whichever slot printed, and
   isn't charged at all after. A resumed one-color print is charged nothing
   after its first seconds. In the simulator, with the MMU connecting for
-  10 s, a print cut in slot 1's segment counts 35.5 mm on slot 0 after the
-  boot, the 8 mm feed back and 27.5 mm of slot 1's filament, and nothing
-  on slot 1 to the print's end.
+  10 s and the test's print at 5 mm/s, a print cut in slot 1's segment
+  counts 35.5 mm commanded, 33.7 counted, on slot 0 after the boot, and
+  nothing on slot 1 to the print's end. That's the 8 mm feed back, 3.5 s
+  after the boot in the simulator's timing (its 1.5 s window and 2 s
+  recovery), and the 27.5 mm slot 1 prints from the print's restart, 4.5 s
+  after the boot, until the MMU is Active.
 - **Evidence**: Read in the firmware source; shown in the simulator by
   `test_an_mmu_print_resumed_after_a_cut_is_charged_nothing_until_a_tool_change`
   and `test_the_resume_feed_back_lands_on_slot_0_while_the_mmu_connects`
