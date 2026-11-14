@@ -241,9 +241,11 @@ that trace. The points that matter for the bridge, in short:
   change isn't an unload; the incoming tool gets a purge. Neither stores
   UUIDs, so `M865.1` does nothing there. Disabled tools don't appear in
   `/api/v1/filament`.
-- A model's feed system, direct or toolchanger, holds the rules that differ
-  between the two (`feed.py`). The XL and INDX models are toolchangers, and
-  the rest are direct. The feed system says whether `select_tool` can pick a
+- A model's feed system, direct, XL or INDX, holds the rules that differ
+  between them (`feed.py`). The XL and INDX feed systems are the two
+  toolchangers, and the rest of the models are direct. `ModelInfo.feed` names
+  the system, and `script/firmware-check` compares it with the build's
+  `HAS_TOOLCHANGER` and `HAS_INDX`. The feed system says whether `select_tool` can pick a
   tool, whether the preview's tools-mapping screen applies, what a
   print's tool change does, which tool a move counts on, and which tool's
   sensor the idle sensor clear reads.

@@ -251,6 +251,8 @@ class ModelInfo:
     # (`PrinterModelInfo::current`), so each model has its own entry's group.
     group: str = field(kw_only=True)
     checks: GCodeChecks = field(kw_only=True)  # its build's
+    # Its feed system: XL on HAS_TOOLCHANGER builds, INDX on HAS_INDX ones, else direct.
+    feed: Feed = field(default=Feed.DIRECT, kw_only=True)
 
     def holds_uuid(self, tool: int) -> bool:
         """Whether `tool` keeps tag UUIDs: tool 0 of a model with a tag reader (F21).
@@ -259,13 +261,6 @@ class ModelInfo:
         Core One L build `M865.1` and the tag reader.
         """
         return self.uuids and tool == UUID_TOOL
-
-    @property
-    def feed(self) -> Feed:
-        """The build's feed system. The `HAS_TOOLCHANGER` builds, XL and INDX, are exactly
-        the ones with more than one tool (`ProjectOptions.cmake`), and `script/firmware-check`
-        compares `max_tools`, so it covers this too."""
-        return Feed.TOOLCHANGER if self.max_tools > 1 else Feed.DIRECT
 
     def preset_temperatures(self, name: str) -> dict[str, int]:
         """Return the temperatures a material named `name` starts from, as `Material`
@@ -334,10 +329,24 @@ MODELS = _models(
         checks=PLAIN_CHECKS,
     ),
     ModelInfo(
-        "3.1.0", "XL", XL_EXTRUDER, LOAD_CELL_PRESETS, max_tools=5, group="xl", checks=XL_CHECKS
+        "3.1.0",
+        "XL",
+        XL_EXTRUDER,
+        LOAD_CELL_PRESETS,
+        max_tools=5,
+        group="xl",
+        checks=XL_CHECKS,
+        feed=Feed.XL,
     ),
     ModelInfo(
-        "3.1.1", "XLP", XL_EXTRUDER, LOAD_CELL_PRESETS, max_tools=5, group="xls", checks=XL_CHECKS
+        "3.1.1",
+        "XLP",
+        XL_EXTRUDER,
+        LOAD_CELL_PRESETS,
+        max_tools=5,
+        group="xls",
+        checks=XL_CHECKS,
+        feed=Feed.XL,
     ),
     ModelInfo(
         "5.1.0",
@@ -349,6 +358,7 @@ MODELS = _models(
         power_panic=False,
         group="xl",
         checks=PLAIN_CHECKS,
+        feed=Feed.XL,
     ),
     ModelInfo("4.1.0", "iX", IX_EXTRUDER, LOAD_CELL_PRESETS, group="ix", checks=IX_CHECKS),
     ModelInfo(
@@ -390,6 +400,7 @@ MODELS = _models(
         max_tools=8,
         group="coreone_indx",
         checks=INDX_CHECKS,
+        feed=Feed.INDX,
     ),
     ModelInfo(
         "8.10.0",
@@ -400,6 +411,7 @@ MODELS = _models(
         max_tools=8,
         group="coreonel_indx",
         checks=INDX_CHECKS,
+        feed=Feed.INDX,
     ),
 )
 

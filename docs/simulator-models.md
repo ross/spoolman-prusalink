@@ -104,8 +104,10 @@ firmware update.
   sensor; each tool has its own path. A print is a list of (tool, mm)
   segments with a fixed purge at each tool change. Picking a tool can
   trigger the idle sensor clear. A tool can be disabled.
-- The model's feed system, direct or toolchanger, holds the rules that
-  differ between the two. The printer's selected tool can be none, which
+- The model's feed system, direct, XL or INDX, holds the rules that
+  differ between them. `ModelInfo.feed` names it, and
+  `script/firmware-check` compares it with `HAS_TOOLCHANGER` and
+  `HAS_INDX`. The printer's selected tool can be none, which
   stands for a toolchanger with no tool picked: then no filament moves or
   counts, the idle sensor clear doesn't run, and the end of a print neither
   retracts nor auto-retracts. Nothing leaves it none yet.
@@ -314,7 +316,8 @@ hand-copied data that `script/firmware-check` compares with the source:
 - The preset table for its build.
 - The G-code names it accepts as its own and in compatibility mode, and the
   features a file must declare.
-- Its feed system (below), and whether it can take an MMU.
+- Its feed system (below): direct, XL or INDX. And whether it can take an
+  MMU.
 
 `Settings` keeps times and rates. Its load lengths become overrides: unset
 means the model's value. The `firmware` package gains readers for the new
@@ -351,8 +354,8 @@ when, which tool a move credits, what a tool change moves, and which tool
 the idle sensor clear reads, if any. What counts an unload isn't one of
 them: the firmware counts any write of "none" over a stored type
 (`store_definition.cpp:258-262`). An MMU counts fewer only because its
-operations don't write "none". There are three: direct, toolchanger and
-MMU. The model's profile names its system, and a printer's config turns the
+operations don't write "none". There are four: direct, the XL and INDX
+toolchangers, and MMU. The model's profile names its system, and a printer's config turns the
 MMU on.
 
 ### The preview

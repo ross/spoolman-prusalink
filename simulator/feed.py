@@ -1,6 +1,7 @@
-"""Feed systems: the rules that differ between a direct-drive printer and a toolchanger.
+"""Feed systems: the rules that differ between a direct-drive printer and the toolchangers.
 
-A model's feed system follows from its build. Each system is a stateless singleton in
+A model's feed system follows from its build: `ModelInfo.feed`, which `script/firmware-check`
+compares with `HAS_TOOLCHANGER` and `HAS_INDX`. Each system is a stateless singleton in
 `FEED_SYSTEMS`, so snapshots and `asdict` never see it. `model` holds the state the rules
 act on, and `SimPrinter.feed` picks the printer's system.
 """
@@ -17,7 +18,8 @@ if TYPE_CHECKING:
 
 class Feed(StrEnum):
     DIRECT = "direct"
-    TOOLCHANGER = "toolchanger"
+    XL = "xl"  # HAS_TOOLCHANGER without HAS_INDX: the XL's Dwarf heads
+    INDX = "indx"  # HAS_INDX: the Core One INDX and Core One L INDX
 
 
 class FeedSystem:
@@ -68,4 +70,16 @@ class Toolchanger(FeedSystem):
     tool_mapping = True
 
 
-FEED_SYSTEMS: dict[Feed, FeedSystem] = {Feed.DIRECT: Direct(), Feed.TOOLCHANGER: Toolchanger()}
+class XlToolchanger(Toolchanger):
+    """The XL: a Dwarf head per tool (`toolchanger_xl.cpp`)."""
+
+
+class IndxToolchanger(Toolchanger):
+    """INDX: tools picked from docks onto one head (`toolchanger_indx.cpp`)."""
+
+
+FEED_SYSTEMS: dict[Feed, FeedSystem] = {
+    Feed.DIRECT: Direct(),
+    Feed.XL: XlToolchanger(),
+    Feed.INDX: IndxToolchanger(),
+}

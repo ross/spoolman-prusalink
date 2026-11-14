@@ -182,7 +182,7 @@ table for every model. Each simulator model keeps its build's presets and extrud
 numbers: steps per mm, filament change lengths, ramming sequences, the nozzle cleaner's
 purge, the auto-retract's fully-retracted threshold, whether it can unload cold, the
 purge before an unload, and the power-panic resume's purge. It also keeps its G-code compatibility group, whether its build
-has a compatibility mode, whether its build has power panic, and the `M862.6` feature names its build knows. The simulator
+has a compatibility mode, whether its build has power panic, its feed system (direct, XL or INDX), and the `M862.6` feature names its build knows. The simulator
 also lists the flexible presets, every G-code model name with its group, and the shortest
 purge a load runs. `firmware/compare.py` itself keeps each build's main board, which its
 board macros follow.
