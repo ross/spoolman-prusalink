@@ -66,17 +66,17 @@ def test_indx_doesnt_auto_retract_after_the_purge():
     sim.tick(p.settings.recover_seconds + 0.01)
     t = p.tools[0]
     # The purge leaves the filament at the nozzle, gap 0, with no distance stored.
-    assert (t.gap, t.gap_valid, t.auto_retracted) == (0.0, True, None)
+    assert (t.path.gap, t.path.gap_valid, t.path.auto_retracted) == (0.0, True, None)
     assert job_log(sim)[-1:] == ["nozzle clean purged 25 mm"]
 
 
 def test_the_cut_forgets_a_stored_auto_retract():
     sim, p = printing()
-    p.tools[0].auto_retracted = 20.0
+    p.tools[0].path.auto_retracted = 20.0
     p.reboot(keep_job=True)
     t = p.tools[0]
     # Kept, the boot would have set gap 20, and the 8 mm fed back would count nothing.
-    assert (t.auto_retracted, t.gap, t.gap_valid) == (None, 0.0, False)
+    assert (t.path.auto_retracted, t.path.gap, t.path.gap_valid) == (None, 0.0, False)
     sim.tick(p.settings.recover_seconds + 0.01)
     assert p.state is State.PAUSED and t.extruded == pytest.approx(FED_BACK)
 
@@ -97,10 +97,10 @@ def test_a_cold_bed_feeds_back_once():
 def test_a_paused_print_moves_nothing_at_the_cut(model):
     sim, p = printing(model)
     p.pause()
-    p.tools[0].auto_retracted = 20.0
+    p.tools[0].path.auto_retracted = 20.0
     p.reboot(keep_job=True)
     t = p.tools[0]
-    assert p.state is State.PAUSED and t.extruded == 0 and t.auto_retracted == 20.0
+    assert p.state is State.PAUSED and t.extruded == 0 and t.path.auto_retracted == 20.0
     p.resume()
     assert p.state is State.PRINTING
     assert not any(s.startswith(("fed back", "nozzle clean")) for s in job_log(sim))
@@ -114,6 +114,6 @@ def test_an_empty_tool_still_counts(model, counted):
     p.set_power("off")
     p.unload(0)  # pulled out by hand while off
     p.set_power("on", resume=True)
-    assert not p.tools[0].loaded
+    assert not p.tools[0].path.loaded
     sim.tick(p.settings.recover_seconds + 0.01)
     assert p.state is State.PAUSED and p.tools[0].extruded == pytest.approx(counted)

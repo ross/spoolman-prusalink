@@ -37,7 +37,7 @@ def idle_loaded(model: str, name: str = "PLA", **settings):
     sim, p = make(model, [SimTool(0)], **settings)
     p.load(0, source="preset", name=name)
     sim.advance(100)
-    assert p.tools[0].loaded and p.tools[0].process is None
+    assert p.tools[0].path.loaded and p.tools[0].process is None
     return sim, p
 
 
@@ -50,13 +50,13 @@ def counted(p, action) -> float:
 
 def tracker(p) -> tuple[float, bool, float | None]:
     t = p.tools[0]
-    return t.gap, t.gap_valid, t.auto_retracted
+    return t.path.gap, t.path.gap_valid, t.path.auto_retracted
 
 
 def unload(sim, p) -> None:
     p.unload(0)
     sim.advance(10)
-    assert not p.tools[0].loaded and p.tools[0].unload_count == 1
+    assert not p.tools[0].path.loaded and p.tools[0].unload_count == 1
 
 
 # The idle load.
@@ -251,7 +251,7 @@ def test_a_change_with_the_tracker_lost_resumes_at_gap_0(lost):
     sim.advance(100)
     # MK4S reload from gap 40: 30 slow (gap 10), 50 fast (gap 0), the 27 mm purge, the
     # 8 mm retract (gap 8), the 4 mm prime (gap 4) and the 8 mm retract: gap 12.
-    assert p.tools[0].gap == pytest.approx(12)
+    assert p.tools[0].path.gap == pytest.approx(12)
     p.resume()  # back to gap 0: 12 fed, nothing counts
     assert tracker(p) == (0, True, None)
 
@@ -442,7 +442,7 @@ def test_indx_unloads_a_cleared_flexible_tool_with_its_flexible_sequence():
     sim.tick(1)
     sim.tick(1)
     p.set_sensor_fault(0, False)
-    assert p.tools[0].loaded and p.tools[0].material is None
+    assert p.tools[0].path.loaded and p.tools[0].material is None
     # The 2 mm purge counts, and the flexible ramming only retracts: 2 * 550 / 576 = 1.91.
     # The standard ramming would add its 17: 19 * 550 / 576 = 18.14.
     before = p.tools[0].extruded

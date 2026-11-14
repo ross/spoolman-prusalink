@@ -152,10 +152,11 @@ that trace. The points that matter for the bridge, in short:
   MK3.5, and the PA temperatures on the MINI. A menu load of a preset the
   build lacks answers 400, and an `M865` preset write of one stores nothing.
 - Every filament move counts as the firmware's filament tracker counts it.
-  A retract grows the tool's gap up to the model's limit, 40 mm or 27 mm on
-  INDX. A feed fills the gap first, and what goes past it counts times the
-  model's feed ratio: 380/400 steps, or 550/576 on INDX. This covers prints,
-  loads, purges and manual moves.
+  Each tool has a filament path, which holds its gap, its stored
+  auto-retract distance and its sensor. A retract grows the path's gap up to
+  the model's limit, 40 mm or 27 mm on INDX. A feed fills the gap first, and
+  what goes past it counts times the model's feed ratio: 380/400 steps, or
+  550/576 on INDX. This covers prints, loads, purges and manual moves.
 - A menu load feeds the model's slow and fast lengths with no material
   reported, sets the material, then purges. The purge ends with an 8 mm
   retract, except on the iX and INDX, whose nozzle cleaners end it. A
@@ -171,7 +172,7 @@ that trace. The points that matter for the bridge, in short:
   print's end, and it skips a tool already retracted that far, flexible
   filament, and a printer with `auto_retract = false`. The next forward move
   feeds the stored distance back first. At boot, the stored distance sets
-  the tool's gap; with nothing stored, the gap starts at 0 and the tracker
+  the path's gap; with nothing stored, the gap starts at 0 and the tracker
   reports no retracted distance until a feed reaches the nozzle. A Nextruder print's end counts 23
   mm; an INDX print's end counts nothing, because the 8 mm park retract
   already counts as retracted. The MINI, MK3.5 and the dev kit don't
@@ -320,7 +321,7 @@ Choices made where the firmware was silent or the plan left it open:
   tools-mapping screen is up isn't modeled: the simulator reports no
   temperatures.
 - A tool is used when a segment names it; the firmware reads the file's
-  `filament used [g]`. The filament sensor is the tool's `loaded` flag, so a
+  `filament used [g]`. The filament sensor is the path's `loaded` flag, so a
   sensor fault doesn't raise the filament question.
 - The preview's load is the user's choice of what to load. The firmware
   loads the file's type when it knows the name and asks otherwise. The

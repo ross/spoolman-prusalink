@@ -10,6 +10,7 @@ from simulator.model import (
     PHASE_STATES,
     Attention,
     Busy,
+    FilamentPath,
     Invalid,
     JobPhase,
     PrintSpec,
@@ -120,9 +121,9 @@ def test_loading_by_hand_while_off():
     sim, p = make(tools=[SimTool(0)])
     p.set_power("off")
     p.load(0, source="preset", name="PLA")
-    assert tool0(p).loaded and tool0(p).material.name == "PLA"
+    assert tool0(p).path.loaded and tool0(p).material.name == "PLA"
     p.unload(0)
-    assert not tool0(p).loaded and tool0(p).gap == p.model.gap_mm
+    assert not tool0(p).path.loaded and tool0(p).path.gap == p.model.gap_mm
     with pytest.raises(Invalid, match="no filament"):
         p.unload(0)
 
@@ -137,7 +138,7 @@ def test_loading_by_hand_while_off_during_a_process_is_refused():
     sim2, q = make()
     q.unload(0)
     q.set_power("off")
-    q.tools[0].loaded = True
+    q.tools[0].path.loaded = True
     with pytest.raises(Busy, match="already running"):
         q.unload(0)
 
@@ -147,7 +148,7 @@ def test_a_runout_reload_by_hand_while_off_restores_the_kept_type():
     p.runout(0)
     p.set_power("off")
     p.load(0)
-    assert tool0(p).loaded and tool0(p).gap == 0
+    assert tool0(p).path.loaded and tool0(p).path.gap == 0
     assert (tool0(p).material.name, tool0(p).material.instance_uuid) == ("PLA", PLA.instance_uuid)
 
 
@@ -203,7 +204,7 @@ def test_runout_and_jam_need_a_print_with_a_loaded_selected_tool():
     with pytest.raises(Busy, match="needs a print in progress"):
         p.runout(0)
     sim, p = printing()
-    p.tools[0].loaded = False
+    p.tools[0].path.loaded = False
     with pytest.raises(Busy, match="T0 has no filament"):
         p.jam(0)
     p.set_power("off")
@@ -328,6 +329,32 @@ def test_to_json_reports_an_unload_in_progress():
     assert process["remaining_s"] == pytest.approx(p.settings.unload_seconds - 1)
 
 
+TOOL_KEYS = {
+    "index",
+    "enabled",
+    "loaded",
+    "material",
+    "previous",
+    "kept_type",
+    "extruded",
+    "unload_count",
+    "extruded_at_unload",
+    "gap",
+    "gap_valid",
+    "auto_retracted",
+    "sensor_fault",
+    "stuck_write",
+    "process",
+}
+
+
+def test_a_tool_reports_and_snapshots_its_path_flat():
+    # The page and saved snapshots read the path's fields at the tool's level.
+    sim, p = make()
+    assert set(p.to_json()["tools"][0]) == TOOL_KEYS | {"actions"}
+    assert set(sim.snapshot()["printers"][0]["tools"][0]) == TOOL_KEYS
+
+
 def test_snapshot_mid_unload_finishes_the_unload():
     sim, p = make()
     p.unload(0)
@@ -337,7 +364,7 @@ def test_snapshot_mid_unload_finishes_the_unload():
     q = other.printers["p"]
     assert q.tools[0].process is not None and q.state is State.BUSY
     other.tick(10)
-    assert q.state is State.IDLE and not q.tools[0].loaded and q.tools[0].unload_count == 1
+    assert q.state is State.IDLE and not q.tools[0].path.loaded and q.tools[0].unload_count == 1
 
 
 def test_snapshot_while_paused_keeps_where_the_print_paused_from():
@@ -383,7 +410,7 @@ def test_restore_rejects_bad_settings_and_changes_nothing():
 
 
 def test_select_tool_while_off_changes_the_pick_without_touching_the_sensor():
-    sim, p = make("3.1.0", [loaded(0), loaded(1, sensor_fault=True)])
+    sim, p = make("3.1.0", [loaded(0), loaded(1, path=FilamentPath(sensor_fault=True))])
     p.set_power("off")
     p.select_tool(1)
     assert p.selected_tool == 1
@@ -391,7 +418,7 @@ def test_select_tool_while_off_changes_the_pick_without_touching_the_sensor():
 
 
 def test_select_tool_while_on_counts_a_faulty_sensor_as_an_unload():
-    sim, p = make("3.1.0", [loaded(0), loaded(1, sensor_fault=True)])
+    sim, p = make("3.1.0", [loaded(0), loaded(1, path=FilamentPath(sensor_fault=True))])
     p.select_tool(1)
     assert p.selected_tool == 1
     assert p.tools[1].unload_count == 1 and p.tools[1].material is None
@@ -514,4 +541,4 @@ def test_a_reload_by_hand_with_no_type_to_restore_still_loads_the_tool():
     assert tool.kept() is None
     p.set_power("off")
     p.load(0)
-    assert tool.loaded and tool.material is None
+    assert tool.path.loaded and tool.material is None

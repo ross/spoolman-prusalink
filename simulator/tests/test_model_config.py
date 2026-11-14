@@ -40,7 +40,7 @@ def test_tool_with_color_and_uuid_is_adhoc(tmp_path):
     )
     p = sim_from(tmp_path, text).printers["p"]
     t = p.tools[0]
-    assert (t.loaded, t.enabled, t.extruded, t.unload_count) == (True, True, 4310.5, 2)
+    assert (t.path.loaded, t.enabled, t.extruded, t.unload_count) == (True, True, 4310.5, 2)
     assert t.extruded_at_unload == 4000
     # A color or UUID can only come from an ad-hoc type, which also fills the ad-hoc slot.
     assert t.material == Material(
@@ -58,13 +58,13 @@ def test_bare_name_is_a_preset(tmp_path):
     p = sim_from(tmp_path, printer(tool('index = 0\nmaterial = { name = "ASA" }'))).printers["p"]
     t = p.tools[0]
     assert t.material == Material("ASA", None, None, False, **p.model.preset_temperatures("ASA"))
-    assert t.loaded and t.previous is None
+    assert t.path.loaded and t.previous is None
     assert shown(p) == {"name": "ASA"}
 
 
 def test_tool_without_material_is_empty(tmp_path):
     t = sim_from(tmp_path, printer()).printers["p"].tools[0]
-    assert (t.loaded, t.material, t.previous, t.extruded) == (False, None, None, 0.0)
+    assert (t.path.loaded, t.material, t.previous, t.extruded) == (False, None, None, 0.0)
 
 
 def test_firmware_defaults_by_model(tmp_path):

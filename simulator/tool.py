@@ -335,16 +335,17 @@ class UnloadProcess:
 
 
 @dataclass
-class SimTool:
-    index: int
-    enabled: bool = True
+class FilamentPath:
+    """The physical filament path to a nozzle: whether filament is in it, where it is, and
+    its sensor.
+
+    The firmware keeps the tracker's gap and the auto-retract's stored distance per hotend,
+    and the extruded distance per tool (`filament_tracker.hpp`; `filament_retracted_distances`
+    in `store_definition.hpp` is indexed by `PhysicalToolIndex`). So the path holds the
+    first two, and the tool keeps its counters.
+    """
+
     loaded: bool = False
-    material: Material | None = None
-    previous: Material | None = None  # the ad-hoc slot: the last ad-hoc material written
-    kept_type: Material | None = None  # the type the last unload left, for a runout reload
-    extruded: float = 0.0
-    unload_count: int = 0
-    extruded_at_unload: int = 0
     # The firmware's filament tracker: how far the filament is retracted from the nozzle,
     # and whether it trusts that distance (`filament_tracker.cpp`).
     gap: float = 0.0
@@ -353,8 +354,25 @@ class SimTool:
     # known not to be retracted (`auto_retract.cpp`).
     auto_retracted: float | None = None
     sensor_fault: bool = False
+
+
+@dataclass
+class SimTool:
+    """A tool as `/api/v1/filament` lists it: its stored type, its counters, and the process
+    running on it. The filament itself is in its `path`."""
+
+    index: int
+    enabled: bool = True
+    material: Material | None = None
+    previous: Material | None = None  # the ad-hoc slot: the last ad-hoc material written
+    kept_type: Material | None = None  # the type the last unload left, for a runout reload
+    extruded: float = 0.0
+    unload_count: int = 0
+    extruded_at_unload: int = 0
     stuck_write: bool = False
+    # One process per printer, and a load types one tool, so the process stays on the tool.
     process: LoadProcess | UnloadProcess | None = None
+    path: FilamentPath = field(default_factory=FilamentPath)
 
     # The stored type, the ad-hoc slot and the kept type change only through these methods.
 
@@ -373,8 +391,9 @@ class SimTool:
         model: a tool that has fed since its last auto-retract. A real idle load would
         leave the model's auto-retract instead, but the tool doesn't know its model.
         """
-        self.loaded = material is not None
-        self.gap, self.gap_valid, self.auto_retracted = 0.0, True, None
+        path = self.path
+        path.loaded = material is not None
+        path.gap, path.gap_valid, path.auto_retracted = 0.0, True, None
         self.store(material)
 
     def store(self, material: Material | None) -> None:
@@ -395,7 +414,7 @@ class SimTool:
         `store_definition.cpp`).
         """
         self.kept_type, self.material = self.material, None
-        self.auto_retracted = None
+        self.path.auto_retracted = None
 
     def kept(self) -> Material | None:
         """The type a load without a source restores: the one the unload left, else the slot."""
