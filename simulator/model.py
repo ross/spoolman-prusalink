@@ -28,6 +28,7 @@ from simulator.compatibility import (
     XL_CHECKS,
     GCodeChecks,
 )
+from simulator.feed import FEED_SYSTEMS, Feed, FeedSystem
 from simulator.preview import (
     Failed,
     Severity,
@@ -43,6 +44,7 @@ from simulator.tool import (
     CORE_ONE_PRESETS,
     DEFAULT_TEMPERATURES,
     DERETRACT_STEP,
+    EPSILON,
     INDX_EXTRUDER,
     INDX_PRESETS,
     IX_EXTRUDER,
@@ -59,6 +61,7 @@ from simulator.tool import (
     XL_DEV_KIT_EXTRUDER,
     XL_EXTRUDER,
     Extruder,
+    FilamentPath,
     LoadProcess,
     LoadStep,
     Material,
@@ -73,7 +76,6 @@ from simulator.tool import (
 
 EVENT_LIMIT = 2000
 SNAPSHOT_NAME = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
-EPSILON = 1e-9
 # The shortest purge a load runs, whatever the override: `minimal_purge` in
 # `src/marlin_stubs/include/pause_settings.hpp`. `script/firmware-check` compares it with
 # the firmware source.
@@ -254,6 +256,13 @@ class ModelInfo:
         Core One L build `M865.1` and the tag reader.
         """
         return self.uuids and tool == UUID_TOOL
+
+    @property
+    def feed(self) -> Feed:
+        """The build's feed system. The `HAS_TOOLCHANGER` builds, XL and INDX, are exactly
+        the ones with more than one tool (`ProjectOptions.cmake`), and `script/firmware-check`
+        compares `max_tools`, so it covers this too."""
+        return Feed.TOOLCHANGER if self.max_tools > 1 else Feed.DIRECT
 
     def preset_temperatures(self, name: str) -> dict[str, int]:
         """Return the temperatures a material named `name` starts from, as `Material`
@@ -620,7 +629,9 @@ class SimPrinter:
     screen: State = State.IDLE
     job: UserJob | SyncJob | None = None
     job_counter: int = 0
-    selected_tool: int = 0
+    # The picked tool, or None for a toolchanger with no tool picked: then no filament moves
+    # and the idle sensor clear doesn't run (`SimPrinter.feed`).
+    selected_tool: int | None = 0
     message: str | None = None
     homed: bool = False
     # How the print preview treats a failed check that a setting governs: the firmware has
@@ -650,6 +661,11 @@ class SimPrinter:
             return State.BUSY
         return self.screen
 
+    @property
+    def feed(self) -> FeedSystem:
+        """The rules of the model's feed system."""
+        return FEED_SYSTEMS[self.model.feed]
+
     # Plumbing.
 
     @property
@@ -669,70 +685,56 @@ class SimPrinter:
         auto-retract hook in `Planner::buffer_segment`
         (`lib/Marlin/Marlin/src/module/planner.cpp`). Every move the simulator makes goes
         through here.
+
+        With no tool picked nothing moves: a toolchanger can't move E without a tool, and
+        the hook needs one too (`bsod("E move without tool")` and `currently_selected()` in
+        the same function).
         """
+        if self.feed.credited(self, tool) is None:
+            return
         if mm > 0:
             self._deretract(tool)
         elif mm < 0:
-            tool.auto_retracted = None
+            tool.path.auto_retracted = None
         self._count(tool, mm)
 
     def _count(self, tool: SimTool, mm: float) -> None:
-        """Count a move as the firmware's filament tracker does.
-
-        A retract grows the gap up to the model's limit, a feed fills it first, and only what
-        goes past the gap counts, times the feed ratio. The gap becomes valid when it reaches
-        0 and invalid when it reaches the limit (`track_extruder_move` in
-        `src/feature/filament_tracker/filament_tracker.cpp`).
-        """
-        limit = self.model.gap_mm
-        unclamped = tool.gap - mm
-        tool.gap = min(max(unclamped, 0.0), limit)
-        # A move split into ticks can stop a rounding error short of either end.
-        if tool.gap <= EPSILON:
-            tool.gap, tool.gap_valid = 0.0, True
-        elif tool.gap >= limit - EPSILON:
-            tool.gap, tool.gap_valid = limit, False
-        tool.extruded += max(-unclamped, 0.0) * self.feed_ratio
-
-    def _tracked(self, tool: SimTool) -> float:
-        """The tracker's gap when it's valid, else 0 (`get_retracted_distance`)."""
-        return tool.gap if tool.gap_valid else 0.0
+        """Count a move as the firmware's filament tracker does: only what goes past the
+        model's gap counts, times the feed ratio (`FilamentPath.move`). The feed system says
+        which tool it counts on."""
+        credited = self.feed.credited(self, tool)
+        credited.extruded += tool.path.move(mm, self.model.gap_mm) * self.feed_ratio
 
     def _deretract(self, tool: SimTool) -> None:
         """Feed back an auto-retracted distance (`maybe_deretract_to_nozzle`).
 
         On a Nextruder that's 55 mm into a gap that stops at 40, so 15 mm count that never
-        left the nozzle.
+        left the nozzle. It needs a picked tool (`auto_retract.cpp`).
         """
-        stored = tool.auto_retracted
-        if stored:
-            tool.auto_retracted = 0.0
+        stored = tool.path.auto_retracted
+        if stored and self.feed.credited(self, tool) is not None:
+            tool.path.auto_retracted = 0.0
             self._count(tool, stored)
             self._log("load", f"T{tool.index} deretracted {stored:g} mm")
-
-    def _fully_retracted(self, tool: SimTool) -> bool:
-        """`AutoRetract::is_fully_retracted`: the stored distance reaches the threshold."""
-        stored = tool.auto_retracted
-        return stored is not None and stored >= self.model.extruder.full_retract_mm
 
     def _retract_to(self, tool: SimTool, target: float) -> None:
         """Retract until the filament is `target` mm back, unless it already is
         (`mapi::retract_to` in `src/common/mapi/motion.cpp`)."""
-        stored = tool.auto_retracted or 0.0
+        stored = tool.path.auto_retracted or 0.0
         if stored >= target:
             return
         # A stored distance counts as retracted; the retract then forgets it.
-        current = stored or self._tracked(tool)
+        current = stored or tool.path.tracked()
         if target - current > EPSILON:
             self._track(tool, current - target)
 
     def _restore_to(self, tool: SimTool, target: float) -> None:
         """Move the filament to `target` mm back, feeding or retracting
         (`mapi::restore_retracted_distance` in `src/common/mapi/motion.cpp`)."""
-        stored = tool.auto_retracted or 0.0
-        current = stored or self._tracked(tool)
+        stored = tool.path.auto_retracted or 0.0
+        current = stored or tool.path.tracked()
         # The move takes a stored distance over, so a feed doesn't deretract it again.
-        tool.auto_retracted = None if stored else tool.auto_retracted
+        tool.path.auto_retracted = None if stored else tool.path.auto_retracted
         if abs(target - current) > EPSILON:
             self._track(tool, current - target)
 
@@ -767,7 +769,7 @@ class SimPrinter:
         sequence = ex.ramming.get("auto_retract")
         if (
             sequence is None
-            or self._fully_retracted(tool)
+            or tool.path.fully_retracted(ex.full_retract_mm)
             or (ex.auto_retract_switchable and not self.auto_retract)
             or self._flexible(tool)
         ):
@@ -784,8 +786,8 @@ class SimPrinter:
         """
         ex = self.model.extruder
         unload = ex.lengths.unload_mm
-        if ex.auto_retracts and ex.cold_unload and self._fully_retracted(tool):
-            return [LoadStep("UNLOAD", -max(unload - (tool.auto_retracted or 0.0), 0.0))]
+        if ex.auto_retracts and ex.cold_unload and tool.path.fully_retracted(ex.full_retract_mm):
+            return [LoadStep("UNLOAD", -max(unload - (tool.path.auto_retracted or 0.0), 0.0))]
         sequence = self._sequence(case, tool)
         return [
             LoadStep("PURGE", ex.unload_purge_mm),
@@ -811,9 +813,9 @@ class SimPrinter:
                 steps[:0] = self._auto_retract_steps(tool)
             elif step.phase == DERETRACT_STEP:
                 self._deretract(tool)
-                self._track(tool, self._tracked(tool))
+                self._track(tool, tool.path.tracked())
             else:  # RETRACTED_STEP
-                tool.auto_retracted = step.mm
+                tool.path.auto_retracted = step.mm
                 self._log(
                     "load",
                     f"T{tool.index} auto-retracted {step.mm:g} mm: extruded {int(tool.extruded)}",
@@ -933,13 +935,12 @@ class SimPrinter:
 
     def _physical_unload(self, tool: SimTool, why: str) -> None:
         self._count_unload(tool, why)
-        tool.loaded = False
-        tool.gap, tool.gap_valid, tool.auto_retracted = self.model.gap_mm, False, None
+        tool.path.empty(self.model.gap_mm)
 
     def _idle_sensor_clear(self, tool: SimTool, *, sensor_fault_counts: bool) -> None:
         if not self.sensors:
             return
-        empty = not tool.loaded or (sensor_fault_counts and tool.sensor_fault)
+        empty = not tool.path.loaded or (sensor_fault_counts and tool.path.sensor_fault)
         if tool.material is not None and empty:
             self._count_unload(tool, "idle sensor clear")
 
@@ -1069,7 +1070,7 @@ class SimPrinter:
     def _hand_load(self, t: SimTool, material: Material | None) -> None:
         # Filament goes in even when there's no type to restore.
         t.store(t.kept() if material is None else material)
-        t.loaded, t.gap = True, 0.0
+        t.path.loaded, t.path.gap = True, 0.0
         self._log("load", f"T{t.index} loaded by hand while off: {describe(t.material)}")
 
     def unload(self, tool: int) -> None:
@@ -1078,7 +1079,7 @@ class SimPrinter:
         self._check_unload(t)
         if self.power is Power.OFF:
             self._log("action", f"unload T{tool} by hand while off")
-            t.loaded, t.gap = False, self.model.gap_mm
+            t.path.loaded, t.path.gap = False, self.model.gap_mm
             return
         self._log("action", f"unload T{tool}")
         steps = self._unload_steps(t, "unload")
@@ -1101,15 +1102,16 @@ class SimPrinter:
     def retract(self, tool: int, mm: float) -> None:
         t, mm = self._manual_move(tool, mm)
         self._track(t, -mm)
-        self._log("action", f"retract T{tool} {mm:g} mm: gap {t.gap:g}")
+        self._log("action", f"retract T{tool} {mm:g} mm: gap {t.path.gap:g}")
 
     def select_tool(self, tool: int) -> None:
         t = self._tool(tool)
         self._check_select(t)
         self.selected_tool = tool
         self._log("action", f"select T{tool}")
-        if self.power is not Power.OFF:
-            self._idle_sensor_clear(t, sensor_fault_counts=True)
+        cleared = self.feed.idle_clear_tool(self)
+        if self.power is not Power.OFF and cleared is not None:
+            self._idle_sensor_clear(cleared, sensor_fault_counts=True)
 
     # Actions on prints.
 
@@ -1220,7 +1222,7 @@ class SimPrinter:
             return
         t.process = None
         if isinstance(p, LoadProcess) and p.typed:
-            t.loaded = True
+            t.path.loaded = True
         self._log("load", f"T{t.index} {p.kind} stopped by the cancel")
 
     def dismiss(self) -> None:
@@ -1261,7 +1263,7 @@ class SimPrinter:
         # The filament change records the tracker's distance, parks with a retract, then
         # rams and unloads (`Pause::filament_change` and `park_nozzle_and_notify` in
         # `src/marlin_stubs/pause/pause.cpp`).
-        job.restore_gap = self._tracked(t)
+        job.restore_gap = t.path.tracked()
         self._retract_to(t, self.model.extruder.lengths.retract_mm)
         self._run_steps(t, self._unload_steps(t, "runout"))
         self._physical_unload(t, str(reason))
@@ -1308,23 +1310,12 @@ class SimPrinter:
         for t in self.tools.values():
             t.extruded, t.unload_count, t.extruded_at_unload = 0.0, 0, 0
             t.process = None
-            self._boot_tracker(t)
+            t.path.boot(self.model.gap_mm)
         self.homed, self.message = False, None
         self._log("boot", f"boot id {self.boot_id}")
-        selected = self.tools.get(self.selected_tool)
+        selected = self.feed.idle_clear_tool(self)
         if idle_clear and selected is not None:
             self._idle_sensor_clear(selected, sensor_fault_counts=False)
-
-    def _boot_tracker(self, t: SimTool) -> None:
-        """The tracker starts at gap 0 and invalid; a stored auto-retract distance then sets
-        it, valid below the gap's limit (`marlin_server::init` and
-        `FilamentTracker::assume_retracted_distance`). The stored distance survives."""
-        stored = t.auto_retracted
-        if stored is None:
-            t.gap, t.gap_valid = 0.0, False
-            return
-        t.gap = min(max(stored, 0.0), self.model.gap_mm)
-        t.gap_valid = t.gap != self.model.gap_mm
 
     def reboot(self, *, keep_job: bool = False, cold_bed: bool = False) -> None:
         """Reboot. With keep_job a print in progress resumes with the same ID (power panic).
@@ -1420,7 +1411,7 @@ class SimPrinter:
         self._log("action", f"firmware {self.firmware}")
 
     def set_sensor_fault(self, tool: int, value: bool) -> None:
-        self._tool(tool).sensor_fault = value
+        self._tool(tool).path.sensor_fault = value
         self._log("action", f"T{tool} sensor fault {'on' if value else 'off'}")
 
     def set_stuck_write(self, tool: int, value: bool) -> None:
@@ -1470,7 +1461,7 @@ class SimPrinter:
             raise Busy("can't load during a print; run the tool out first")
 
     def _check_unload(self, t: SimTool) -> None:
-        if not t.loaded:
+        if not t.path.loaded:
             raise Invalid(f"T{t.index} has no filament")
         if t.process is not None:
             raise Busy("a load or unload is already running")
@@ -1485,11 +1476,11 @@ class SimPrinter:
         self._need_power()
         if self.job is not None or self.state not in IDLE_STATES:
             raise Busy(f"manual moves need an idle printer, not {self.state}")
-        if not t.loaded:
+        if not t.path.loaded:
             raise Invalid(f"T{t.index} has no filament")
 
     def _check_select(self, t: SimTool) -> None:
-        if self.model.max_tools == 1:
+        if not self.feed.selectable:
             raise Invalid(f"{self.model.name} has one tool")
         if self.job is not None or self.state is State.BUSY:
             raise Busy(f"can't pick a tool while {self.state}")
@@ -1502,7 +1493,7 @@ class SimPrinter:
         # Only the picked tool feeds, so only its sensor can see a runout or a jam.
         if t.index != self.selected_tool:
             raise Invalid(f"T{t.index} isn't the selected tool")
-        if not t.loaded:
+        if not t.path.loaded:
             raise Busy(f"T{t.index} has no filament")
 
     def _check_sensor_runout(self, t: SimTool) -> None:
@@ -1620,7 +1611,7 @@ class SimPrinter:
         # The firmware clears the type whenever it isn't printing and the picked tool's sensor
         # reads empty, so a type written to an empty tool shows only until the job ends.
         # `is_printing()` is false on the tools-mapping screen too (`marlin_server.cpp`).
-        t = self.tools.get(self.selected_tool)
+        t = self.feed.idle_clear_tool(self)
         job = self.job
         idle = job is None and self.state in IDLE_STATES
         mapping = job is not None and any(job.waits_for(r) for r in MAPPING_QUESTIONS)
@@ -1656,7 +1647,7 @@ class SimPrinter:
         """Act on the markers that come up, and end the load after its last step."""
         self._settle(t, p.steps, p.material)
         if not p.steps:
-            t.loaded, t.process = True, None
+            t.path.loaded, t.process = True, None
             self._log("load", f"T{t.index} loaded: extruded {int(t.extruded)}")
             self._process_done()
 
@@ -1749,7 +1740,7 @@ class SimPrinter:
 
     def _tool_views(self) -> dict[int, ToolView]:
         # A sensor that's off reads neither filament nor none, so no check fails on it.
-        seen = {i: t.loaded or not self.sensors for i, t in self.tools.items()}
+        seen = {i: t.path.loaded or not self.sensors for i, t in self.tools.items()}
         return {
             i: ToolView(t.enabled, seen[i], t.material.name if t.material else None)
             for i, t in self.tools.items()
@@ -1765,7 +1756,7 @@ class SimPrinter:
 
     def _ask_print(self, job: UserJob) -> None:
         """The "G-code incompatible" screen (`stateFromPrinterCheck`), then the rest."""
-        rows = print_checks(self.model.max_tools, self._uses(job), self._tool_views()).rows
+        rows = print_checks(self.feed.tool_mapping, self._uses(job), self._tool_views()).rows
         if rows:
             self._preview_question(job, Reason.PREVIEW, rows)
         else:
@@ -1779,7 +1770,7 @@ class SimPrinter:
         applies, with nothing wrong too: only a remote start that is fully compatible skips
         it (`checks_done` in `src/common/marlin_print_preview.cpp`).
         """
-        checks = print_checks(self.model.max_tools, self._uses(job), self._tool_views())
+        checks = print_checks(self.feed.tool_mapping, self._uses(job), self._tool_views())
         if checks.mapped:
             job.mapping = self._mapping_report(job, checks.mapping)
             self._wait(job, job.mapping[0])
@@ -1819,7 +1810,7 @@ class SimPrinter:
         """The wrong-filament screen (`stateFromFilamentType`), which a printer with tool
         mapping leaves to its tools-mapping screen."""
         uses, views = self._uses(job), self._tool_views()
-        rows = [] if tool_mapping(self.model.max_tools, uses, views) else wrong_types(uses, views)
+        rows = [] if tool_mapping(self.feed.tool_mapping, uses, views) else wrong_types(uses, views)
         if rows:
             self._preview_question(job, Reason.WRONG_FILAMENT, rows)
         else:
@@ -1856,16 +1847,23 @@ class SimPrinter:
         stores each tool's valid tracker gap as its auto-retracted distance and
         auto-retracts the picked tool, which INDX skips: its 8 mm already counts as fully
         retracted.
+
+        On a toolchanger with no tool picked, the retract and the auto-retract do nothing
+        (`move_to_retracted_distance` in `src/common/mapi/motion.cpp`,
+        `AutoRetract::maybe_retract_from_nozzle` in `src/feature/auto_retract/auto_retract.cpp`),
+        and the valid gaps are still stored: that loop goes over every hotend.
         """
         ex = self.model.extruder
-        t = self.tools[self.selected_tool]
-        self._retract_to(t, ex.lengths.retract_mm)
+        t = None if self.selected_tool is None else self.tools[self.selected_tool]
+        if t is not None:
+            self._retract_to(t, ex.lengths.retract_mm)
         if not ex.auto_retracts:
             return
         for tool in self.tools.values():
-            if tool.gap_valid:
-                tool.auto_retracted = tool.gap
-        self._run_steps(t, [LoadStep(AUTO_RETRACT_STEP)])
+            if tool.path.gap_valid:
+                tool.path.auto_retracted = tool.path.gap
+        if t is not None:
+            self._run_steps(t, [LoadStep(AUTO_RETRACT_STEP)])
 
     def _print_step(self, job: UserJob, dt: float) -> float:
         """Feed for dt, stopping at each segment end and color change. Return the time left."""
@@ -1905,13 +1903,7 @@ class SimPrinter:
         new = segments[job.segment].tool
         if new == old:
             return
-        self.selected_tool = new
-        self._log("job", f"tool change T{old} -> T{new}")
-        # Nothing checks for filament at a pickup, and a runout needs the sensor to go from
-        # filament to none, so an empty tool prints on and counts what it would have fed
-        # (`check_runout` in `src/feature/filament_sensor/filament_sensors_handler.cpp`,
-        # `check_for_events` in `filament_sensor.cpp`).
-        self._track(self.tools[new], self.settings.toolchange_purge_mm)
+        self.feed.tool_change(self, self.tools[old], self.tools[new])
 
     # The sync job.
 
@@ -2019,8 +2011,16 @@ def _refusal(check: Callable[[], None]) -> str | None:
     return None
 
 
-def _tool_json(t: SimTool) -> dict:
+def _tool_dict(t: SimTool) -> dict:
+    """`asdict(t)` with the path's fields at the tool's level, as the page and snapshots
+    have them."""
     out = asdict(t)
+    out.update(out.pop("path"))
+    return out
+
+
+def _tool_json(t: SimTool) -> dict:
+    out = _tool_dict(t)
     p = t.process
     if p is None:
         out["process"] = None
@@ -2052,6 +2052,8 @@ def _process_from(d: dict | None) -> LoadProcess | UnloadProcess | None:
 
 def _tool_from(d: dict) -> SimTool:
     d = dict(d)
+    path = {f.name: d.pop(f.name) for f in fields(FilamentPath) if f.name in d}
+    d["path"] = FilamentPath(**path)
     d["material"] = _material_from(d["material"])
     d["previous"] = _material_from(d["previous"])
     d["kept_type"] = _material_from(d["kept_type"])
@@ -2086,7 +2088,7 @@ def _job_from(d: dict | None) -> UserJob | SyncJob | None:
 def _printer_dict(p: SimPrinter) -> dict:
     d = asdict(p)
     d["model"] = p.model.code
-    d["tools"] = [d["tools"][i] for i in sorted(d["tools"])]
+    d["tools"] = [_tool_dict(p.tools[i]) for i in sorted(p.tools)]
     if p.job is not None:
         d["job"]["kind"] = p.job.kind
     return d

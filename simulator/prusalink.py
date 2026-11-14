@@ -161,7 +161,7 @@ def job(p: SimPrinter) -> dict | None:
 
 def _material(p: SimPrinter, tool: SimTool) -> dict | None:
     m = tool.material
-    if m is None or tool.sensor_fault:
+    if m is None or tool.path.sensor_fault:
         return None
     nozzle, preheat, bed = m.temperatures()
     out: dict[str, Any] = {

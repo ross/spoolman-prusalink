@@ -248,7 +248,7 @@ def _auto_retracted(tool: SimTool) -> None:
     """Leave a Core One L tool as its last auto-retract left it: 55 mm stored, the tracker
     at its 40 mm limit and invalid. The F10 traces start from such a tool: their counter
     stayed 0 through a sync job, which auto-retracts a tool that isn't."""
-    tool.auto_retracted, tool.gap, tool.gap_valid = 55.0, 40.0, False
+    tool.path.auto_retracted, tool.path.gap, tool.path.gap_valid = 55.0, 40.0, False
 
 
 def f10b_sync_job_rewrite(rec: Recorder) -> None:

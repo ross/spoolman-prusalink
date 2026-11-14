@@ -13,8 +13,10 @@ the model's lengths, the ramming and auto-retract run per build, and the
 tests run the bridge against each family. Workstream 2 is built: an
 uploaded file goes through the preview's checks of its `M862` lines, and a
 print with segments goes through its checks of the tools it uses. The MMU's
-filament-inserted question belongs to Workstream 5. Workstreams 3 to 6
-aren't started. [Open questions](#open-questions)
+filament-inserted question belongs to Workstream 5. Workstream 3 is built:
+a tool and its filament path are apart, the selected tool can be none, and
+a feed system holds what differs between direct and toolchanger printers.
+Workstreams 4 to 6 aren't started. [Open questions](#open-questions)
 lists what the work still has to settle.
 
 ## Goal and non-goals
@@ -97,9 +99,16 @@ firmware update.
 - Each model has its build's preset table. A menu load and a preset write
   report that build's temperatures, and neither takes a preset the build
   doesn't have, such as PPS on an MK4S.
-- A tool has its own counters, material, gap and sensor. A print is a list
-  of (tool, mm) segments with a fixed purge at each tool change. Picking a
-  tool can trigger the idle sensor clear. A tool can be disabled.
+- A tool has its counters and its stored type. Its filament path has the
+  filament, the tracker's gap, the stored auto-retract distance and the
+  sensor; each tool has its own path. A print is a list of (tool, mm)
+  segments with a fixed purge at each tool change. Picking a tool can
+  trigger the idle sensor clear. A tool can be disabled.
+- The model's feed system, direct or toolchanger, holds the rules that
+  differ between the two. The printer's selected tool can be none, which
+  stands for a toolchanger with no tool picked: then no filament moves or
+  counts, the idle sensor clear doesn't run, and the end of a print neither
+  retracts nor auto-retracts. Nothing leaves it none yet.
 - An uploaded file's job is counted at once. When the scan ends, the
   print preview checks the file's `M862` lines: the model by compatibility
   group, the G-code level, input shaper, the INDX lock, the MMU3 feature
@@ -221,8 +230,9 @@ builds that can take one and false elsewhere (`basic_gets.cpp:229-253`).
 | A load or unload during a print | Reads `ATTENTION` in every phase, not only while waiting. Idle, it reads `BUSY`. | `printer_state.cpp:178-190, 238-243` |
 
 The simulator has the first row, and an idle sensor clear that follows the
-picked tool. It always has a tool picked, so T4 (the idle clear on a picked
-tool) describes something an INDX does only with a tool left on the head.
+picked tool. Its selected tool can be none, but nothing makes it none, so
+T4 (the idle clear on a picked tool) describes something an INDX does only
+with a tool left on the head.
 
 One correction applies to every build. After a power cut, the firmware sits
 in `IDLE` for at least 1.5 s before the resume starts, and the idle sensor
@@ -321,13 +331,29 @@ tables, so each number has a check behind it.
 
 A single-tool printer has one of each. A toolchanger has one path per
 tool. An MMU printer has five tools and one path. The printer has a
-selected tool, which can be none, and feeding credits the selected tool
-through its path's gap. With none selected, nothing counts.
+selected tool, which can be none. A move names the tool whose path moves,
+and the feed system decides which tool it credits. A toolchanger's menu
+load on an unpicked tool counts on that tool until Workstream 4 has a menu
+load pick the tool first. A load or unload in progress stays on its tool.
+
+"None selected" is two cases in the firmware. A toolchanger with no tool
+picked has no physical tool: it can't move E at all, the auto-retract's
+hooks don't run, and the end of a print neither retracts nor auto-retracts
+(`tool_index.cpp:121-137`, `planner.cpp:2194-2197, 2224`,
+`mapi/motion.cpp:88-91`). An MMU with no slot selected still has its one
+physical tool: moves run and deretract but don't count, and the end of a
+print still retracts and skips only the auto-retract
+(`tool_index.cpp:134-151`, `auto_retract.cpp:91-94`). The simulator's none
+is the first case. The MMU's feed system brings the second.
 
 A **feed system** owns the rules that differ: which tool is selected and
-when, what a tool change moves, what counts an unload, and whether the idle
-sensor clear runs. There are three: direct, toolchanger and MMU. The model's
-profile names its system, and a printer's config turns the MMU on.
+when, which tool a move credits, what a tool change moves, and which tool
+the idle sensor clear reads, if any. What counts an unload isn't one of
+them: the firmware counts any write of "none" over a stored type
+(`store_definition.cpp:258-262`). An MMU counts fewer only because its
+operations don't write "none". There are three: direct, toolchanger and
+MMU. The model's profile names its system, and a printer's config turns the
+MMU on.
 
 ### The preview
 
@@ -398,7 +424,10 @@ confirm first.
    simulator test and a row in printer-behaviors.md.
 5. **MMU.** The MMU feed system, the switch in the config and on the page,
    slot operations (preload, load to nozzle, unload, eject), tool changes,
-   runout, spool join, boot, and the preview's unload question.
+   runout, spool join, boot, and the preview's unload question. The
+   snapshot needs printer-level paths, since a flat snapshot per tool can't
+   express a shared path. The `M865` slot range can't follow `max_tools`
+   with an MMU on.
    Acceptance: a two-color print's counters match the source's arithmetic,
    and the family matrix runs the bridge against both MMU printers.
 6. **Keeping up.** A list in printer-behaviors.md of the behaviors that

@@ -264,7 +264,7 @@ function renderPrinter(p) {
     opts(S.options.checks, p.checks) + '</select></label>' +
     '<small class="muted">boot ' + esc(p.boot_id) + '</small>' +
     '<small>' + (p.homed ? 'homed' : '<span class="muted">not homed</span>') + '</small>' +
-    '<small>tool <b>' + esc(p.selected_tool) + '</b></small>' +
+    '<small>tool <b>' + esc(p.selected_tool == null ? 'none' : p.selected_tool) + '</b></small>' +
     '<small class="muted" title="the model\'s values, which an empty setting uses">ratio ' +
     Number(m.feed_ratio).toFixed(4) + ', load ' + esc(m.slow_load_mm) + ' + ' + esc(m.fast_load_mm) +
     ', purge ' + esc(m.purge_mm) + ' mm' + (p.high_flow ? ' (high-flow)' : '') + '</small></div>';

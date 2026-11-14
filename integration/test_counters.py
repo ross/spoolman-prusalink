@@ -341,7 +341,7 @@ async def test_c7_tool_reports_no_filament(world: World):
     # The sensor reads empty, so the idle clear counts an unload with the filament in.
     w.printer.set_sensor_fault(0, True)
     w.advance(0.1)
-    assert w.tool.loaded and w.material() == (None, None, None)
+    assert w.tool.path.loaded and w.material() == (None, None, None)
     w.printer.extrude(0, 20)
     records = await w.poll()
     assert [e["event"] for e in events(records)] == ["unload", "swap_unconfirmed"]

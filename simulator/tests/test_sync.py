@@ -43,7 +43,7 @@ def test_preset_ignores_edits_and_adhoc_write_edits_the_slot():
 def test_m865_writes_an_unloaded_tool():
     sim, p = make(tools=[SimTool(0)])
     sync.apply(p, gcode.parse('M865 X R N"PLA" L0'))
-    assert tool0(p).material == Material("PLA", **RESET) and not tool0(p).loaded
+    assert tool0(p).material == Material("PLA", **RESET) and not tool0(p).path.loaded
 
 
 def test_m865_1_only_on_tool_0_of_uuids_model():

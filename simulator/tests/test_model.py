@@ -60,9 +60,9 @@ def test_unload_bookkeeping():
     t = tool0(p)
     # From gap 0 the unload's ramming counts its 8 mm feed and 15 of its 55 mm feed before
     # the unload is recorded: 100.7 + 23 * 0.95 = 122.55.
-    assert (t.unload_count, t.extruded_at_unload, t.loaded) == (1, 122, False)
+    assert (t.unload_count, t.extruded_at_unload, t.path.loaded) == (1, 122, False)
     assert t.material is None and t.previous == PLA
-    assert t.gap == 40
+    assert t.path.gap == 40
     assert p.state is State.IDLE
     assert shown(p) is None
 
@@ -89,7 +89,7 @@ def test_load_runs_its_steps():
     p.load(0, source="preset", name="PETG")
     assert p.state is State.BUSY and tool0(p).process.phase == "SLOW"
     sim.tick(4.0)  # the slow load fills the 40 mm gap: nothing counted
-    assert tool0(p).extruded == base and tool0(p).gap == 0
+    assert tool0(p).extruded == base and tool0(p).path.gap == 0
     assert tool0(p).process.phase == "FAST"
     sim.tick(1.5)  # 15 of the 20 mm fast load: 15 * 0.95
     assert tool0(p).extruded == pytest.approx(base + 14.25)
@@ -97,19 +97,19 @@ def test_load_runs_its_steps():
     sim.tick(0.5)  # the fast load ends and the type is written before the purge
     assert shown(p) == {"name": "PETG"}
     assert tool0(p).process.phase == "PURGE"
-    assert not tool0(p).loaded
+    assert not tool0(p).path.loaded
     sim.tick(4.0)  # the purge: (20 + 40) * 0.95
     assert tool0(p).extruded == pytest.approx(base + 57)
     assert tool0(p).process.phase == "RETRACT"
     sim.tick(0.8)  # the retract only grows the gap, to 8
     t = tool0(p)
     # The auto-retract feeds the tracker's 8 mm back at once (gap 0), then runs its steps.
-    assert t.process.phase == "RAM" and not t.loaded
-    assert t.extruded == pytest.approx(base + 57) and t.gap == 0
+    assert t.process.phase == "RAM" and not t.path.loaded
+    assert t.extruded == pytest.approx(base + 57) and t.path.gap == 0
     sim.tick(25.3)  # 253 mm of steps: the 8 mm feed and 15 of the 55 mm feed count
-    assert t.loaded and t.process is None
+    assert t.path.loaded and t.process is None
     assert t.extruded == pytest.approx(base + 57 + 23 * 0.95)
-    assert (t.gap, t.gap_valid, t.auto_retracted) == (40, False, 55)
+    assert (t.path.gap, t.path.gap_valid, t.path.auto_retracted) == (40, False, 55)
     assert p.state is State.IDLE
 
 
@@ -131,7 +131,7 @@ def test_one_tick_runs_a_whole_load():
     p.load(0, source="preset", name="ASA", color="#DE3129")
     sim.tick(100.0)
     t = tool0(p)
-    assert t.loaded and t.process is None and p.state is State.IDLE
+    assert t.path.loaded and t.process is None and p.state is State.IDLE
     # (20 + 40) past the 40 mm gap, then the auto-retract's 8 + 15: 83 * 0.95.
     assert t.extruded - base == pytest.approx(78.85)
     assert t.material == Material("ASA", "#de3129", **p.model.preset_temperatures("ASA"))
@@ -210,7 +210,7 @@ def test_load_and_unload_while_off_count_nothing_until_boot():
     assert t.unload_count == 1 and t.material is None and t.previous == PLA
     p.set_power("off")
     p.load(0, source="preset", name="PETG")
-    assert tool0(p).loaded and tool0(p).material == Material(
+    assert tool0(p).path.loaded and tool0(p).material == Material(
         "PETG", adhoc=False, **p.model.preset_temperatures("PETG")
     )
     assert tool0(p).extruded == 0
@@ -219,9 +219,9 @@ def test_load_and_unload_while_off_count_nothing_until_boot():
 def test_extrude_fills_gap_then_counts_and_retract_clamps():
     sim, p = make()
     p.retract(0, 100)
-    assert tool0(p).gap == 40
+    assert tool0(p).path.gap == 40
     p.extrude(0, 50)  # 40 refill the gap, (50 - 40) * 0.95 counts
-    assert tool0(p).gap == 0 and tool0(p).extruded == pytest.approx(9.5)
+    assert tool0(p).path.gap == 0 and tool0(p).extruded == pytest.approx(9.5)
     p.start_print(PrintSpec([Segment(0, 10)]))
     with pytest.raises(Busy):
         p.extrude(0, 5)
@@ -360,7 +360,7 @@ def test_runout_keeps_previous_and_reload_restores_it():
     assert shown(p)["instance_uuid"] == PLA.instance_uuid
     assert p.state is State.ATTENTION
     sim.tick(10)
-    assert p.state is State.PAUSED and tool0(p).loaded
+    assert p.state is State.PAUSED and tool0(p).path.loaded
     p.resume()
     sim.tick(100)
     assert p.state is State.FINISHED
@@ -492,7 +492,7 @@ def test_with_the_sensors_off_nothing_reads_them():
     p.resume()
     sim.tick(100)
     # No idle sensor clear: a tool emptied by hand keeps its type, picked or at boot.
-    tool0(p).loaded = False
+    tool0(p).path.loaded = False
     p.select_tool(0)
     sim.tick(1)
     p.reboot()
@@ -563,7 +563,7 @@ def test_hung_printer_keeps_running():
 
 def test_idle_sensor_clear_on_boot():
     sim, p = make()
-    tool0(p).loaded = False  # pulled out while off
+    tool0(p).path.loaded = False  # pulled out while off
     p.reboot()
     assert tool0(p).unload_count == 1 and tool0(p).previous == PLA
 
@@ -684,7 +684,7 @@ def test_abort_at_the_preview_ends_idle_with_the_id_used():
     p.cancel()  # Abort
     assert p.job is None and p.state is State.IDLE and p.job_counter == 1
     assert "s.gcode" in p.files
-    assert tool0(p).extruded == extruded and tool0(p).auto_retracted is None  # nothing moved
+    assert tool0(p).extruded == extruded and tool0(p).path.auto_retracted is None  # nothing moved
     run_sync(sim, p)
     assert p.job.id == 2
 
@@ -694,18 +694,18 @@ def test_a_cancel_before_the_print_begins_ends_idle_with_nothing_moved():
     cleans up to IDLE with no park and no end-of-print moves."""
     for start, seconds in (("upload", 0), ("print", 0), ("upload", 0.6), ("print", 0.6)):
         sim, p = make()
-        tool0(p).auto_retracted = None  # so an end-of-print auto-retract would count
+        tool0(p).path.auto_retracted = None  # so an end-of-print auto-retract would count
         if start == "upload":
             p.upload("s.gcode", JOB, print_after=True, overwrite=True)
         else:
             p.start_print(one_segment(10))
         sim.tick(seconds)
         assert p.job.phase is (JobPhase.SCANNING if seconds == 0 else JobPhase.BLIP)
-        extruded, gap = tool0(p).extruded, tool0(p).gap
+        extruded, gap = tool0(p).extruded, tool0(p).path.gap
         p.cancel()
         assert p.job is None and p.state is State.IDLE and p.job_counter == 1
-        assert (tool0(p).extruded, tool0(p).gap) == (extruded, gap)
-        assert tool0(p).auto_retracted is None and tool0(p).material == PLA
+        assert (tool0(p).extruded, tool0(p).path.gap) == (extruded, gap)
+        assert tool0(p).path.auto_retracted is None and tool0(p).material == PLA
         sim.tick(10)
         assert p.state is State.IDLE and tool0(p).extruded == extruded
 
@@ -822,6 +822,9 @@ def test_snapshot_round_trip_mid_print_and_mid_load():
     p.runout(0)
     p.load(0)
     sim.tick(2)
+    # Path state that nothing above leaves at its default.
+    p.tools[1].path.sensor_fault = True
+    p.tools[2].path.auto_retracted = 8.0
 
     data = json.loads(json.dumps(sim.snapshot()))
     other = Simulation()
@@ -912,7 +915,7 @@ def test_cancel_stops_a_reload():
     p.load(0)
     sim.tick(1)  # still filling the gap
     p.cancel()
-    assert tool0(p).process is None and not tool0(p).loaded and tool0(p).material is None
+    assert tool0(p).process is None and not tool0(p).path.loaded and tool0(p).material is None
     sim.tick(2)
     assert p.state is State.STOPPED and p.can_print()
 
@@ -923,7 +926,7 @@ def test_cancel_stops_a_reload():
     p.load(0)
     sim.tick(4 + 3.6 + 1)  # into the purge: the type is set
     p.cancel()
-    assert tool0(p).loaded and tool0(p).material == PLA
+    assert tool0(p).path.loaded and tool0(p).material == PLA
 
 
 def test_no_print_while_a_tool_process_runs():

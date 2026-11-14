@@ -25,7 +25,7 @@ def menu_load(sim, p) -> tuple[float, float]:
     base = p.tools[0].extruded
     p.load(0, source="preset", name="PETG")
     sim.advance(100)
-    assert p.tools[0].loaded and p.tools[0].process is None and p.state is State.IDLE
+    assert p.tools[0].path.loaded and p.tools[0].process is None and p.state is State.IDLE
     (typed,) = at_type
     return typed - base, p.tools[0].extruded - typed
 
@@ -35,7 +35,7 @@ def unloaded(model: str, **settings):
     sim, p = make(model, [loaded(0, PLA)], **settings)
     p.unload(0)
     sim.advance(10)
-    assert p.tools[0].gap == p.model.gap_mm
+    assert p.tools[0].path.gap == p.model.gap_mm
     return sim, p
 
 
@@ -69,7 +69,7 @@ def test_a_menu_load_from_a_full_gap(model):
     sim, p = unloaded(model)
     assert menu_load(sim, p) == pytest.approx((before, after))
     t = p.tools[0]
-    assert (t.gap, t.gap_valid, t.auto_retracted) == (gap, valid, stored)
+    assert (t.path.gap, t.path.gap_valid, t.path.auto_retracted) == (gap, valid, stored)
 
 
 @pytest.mark.parametrize(
@@ -83,7 +83,7 @@ def test_a_menu_load_from_a_full_gap(model):
 def test_a_load_after_a_boot_counts_from_the_first_mm(model, before):
     sim, p = make(model, [SimTool(0)])
     p.reboot()
-    assert p.tools[0].gap == 0
+    assert p.tools[0].path.gap == 0
     assert menu_load(sim, p)[0] == pytest.approx(before)
 
 
@@ -183,13 +183,13 @@ def test_manual_moves_count_past_the_gap_and_retracts_stop_at_its_limit():
     sim, p = make("8.10.0", [loaded(0, PLA)])
     p.retract(0, 5)
     p.retract(0, 5)
-    assert p.tools[0].gap == 10
+    assert p.tools[0].path.gap == 10
     p.extrude(0, 4)  # inside the gap: nothing counts
-    assert (p.tools[0].gap, p.tools[0].extruded) == (6, 0)
+    assert (p.tools[0].path.gap, p.tools[0].extruded) == (6, 0)
     p.retract(0, 100)  # the gap stops at INDX's 27 mm
-    assert p.tools[0].gap == 27
+    assert p.tools[0].path.gap == 27
     p.extrude(0, 30)  # 27 refill it, 3 count
-    assert p.tools[0].gap == 0
+    assert p.tools[0].path.gap == 0
     assert p.tools[0].extruded == pytest.approx(3 * INDX_RATIO)
 
 
@@ -200,7 +200,7 @@ def printing_runout(model: str):
     sim.tick(0.8 + 1)
     assert p.tools[0].extruded == pytest.approx(5 * 0.95)
     p.runout(0)
-    assert p.tools[0].gap == 40
+    assert p.tools[0].path.gap == 40
     return sim, p
 
 
@@ -213,10 +213,10 @@ def test_a_reload_during_a_print_on_the_mk4():
     # Gap 40. Slow 30: gap 10. Fast 50: 10 refill it, 40 count. Purge 27: counts. The
     # purge's retract 8: gap 8. The prime 4: gap 4, nothing counts. The retract 8: gap 12.
     assert p.tools[0].extruded - before == pytest.approx((40 + 27) * 0.95)
-    assert p.tools[0].gap == pytest.approx(12)
+    assert p.tools[0].path.gap == pytest.approx(12)
     p.resume()  # back to the gap 0 the runout found: 12 fed, all refill the gap
     assert p.tools[0].extruded - before == pytest.approx((40 + 27) * 0.95)
-    assert p.tools[0].gap == 0
+    assert p.tools[0].path.gap == 0
     sim.tick(1)  # 5 mm printed, all counted
     assert p.tools[0].extruded - before == pytest.approx((40 + 27 + 5) * 0.95)
 
@@ -229,10 +229,10 @@ def test_a_reload_during_a_print_on_the_ix():
     # Gap 40. Slow 40: gap 0. Fast 45: counts. Purge 40: counts, and no retract after it.
     # The prime 4: counts. The retract 8: gap 8.
     assert p.tools[0].extruded - before == pytest.approx((45 + 40 + 4) * 0.95)
-    assert p.tools[0].gap == pytest.approx(8)
+    assert p.tools[0].path.gap == pytest.approx(8)
     p.resume()  # back to the gap 0 the runout found: 8 fed, all refill the gap
     assert p.tools[0].extruded - before == pytest.approx((45 + 40 + 4) * 0.95)
-    assert p.tools[0].gap == 0
+    assert p.tools[0].path.gap == 0
     sim.tick(1)  # 5 mm printed, all counted
     assert p.tools[0].extruded - before == pytest.approx((45 + 40 + 4 + 5) * 0.95)
 
@@ -242,7 +242,7 @@ def test_a_reload_resumes_at_the_gap_the_runout_found():
     p.retract(0, 10)
     p.start_print(PrintSpec([Segment(0, 100)], preheat_s=0))
     sim.tick(0.8 + 1)  # 5 mm printed into the 10 mm gap: gap 5, nothing counts
-    assert (p.tools[0].gap, p.tools[0].extruded) == (5, 0)
+    assert (p.tools[0].path.gap, p.tools[0].extruded) == (5, 0)
     # The park retracts 3 to gap 8; the runout ramming feeds 8 back and counts its 7.
     p.runout(0)
     assert p.tools[0].extruded == pytest.approx(7 * 0.95)
@@ -250,9 +250,9 @@ def test_a_reload_resumes_at_the_gap_the_runout_found():
     sim.advance(100)
     # As on the MK4 above: (40 + 27) counted, gap 12.
     assert p.tools[0].extruded == pytest.approx((7 + 40 + 27) * 0.95)
-    assert p.tools[0].gap == pytest.approx(12)
+    assert p.tools[0].path.gap == pytest.approx(12)
     p.resume()  # 12 - 5 = 7 fed: gap 5, nothing counts
-    assert p.tools[0].gap == pytest.approx(5)
+    assert p.tools[0].path.gap == pytest.approx(5)
     assert p.tools[0].extruded == pytest.approx((7 + 40 + 27) * 0.95)
     sim.tick(1)  # 5 mm printed refill the gap
     assert p.tools[0].extruded == pytest.approx((7 + 40 + 27) * 0.95)
@@ -271,10 +271,10 @@ def test_a_reload_in_the_preheat_resumes_at_its_gap():
     p.runout(0)
     p.load(0)
     sim.advance(100)
-    assert p.tools[0].gap == pytest.approx(12)
+    assert p.tools[0].path.gap == pytest.approx(12)
     p.resume()  # 12 - 10 = 2 fed: gap 10, back to the preheat
     assert p.job.phase is JobPhase.PREHEAT
-    assert p.tools[0].gap == pytest.approx(10)
+    assert p.tools[0].path.gap == pytest.approx(10)
     assert p.tools[0].extruded == pytest.approx((7 + 40 + 27) * 0.95)
 
 
@@ -289,7 +289,7 @@ def test_a_power_loss_after_a_reload_drops_the_restore():
     p.reboot(keep_job=True)  # the counters and gaps restart at 0
     assert p.job.phase is JobPhase.PAUSED
     p.resume()  # the filament change never got to its restore, so nothing moves
-    assert (p.tools[0].extruded, p.tools[0].gap) == (0, 0)
+    assert (p.tools[0].extruded, p.tools[0].path.gap) == (0, 0)
 
 
 def test_a_plain_pause_and_resume_move_nothing():
@@ -300,7 +300,7 @@ def test_a_plain_pause_and_resume_move_nothing():
     p.pause()
     sim.tick(10)
     p.resume()
-    assert (p.tools[0].extruded, p.tools[0].gap) == (counted, 0)
+    assert (p.tools[0].extruded, p.tools[0].path.gap) == (counted, 0)
 
 
 def test_the_page_sees_the_models_defaults():

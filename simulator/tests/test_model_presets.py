@@ -25,7 +25,7 @@ def test_a_menu_load_reports_the_builds_preset(code, name, temps):
     sim, p = make(code, [SimTool(0)])
     p.load(0, source="preset", name=name)
     sim.tick(300.0)
-    assert tool0(p).loaded and temperatures(p) == temps
+    assert tool0(p).path.loaded and temperatures(p) == temps
 
 
 @pytest.mark.parametrize(("code", "name", "temps"), CASES)

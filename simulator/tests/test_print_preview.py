@@ -10,6 +10,7 @@ from aiohttp.test_utils import TestClient, TestServer
 from simulator import prusalink
 from simulator.model import (
     Busy,
+    FilamentPath,
     JobPhase,
     Material,
     PrintSpec,
@@ -28,7 +29,7 @@ PETG = Material("PETG", "#186bb5")
 
 def empty(index: int = 0) -> SimTool:
     """A tool emptied by an unload: no filament, no type, the tracker's gap at its limit."""
-    return SimTool(index, gap=40.0, gap_valid=False)
+    return SimTool(index, path=FilamentPath(gap=40.0, gap_valid=False))
 
 
 def seen(p) -> tuple[str, int | None, str | None]:
@@ -65,7 +66,7 @@ def test_an_empty_tool_asks_then_waits_for_a_load_at_the_preview():
     sim.tick(10.8)
     assert p.job.phase is JobPhase.PREHEAT and seen(p) == ("PRINTING", 1, "PRINTING")
     assert p.tools[0].extruded == pytest.approx(57)
-    assert p.tools[0].material.name == "PLA" and p.tools[0].gap == pytest.approx(8)
+    assert p.tools[0].material.name == "PLA" and p.tools[0].path.gap == pytest.approx(8)
     # 9.5 s of preheat are left. Then 1.9 s at 5 mm/s print 9.5 mm: the first 8 fill the
     # gap and 1.5 count, 57 + 1.425 = 58.425.
     sim.tick(9.5 + 1.9)
@@ -135,7 +136,7 @@ def test_declining_at_each_step_ends_idle_with_the_id_used(step):
     extruded = p.tools[0].extruded
     p.cancel()  # Abort, or No
     assert p.job is None and seen(p) == ("IDLE", None, None) and p.job_counter == 1
-    assert p.tools[0].extruded == extruded and p.tools[0].auto_retracted is None
+    assert p.tools[0].extruded == extruded and p.tools[0].path.auto_retracted is None
     sim.tick(5)
     assert p.state is State.IDLE
     p.tools[0] = loaded(0)
@@ -156,7 +157,7 @@ def test_the_preview_s_load_on_an_indx_ends_with_the_cleaner_s_auto_retract():
     # One tool enabled and a one-tool print: no tool mapping, so the preview asks for a
     # load. From the full 27 mm gap the 15 slow and 25 fast count 13, then the cleaner's 25
     # mm purge and its own auto-retract's 8: 46 * 550/576, as an idle load counts.
-    sim, p = make("8.10.0", [SimTool(0, gap=27.0, gap_valid=False)])
+    sim, p = make("8.10.0", [SimTool(0, path=FilamentPath(gap=27.0, gap_valid=False))])
     p.start_print(PrintSpec([Segment(0, 10)], preheat_s=0))
     sim.tick(0.5)
     p.tap_through()
@@ -165,7 +166,7 @@ def test_the_preview_s_load_on_an_indx_ends_with_the_cleaner_s_auto_retract():
         sim.tick(0.1)
     assert p.job.phase is JobPhase.BLIP  # the type check passed: the print begins
     assert p.tools[0].extruded == pytest.approx(46 * 550 / 576)
-    assert p.tools[0].auto_retracted == 8
+    assert p.tools[0].path.auto_retracted == 8
 
 
 def cut_at_the_wait(sim, p):
@@ -320,7 +321,7 @@ def test_abort_on_the_mapping_screen_ends_idle_with_the_id_used(model):
     sim, p = two_tools(model)
     p.cancel()  # Abort
     assert p.job is None and seen(p) == ("IDLE", None, None) and p.job_counter == 1
-    assert p.tools[0].extruded == 0 and p.tools[0].auto_retracted is None
+    assert p.tools[0].extruded == 0 and p.tools[0].path.auto_retracted is None
     p.start_print(PrintSpec([Segment(0, 10)]))
     assert p.job.id == 2
 
