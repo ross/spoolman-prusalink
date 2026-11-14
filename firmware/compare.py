@@ -17,11 +17,11 @@ compatibility group.
 from __future__ import annotations
 
 import functools
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, fields
 from typing import Any
 
-from firmware import read
+from firmware import read, watch
 from firmware.source import Source, Unreadable
 
 # Printer type code (`/api/version`'s `printer`) to the firmware build that runs it: the
@@ -72,6 +72,8 @@ PRINTER_IS = {
 # `include/device/board.h` maps a BOARD onto these macros. The XL's main board is the
 # XLBUDDY, and the dev kit's XL_DEV_KIT_XLB defines `BOARD_IS_XLBUDDY()` too. The DWARF is
 # the XL tool head's own firmware, not a printer build. A macro missing here fails the read.
+# Watched regions in `firmware/watch.py` guard the main-board condition and the two XL
+# boards' macros; `presets.json` isn't watched.
 BOARD_IS: dict[str, set[str]] = {
     "XLBUDDY": {"XL", "XL_DEV_KIT"},
     "DWARF": set(),
@@ -656,12 +658,15 @@ EXPECTED = (
 
 
 def report(
-    differences: list[Difference], expected: tuple[Expected, ...] | None = None
+    differences: list[Difference],
+    expected: tuple[Expected, ...] | None = None,
+    changes: Sequence[watch.Change] = (),
 ) -> tuple[list[str], bool]:
-    """Return the report's lines, per table, and whether the check passes.
+    """Return the report's lines, per table and then for the watched source, and whether
+    the check passes.
 
-    It passes when every difference is expected (on `EXPECTED` by default) and every
-    expected entry still occurs.
+    It passes when every difference is expected (on `EXPECTED` by default), every expected
+    entry still occurs and no watched region has changed.
     """
     if expected is None:
         expected = EXPECTED
@@ -685,12 +690,17 @@ def report(
     stale = [e for e in expected if e not in used]
     for e in stale:
         lines.append(f"stale expected difference, no longer found: {e}; remove it from EXPECTED")
+    if changes:
+        lines.append("watched source:")
+        lines.extend(f"  {c}" for c in changes)
+    else:
+        lines.append("watched source: ok")
     matched = len(differences) - unexpected
     lines.append(
         f"{unexpected} unexpected differences, {matched} expected, "
-        f"{len(stale)} stale expected entries"
+        f"{len(stale)} stale expected entries, {len(changes)} changed watched regions"
     )
-    return lines, unexpected == 0 and not stale
+    return lines, unexpected == 0 and not stale and not changes
 
 
 def _version(code: str) -> tuple[int, ...]:

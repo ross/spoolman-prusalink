@@ -118,3 +118,24 @@ def test_a_missing_git_exits_3(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("PATH", str(tmp_path))
     assert cli.main([]) == 3
     assert "git isn't installed or isn't on PATH" in capsys.readouterr().err
+
+
+def test_a_changed_watched_region_exits_1(calls, monkeypatch, capsys):
+    board = fixtures.BOARD_H.replace("#define BOARD_IS_XLBUDDY() 1", "#define BOARD_IS_XLBUDDY() 0")
+    files = {**fixtures.FILES, "include/device/board.h": board}
+    monkeypatch.setattr(source, "Source", lambda directory, ref: fixtures.FakeSource(files))
+    assert cli.main(["--checkout", "."]) == 1
+    out = capsys.readouterr().out
+    assert "simulator MODELS: ok" in out
+    assert "watched source:\n  the XLBUDDY board's macros in include/device/board.h changed" in out
+    assert out.endswith(", 0 stale expected entries, 1 changed watched regions\n")
+
+
+def test_a_watched_region_that_cant_be_found_exits_3(calls, monkeypatch, capsys):
+    files = {**fixtures.FILES, "include/device/board.h": ""}
+    monkeypatch.setattr(source, "Source", lambda directory, ref: fixtures.FakeSource(files))
+    assert cli.main(["--checkout", "."]) == 3
+    assert capsys.readouterr().err == (
+        "can't read include/device/board.h: 0 lines start #elif BOARD() == BOARD_XLBUDDY(),"
+        " for the XLBUDDY board's macros\n"
+    )

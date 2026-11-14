@@ -447,7 +447,8 @@ def test_matching_copies_have_no_differences():
     lines, ok = compare.report([], ())
     assert ok
     assert lines == [f"{t}: ok" for t in compare.TABLES] + [
-        "0 unexpected differences, 0 expected, 0 stale expected entries"
+        "watched source: ok",
+        "0 unexpected differences, 0 expected, 0 stale expected entries, 0 changed watched regions",
     ]
 
 
@@ -736,7 +737,9 @@ def test_report_marks_expected_differences():
     )
     assert "  1.4.0 max_tools: firmware 1, copy 2" in lines
     assert "simulator presets: ok" in lines
-    assert lines[-1] == "1 unexpected differences, 2 expected, 0 stale expected entries"
+    assert lines[-1] == (
+        "1 unexpected differences, 2 expected, 0 stale expected entries, 0 changed watched regions"
+    )
 
     lines, ok = compare.report(differences[:2], expected)
     assert ok
@@ -754,7 +757,9 @@ def test_report_fails_on_a_stale_expected_difference():
         "stale expected difference, no longer found: simulator MODELS: 5.1.0 counters;"
         " remove it from EXPECTED" in lines
     )
-    assert lines[-1] == "0 unexpected differences, 1 expected, 1 stale expected entries"
+    assert lines[-1] == (
+        "0 unexpected differences, 1 expected, 1 stale expected entries, 0 changed watched regions"
+    )
 
 
 def test_a_pinned_entry_doesnt_mask_another_value():
@@ -766,7 +771,9 @@ def test_a_pinned_entry_doesnt_mask_another_value():
     lines, ok = compare.report([other], (entry,))
     assert not ok
     assert "  4.1.0 unsupported: firmware 'has the filament tracker', copy 'x'" in lines
-    assert lines[-1] == "1 unexpected differences, 0 expected, 1 stale expected entries"
+    assert lines[-1] == (
+        "1 unexpected differences, 0 expected, 1 stale expected entries, 0 changed watched regions"
+    )
     pinned = Expected("bridge PRESETS", None, "PPS", "material", "why", PRESENT, MISSING)
     assert pinned.matches(
         Difference("bridge PRESETS", "7.1.0", "PPS", "material", PRESENT, MISSING)

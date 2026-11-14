@@ -55,8 +55,9 @@ GROUPS: dict[str, str] = {
 # The group each group falls back on for a file that isn't its own, with the compatibility
 # flag that step sets, or None. A group not listed has no fallback. This mirrors the
 # `switch` in `gcode_compatibility_report_constexpr` in `src/common/printer_model.cpp`,
-# which is code the check can't read, so compare it by hand when that function changes.
-# The firmware names a model to fall back on; this names the model's group.
+# which is code the check can't read. A watched region in `firmware/watch.py` guards it:
+# the check fails when that function changes. The firmware names a model to fall back on;
+# this names the model's group.
 UPGRADES: dict[str, tuple[str, str | None]] = {
     "xls": ("xl", "xl"),
     "mk3_5": ("mk3", "mk3"),
@@ -86,7 +87,8 @@ class GCodeChecks:
     # The names a file must declare, or the preview asks. This is code in
     # `CompatibilityReport::generate_without_toolmapping` in
     # `src/feature/compatibility_checks/gcode_compatibility.cpp`, which the check can't
-    # read: Input Shaper on every build but the iX's, and INDX lock on INDX builds.
+    # read: Input Shaper on every build but the iX's, and INDX lock on INDX builds. A
+    # watched region in `firmware/watch.py` guards it.
     required: frozenset[str]
 
 

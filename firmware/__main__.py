@@ -1,7 +1,8 @@
 """Compare the copied tables with the firmware source. See `script/firmware-check`.
 
-Exits 0 when every difference is expected, 1 on any other difference or a stale expected
-entry, 2 on a usage error and 3 when the firmware can't be fetched or read.
+Exits 0 when every difference is expected, 1 on any other difference, a stale expected
+entry or a changed watched region, 2 on a usage error and 3 when the firmware can't be
+fetched or read.
 """
 
 from __future__ import annotations
@@ -10,7 +11,7 @@ import sys
 from contextlib import AbstractContextManager, nullcontext
 from pathlib import Path
 
-from firmware import compare, source
+from firmware import compare, source, watch
 
 USAGE = "usage: script/firmware-check [REF | --checkout DIR [REF]]"
 
@@ -38,10 +39,12 @@ def main(argv: list[str] | None = None) -> int:
         with _open(directory, ref) as firmware_source:
             print(f"==> Checking {where} ({firmware_source.commit})", flush=True)
             firmware = compare.load(firmware_source)
+            changes = watch.changes(firmware_source)
     except source.Unreadable as e:
         print(e, file=sys.stderr)
         return 3
-    lines, ok = compare.report(compare.compare(firmware, compare.Copies.current()))
+    differences = compare.compare(firmware, compare.Copies.current())
+    lines, ok = compare.report(differences, changes=changes)
     print("\n".join(lines))
     return 0 if ok else 1
 

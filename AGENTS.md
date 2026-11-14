@@ -187,6 +187,11 @@ After you change a copied table, run the check. If a difference is intended, add
 `EXPECTED` in `firmware/compare.py`. The check also fails when an expected difference no
 longer occurs.
 
+A few copied rules are code in the firmware, which the check can't rebuild as a table. For
+each, `WATCHED` in `firmware/watch.py` records a fingerprint of the firmware code it came
+from: a watched region. When the check reports a changed region, re-read it, update the
+copy it names, and then record the new fingerprint that the check prints.
+
 ## Conventions
 
 - **Logging.** Log a problem once, when it starts, and stay quiet until it changes or

@@ -7,9 +7,11 @@
 #
 # It rebuilds each table from Prusa-Firmware-Buddy for every firmware build and lists each
 # difference; firmware/compare.py has the details and the list of expected differences.
-# Exits 0 when every difference is expected, 1 on any other difference or an expected one
-# that no longer occurs, 2 on a usage error, 3 when the firmware can't be fetched or a
-# file doesn't have the structure the reader expects.
+# It also fingerprints the firmware code behind the copied rules it can't rebuild, and
+# reports each watched region whose code changed; firmware/watch.py lists them.
+# Exits 0 when every difference is expected, 1 on any other difference, an expected one
+# that no longer occurs or a changed watched region, 2 on a usage error, 3 when the
+# firmware can't be fetched or a file doesn't have the structure the reader expects.
 #
 #   script/firmware-check                    # upstream master
 #   script/firmware-check REF                # an upstream branch, tag or full commit hash
