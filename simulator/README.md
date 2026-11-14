@@ -252,9 +252,11 @@ that trace. The points that matter for the bridge, in short:
   `load_to_nozzle` is Load To Nozzle: it unloads the selected slot, feeds
   the new slot to the extruder with no slot selected, selects it, and loads
   17 and then 30 mm, which count on the slot, then writes back the slot's
-  own type. `unload` takes the selected slot's filament back into the MMU:
-  it rams, or only relieves the pressure when the filament is fully
-  auto-retracted, and leaves no slot selected. It writes no type, so no
+  own type. It refuses while the extruder holds filament and no slot is
+  selected, as after a boot: unload that filament first. `unload` takes the
+  filament in the extruder, the fed slot's, back into the MMU, whether or not
+  a slot is selected: it rams, or only relieves the pressure when the
+  filament is fully auto-retracted, and leaves no slot selected. It writes no type, so no
   unload counts. `eject`, `cut` and each preload take `unload_seconds` and
   move nothing the bridge counts. `eject`, `cut` and `change_all` refuse while
   the extruder holds filament. `preload_all` stores the preset `name` on

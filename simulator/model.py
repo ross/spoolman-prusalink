@@ -2422,6 +2422,12 @@ class SimPrinter:
         self._check_mmu_menu()
         if t.material is None:
             raise Invalid(f"T{t.index} has no type to load")
+        # The firmware frees the extruder only for a selected slot (`mmu2_mk4.cpp:971-973`).
+        # With filament in it and none selected, after a boot or a load by hand, it makes no
+        # move to free it, and what follows isn't in the source, so the simulator refuses:
+        # Unload Filament on the fed slot first. A print's `T` doesn't come here.
+        if self.mmu.path.loaded and self.selected_tool is None:
+            raise Busy("the extruder holds filament and no slot is selected; unload it first")
 
     def _check_start_print(self) -> None:
         self._need_power()

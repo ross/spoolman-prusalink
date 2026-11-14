@@ -325,6 +325,21 @@ def test_mmu_menu_guards():
         p.cut(0)
 
 
+def test_load_to_nozzle_refuses_filament_with_no_slot_selected():
+    # After a boot slot 2's filament is still in the extruder with no slot selected, and
+    # the firmware would make no move to free it: Unload Filament on slot 2 first.
+    sim, p = make_mmu(types={0: PLA, 2: PETG}, slot=2, mmu_connect_seconds=0)
+    p.reboot()
+    with pytest.raises(Busy, match="no slot is selected; unload it first"):
+        p.load_to_nozzle(0)
+    assert p.to_json()["tools"][0]["actions"]["load_to_nozzle"] is not None
+    p.unload(2)
+    until_idle(sim, p)
+    p.load_to_nozzle(0)
+    until_idle(sim, p)
+    assert p.selected_tool == 0 and p.mmu.fed == 0
+
+
 def test_mmu_operations_need_an_mmu_switched_on():
     sim, p = make_mmu(slot=0)
     p.set_mmu(False)

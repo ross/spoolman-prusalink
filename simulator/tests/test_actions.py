@@ -309,6 +309,14 @@ def mmu_loading():
     return sim, p
 
 
+def mmu_loaded_unselected():
+    """After a boot, slot 2's filament is in the extruder with no slot selected."""
+    sim, p = make_mmu(types={0: PLA, 2: PLA}, slot=2, mmu_connect_seconds=0)
+    p.reboot()
+    assert p.mmu.active and p.mmu.path.loaded and p.selected_tool is None
+    return sim, p
+
+
 def mmu_preloading():
     """A Preload To MMU of slots 1 and 3 runs on slot 1, with slot 3 queued."""
     sim, p = mmu_empty()
@@ -335,6 +343,7 @@ SITUATIONS = [
     mmu_loaded,
     mmu_empty,
     mmu_loading,
+    mmu_loaded_unselected,
     mmu_preloading,
     mmu_connecting,
     mmu_off,
