@@ -688,14 +688,16 @@ def _compare_sim_models(
 
 
 def _compare_sim_mmu(built: Mapping[str, Build], copies: Copies, differ: Differ) -> None:
-    """Compare `simulator.mmu` with each build a simulator MMU model runs, by build name.
-    The simulator models the E-stall feed, so a try-load build differs in its feed and has
-    no constants to compare."""
+    """Compare `simulator.mmu` with each build that runs a simulator model taking an MMU
+    (`ModelInfo.takes_mmu`), by build name: the MK4, Core One and Core One L. The MK3.5
+    build is left out: it's the try-load build, and its models take no MMU in the
+    simulator, so the lengths are never used for it. The simulator models the E-stall feed,
+    so a try-load build here would differ in its feed and have no constants to compare."""
     table = "simulator MMU"
     builds = {
         build.name: build.mmu
         for code, build in built.items()
-        if build.mmu is not None and code in copies.sim_models and copies.sim_models[code].mmu
+        if build.mmu is not None and code in copies.sim_models and copies.sim_models[code].takes_mmu
     }
     for name, mmu in sorted(builds.items()):
         differ(table, None, name, "feed", mmu.feed, "E-stall")
@@ -834,15 +836,6 @@ EXPECTED = (
         "permanent: it needs the HT idler-door setting, which M865 can't set",
         PRESENT,
         MISSING,
-    ),
-    Expected(
-        "simulator MMU",
-        None,
-        "MK3.5",
-        "feed",
-        "not yet: the simulator's MK3.5 and MK3.5S run the E-stall builds' MMU lengths",
-        "try-load",
-        "E-stall",
     ),
 )
 

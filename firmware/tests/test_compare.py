@@ -263,18 +263,25 @@ def test_mmu_differences():
         "COREONE": replace(core, features=core.features | mmu, mmu=MmuBuild(True, {}, MMU_RAMMING)),
     }
     sim = dict(copies.sim_models)
-    for code in ("1.4.0", "7.1.0"):
-        sim[code] = replace(sim[code], mmu=True)
+    # The MK4 takes an MMU in the simulator. The Core One's model has one but doesn't take
+    # it, as the MK3.5's doesn't, so its try-load build isn't compared.
+    sim["1.4.0"] = replace(sim["1.4.0"], mmu=True, takes_mmu=True)
+    sim["7.1.0"] = replace(sim["7.1.0"], mmu=True)
     lengths = {k: v for k, v in MMU_LENGTHS.items() if k != "nominalEMotorFSOff"}
     copies = replace(copies, sim_models=sim, sim_mmu={**lengths, "extra": 1.0})
     found = compare.compare(replace(firmware, builds=builds), copies)
     t = "simulator MMU"
     assert [d for d in found if d.table == t] == [
-        Difference(t, None, "COREONE", "feed", "try-load", "E-stall"),
         Difference(t, None, "MK4", "MMU2_FEED_DISTANCE", 40.0, 50.0),
         Difference(t, None, "MK4", "extra", MISSING, 1.0),
         Difference(t, None, "MK4", "nominalEMotorFSOff", 14.0, MISSING),
         Difference(t, None, "MK4", "ramming", ((20, 1500),), MMU_RAMMING),
+    ]
+    # A try-load build under a model that takes an MMU differs in its feed alone.
+    builds["MK4"] = replace(builds["MK4"], mmu=MmuBuild(True, {}, MMU_RAMMING))
+    found = compare.compare(replace(firmware, builds=builds), copies)
+    assert [d for d in found if d.table == t] == [
+        Difference(t, None, "MK4", "feed", "try-load", "E-stall"),
     ]
 
 
