@@ -126,6 +126,14 @@ else()
 endif()
 define_boolean_option(BOARD_IS_MASTER_BOARD ${BOARD_IS_MASTER_BOARD})
 
+set(PRINTERS_WITH_DWARF "XL" "XL_DEV_KIT")
+if(${PRINTER} IN_LIST PRINTERS_WITH_DWARF AND BOARD_IS_MASTER_BOARD)
+  set(HAS_DWARF YES)
+else()
+  set(HAS_DWARF NO)
+endif()
+define_boolean_option(HAS_DWARF ${HAS_DWARF})
+
 if(BOARD IN_LIST BUDDY_BOARDS)
   set(RTT_METRICS_ENABLED
       ${DEBUG}
@@ -992,6 +1000,314 @@ static constexpr EnumArray<Sequence, GCodeFile, static_cast<int>(Sequence::_cnt)
 
 } // namespace nozzle_cleaner
 """
+
+# Cut down to the namespace with the two constants, all of `resume_loop`, and the cut's
+# retract in a stub of `panic_loop`.
+POWER_PANIC_CPP = """\
+#include "power_panic.hpp"
+
+namespace {
+
+constexpr uint16_t chamber_temp_off = 0xffff;
+
+constexpr bool power_panic_retracts =
+    // Dwarf gets turned off during the shutdown loop, so no retraction can happen
+    !HAS_DWARF();
+
+constexpr bool power_panic_deretracts = power_panic_retracts
+    // Skipped where G12 S21 already pressurizes the nozzle (see WaitForHeaters).
+    && !(HAS_NOZZLE_CLEANER() && (PRINTER_IS_PRUSA_COREONE() || PRINTER_IS_PRUSA_COREONEL()))
+    && true;
+
+
+namespace power_panic {
+
+void resume_loop() {
+    switch (resume_state) {
+    case ResumeState::Setup:
+        // Set bed temperature to prevent bed from cooling down
+        thermalManager.setTargetBed(state_buf.planner.target_bed);
+        break;
+
+    case ResumeState::Resume: {
+        // setup the paused state
+        // This applies for PowerPanic from paused AND from printing too
+        // because printing after power up starts from pause
+        marlin_server::resume_state_t resume;
+        resume.pos = state_buf.crash.crash_native_position;
+        resume.fan_speed = state_buf.planner.fan_speed;
+        resume.print_speed = state_buf.planner.print_speed;
+        resume.nozzle_temp = state_buf.planner.target_nozzle;
+#if HAS_MOTOR_CURRENT_PROFILES()
+        buddy::set_active_motor_current_profile(static_cast<buddy::StandardMotorCurrentProfile>(state_buf.planner.current_profile));
+#endif
+#if HAS_INDX()
+        resume.active_tool = state_buf.planner.active_tool;
+        if (state_buf.toolchanger.phase != PrusaToolChanger::ToolchangePhase::none) {
+            // During a toolchange planner.active_tool is pre-toolchange; use the target tool.
+            resume.active_tool = state_buf.toolchanger.tool_nr;
+        }
+#endif
+        marlin_server::set_resume_data(&resume);
+
+        // Set sdpos
+        //  in case powerpanic happens before sdpos propagates from resume data to media where crash_s would get it
+        crash_s.sdpos = state_buf.crash.sdpos;
+
+        // set bed temperatures
+        thermalManager.setTargetBed(state_buf.planner.target_bed);
+#if ENABLED(PREVENT_COLD_EXTRUSION)
+        thermalManager.extrude_min_temp = state_buf.planner.extrude_min_temp;
+        thermalManager.allow_cold_extrude = state_buf.planner.allow_cold_extrude;
+#endif
+
+        gcode.compatibility = state_buf.planner.compatibility;
+
+        marlin_debug_flags = state_buf.planner.marlin_debug_flags;
+
+        // planner settings
+        planner.apply_settings(state_buf.planner.settings);
+        planner.refresh_acceleration_rates();
+#if !HAS_CLASSIC_JERK
+        planner.junction_deviation_mm = state_buf.planner.junction_deviation_mm;
+#endif
+
+#if HAS_INDX()
+        // active_extruder is not restored from EEPROM (the cache is invalidated
+        // mid-print). Apply the saved pre-toolchange tool so subsequent E moves
+        // are valid, including its tool offset. Prefer the one physically held
+        // if toolchange is in progress.
+        const uint8_t effective_active_tool
+            = state_buf.toolchanger.phase == PrusaToolChanger::ToolchangePhase::after_lock
+            ? state_buf.toolchanger.tool_nr
+            : state_buf.planner.active_tool;
+        if (effective_active_tool != PrusaToolChanger::MARLIN_NO_TOOL_PICKED) {
+            const PhysicalToolIndex tool = PhysicalToolIndex::from_raw(effective_active_tool);
+            prusa_toolchanger.set_active_extruder(tool);
+            hotend_currently_applied_offset = hotend_offset[tool];
+        } else {
+            prusa_toolchanger.set_active_extruder(NoTool {});
+            hotend_currently_applied_offset = xyz_pos_t {};
+        }
+#endif
+        // initial planner state (order is relevant!)
+        debug_assert(!planner.leveling_active);
+        current_position[Z_AXIS] = state_buf.planner.z_position;
+        planner.set_position_mm(current_position);
+        axes_home_level[Z_AXIS] = state_buf.crash.axes_home_level[Z_AXIS];
+        planner.max_printed_z = state_buf.planner.max_printed_z;
+
+        // canceled objects
+#if HAS_CANCEL_OBJECT()
+        buddy::cancel_object().set_state(state_buf.cancel_object);
+#endif
+#if HAS_TOOL_MAPPING()
+        tool_mapper.deserialize(state_buf.tool_mapping);
+#endif
+#if HAS_SPOOL_JOIN()
+        spool_join.deserialize(state_buf.spool_join);
+#endif
+#if HAS_CHAMBER_API()
+        if (state_buf.chamber_target_temp == chamber_temp_off) {
+            buddy::chamber().set_target_temperature(std::nullopt);
+        } else {
+            buddy::chamber().set_target_temperature(state_buf.chamber_target_temp);
+        }
+#endif
+#if HAS_TEMP_HEATBREAK_CONTROL
+        for (auto tool : PhysicalToolIndex::all()) {
+            thermalManager.setTargetHeatbreak(state_buf.heatbreak_temperatures[tool], tool);
+        }
+
+#endif
+
+#if HAS_TOOLCHANGER() && HAS_TOOL_CRASH_RECOVERY()
+        if (prusa_toolchanger.is_pos_in_toolchange_area(state_buf.crash.crash_machine_position.xy())) {
+            prusa_toolchanger.set_return_data({
+                PhysicalToolIndex::from_raw_notool(state_buf.toolchanger.tool_nr),
+                state_buf.toolchanger.return_type,
+                state_buf.toolchanger.return_pos,
+            });
+            resume_state = ResumeState::Finish; // Do not reheat, do not unpark
+            break; // Skip lift and rehome
+            // Will continue with toolcrash recovery
+        }
+#endif
+#if HAS_INDX()
+        if (state_buf.toolchanger.phase != PrusaToolChanger::ToolchangePhase::none) {
+            // Skip XY re-home. Already included in the toolchange recovery.
+            resume_state = ResumeState::Finish;
+            break;
+        }
+#endif
+
+        if (state_buf.crash.recover_flags & Crash_s::RECOVER_AXIS_STATE) {
+            // lift and rehome
+            if (state_buf.crash.axes_home_level.is_homed(X_AXIS, AxisHomeLevel::imprecise) || state_buf.crash.axes_home_level.is_homed(Y_AXIS, AxisHomeLevel::imprecise)) {
+                float z_dist = current_position[Z_AXIS] - state_buf.crash.crash_native_position[Z_AXIS];
+                float z_lift = z_dist < Z_HOMING_HEIGHT ? Z_HOMING_HEIGHT - z_dist : 0;
+                char cmd_buf[24];
+                snprintf(cmd_buf, sizeof(cmd_buf), "G28 X Y D R%f", (double)z_lift);
+                marlin_server::enqueue_gcode(cmd_buf);
+            }
+        }
+
+        if (state_buf.planner.was_paused) {
+            resume_state = ResumeState::ParkForPause;
+        } else {
+            for (auto tool : PhysicalToolIndex::all()) {
+                thermalManager.setTargetHotend(state_buf.planner.target_nozzle[tool], tool);
+            }
+            // setTargetBed is already called higher up in this function
+
+            resume_state = ResumeState::WaitForHeaters;
+        }
+        break;
+    }
+
+    case ResumeState::WaitForHeaters: {
+        buddy::safety_timer().reset_restore_nonblocking();
+
+        if (!Temperature::are_all_temperatures_reached(Temperature::RequireCooling::current_tool_only)) {
+            break;
+        }
+
+#if HAS_NOZZLE_CLEANER()
+        if (PhysicalToolIndex::currently_selected_opt().has_value()) {
+            // Keep the printer list below in sync with the unretract guard in
+            // ResumeState::Unpark — G12 S21 pressurizes the nozzle on its own.
+    #if PRINTER_IS_PRUSA_COREONE() || PRINTER_IS_PRUSA_COREONEL()
+            static_assert(!power_panic_deretracts);
+            marlin_server::enqueue_gcode("G12 S90"); // enter cleaner
+            marlin_server::enqueue_gcode("G12 S21"); // purge (no retract) and brush wipe
+            marlin_server::enqueue_gcode("G12 S91"); // exit cleaner
+    #else
+            marlin_server::enqueue_gcode("G12"); // clean nozzle on the brush
+    #endif
+        }
+#endif
+        resume_state = ResumeState::Unpark;
+        break;
+    }
+
+    case ResumeState::Unpark:
+        if (marlin_server::is_processing()) {
+            break;
+        }
+
+        // forget the XYZ resume position if requested
+        if (!(state_buf.crash.recover_flags & Crash_s::RECOVER_XY_POSITION)) {
+            LOOP_XY(i) {
+                state_buf.crash.crash_native_position[i] = current_position[i];
+            }
+        }
+        if (!(state_buf.crash.recover_flags & Crash_s::RECOVER_Z_POSITION)) {
+            state_buf.crash.crash_native_position[Z_AXIS] = current_position[Z_AXIS];
+        }
+
+        // unpark only if the position was known
+        if (state_buf.crash.axes_home_level.is_homed({ X_AXIS, Y_AXIS }, AxisHomeLevel::imprecise)) {
+            plan_park_move_to_xyz(state_buf.crash.crash_native_position.xyz(), NOZZLE_PARK_XY_FEEDRATE, NOZZLE_PARK_Z_FEEDRATE, Segmented::yes);
+        }
+
+        // Unretract paired with the retract in PPState::Prepared.
+        if (power_panic_deretracts && PhysicalToolIndex::currently_selected_opt().has_value()) {
+            mapi::extruder_move(STANDARD_RETRACT_LENGTH, buddy::standard_feedrates::current_extruder(buddy::standard_feedrates::Extruder::deretract));
+        }
+
+        resume_state = ResumeState::Finish;
+        break;
+
+    case ResumeState::ParkForPause:
+        if (marlin_server::is_processing()) {
+            break;
+        }
+
+        // return to the parking position
+        plan_park_move_to_xyz(state_buf.crash.start_current_position.xyz(),
+            NOZZLE_PARK_XY_FEEDRATE, NOZZLE_PARK_Z_FEEDRATE, Segmented::yes);
+        resume_state = ResumeState::Finish;
+        break;
+
+    case ResumeState::Finish:
+        if (marlin_server::is_processing()) {
+            break;
+        }
+
+        // original planner state
+        planner.flow_percentage = state_buf.planner.flow_percentage;
+        gcode.axis_relative = state_buf.planner.axis_relative;
+
+        // IS/PA
+        LOOP_XYZ(i) {
+            if (state_buf.planner.axis_config[i].frequency == 0.f) {
+                input_shaper::set_axis_config((AxisEnum)i, std::nullopt);
+            } else {
+                input_shaper::set_axis_config((AxisEnum)i, state_buf.planner.axis_config[i]);
+            }
+        }
+
+        if (state_buf.planner.original_y.frequency == 0.f) {
+            input_shaper::set_config_for_m74(Y_AXIS, std::nullopt);
+        } else {
+            input_shaper::set_config_for_m74(Y_AXIS, state_buf.planner.original_y);
+        }
+
+        if (state_buf.planner.axis_y_weight_adjust.frequency_delta != 0.f) {
+            input_shaper::set_axis_y_weight_adjust(std::nullopt);
+        } else {
+            input_shaper::set_axis_y_weight_adjust(state_buf.planner.axis_y_weight_adjust);
+        }
+
+        pressure_advance::set_axis_e_config(state_buf.planner.axis_e_config);
+
+        // restore crash state
+        {
+            const auto &d = state_buf.crash;
+
+            crash_s.start_current_position = d.start_current_position;
+            crash_s.crash_native_position = d.crash_native_position;
+            crash_s.crash_machine_position = d.crash_machine_position;
+            crash_s.segments_finished = d.segments_finished;
+            crash_s.leveling_active = d.leveling_active;
+            crash_s.recover_flags = d.recover_flags;
+            crash_s.fr_mm_s = d.fr_mm_s;
+            crash_s.counters.restore_data(d.counters);
+        }
+
+        atomic_finish();
+
+        // Re-prepare for the next power panic now that power is stable, to
+        // avoid expensive erase.
+        //
+        // For the non-resumed print, it is done in MBL/G29.
+        prepare();
+
+        log_info(PowerPanic, "resuming complete");
+
+        resume_state = ResumeState::Error;
+        break;
+
+    case ResumeState::Error:
+        // fail if marlin_server::powerpanic_finish_xxx didn't reset the server loop state
+        bsod("resume loop not reset");
+    }
+}
+
+void panic_loop() {
+    switch (power_panic_state) {
+    case PPState::Triggered:
+        if (power_panic_retracts && PhysicalToolIndex::currently_selected_opt().has_value() && !runtime_state.nested_fault && !state_buf.planner.was_paused && !state_buf.planner.was_crashed) {
+            // retract if we were printing
+            mapi::extruder_move(-STANDARD_RETRACT_LENGTH, buddy::standard_feedrates::current_extruder(buddy::standard_feedrates::Extruder::retract));
+            planner.start_moving();
+        }
+        break;
+    }
+}
+
+} // namespace power_panic
+"""  # noqa: E501 (verbatim firmware lines)
 
 CONFIGURATION_H = """\
 //! @file
@@ -1949,6 +2265,7 @@ FILES = {
     read.CLEANER_FILE: NOZZLE_CLEANER_CPP,
     read.AUTO_RETRACT_FILE: AUTO_RETRACT_HPP,
     read.PAUSE_FILE: PAUSE_CPP,
+    "src/common/power_panic.cpp": POWER_PANIC_CPP,
     "src/common/printer_model.cpp": PRINTER_MODEL_CPP,
     "src/feature/compatibility_checks/gcode_compatibility.cpp": GCODE_COMPATIBILITY_CPP,
     "src/marlin_stubs/pause/pause_settings.cpp": PAUSE_SETTINGS_CPP,

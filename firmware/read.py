@@ -767,17 +767,17 @@ def _ramming_steps(text: str, name: str) -> tuple[Step, ...]:
     return tuple(steps)
 
 
-def cleaner_purge(text: str, macros: Macros) -> tuple[float, bool]:
-    """Return how far one build's nozzle cleaner `purge_clean` G-code extrudes, and whether
-    it runs `M1705` (auto-retract) after that.
+def cleaner_purge(text: str, macros: Macros, sequence: str = "purge_clean") -> tuple[float, bool]:
+    """Return how far one of a build's nozzle cleaner G-code sequences extrudes, and whether
+    it runs `M1705` (auto-retract) after that: `purge_clean` unless `sequence` names
+    another, such as `power_panic_purge`.
 
     Only `G750` may move E, and an `M1705` has to come after the last E move.
     """
     try:
         text = "\n".join(active_lines(_strip_comments(text).splitlines(), macros))
-        entry = _one(
-            r"\{\s*Sequence::purge_clean\s*,\s*\{(.*?)\}\s*\}", text, "Sequence::purge_clean"
-        )
+        name = f"Sequence::{sequence}"
+        entry = _one(rf"\{{\s*{re.escape(name)}\s*,\s*\{{(.*?)\}}\s*\}}", text, name)
         literals, rest = _one(
             r'\.default_gcode\s*=\s*((?:"[^"]*"\s*)+)(?=(.*))', entry, ".default_gcode", 2
         )
@@ -786,7 +786,7 @@ def cleaner_purge(text: str, macros: Macros) -> tuple[float, bool]:
             raise ValueError("unexpected code after the .default_gcode literals")
         gcode = "".join(re.findall(r'"([^"]*)"', literals))
         if re.search(r"\\(?!n)", gcode):
-            raise ValueError("an escape other than \\n in purge_clean")
+            raise ValueError(f"an escape other than \\n in {sequence}")
         extruded = 0.0
         last_move = retract = None
         for i, line in enumerate(gcode.split("\\n")):
@@ -798,11 +798,11 @@ def cleaner_purge(text: str, macros: Macros) -> tuple[float, bool]:
                 continue
             m = re.fullmatch(r"E(-?\d+(?:\.\d*)?)", moves[0])
             if words[0] != "G750" or len(moves) != 1 or not m:
-                raise ValueError(f"can't read the E move {line.strip()!r} in purge_clean")
+                raise ValueError(f"can't read the E move {line.strip()!r} in {sequence}")
             extruded += float(m.group(1))
             last_move = i
         if retract is not None and (last_move is None or retract < last_move):
-            raise ValueError("M1705 before the last E move in purge_clean")
+            raise ValueError(f"M1705 before the last E move in {sequence}")
     except ValueError as e:
         raise Unreadable(CLEANER_FILE, str(e)) from None
     return extruded, retract is not None

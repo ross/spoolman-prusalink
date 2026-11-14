@@ -185,6 +185,14 @@ def test_load_reads_every_builds_auto_retract_and_unload_purge(name, retract, pu
     assert (build.auto_retract, build.unload_purge_mm) == (retract, purge)
 
 
+@pytest.mark.parametrize("name", sorted(EXTRUDERS))
+def test_load_reads_the_power_panic_purge_on_indx_only(name):
+    # The iX has a nozzle cleaner but isn't a Core One: its resume only wipes.
+    build = compare.load(fixtures.FakeSource()).builds[name]
+    indx = name in ("COREONE_INDX", "COREONEL_INDX")
+    assert build.panic_purge == (CleanerPurge(25.0, False) if indx else None)
+
+
 def test_feed_ratio():
     builds = compare.load(fixtures.FakeSource()).builds
     assert builds["MK4"].feed_ratio == 0.95
@@ -389,6 +397,7 @@ def build(name, features, tools, gap_mm, presets):
         pause=NEXTRUDER_PAUSE,
         ramming=NEXTRUDER,
         cleaner_purge=None,
+        panic_purge=None,
         auto_retract=AutoRetract(20.0, True),
         unload_purge_mm=0.0,
         feature_names=INPUT_SHAPER,
@@ -567,11 +576,12 @@ def test_model_differences():
 
 def test_extruder_differences():
     firmware, copies = synthetic()
-    mk4, xl = firmware.builds["MK4"], firmware.builds["XL"]
+    mk4, xl, mini = (firmware.builds[b] for b in ("MK4", "XL", "MINI"))
     builds = {
         **firmware.builds,
         "MK4": replace(mk4, features=mk4.features | {"HAS_SWITCHABLE_AUTO_RETRACT", "HAS_MMU2"}),
         "XL": replace(xl, cleaner_purge=CleanerPurge(25.0, True)),
+        "MINI": replace(mini, panic_purge=CleanerPurge(25.0, True)),
     }
     firmware = replace(firmware, builds=builds)
     sim = dict(copies.sim_models)
@@ -587,7 +597,9 @@ def test_extruder_differences():
     sim["2.1.0"] = replace(sim["2.1.0"], mmu=True, extruder=mini_extruder)
     # The cleaner's purge matches; its auto-retract doesn't.
     sim["3.1.0"] = replace(sim["3.1.0"], extruder=replace(EXTRUDER, cleaner_purge_mm=25.0))
-    sim["7.1.0"] = replace(sim["7.1.0"], extruder=replace(EXTRUDER, cleaner_auto_retract=True))
+    sim["7.1.0"] = replace(
+        sim["7.1.0"], extruder=replace(EXTRUDER, cleaner_auto_retract=True, panic_purge_mm=25.0)
+    )
     s = "simulator MODELS"
     found = compare.compare(firmware, replace(copies, sim_models=sim))
     assert found == [
@@ -602,8 +614,11 @@ def test_extruder_differences():
         Difference(s, "2.1.0", None, "mmu", False, True),
         Difference(s, "2.1.0", None, "auto_retract_switchable", False, True),
         Difference(s, "2.1.0", None, "cleaner_purge_mm", None, 0.0),
+        Difference(s, "2.1.0", None, "panic_purge_mm", 25.0, None),
+        Difference(s, "2.1.0", None, "panic_purge_auto_retract", True, False),
         Difference(s, "3.1.0", None, "cleaner_auto_retract", True, False),
         Difference(s, "7.1.0", None, "cleaner_auto_retract", False, True),
+        Difference(s, "7.1.0", None, "panic_purge_mm", None, 25.0),
     ]
     assert str(found[3]) == "1.4.0 lengths.purge_mm: firmware 27, copy 28"
     assert str(found[5]) == "1.4.0 ramming.extra: firmware missing, copy ((1, 1),)"

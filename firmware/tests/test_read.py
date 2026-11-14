@@ -1087,6 +1087,18 @@ def test_cleaner_purge(indx, purge):
     assert read.cleaner_purge(fixtures.NOZZLE_CLEANER_CPP, macros(HAS_INDX=indx)) == purge
 
 
+def test_cleaner_purge_reads_the_power_panic_purge():
+    text = fixtures.NOZZLE_CLEANER_CPP
+    panic = read.cleaner_purge(text, macros(HAS_INDX=True), "power_panic_purge")
+    assert panic == (25.0, False)
+    # Only INDX compiles it.
+    with pytest.raises(Unreadable, match="no Sequence::power_panic_purge"):
+        read.cleaner_purge(text, macros(HAS_INDX=False), "power_panic_purge")
+    entry = '{ Sequence::power_panic_purge, { .default_gcode = "M1705\\nG750 E5", } }'
+    with pytest.raises(Unreadable, match="M1705 before the last E move in power_panic_purge"):
+        read.cleaner_purge(entry, macros(), "power_panic_purge")
+
+
 def purge_clean(gcode):
     return f'{{ Sequence::purge_clean, {{ .filename = "p", .default_gcode = {gcode}, }} }}'
 
