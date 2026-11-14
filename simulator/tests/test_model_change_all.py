@@ -88,8 +88,11 @@ def test_change_all_changes_each_tool_in_turn(model, counted, ratio, after, pick
         assert t.extruded == pytest.approx(mm * ratio), t.index
         assert t.path.loaded and t.material.name == "PETG" and t.material.color == "#ff0000"
     assert p.selected_tool == after
-    # Each pick is inside the dialog, and INDX docks only after the load.
+    # Each pick is inside the dialog, with no idle sensor clear: T1's unload counts where its
+    # ramming ends, not at 0. INDX docks only after the load.
     assert picks(sim)[-len(picked) :] == picked
+    assert not any("idle sensor clear" in e.text for e in sim.events[start:])
+    assert p.tools[1].extruded_at_unload > 0
     assert p.queue == []
 
 
