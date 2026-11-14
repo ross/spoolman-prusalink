@@ -288,3 +288,16 @@ def test_an_mmu_switched_off_prints_as_a_single_tool_printer():
     p.set_mmu(False)
     p.start_print(one_segment(10))
     assert p.job is not None
+
+
+def test_a_plain_mmu_build_stores_slot_writes_but_lists_tool_0_alone():
+    # An MK4 with no MMU attached: `M865 I2` lands in slot 2's config, but the printer has
+    # slot 0 alone while the MMU setting is off, so slot 2 can't be enabled or listed.
+    sim, p = make("1.4.0")
+    run_sync(sim, p, sliced(p, 'M865 I2 N"PETG"\n'))
+    assert p.tools[2].material.name == "PETG" and not p.tools[2].enabled
+    reason = "T2 is an MMU slot, and the MMU is off"
+    assert p.to_json()["tools"][1]["actions"]["set_tool_enabled"] == reason
+    with pytest.raises(Invalid, match=reason):
+        p.set_tool_enabled(2, True)
+    assert listed(p) == [0]
