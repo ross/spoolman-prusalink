@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import pytest
 
-from simulator.model import JobPhase, PrintSpec, Segment, SimTool, State
+from simulator.model import MODELS, Invalid, JobPhase, PrintSpec, Segment, SimTool, State
 from simulator.tests.util import loaded, make, sliced
 
 XL, INDX = "3.1.0", "8.10.0"
@@ -252,3 +252,57 @@ def test_an_indx_print_paused_then_cut_resumes_with_a_pick_and_a_purge():
     # The tracker boots at gap 0 and doesn't know the pause's 8 mm retract, so all 25
     # count, and the auto-retract's 8.
     assert counts(p)[0] == pytest.approx(25 + 8)
+
+
+# An XL with one tool: its toolchanger is off, and the tool stays on the head
+# (`autodetect_toolchanger_enabled` in `toolchanger_utils_xl.cpp`).
+
+
+def test_a_one_tool_xl_keeps_its_tool_and_its_end_auto_retracts():
+    sim, p = make(XL)
+    p.start_print(print_spec((0, 10)))
+    sim.advance(20)
+    assert p.state is State.FINISHED and p.selected_tool == 0
+    # The single-tool profile's end G-code has no park, so the firmware's end runs.
+    assert p.tools[0].path.auto_retracted == 55
+    assert "end G-code parks T0" not in [e.text for e in sim.events]
+
+
+@pytest.mark.parametrize("action", ["select_tool", "park_tool"])
+def test_a_one_tool_xl_has_no_tool_to_pick_or_park(action):
+    _, p = make(XL)
+    args = (0,) if action == "select_tool" else ()
+    with pytest.raises(Invalid, match="XL has one tool"):
+        getattr(p, action)(*args)
+    assert not p.toolchanger and make(XL, [loaded(0), loaded(1)])[1].toolchanger
+    # One enabled tool of two is the same printer; INDX docks whatever it has.
+    assert not make(XL, [loaded(0), SimTool(1, enabled=False)])[1].toolchanger
+    assert make(INDX)[1].toolchanger
+
+
+def test_the_tool_picked_by_default():
+    assert MODELS[XL].first_tool(1) == 0 and MODELS[XL].first_tool(2) is None
+    assert MODELS[INDX].first_tool(1) is None
+    assert MODELS["8.1.0"].first_tool(1) == 0
+
+
+def test_a_jam_cleared_in_place_on_indx_counts_nothing_at_the_resume():
+    """A jam is a filament change dialog, which parks nothing, so its resume runs no
+    `unpark_prime` (`Pause::filament_change` in `pause.cpp`)."""
+    sim, p = make(INDX, [loaded(0), loaded(1)])
+    start(sim, p, print_spec((0, 100)))
+    p.jam(0, unload=False)
+    before = counts(p)
+    p.clear_jam()
+    p.resume()
+    assert p.job.phase is JobPhase.PRINTING and p.selected_tool == 0
+    assert counts(p) == before
+
+
+def test_a_cut_at_the_preview_of_a_multi_tool_indx_print_keeps_the_pick():
+    sim, p = make(INDX, [loaded(0), loaded(1)])
+    p.start_print(print_spec((0, 10), (1, 10)))
+    sim.tick(0.5)
+    assert p.job.previewing and p.selected_tool == 0
+    p.reboot(keep_job=True)
+    assert p.selected_tool == 0

@@ -392,17 +392,16 @@ def test_auto_retract_off():
     assert counted(p, lambda: p.extrude(0, 10)) == pytest.approx(10)
 
 
-# The MINI's end retracts 8 and stores nothing. The dev kit's end G-code parks its tool
-# first, so its end retracts nothing.
-@pytest.mark.parametrize(("model", "gap"), [("5.1.0", 0), ("2.1.0", 8)])
-def test_a_dev_kit_and_a_mini_never_auto_retract(model, gap):
+@pytest.mark.parametrize("model", ["5.1.0", "2.1.0"])
+def test_a_dev_kit_and_a_mini_never_auto_retract(model):
     sim, p = make(model, [SimTool(0)])
     p.load(0, source="preset", name="PLA")
     sim.advance(100)
     assert tracker(p) == (8, True, None)
     p.start_print(PrintSpec([Segment(0, 10)], preheat_s=0))
     sim.advance(10)
-    assert tracker(p) == (gap, True, None)
+    # The end retracts 8 and stores nothing.
+    assert tracker(p) == (8, True, None)
     assert not p.to_json()["model"]["auto_retracts"]
 
 

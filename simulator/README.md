@@ -294,6 +294,9 @@ that trace. The points that matter for the bridge, in short:
   after a cut during a print that used several tools. Then no filament
   moves or counts, the idle sensor clear doesn't run, and a print's end
   neither retracts nor auto-retracts. The page shows the tool as "none".
+  An XL with one tool enabled isn't a toolchanger in any of this: its
+  toolchanger is off in the firmware, so the tool stays picked, a print's
+  end doesn't park it, and `select_tool` and `park_tool` are refused.
 - Where the picked tool rests. A finished print on the XL or INDX ends with
   the stock profiles' `P0 S1`, which parks the tool before the firmware's
   end retract and auto-retract, so those find no tool. The simulator takes

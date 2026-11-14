@@ -598,7 +598,8 @@ written.
   load, an unload, a pause and a print, so an idle INDX has none picked
   (`M701_2.cpp:135-140, 194-197, 339-342`,
   `marlin_server.cpp:1098, 2561`). A finished print's end G-code parks the
-  tool on the XL too (`P0 S1` in the stock profiles), and the XL otherwise
+  tool on an XL with several tools too (`P0 S1` in the stock profile), and
+  that XL otherwise
   has whichever tool is on the head (F32). A docked or parked tool emptied
   by hand keeps its type and counts no unload, and nothing sweeps the
   tools at boot or at a print start. On an idle INDX only a menu load,

@@ -389,7 +389,8 @@ def build(cfg: SimConfig) -> Simulation:
         model = MODELS[pc.model]
         default = Firmware.FULL if model.counters else Firmware.NO_COUNTERS
         tools = {tc.index: _sim_tool(model, tc) for tc in pc.tools}
-        picked = model.first_tool if pc.picked_tool is None else pc.picked_tool
+        default_pick = model.first_tool(sum(t.enabled for t in tools.values()))
+        picked = default_pick if pc.picked_tool is None else pc.picked_tool
         sim.add(
             SimPrinter(
                 name=pc.name,

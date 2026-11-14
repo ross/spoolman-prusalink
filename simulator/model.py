@@ -254,11 +254,14 @@ class ModelInfo:
     # Its feed system: XL on HAS_TOOLCHANGER builds, INDX on HAS_INDX ones, else direct.
     feed: Feed = field(default=Feed.DIRECT, kw_only=True)
 
-    @property
-    def first_tool(self) -> int | None:
-        """The tool picked when the config names none: a direct printer's one tool, and none
-        on a toolchanger, whose tools wait docked or parked."""
-        return 0 if self.feed is Feed.DIRECT else None
+    def first_tool(self, enabled: int) -> int | None:
+        """The tool picked when the config names none, on a printer with `enabled` tools
+        enabled: none on a toolchanger, whose tools wait docked or parked, and tool 0
+        elsewhere. An XL with one tool isn't one: its toolchanger is off and the tool stays
+        on the head (`autodetect_toolchanger_enabled` in
+        `src/module/prusa/toolchanger_utils_xl.cpp`)."""
+        changes = self.feed is Feed.INDX or (self.feed is Feed.XL and enabled > 1)
+        return None if changes else 0
 
     def holds_uuid(self, tool: int) -> bool:
         """Whether `tool` keeps tag UUIDs: tool 0 of a model with a tag reader (F21).
@@ -571,6 +574,10 @@ class UserJob(SimJob):
     # The tool of a filament change and its gap when the change began, which the resume
     # restores.
     restore: tuple[int, float] | None = None
+    # Whether the pause went through the firmware's pause states, whose resume unparks and,
+    # on INDX, purges (`unpark_prime`). A jam cleared in place didn't: it's a filament
+    # change dialog, which parks nothing (`Pause::filament_change`).
+    parked: bool = False
     previewing: bool = True  # until the preview lets the print begin
     # The tools-mapping screen and the questions its Print asks, set when the screen opens.
     mapping: list[Attention] = field(default_factory=list)
@@ -712,6 +719,16 @@ class SimPrinter:
         if any(t.process is not None for t in self.tools.values()):
             return State.BUSY
         return self.screen
+
+    @property
+    def toolchanger(self) -> bool:
+        """Whether the printer changes tools. An XL with one tool enabled doesn't: the
+        firmware turns its toolchanger off, keeps that tool on the head and refuses a
+        change to any other, and its stock profile's end G-code has no park
+        (`autodetect_toolchanger_enabled` in `toolchanger_utils_xl.cpp`, `tool_change` in
+        `toolchanger_xl.cpp`). INDX always docks."""
+        enabled = sum(t.enabled for t in self.tools.values())
+        return self.feed.selectable and (self.feed.docks or enabled > 1)
 
     @property
     def feed(self) -> FeedSystem:
@@ -1291,6 +1308,7 @@ class SimPrinter:
         job = self.job
         self._log("action", "pause")
         job.paused_from = job.phase
+        job.parked = True
         if self._primes_at_resume():
             # The pause retracts to 8 mm (`retract_and_lift` in `Pausing_WaitIdle`), and the
             # resume never feeds it back: its purge refills the gap instead.
@@ -1319,8 +1337,9 @@ class SimPrinter:
             # A change on another tool changes back to the print's tool after the dialog,
             # with no E move and no purge (`M600_execute`, `M600.cpp:317-339`).
             self._pick(self._job_tool(job))
-        else:
+        elif job.parked:
             self._unpark_prime(job)
+        job.parked = False
         if job.paused_from is JobPhase.PREHEAT:
             job.enter(JobPhase.PREHEAT)
             self._show_state()
@@ -1570,6 +1589,9 @@ class SimPrinter:
                 self._track(self._job_tool(job), -self.model.extruder.lengths.retract_mm)
             job.restore = None  # a power loss ends the filament change before its restore
             job.paused_from = JobPhase.PRINTING if was_paused else None
+            # A paused print's resume goes through the pause's unpark, whatever paused it
+            # (`power_panic.cpp:1041-1046`).
+            job.parked = was_paused
             if was_paused:
                 job.enter(JobPhase.PAUSED)
         elif held is not None and not keep_job:
@@ -1767,7 +1789,7 @@ class SimPrinter:
             raise Invalid(f"T{t.index} has no filament")
 
     def _check_select(self) -> None:
-        if not self.feed.selectable:
+        if not self.toolchanger:
             raise Invalid(f"{self.model.name} has one tool")
         if self.job is not None or self.state is State.BUSY:
             raise Busy(f"can't pick a tool while {self.state}")
@@ -1813,7 +1835,7 @@ class SimPrinter:
     def _check_change_all(self) -> None:
         # Change all is in the Filament menu on a toolchanger only
         # (`src/gui/screen_menu_filament.hpp`), and the menu needs an idle printer.
-        if not self.feed.selectable:
+        if not self.toolchanger:
             raise Invalid(f"{self.model.name} has one tool")
         self._need_power()
         if self.job is not None or self.state not in IDLE_STATES:
@@ -2163,7 +2185,8 @@ class SimPrinter:
         """End a job: a finished print's end G-code parks the tool on a toolchanger, then the
         firmware's own end runs, and INDX docks what's still picked (`pre_finalize_print`).
         A stopped print and a sync job keep the tool to the firmware's end."""
-        if isinstance(job, UserJob) and end is State.FINISHED and self.feed.end_parks:
+        parks = self.feed.end_parks and self.toolchanger
+        if isinstance(job, UserJob) and end is State.FINISHED and parks:
             self._log("job", f"end G-code parks T{self.selected_tool}")
             self.selected_tool = None
         self._end_of_print()

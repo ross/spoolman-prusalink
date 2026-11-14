@@ -135,7 +135,8 @@ async def start(spec: Spec, world: World) -> tuple[Station, PrinterConfig]:
     for index, location in enumerate(spec.empty, start=len(spec.loads)):
         tools[index], locations[index] = SimTool(index), location
     model = MODELS[spec.model]
-    printer = SimPrinter(spec.name, 0, KEY, model, tools=tools, selected_tool=model.first_tool)
+    picked = model.first_tool(len(tools))
+    printer = SimPrinter(spec.name, 0, KEY, model, tools=tools, selected_tool=picked)
     world.sim.add(printer)
     made = Station(world.sim, printer, world=world, locations=locations)
     made.server = TestServer(made.app())
