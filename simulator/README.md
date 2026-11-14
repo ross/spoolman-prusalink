@@ -142,11 +142,27 @@ that trace. The points that matter for the bridge, in short:
   reported, sets the material, then purges. The purge ends with an 8 mm
   retract, except on the iX and INDX, whose nozzle cleaners end it. A
   high-flow nozzle doubles the purge, except on INDX, whose cleaner purges a
-  fixed 25 mm. A reload during a print then primes 4 mm and retracts 8 mm,
-  and the resume puts the tool back at the gap it had when the change
-  started. From a full gap, a Core One L load
-  counts 20 mm before the material shows and 40 mm after, times the feed
-  ratio.
+  fixed 25 mm. An idle load then auto-retracts. A reload during a print
+  primes 4 mm and retracts 8 mm instead, and the resume puts the tool back at
+  the gap it had when the change began. From a full gap, a Core One L load
+  counts 20 mm before the material shows and 63 mm after, times the feed
+  ratio: 40 mm of purge and 23 mm of auto-retract ramming.
+- An auto-retract runs the model's `auto_retract` ramming sequence and stores
+  how far it left the filament retracted: 55 mm on a Nextruder, 8 mm on INDX.
+  It runs at the end of an idle load, after the INDX cleaner purge, and at a
+  print's end, and it skips a tool already retracted that far, flexible
+  filament, and a printer with `auto_retract = false`. The next forward move
+  feeds the stored distance back first. At boot, the stored distance sets
+  the tool's gap; with nothing stored, the gap starts at 0 and the tracker
+  reports no retracted distance until a feed reaches the nozzle. A Nextruder print's end counts 23
+  mm; an INDX print's end counts nothing, because the 8 mm park retract
+  already counts as retracted. The MINI, MK3.5 and the dev kit don't
+  auto-retract.
+- An unload or runout rams with the model's `unload` or `runout` sequence,
+  then retracts what's left of the unload length. INDX purges 2 mm first.
+  A menu unload of a Nextruder tool that auto-retracted skips the ramming
+  and counts nothing. An unload of a tool that fed since its auto-retract
+  counts 23 mm times the feed ratio; a Nextruder runout counts 7 mm.
 - Every print start shows `PRINTING`, then a brief `IDLE` with no job, then
   `PRINTING`. `FINISHED` and `STOPPED` persist until dismissed, and the job
   disappears from `/api/v1/status` and `/api/v1/job` as soon as a print ends.
@@ -187,6 +203,22 @@ Choices made where the firmware was silent or the plan left it open:
 - A pause and resume with no filament change moves no filament. The
   firmware retracts at the pause and feeds the same length back at the
   unpark, which counts nothing unless the gap was near its limit.
+- `fill()` and a tool built loaded start with gap 0, the tracker valid and
+  nothing stored, on every model. A real printer that just loaded would
+  have auto-retracted.
+- Ramming, unload and auto-retract moves run at the load rate, not at the
+  sequence's feedrates.
+- The menu unload starts with a cold nozzle, so it gets no 8 mm park
+  retract. On INDX it counts 19 mm: the 2 mm purge and 17 mm of ramming.
+  With a hot nozzle the firmware's park would make it 17 mm.
+- An INDX tool has no extruder filament sensor, so the firmware sends a jam
+  to `manual_unload` in `pause.cpp`, with no ramming and no unload counted. The simulator rams and counts it as a runout.
+- The `M865` flexible flag isn't modeled: only the preset names in
+  `FLEXIBLE_PRESETS` count as flexible.
+- Temperatures, `G12`, the mesh bed leveling retract and the MMU don't move
+  filament in the simulator.
+- A power loss during a filament change drops the gap to restore: the
+  resume after the reload doesn't move.
 
 ## Tests
 
