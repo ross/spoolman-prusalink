@@ -5,7 +5,9 @@ charge the wrong amount or the wrong spool, miss a spool swap, or fail to
 write to the printer. They turned up while the simulator was made to follow
 each printer family ([simulator-models.md](simulator-models.md)). This list
 tracks them in a proposed order of work, so they can be taken one stage at
-a time.
+a time. [bridge-fixes.md](bridge-fixes.md) plans the fixes as workstreams,
+with the decisions they wait on. This list stays the record of each
+finding: a fix sets its Status here.
 
 ## Reading an entry
 

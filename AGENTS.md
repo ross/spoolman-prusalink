@@ -174,6 +174,7 @@ trace.
 
 `docs/bridge-findings.md` tracks what the simulator work found the bridge gets wrong, by
 BF ID, in priority stages. A new finding gets an entry there, not a GitHub issue.
+`docs/bridge-fixes.md` plans the fixes as workstreams, with the decisions they wait on.
 
 ## Firmware tables
 
