@@ -195,8 +195,16 @@ longer occurs.
 
 A few copied rules are code in the firmware, which the check can't rebuild as a table. For
 each, `WATCHED` in `firmware/watch.py` records a fingerprint of the firmware code it came
-from: a watched region. When the check reports a changed region, re-read it, update the
-copy it names, and then record the new fingerprint that the check prints.
+from: a watched region. Each row also records the firmware commit the region was last
+read at. When the check reports a changed region, do these steps in order:
+
+1. In a firmware checkout, run the `git diff` that the check prints.
+2. Re-read the copy that the check names.
+3. If the rule changed, update the copy.
+4. Record the new fingerprint and commit that the check prints.
+
+Update a row only when its region changed. A region with the same text at a newer commit
+passes, and its row keeps its commit.
 
 ## Conventions
 

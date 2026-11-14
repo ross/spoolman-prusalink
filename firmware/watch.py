@@ -41,10 +41,16 @@ class Watched:
     anchor: str  # the function's name, or the start of the directive or command
     copy: str  # what was copied from the region, and where
     fingerprint: str
+    commit: str  # the full hash of the firmware commit the region was last read at
 
 
-# The regions the copies come from. When one changes, re-read it, check the copy it names,
-# and replace its fingerprint with the one the check prints.
+# The upstream commit most fingerprints were read at.
+UPSTREAM_7D8BF685 = "7d8bf6858b363c453c0617bceab5e66997d8fc25"
+
+# The regions the copies come from. Each row's commit is the one its region was last read
+# at, not the last one checked: a region whose text is the same at a newer commit stays as
+# it is. When one changes, read the diff the check prints, check the copy it names, and
+# then record the fingerprint and commit the check prints.
 WATCHED = (
     # The upgrade paths: `UPGRADES` in simulator/compatibility.py.
     Watched(
@@ -54,6 +60,7 @@ WATCHED = (
         "gcode_compatibility_report_constexpr",
         "UPGRADES in simulator/compatibility.py",
         "bf8dbaf2d07d79c5",
+        UPSTREAM_7D8BF685,
     ),
     # The next two guard `GCodeChecks.required` in simulator/compatibility.py. The first
     # requires the Input Shaper and INDX lock flags; the conditions sit among other checks in
@@ -67,6 +74,7 @@ WATCHED = (
         "GCodeChecks.required in simulator/compatibility.py and print_checks in"
         " simulator/preview.py",
         "b3cf2415e667a40b",
+        UPSTREAM_7D8BF685,
     ),
     # The second decides which `M862.6` name sets which flag. It parses every `M862` line, so
     # it also trips on unrelated changes: 8 commits touched it in 2026 up to 7d8bf6858.
@@ -77,6 +85,7 @@ WATCHED = (
         "GCodeInfo::parse_m862",
         "GCodeChecks.required in simulator/compatibility.py",
         "7e4c129c699f5571",
+        UPSTREAM_7D8BF685,
     ),
     # The per-tool checks of a print: the disabled tool, the missing filament and the wrong
     # type in `print_checks` and `wrong_types` in simulator/preview.py. The function runs
@@ -89,6 +98,7 @@ WATCHED = (
         "CompatibilityReport::generate_toolmapping_only_noclear",
         "print_checks and wrong_types in simulator/preview.py",
         "57407f963fde6b8d",
+        UPSTREAM_7D8BF685,
     ),
     # When a print goes through the tools-mapping screen: `tool_mapping` in
     # simulator/preview.py.
@@ -99,6 +109,7 @@ WATCHED = (
         "is_tool_mapping_possible",
         "tool_mapping in simulator/preview.py",
         "136be5698acb0b96",
+        UPSTREAM_7D8BF685,
     ),
     # The main boards besides the buddy boards: `OTHER_MAIN_BOARDS` in firmware/compare.py.
     Watched(
@@ -108,6 +119,7 @@ WATCHED = (
         "if(BOARD IN_LIST BUDDY_BOARDS OR",
         "OTHER_MAIN_BOARDS in firmware/compare.py",
         "c6120ac728f42a92",
+        UPSTREAM_7D8BF685,
     ),
     # The next six guard `BOARD_DEFINES` in firmware/compare.py: of the main boards, only
     # XLBUDDY and XL_DEV_KIT_XLB define `BOARD_IS_XLBUDDY()`, none defines
@@ -119,6 +131,7 @@ WATCHED = (
         "#elif BOARD() == BOARD_XLBUDDY()",
         "BOARD_DEFINES in firmware/compare.py",
         "1b5878d336656cec",
+        UPSTREAM_7D8BF685,
     ),
     Watched(
         "the XL dev kit board's macros",
@@ -127,6 +140,7 @@ WATCHED = (
         "#elif BOARD() == BOARD_XL_DEV_KIT_XLB()",
         "BOARD_DEFINES in firmware/compare.py",
         "8d2733394e9e16e1",
+        UPSTREAM_7D8BF685,
     ),
     Watched(
         "the BUDDY board's macros",
@@ -135,6 +149,7 @@ WATCHED = (
         "#elif BOARD() == BOARD_BUDDY()",
         "BOARD_DEFINES in firmware/compare.py",
         "34ada32dca12a264",
+        UPSTREAM_7D8BF685,
     ),
     Watched(
         "the XBUDDY board's macros",
@@ -143,6 +158,7 @@ WATCHED = (
         "#elif BOARD() == BOARD_XBUDDY()",
         "BOARD_DEFINES in firmware/compare.py",
         "b366077de8f45a00",
+        UPSTREAM_7D8BF685,
     ),
     Watched(
         "the BOARD_IS_XLBUDDY default",
@@ -151,6 +167,7 @@ WATCHED = (
         "#ifndef BOARD_IS_XLBUDDY",
         "BOARD_DEFINES in firmware/compare.py",
         "6bacb277dac47d33",
+        UPSTREAM_7D8BF685,
     ),
     Watched(
         "the BOARD_IS_DWARF default",
@@ -159,6 +176,7 @@ WATCHED = (
         "#ifndef BOARD_IS_DWARF",
         "BOARD_DEFINES in firmware/compare.py",
         "04c9261a6da4db2d",
+        UPSTREAM_7D8BF685,
     ),
     # The load's purge: the high-flow doubling in `SimPrinter._load_lengths`, and the
     # override and that the minimum applies in `SimPrinter._load_steps`, in
@@ -170,6 +188,7 @@ WATCHED = (
         "pause::Settings::purge_length",
         "SimPrinter._load_lengths and _load_steps in simulator/model.py",
         "eebdf064fe4b03fc",
+        UPSTREAM_7D8BF685,
     ),
 )
 
@@ -178,13 +197,25 @@ WATCHED = (
 class Change:
     watched: Watched
     now: str  # the region's fingerprint now
+    commit: str  # the full hash of the commit checked
 
     def __str__(self) -> str:
         w = self.watched
+        if self.commit == w.commit:
+            return (
+                f"{w.name} in {w.path} has fingerprint {self.now} at {_short(w.commit)}, its"
+                f" recorded commit, not {w.fingerprint}: the recorded fingerprint is wrong"
+            )
         return (
-            f"{w.name} in {w.path} changed (expected {w.fingerprint}, now {self.now}):"
-            f" re-read it and check {w.copy}, then record the new fingerprint"
+            f"{w.name} in {w.path} changed since {_short(w.commit)}: check {w.copy} against"
+            f" the diff, then record fingerprint {self.now} and commit {self.commit}\n"
+            f"    in a firmware checkout: git diff"
+            f" {_short(w.commit)}..{_short(self.commit)} -- {w.path}"
         )
+
+
+def _short(commit: str) -> str:
+    return commit[:12]
 
 
 def changes(source: Source, watched: Iterable[Watched] = WATCHED) -> list[Change]:
@@ -194,7 +225,7 @@ def changes(source: Source, watched: Iterable[Watched] = WATCHED) -> list[Change
     for w in watched:
         now = fingerprint(region(text(w.path), w))
         if now != w.fingerprint:
-            found.append(Change(w, now))
+            found.append(Change(w, now, source.commit))
     return found
 
 

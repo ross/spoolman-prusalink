@@ -1,5 +1,7 @@
 """The watched regions: finding them, their fingerprints and how a change is reported."""
 
+import re
+
 import pytest
 
 from firmware import compare, watch
@@ -8,7 +10,7 @@ from firmware.tests import fixtures
 
 
 def watched(kind, anchor, fingerprint="0" * 16):
-    return watch.Watched("the region", "a/file", kind, anchor, "X in y.py", fingerprint)
+    return watch.Watched("the region", "a/file", kind, anchor, "X in y.py", fingerprint, "c" * 40)
 
 
 def region(text, kind, anchor):
@@ -21,8 +23,23 @@ def test_every_watched_region_is_in_the_fixtures(row):
     assert watch.fingerprint(found) == row.fingerprint
 
 
+@pytest.mark.parametrize("row", watch.WATCHED, ids=lambda w: w.name)
+def test_every_watched_row_records_a_full_commit(row):
+    # The report knows a wrong fingerprint by the recorded commit being the checked one,
+    # whose full hash it compares.
+    assert re.fullmatch("[0-9a-f]{40}", row.commit)
+
+
 def test_the_fixtures_have_no_changes():
     assert watch.changes(fixtures.FakeSource()) == []
+
+
+def test_an_unchanged_region_at_a_newer_commit_is_ok():
+    # The recorded commit is where the region was last read, so a newer commit with the same
+    # text needs no update.
+    newer = "f" * 40
+    assert all(w.commit != newer for w in watch.WATCHED)
+    assert watch.changes(fixtures.FakeSource(commit=newer)) == []
 
 
 def test_a_function_runs_from_its_line_to_its_closing_brace():
@@ -159,16 +176,26 @@ def test_only_code_changes_the_fingerprint():
     )
 
 
-def test_a_changed_region_is_reported():
+def changed(commit):
     row = watch.WATCHED[0]
     files = {**fixtures.FILES, row.path: fixtures.PRINTER_MODEL_CPP.replace("xl", "XL")}
-    [change] = watch.changes(fixtures.FakeSource(files), [row])
+    [change] = watch.changes(fixtures.FakeSource(files, commit), [row])
     assert change.watched == row
     assert change.now != row.fingerprint
+    return row, change
+
+
+def test_a_changed_region_is_reported_with_the_diff_to_read():
+    newer = "abcdef0123456789" * 2 + "abcdef01"
+    row, change = changed(newer)
+    assert row.commit == "7d8bf6858b363c453c0617bceab5e66997d8fc25"
+    assert change.commit == newer
     assert str(change) == (
-        f"the compatibility upgrades in src/common/printer_model.cpp changed (expected"
-        f" {row.fingerprint}, now {change.now}): re-read it and check UPGRADES in"
-        " simulator/compatibility.py, then record the new fingerprint"
+        "the compatibility upgrades in src/common/printer_model.cpp changed since 7d8bf6858b36:"
+        " check UPGRADES in simulator/compatibility.py against the diff, then record"
+        f" fingerprint {change.now} and commit {newer}\n"
+        "    in a firmware checkout: git diff 7d8bf6858b36..abcdef012345 --"
+        " src/common/printer_model.cpp"
     )
     lines, ok = compare.report([], (), [change])
     assert not ok
@@ -180,3 +207,12 @@ def test_a_changed_region_is_reported():
     lines, ok = compare.report([], (), [])
     assert ok
     assert lines[-2] == "watched source: ok"
+
+
+def test_a_changed_region_at_its_recorded_commit_is_a_wrong_fingerprint():
+    row, change = changed(watch.WATCHED[0].commit)
+    assert str(change) == (
+        f"the compatibility upgrades in src/common/printer_model.cpp has fingerprint"
+        f" {change.now} at 7d8bf6858b36, its recorded commit, not {row.fingerprint}: the"
+        " recorded fingerprint is wrong"
+    )

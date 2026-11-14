@@ -127,7 +127,15 @@ def test_a_changed_watched_region_exits_1(calls, monkeypatch, capsys):
     assert cli.main(["--checkout", "."]) == 1
     out = capsys.readouterr().out
     assert "simulator MODELS: ok" in out
-    assert "watched source:\n  the XLBUDDY board's macros in include/device/board.h changed" in out
+    assert (
+        "watched source:\n  the XLBUDDY board's macros in include/device/board.h changed since"
+        " 7d8bf6858b36: check BOARD_DEFINES in firmware/compare.py against the diff, then record"
+        " fingerprint "
+    ) in out
+    assert (
+        " and commit c0ffee\n"
+        "    in a firmware checkout: git diff 7d8bf6858b36..c0ffee -- include/device/board.h\n"
+    ) in out
     assert out.endswith(", 0 stale expected entries, 1 changed watched regions\n")
 
 
