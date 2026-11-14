@@ -2247,6 +2247,178 @@ PRESETS_JSON = """\
 }
 """  # noqa: E501 (verbatim firmware lines)
 
+# The two MMU functions in src/common/tool_index.cpp.
+TOOL_INDEX_CPP = """\
+template <>
+bool VirtualToolIndex::is_enabled() const {
+    [[maybe_unused]] const auto &self = static_cast<const VirtualToolIndex &>(*this);
+
+#if HAS_TOOLCHANGER()
+    return self.to_physical().is_enabled();
+
+#elif HAS_MMU2()
+    static_assert(PhysicalToolIndex::count == 1);
+    if (config_store().mmu2_enabled.get()) {
+        // MMU has five slots, the virtual tool count should match
+        static_assert(VirtualToolIndex::count == 5);
+
+        // MMU is enabled - we have access to all virtual tools and can toolchange between them
+        return true;
+
+    } else {
+        // Without the MMU, we only have one virtual tool available (there's nothing that would do the toolchange)
+        return self.to_raw() == 0;
+    }
+#else
+    // Single nozzle, single slot - nothing to get disabled
+    static_assert(PhysicalToolIndex::count == 1);
+    static_assert(VirtualToolIndex::count == 1);
+    return true;
+#endif
+}
+
+std::variant<VirtualToolIndex, NoTool> PhysicalExtension::currently_selected_virtual_tool() const {
+    const auto &self = static_cast<const PhysicalToolIndex &>(*this);
+
+#if HAS_MMU2()
+    static_assert(PhysicalToolIndex::count == 1);
+    if (MMU2::mmu2.Enabled()) {
+        const auto e = MMU2::mmu2.get_current_tool();
+        if (e == MMU2::FILAMENT_UNKNOWN) {
+            return NoTool {};
+        } else {
+            return VirtualToolIndex::from_raw(e);
+        }
+    }
+#else
+    static_assert(PhysicalToolIndex::count == VirtualToolIndex::count);
+#endif
+
+    return VirtualToolIndex::from_raw(self.to_raw());
+}
+"""  # noqa: E501 (verbatim firmware lines)
+
+# The MMU's switch in src/marlin_stubs/pause/M70X_mmu.cpp.
+M70X_MMU_CPP = """\
+/**
+ * @brief turn mmu on
+ *
+ */
+void filament_gcodes::mmu_on() {
+    config_store().mmu2_enabled.set(true);
+
+#if HAS_ANFC() && !HAS_ANFC_FOR_MULTIPLE_TOOLS()
+    // Remove link to a NFC Tag
+    for (const VirtualToolIndex tool : VirtualToolIndex::all()) {
+        FilamentType { AdHocFilamentType { tool } }.modify_parameters([](FilamentTypeParameters &p) {
+            p.openprinttag_uid_hash = buddy::openprinttag::ToolTag::no_tag_hash;
+        });
+    }
+#endif
+
+    MMU2::mmu2.Start();
+
+    // To ensure SideFS (MMU's FS) is properly set up in FS handler
+    // logical_sensor_states_ has to update with logical filament sensors already reconfigured and enabled
+    FSensors_instance().request_enable_state_update();
+}
+
+/**
+ * @brief turn mmu off
+ *
+ */
+void filament_gcodes::mmu_off() {
+    config_store().mmu2_enabled.set(false);
+
+    // MMU uses config_store.filament_type to store what's preloaded in the MMU
+    // When we turn the MMU off, it should now actually store what's in the nozzle.
+    // If there is nothing in the nozzle, clear the setting.
+    // BFW-5199
+    if (!FSensors_instance().has_filament_surely(LogicalFilamentSensor::extruder)) {
+        config_store().set_filament_type(VirtualToolIndex::from_raw(0), {});
+    }
+
+    MMU2::mmu2.Stop();
+
+    // Update logical FS states
+    FSensors_instance().request_enable_state_update();
+}
+"""  # noqa: E501 (verbatim firmware lines)
+
+# The E move's count in `Planner::buffer_segment`, without the function around it.
+PLANNER_CPP = """\
+    /// Extruder movement without a tool picked doesn't make any sense
+    if(!tools.physical_tool.has_value()) {
+      bsod("E move without tool");
+    }
+
+    [[maybe_unused]] const float delta_e_mm = (xyze.e - position_float.e) * get_move_e_factor(tools, hints.move);
+
+#if HAS_INDX()
+    buddy::indx_tool_lock_hack().track_extruder_move(delta_e_mm, Badge<Planner>{});
+#endif
+
+#if HAS_FILAMENT_TRACKER()
+    if(tools.virtual_tool.has_value()) {
+      // Note: This is not >>ideal<<, because although the moves get planned, they might get discarded through (gcode_exceptions/quick_stop)
+      // Most notably, this will track some extra filament usage if user intterupts purging
+      // Tying this directly to the immediate motor positions might be better, but one would also need to also handle the origin resets
+      // Live steps/mm against the stock extruder's calibration, so G-codes changing steps (M92) or flow are tracked right.
+      // A custom extruder with user-set steps/mm would need its own calibrated value (e.g. an experimental
+      // menu item stored in EEPROM next to the steps/mm); not supported.
+      static constexpr float inv_calibrated_steps_per_mm = 1.0f / CALIBRATED_AXIS_STEPS_PER_UNIT_E0;
+      buddy::filament_tracker().track_extruder_move(*tools.virtual_tool, {
+        .commanded_mm = delta_e_mm,
+        .feed_ratio = settings.axis_steps_per_mm[E_AXIS_N(tools.extruder)] * inv_calibrated_steps_per_mm,
+      });
+    }
+#endif
+"""  # noqa: E501 (verbatim firmware lines)
+
+# Part of the status renderer's printer object.
+STATUS_RENDERER_CPP = """\
+            // XYZE, mm
+            JSON_FIELD_FFIXED("axis_z", marlin_vars().logical_curr_pos[2], 1) JSON_COMMA;
+            if (!marlin_client::is_printing()) {
+                JSON_FIELD_FFIXED("axis_x", marlin_vars().logical_curr_pos[0], 1) JSON_COMMA;
+                JSON_FIELD_FFIXED("axis_y", marlin_vars().logical_curr_pos[1], 1) JSON_COMMA;
+            }
+            JSON_FIELD_INT("flow", VirtualToolIndex::currently_selected_opt().transform([] (auto tool) { return marlin_vars().virtual_tools[tool].flow_factor.get(); }).value_or(0)) JSON_COMMA;
+            JSON_FIELD_INT("speed", marlin_vars().print_speed) JSON_COMMA;
+            JSON_FIELD_INT("fan_hotend", marlin_vars().active_hotend().heatbreak_fan_rpm) JSON_COMMA;
+            JSON_FIELD_INT("fan_print", marlin_vars().active_hotend().print_fan_rpm);
+"""  # noqa: E501 (verbatim firmware lines)
+
+# `get_info`, the `/api/v1/info` renderer.
+BASIC_GETS_CPP = """\
+JsonResult get_info(size_t resume_point, JsonOutput &output) {
+    char hostname[HOSTNAME_LEN + 1];
+    netdev_get_hostname(netdev_get_active_id(), hostname, sizeof hostname);
+    float nozzle_diameter = config_store().get_nozzle_diameter(PhysicalToolIndex::from_raw(0));
+    auto mmu2_enabled =
+#if HAS_MMU2()
+        config_store().mmu2_enabled.get();
+#else
+        false;
+#endif
+    serial_nr_t serial {};
+    otp_get_serial_nr(serial);
+
+    // Keep the indentation of the JSON in here!
+    // clang-format off
+    JSON_START;
+    JSON_OBJ_START;
+        JSON_FIELD_FFIXED("nozzle_diameter", static_cast<double>(nozzle_diameter), 2) JSON_COMMA;
+        JSON_FIELD_BOOL("mmu", mmu2_enabled) JSON_COMMA;
+        JSON_FIELD_STR("serial", serial.begin()) JSON_COMMA;
+        JSON_FIELD_STR("hostname", hostname) JSON_COMMA;
+        JSON_FIELD_INT("min_extrusion_temp", EXTRUDE_MINTEMP);
+    JSON_OBJ_END;
+    JSON_END;
+    // clang-format on
+}
+"""
+
 FILES = {
     read.MODELS_FILE: MODELS_HPP,
     read.GCODE_INFO_FILE: GCODE_INFO_HPP,
@@ -2284,6 +2456,11 @@ FILES = {
     "include/device/board.h": BOARD_H,
     "src/common/gcode/gcode_info.cpp": GCODE_INFO_CPP,
     "src/common/tools_mapping.cpp": TOOLS_MAPPING_CPP,
+    "src/common/tool_index.cpp": TOOL_INDEX_CPP,
+    "src/marlin_stubs/pause/M70X_mmu.cpp": M70X_MMU_CPP,
+    "lib/Marlin/Marlin/src/module/planner.cpp": PLANNER_CPP,
+    "lib/WUI/nhttp/status_renderer.cpp": STATUS_RENDERER_CPP,
+    "lib/WUI/link_content/basic_gets.cpp": BASIC_GETS_CPP,
     read.IMAGES_FILE: PRESETS_JSON,
     read.PAUSE_SETTINGS_FILE: PAUSE_SETTINGS_HPP,
 }

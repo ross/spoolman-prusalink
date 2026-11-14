@@ -258,6 +258,75 @@ WATCHED = (
         "1c614228e7ef6377",
         UPSTREAM_7D8BF685,
     ),
+    # The MMU3. Which slots the printer lists: all five while the MMU's setting is on.
+    Watched(
+        "the listed MMU slots",
+        "src/common/tool_index.cpp",
+        "function",
+        "VirtualToolIndex::is_enabled",
+        "SimPrinter.listed in simulator/model.py",
+        "014fb6a7f83f64d0",
+        UPSTREAM_7D8BF685,
+    ),
+    # The slot an E move counts on: slot 0 until the MMU is Active, then the selected one.
+    Watched(
+        "the MMU's selected slot",
+        "src/common/tool_index.cpp",
+        "function",
+        "PhysicalExtension::currently_selected_virtual_tool",
+        "Mmu.credited and Mmu.head_tool in simulator/feed.py",
+        "77f6c47bb051be3d",
+        UPSTREAM_7D8BF685,
+    ),
+    # An E move with no slot selected runs and counts on no slot.
+    Watched(
+        "the counted E move",
+        "lib/Marlin/Marlin/src/module/planner.cpp",
+        "statement",
+        "if(tools.virtual_tool.has_value())",
+        "SimPrinter._count in simulator/model.py",
+        "ecec270c18660d34",
+        UPSTREAM_7D8BF685,
+    ),
+    # The menu switch, `M709 S1` and `S0`.
+    Watched(
+        "the MMU switched on",
+        "src/marlin_stubs/pause/M70X_mmu.cpp",
+        "function",
+        "filament_gcodes::mmu_on",
+        "SimPrinter.set_mmu and _start_mmu in simulator/model.py",
+        "278917ea3aa4ec0f",
+        UPSTREAM_7D8BF685,
+    ),
+    Watched(
+        "the MMU switched off",
+        "src/marlin_stubs/pause/M70X_mmu.cpp",
+        "function",
+        "filament_gcodes::mmu_off",
+        "SimPrinter.set_mmu and _mmu_off in simulator/model.py",
+        "1b7cb90c7e30979f",
+        UPSTREAM_7D8BF685,
+    ),
+    # What PrusaLink reports: the flow with no slot selected, and the MMU's setting. The
+    # setting's statement ends in an `#else`, so the whole `/api/v1/info` renderer is watched.
+    Watched(
+        "the status flow",
+        "lib/WUI/nhttp/status_renderer.cpp",
+        "statement",
+        'JSON_FIELD_INT(" ", VirtualToolIndex::currently_selected_opt()',
+        "_flow in simulator/prusalink.py",
+        "041e4cccda4bc85c",
+        UPSTREAM_7D8BF685,
+    ),
+    Watched(
+        "the info mmu field",
+        "lib/WUI/link_content/basic_gets.cpp",
+        "function",
+        "get_info",
+        "info in simulator/prusalink.py",
+        "77e99b5297d36f30",
+        UPSTREAM_7D8BF685,
+    ),
 )
 
 
