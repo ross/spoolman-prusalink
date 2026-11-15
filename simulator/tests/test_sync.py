@@ -188,3 +188,18 @@ def test_mmu_uuids_land_on_slot_0_of_a_core_one_only(code, kept):
     sync.apply(p, gcode.parse(f'M865.1 I1 C"{TAG}"'))
     assert p.tools[0].material.instance_uuid == (TAG if kept else None)
     assert p.tools[1].material.instance_uuid is None
+
+
+def test_m865_1_resets_and_loads_as_m865_does():
+    """`M865.1` shares `M865`'s type, `R` and `L` (`M865.cpp:63-85, 189-196`)."""
+    sim, p = make("8.1.0", [loaded(0), loaded(1, PETG)])
+    sync.apply(p, gcode.parse(f'M865.1 I0 R C"{TAG}"'))
+    assert tool0(p).material == Material("", instance_uuid=TAG, **RESET)
+    sync.apply(p, gcode.parse("M865.1 I1 L0"))
+    assert tool0(p).material == PETG
+
+
+def test_m865_picks_i_before_x():
+    sim, p = make("8.1.0", [loaded(0, PETG), SimTool(1)])
+    sync.apply(p, gcode.parse("M865 I0 X L1"))
+    assert p.tools[1].material == PETG
