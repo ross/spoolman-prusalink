@@ -28,6 +28,7 @@ from simulator.compatibility import MK4_CHECKS
 from simulator.model import MODELS, JobPhase, Material, ModelInfo, State
 from simulator.prusalink import DROP, Answer, Reply
 from simulator.tool import LOAD_CELL_PRESETS, MK4_EXTRUDER
+from spoolman_prusalink import printer_sync
 
 SYNC_FILE = "spoolman-sync.gcode"
 
@@ -222,6 +223,51 @@ async def test_w5_write_that_does_not_take_is_flagged(
     w.advance(1.0)
     await w.poll()
     assert len(w.requests("PUT")) == 2
+
+
+async def test_w5_declined_sync_job_is_flagged(
+    world: World, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+):
+    """A sync job at the printer's question is flagged; declined, it's flagged after one job."""
+    # Without the input-shaper line the preview asks about every job (F27). The bridge's
+    # own preamble has it, so the test leaves it out.
+    monkeypatch.setattr(
+        printer_sync,
+        "default_preamble",
+        lambda m: (f'M862.3 P "{m.name}" ; printer model check', "M862.5 P2 ; g-code level check"),
+    )
+    caplog.set_level(logging.INFO, logger="spoolman_prusalink")
+    w = world
+    b = w.spools["B"]
+    await write_due(w)
+    await w.poll()
+    assert len(w.requests("PUT")) == 1
+    await w.run_until(lambda: w.printer.state is State.ATTENTION)
+    assert w.printer.job.attention.detail == "not sliced with input shaper"
+    await w.poll()
+    flag = await w.flag("B")
+    assert flag == (
+        f"{w.tool_location}: the printer is asking about the sync job writing this spool; "
+        "answer it on the printer's screen"
+    )
+    assert logged_once(caplog, logging.WARNING, f"asking about the sync job for spool {b}")
+
+    w.printer.cancel()
+    await w.poll()
+    flag = await w.flag("B")
+    assert flag is not None and flag.startswith(
+        f"{w.tool_location}: the printer asked about the sync job writing this spool and "
+        "it didn't run; check the printer's screen and its check settings"
+    )
+    msg = f"printer asked about the sync job for spool {b} and it didn't run"
+    assert logged_once(caplog, logging.WARNING, msg)
+
+    # It stays given up: later idle polls don't write.
+    for _ in range(3):
+        w.advance(60.0)
+        await w.poll()
+    assert len(w.requests("PUT")) == 1
+    assert w.material() == (PETG[0], None, None)
 
 
 async def test_w6_sync_job_is_not_a_print_start(world: World):

@@ -200,6 +200,7 @@ end Status.
 | W3 | `test_writes.py::test_w3_print_started_before_the_upload` | A print starts between the poll's read and the upload: nothing is uploaded until idle. |
 | W3 | `test_writes.py::test_w3_upload_refused_busy` | Upload refused with 409 when a print starts mid-poll: the next idle poll writes. |
 | W4 | `test_writes.py::test_w4_print_soon_after_loading_runs_first` | With sync_delay, a print started right after a menu load runs before the write. |
+| W5 | `test_writes.py::test_w5_declined_sync_job_is_flagged` | A sync job at the printer's question is flagged; declined, it's flagged after one job. |
 | W5 | `test_writes.py::test_w5_write_that_does_not_take_is_flagged` | Two sync jobs dropped in a print's start blip: the spool is flagged, no third job. |
 | W6 | `test_writes.py::test_w6_sync_job_gone_before_its_name_is_read` | The sync job ends between the bridge's status and job reads: still not a print start. |
 | W6 | `test_writes.py::test_w6_sync_job_is_not_a_print_start` | The bridge's sync job, polled while it runs, isn't taken for a print start. |

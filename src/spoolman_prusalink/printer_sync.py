@@ -292,14 +292,22 @@ class WriteState:
     # What the bridge last wrote to the tool, so an edit in Spoolman can be told apart
     # from a change on the printer. None when the bridge hasn't written this tool.
     written: WrittenFilament | None = None
+    # The latest sync job was last seen waiting at a question on the printer's screen,
+    # so if it's gone and the printer still differs, the question was declined or
+    # refused: the bridge flags it and doesn't upload again (W5).
+    asked: bool = False
 
     def resync(self) -> WriteState:
         """The active spool changed or the tool unloaded: a write is due."""
-        return replace(self, due=True, attempts=0)
+        return replace(self, due=True, attempts=0, asked=False)
 
     def settled(self) -> WriteState:
         """Nothing is to be written: the printer matches, or the tool is left alone."""
-        return replace(self, due=False, attempts=0)
+        return replace(self, due=False, attempts=0, asked=False)
+
+    def retry(self) -> WriteState:
+        """The write the bridge gave up on changed in Spoolman: write it again."""
+        return replace(self, due=True, attempts=0, asked=False)
 
     def wrote(self, filament: WrittenFilament) -> WriteState:
         """A sync job wrote `filament`. It stays due until a poll sees the printer

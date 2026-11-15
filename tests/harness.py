@@ -33,6 +33,10 @@ from spoolman_prusalink.prusalink import PrusaLink
 from spoolman_prusalink.spoolman import Spoolman
 
 LOC = "Core One L+"
+# The flag on a spool whose sync job waits at a question on the printer's screen (W5).
+ASKED = (
+    "the printer is asking about the sync job writing this spool; answer it on the printer's screen"
+)
 
 
 def levels(caplog, text):

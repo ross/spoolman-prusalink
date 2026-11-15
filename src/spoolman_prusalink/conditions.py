@@ -346,17 +346,49 @@ class WriteWaitsForLoad(Mismatch, name="write_waits_for_load", compared=True):
 
 
 @dataclass(frozen=True)
+class WriteAsked(Mismatch, name="write_asked", compared=True):
+    """The bridge's sync job waits at a question on the printer's screen."""
+
+    def log(self, ctx: Context) -> str:
+        return (
+            f"printer is asking about the sync job for spool {self.spool}; "
+            "answer it on the printer's screen"
+        )
+
+    def flag(self, ctx: Context) -> str:
+        return (
+            "the printer is asking about the sync job writing this spool; "
+            "answer it on the printer's screen"
+        )
+
+
+@dataclass(frozen=True)
 class WriteDidntTake(Mismatch, name="write_didnt_take", compared=True):
     attempts: int
     differences: tuple[Difference, ...]
+    # The printer asked about the last sync job, and the job didn't run: declined, or
+    # refused under the printer's check settings. The bridge can't tell which.
+    asked: bool = False
 
     def log(self, ctx: Context) -> str:
+        if self.asked:
+            return (
+                f"printer asked about the sync job for spool {self.spool} and it didn't "
+                f"run; check the printer's screen and its check settings: "
+                f"{describe(self.differences)}"
+            )
         return (
             f"printer still differs from spool {self.spool} after "
             f"{self.attempts} sync jobs: {describe(self.differences)}"
         )
 
     def flag(self, ctx: Context) -> str:
+        if self.asked:
+            return (
+                "the printer asked about the sync job writing this spool and it didn't "
+                "run; check the printer's screen and its check settings: "
+                f"{describe(self.differences)}"
+            )
         return f"writing this spool to the printer didn't take: {describe(self.differences)}"
 
 

@@ -347,8 +347,28 @@ or the tool unloads. A menu load replaces the filament with a preset, which
 drops the color and UUID, so a write is expected then. It waits while a swap
 is staged and while the tool is empty. During an unconfirmed swap it writes
 the spool Spoolman still assigns, so the printer shows what Spoolman
-thinks is loaded; confirming a different spool rewrites the printer. If the printer still
-differs after two jobs, it stops and flags the spool.
+thinks is loaded; confirming a different spool rewrites the printer.
+
+When a job doesn't change the printer, the bridge stops and flags the spool:
+
+- **Didn't take.** The printer still differs after two jobs, as when the
+  job ran but changed nothing. The flag lists the differences.
+- **The printer is asking about the sync job.** The printer stopped the job
+  at a question on its screen, such as a failed compatibility check, and
+  waits there until someone answers. Answer it on the printer: Print runs
+  the job and clears the flag. The job's own checks pass under the
+  printer's default check settings, so this shouldn't happen on a supported
+  single-tool printer, but a printer with an MMU asks when filament is
+  loaded past its selector.
+- **The printer asked about the sync job and it didn't run.** Someone
+  answered the question with Abort, or the printer's check settings made
+  the check fatal, so Abort was the only answer. The bridge can't tell
+  which, and it doesn't upload another job, which would ask again. Check
+  the printer's screen and its check settings.
+
+Each flag clears when the printer matches the spool. A new spool, an unload,
+or a change to the spool in Spoolman starts the write again. A change on the
+printer alone doesn't.
 
 The bridge never writes a tool loaded from an NFC tag, whatever Spoolman says
 about its name, color or temperatures. The job's `M865` would clear the

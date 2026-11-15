@@ -69,7 +69,7 @@ elsewhere names it under "Also touches".
 | # | Workstream | Owns | Also touches | Stage | Size | Waits on | Status |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | 1 | [The power-panic window](#1-the-power-panic-window) | BF26 | | 1 | Small | D3 | Not started |
-| 2 | [A sync job at a question](#2-a-sync-job-at-a-question) | BF5 | BF4, BF7, BF18 | 1 | Medium | Nothing | Not started |
+| 2 | [A sync job at a question](#2-a-sync-job-at-a-question) | BF5 | BF4, BF7, BF18 | 1 | Medium | Nothing | In progress |
 | 3 | [The custom preamble](#3-the-custom-preamble) | BF2, BF3, BF4 | | 1 | Small | D4 | In progress |
 | 4 | [Print start](#4-print-start) | BF10, BF23, BF27 | | 1 | Medium | D5; sitting D confirms | Not started |
 | 5 | [Usage on an empty tool](#5-usage-on-an-empty-tool) | BF24, BF25 | | 1 | Medium | D6; sittings C and D confirm | Not started |

@@ -229,7 +229,15 @@ written.
   input-shaper line, then answer it with `cancel` instead of
   `tap_through`, polling between. With `checks` set to `abort`, `cancel`
   is the only answer.
-- **Status**: Open.
+- **Status**: Fixed by workstream 2. `PrinterStatus.sync_job` tells the
+  bridge's job at a question apart from no job. While it waits, the spool
+  is flagged (`WriteAsked`). If it's then gone with the printer still
+  different, the spool is flagged at once with that cause
+  (`WriteDidntTake` with `asked`), and no second job is uploaded until a
+  new spool, an unload or an edit in Spoolman. A job declined between two
+  polls, with no poll seeing the question, is still retried once. Shown by
+  `tests/test_sync_question.py` and `test_w5_declined_sync_job_is_flagged`
+  in `integration/test_writes.py`.
 
 ### BF6. A failed `M865` is silent
 
@@ -277,7 +285,10 @@ written.
 - **To reproduce**: Can't be shown. The simulator's preview doesn't model
   an uncalibrated nozzle cleaner (`simulator/README.md`), and the bridge
   uploads nothing to an INDX while it refuses multi-tool writes (BF14).
-- **Status**: Open.
+- **Status**: Open; workstream 7 owns it. Workstream 2 flags the outcome:
+  the refused job is flagged while it waits at the question and once it's
+  gone, after one job, telling the user to check the printer's screen and
+  its check settings. The flag still can't name the cause.
 
 ### BF8. INDX presets differ from the bridge's table
 
@@ -889,7 +900,10 @@ panic (F38 to F46). The MMU's scenario rows are T12 to T17.
   write uploads one job, which waits at the question through 20 minutes
   of polls with no second upload and no flag. No then runs it, the color
   lands, and slot 0's filament stays in the extruder.
-- **Status**: Open.
+- **Status**: Open; workstream 9 owns it. Workstream 2 flags the outcome:
+  the job waiting at the unload question flags its spool, which
+  `test_a_sync_job_on_a_loaded_mmu_waits_on_the_unload_question` now
+  asserts, and a job stopped there is flagged after one job.
 
 ### BF19. MMU: slots 1 to 4 keep no UUIDs
 

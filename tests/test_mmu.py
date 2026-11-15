@@ -2,7 +2,7 @@
 
 import json
 
-from harness import LOC, jobs, ledger, make, menu, poll_during_job, spool_x, tool_locations
+from harness import ASKED, LOC, jobs, ledger, make, menu, poll_during_job, spool_x, tool_locations
 
 from simulator.model import JobPhase, PrintSpec, Reason, Segment, State
 from simulator.prusalink import filament, info, status
@@ -258,9 +258,9 @@ async def test_a_cut_while_an_mmu_runout_waits_charges_nothing_after(tmp_path):
 async def test_a_sync_job_on_a_loaded_mmu_waits_on_the_unload_question(tmp_path):
     # BF18: after Load To Nozzle, FINDA sees slot 0's filament, so the preview asks whether
     # to unload it first, and the bridge's job waits in ATTENTION with its ID. The bridge
-    # uploads once and then only waits: no retry, no time-out and no flag, for as long as
-    # nobody answers. No runs the job with the filament in place, and its end leaves it
-    # there, so the next job would ask again.
+    # uploads once and flags the spool with the question: no retry and no time-out, for as
+    # long as nobody answers. No runs the job with the filament in place, and its end
+    # leaves it there, so the next job would ask again.
     locations = tool_locations(LOC, 5)
     bridge, fake, station = make(
         tmp_path,
@@ -282,7 +282,7 @@ async def test_a_sync_job_on_a_loaded_mmu_waits_on_the_unload_question(tmp_path)
         station.advance(30)
         await poll_during_job(bridge)
     assert len(jobs(station)) == 1 and p.job.waits_for(Reason.MMU_LOADED)
-    assert fake.flag(10) is None
+    assert fake.flag(10) == f"{locations[0]}: {ASKED}"
     p.tap_through()
     station.finish_job()
     await bridge.poll()
@@ -296,7 +296,8 @@ async def test_a_sync_job_in_the_window_on_a_connecting_mmu_waits_on_the_questio
     # BF26 with an MMU: a Spoolman edit during a print waits, and the cut's boot reads idle,
     # so the bridge uploads its sync job and the resume is dropped. The MMU still connects,
     # so the preview asks to unload the MMU's filament first (F43), and the job waits in
-    # ATTENTION with its ID while the bridge only waits. No runs it, and the write lands.
+    # ATTENTION with its ID while the bridge flags the question. No runs it, and the write
+    # lands.
     locations = tool_locations(LOC, 5)
     tools = [SimTool(i) for i in range(5)]
     tools[0].store(menu("PLA", "#ff0000"))
@@ -326,11 +327,12 @@ async def test_a_sync_job_in_the_window_on_a_connecting_mmu_waits_on_the_questio
         station.advance(30)
         await poll_during_job(bridge)
     assert len(jobs(station)) == 1 and p.job.waits_for(Reason.MMU_LOADED)
-    assert fake.flag(1) is None
+    assert fake.flag(1) == f"{locations[0]}: {ASKED}"
     p.tap_through()
     station.finish_job()
     await bridge.poll()
     assert len(jobs(station)) == 1 and station.material(0)[1] == "#00ff00"
+    assert fake.flag(1) is None
     assert p.job_counter == job + 1
     await bridge.aclose()
 
