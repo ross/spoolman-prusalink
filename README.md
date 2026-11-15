@@ -31,7 +31,7 @@ so point it at a test Spoolman first if you want to try it safely.
   once and charges nothing, then resumes on its own if they appear.
 
   The endpoint's `sensors_enabled` field, the filament sensors setting, is
-  optional. Builds from the fork's `prusalink-filament-sensors` branch serve
+  optional. Builds of the fork that include its commit `2ef028181` serve
   it, and with it the bridge warns while the sensors are off (see
   [How usage is attributed](#how-usage-is-attributed)). Older builds work
   as before, without that warning.

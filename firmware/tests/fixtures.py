@@ -3678,8 +3678,60 @@ void MI_MMU_ENABLE::OnChange([[maybe_unused]] size_t old_index) {
 }
 """  # noqa: E501 (verbatim firmware lines)  # noqa: E501 (verbatim firmware lines)
 
-# The MMU's start in `app_setup`.
+# The MMU's start in `app_setup`, and the XL's filament sensor samples of every enabled
+# Dwarf.
 APPMAIN_CPP = """\
+// update filament sensor irq = 76Hz
+static void filament_sensor_irq() {
+
+    static uint8_t cnt_filament_sensor_update = 0;
+
+    if (++cnt_filament_sensor_update >= 13) {
+        for (buddy::puppies::Dwarf &dwarf : buddy::puppies::dwarfs) {
+            if (!dwarf.is_enabled()) {
+                continue;
+            }
+
+            // Main filament sensor
+            fs_process_sample(dwarf.get_tool_filament_sensor(), dwarf.tool_index());
+
+            // Side filament sensor
+            auto mapping = side_fsensor_remap::get_mapping();
+            debug_assert(static_cast<size_t>(dwarf.tool_index().to_raw()) < std::size(mapping));
+            const uint8_t remapped = mapping[dwarf.tool_index().to_raw()];
+            debug_assert(remapped < HOTENDS);
+
+            /**
+             * @brief Mapping of ADC channels to each extruder side filament sensor.
+             * ADC channels are laid left top to bottom and right bottom to top.
+             * Left    Right
+             * sfs1    sfs6
+             * sfs2    sfs5
+             * sfs3    sfs4
+             */
+            static const constexpr std::array<AdcChannel::SideFilamnetSensorsAndTempMux, HOTENDS> adc_channel_mapping = {
+                AdcChannel::SideFilamnetSensorsAndTempMux::sfs1, // T0    - left top
+                AdcChannel::SideFilamnetSensorsAndTempMux::sfs2, // T1    - left middle
+                AdcChannel::SideFilamnetSensorsAndTempMux::sfs3, // T2    - left bottom
+                AdcChannel::SideFilamnetSensorsAndTempMux::sfs6, // T3    - right top
+                AdcChannel::SideFilamnetSensorsAndTempMux::sfs5, // T4    - right middle
+                AdcChannel::SideFilamnetSensorsAndTempMux::sfs4, // Empty - right bottom
+            };
+
+            // ensure AdcGet::undefined_value is representable within FSensor::value_type
+            static_assert(static_cast<IFSensor::value_type>(AdcGet::undefined_value) == AdcGet::undefined_value);
+
+            // widen the type to match the main sensor data type and translate the undefined value
+            IFSensor::value_type fs_raw_value = AdcGet::side_filament_sensor(adc_channel_mapping[remapped]);
+            if (fs_raw_value == AdcGet::undefined_value) {
+                fs_raw_value = IFSensor::undefined_value;
+            }
+            side_fs_process_sample(fs_raw_value, dwarf.tool_index());
+        }
+        cnt_filament_sensor_update = 0;
+    }
+}
+
 static void app_setup(void) {
     metric_record_event(&metric_app_start);
 
@@ -3689,7 +3741,7 @@ static void app_setup(void) {
     }
 #endif
 }
-"""
+"""  # noqa: E501 (verbatim firmware lines)
 
 # The filament sensors' MMU setting, idle clear, switch-off and forced sensors.
 FILAMENT_SENSORS_HANDLER_CPP = """\

@@ -450,6 +450,22 @@ WATCHED = (
         "270ab95cef08dc15",
         UPSTREAM_7D8BF685,
     ),
+    # On the XL, `step()` evaluates a docked Dwarf's sensors on fresh samples because this
+    # loop feeds both sensors of every enabled Dwarf, not only the picked one. The Dwarf's
+    # own sensor value reaches it through the puppy task's slow refresh of each Dwarf that
+    # isn't selected (`puppy_task_loop` in `src/puppies/puppy_task.cpp`, and
+    # `Dwarf::refresh` and `Dwarf::read_general_status` in `src/puppies/Dwarf.cpp`). That
+    # loop isn't watched: its `if` blocks have an `else`, and only the whole function, 192
+    # lines and 30 commits in 2026, could hold it.
+    Watched(
+        "the XL's sensor samples",
+        "src/common/appmain.cpp",
+        "function",
+        "filament_sensor_irq",
+        "SimPrinter.filament_present in simulator/model.py: a docked XL tool reads its sensor",
+        "54fbddcacdb22de2",
+        UPSTREAM_7D8BF685,
+    ),
     # INDX has no extruder sensor, so the renderer reads each tool's side sensor.
     Watched(
         "the INDX extruder sensor",
