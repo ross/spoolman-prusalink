@@ -744,7 +744,7 @@ written.
   `integration/test_tools.py`, and by the XL and INDX cases of
   `test_family_story`.
 - **Scenario rows**: T6, W10.
-- **To reproduce**: No longer reachable: the tests went with the setting.
+- **To reproduce**: Those tests, today.
 - **Status**: Open.
 
 ## MMU3
