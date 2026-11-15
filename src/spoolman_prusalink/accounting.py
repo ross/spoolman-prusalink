@@ -154,6 +154,10 @@ class ToolState:
     # leveling changes nothing.
     pending_job: int | None = None
     pending_at: int = 0
+    # The tool reported no material at the last poll of the pending job. A load before
+    # the job's first extrusion, such as the print preview's, isn't a print start: the
+    # job's counter is taken again once the material appears.
+    pending_empty: bool = False
     # A one-off notice for the user about the active spool (`notice.active`): a print
     # started while another spool was staged. Cleared at the next print start or unload.
     notice: StagedAtPrint | None = None
@@ -202,6 +206,7 @@ class ToolState:
             "job_id": self.job_id,
             "pending_job": self.pending_job,
             "pending_at": self.pending_at,
+            "pending_empty": self.pending_empty,
             "notice": _notice_json(self.notice),
             "held_mm": self.held_mm,
             "deleted_spool": self.deleted_spool,
@@ -240,6 +245,8 @@ class ToolState:
             job_id=data["job_id"],
             pending_job=data["pending_job"],
             pending_at=int(data["pending_at"]),
+            # A database saved before this field existed still loads.
+            pending_empty=bool(data.get("pending_empty", False)),
             notice=_notice_from_json(data["notice"]),
             held_mm=int(data["held_mm"]),
             deleted_spool=data["deleted_spool"],
@@ -291,8 +298,9 @@ class Result:
     # and any reboot are recorded.
     skipped: bool = False
     claimed: bool = False  # True when the claim passed in was handled.
-    # The spool that was in the tool when it unloaded during a started print: a runout,
-    # a jam or tangle, or a planned color change, which all look the same.
+    # The spool that was in the tool when it unloaded during a print, started or pending
+    # (`_Poll.in_print`): a runout, a jam or tangle, or a planned color change, which all
+    # look the same.
     runout: int | None = None
     # True when the active spool changed or the tool unloaded, so what the printer
     # shows for the tool may no longer be the active spool's. A menu load drops the
@@ -390,6 +398,10 @@ _INVARIANTS: tuple[tuple[str, Callable[[ToolState], bool]], ...] = (
     (
         "a pending job isn't the job that last started",
         lambda s: s.pending_job is None or s.pending_job != s.job_id,
+    ),
+    (
+        "a tool is empty at a pending job only while a job is pending",
+        lambda s: not s.pending_empty or s.pending_job is not None,
     ),
 )
 
@@ -731,7 +743,7 @@ class _Poll:
         current.notice = None
         current.staged_notice = None
         self.unloaded = True
-        if self.job_id is not None and self.job_id == self.last.job_id:
+        if self.in_print():
             self.out.runout = current.active
 
         if current.assigned is None and current.active is not None:
@@ -855,21 +867,49 @@ class _Poll:
         if current.assigned != last.assigned:
             self.event(SwapStaged(current.assigned, current.active))
 
+    def in_print(self) -> bool:
+        """Whether an unload at this poll is one during a print.
+
+        It is in a job that started, and in one that's pending: an unload before the
+        print's first extrusion starts the print (see `print_start`). So is an unload at
+        the poll that first sees a job, when the tool is empty after it: a runout in the
+        preheat that no poll saw pending.
+        """
+        job_id, last = self.job_id, self.last
+        return job_id is not None and (
+            job_id in (last.job_id, last.pending_job) or self.reading.material is None
+        )
+
     def print_start(self) -> None:
         """4. A print starting closes the confirmation window.
 
         A print starts at its first extrusion: a new job is pending until the counter
         passes where it was first seen by more than `FIRST_EXTRUSION_MM`, more than a
-        cancel's ramming counts.
+        cancel's ramming counts. A load before that takes the starting point again, and
+        an unload in the job starts the print without the start's effects.
         """
-        current, job_id = self.current, self.job_id
+        current, job_id, reading = self.current, self.job_id, self.reading
         if job_id is None or job_id == self.last.job_id:
-            current.pending_job = None
+            current.pending_job, current.pending_empty = None, False
+            return
+        if self.unloaded and self.in_print():
+            # A runout or a filament change before the first extrusion: the print is under
+            # way, so the swap the unload opened stays open, as for P2 and P3, and no later
+            # count in the job closes it as assumed.
+            current.pending_job, current.pending_empty = None, False
+            current.job_id = job_id
             return
         if current.pending_job != job_id:
-            current.pending_job, current.pending_at = job_id, self.reading.extruded
+            current.pending_job, current.pending_at = job_id, reading.extruded
+            current.pending_empty = reading.material is None
             return
-        if self.reading.extruded - current.pending_at <= FIRST_EXTRUSION_MM:
+        if reading.material is None or current.pending_empty:
+            # A tool with no material counts no print, and its load's count since then
+            # isn't one either (BF23): count from here.
+            current.pending_at = reading.extruded
+            current.pending_empty = reading.material is None
+            return
+        if reading.extruded - current.pending_at <= FIRST_EXTRUSION_MM:
             return
         current.pending_job = None
         current.job_id = job_id

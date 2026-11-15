@@ -626,6 +626,120 @@ def test_a_pending_job_starts_only_past_a_rammings_count(rise, started):
     assert (res.state.job_id, res.state.pending_job) == ((42, None) if started else (None, 42))
 
 
+SWAPPED = [(BOOT, r(100), loc(7)), (BOOT, r(200, unloads=1, at_unload=100), loc(7))]
+
+
+def test_a_load_while_the_job_is_pending_takes_its_start_again():
+    # BF23: the job appears on an empty tool, the preview's load counts 57 mm, and only a
+    # rise past the poll that sees the material starts the print.
+    empty = dict(material=None, unloads=1, at_unload=200)
+    _, _, state = run(
+        [
+            *SWAPPED[:1],
+            (BOOT, r(200, **empty), loc(7)),
+            (BOOT, r(200, **empty), loc(7), 42),
+        ]
+    )
+    assert (state.pending_job, state.pending_at, state.pending_empty) == (42, 200, True)
+    # Still empty, with the load's feed counted: the start is taken from here.
+    res = account(state, BOOT, r(220, **empty), loc(7), 42)
+    assert (res.state.pending_at, res.state.pending_empty) == (220, True)
+    # The material appears: the load's count isn't the print's first extrusion.
+    res = account(res.state, BOOT, r(257, unloads=1, at_unload=200), loc(7), 42)
+    assert (res.state.pending_job, res.state.pending_at, res.state.pending_empty) == (
+        42,
+        257,
+        False,
+    )
+    assert res.charges == [Charge(7, 57, "extruded")] and res.state.swap == SwapFlag(7, 57)
+    res = account(res.state, BOOT, r(281, unloads=1, at_unload=200), loc(7), 42)
+    assert EventKind.SWAP_ASSUMED in [e.kind for e in res.events]
+    assert (res.state.job_id, res.state.pending_job) == (42, None)
+    assert res.state.provisional == Provisional(7, 81, 42)
+
+
+def test_a_tool_emptied_while_the_job_is_pending_takes_its_start_again():
+    # A tool reporting no material counts no print start, such as one printed through
+    # with the sensors off, and its counter is the start once the material is back.
+    _, _, state = run([*SWAPPED, (BOOT, r(200, unloads=1, at_unload=100), loc(7), 42)])
+    res = account(state, BOOT, r(300, material=None, unloads=1, at_unload=100), loc(7), 42)
+    assert (res.state.pending_job, res.state.pending_at, res.state.pending_empty) == (
+        42,
+        300,
+        True,
+    )
+    assert res.state.swap is not None and res.state.job_id is None
+
+
+def test_a_job_that_ends_while_pending_clears_its_empty_tool():
+    _, _, state = run(
+        [
+            *SWAPPED[:1],
+            (BOOT, r(200, material=None, unloads=1, at_unload=100), loc(7), 42),
+            (BOOT, r(200, material=None, unloads=1, at_unload=100), loc(7)),
+        ]
+    )
+    assert (state.pending_job, state.pending_empty) == (None, False)
+
+
+def test_an_unload_in_a_pending_job_starts_it_without_the_start():
+    # BF27: a runout in the preheat, its ramming counted. The print is under way: the
+    # swap the unload opened stays open, the unload is a runout, and the reload and the
+    # rest of the print don't close the swap as assumed.
+    _, _, state = run([(BOOT, r(100), loc(7)), (BOOT, r(100), loc(7), 42)])
+    assert state.pending_job == 42
+    res = account(state, BOOT, r(130, material=None, unloads=1, at_unload=130), loc(7), 42)
+    kinds = [e.kind for e in res.events]
+    assert kinds[:2] == [EventKind.UNLOAD, EventKind.SWAP_UNCONFIRMED]
+    assert EventKind.SWAP_ASSUMED not in kinds
+    assert res.runout == 7 and res.charges == [Charge(7, 30, "before unload")]
+    assert (res.state.job_id, res.state.pending_job, res.state.swap) == (42, None, SwapFlag(7))
+    res = account(res.state, BOOT, r(300, unloads=1, at_unload=130), loc(7), 42)
+    assert EventKind.SWAP_ASSUMED not in [e.kind for e in res.events]
+    assert res.state.swap == SwapFlag(7, 170)
+    # A Spoolman change after the print still confirms it, as P3 says.
+    res = account(res.state, BOOT, r(300, unloads=1, at_unload=130), loc(9))
+    assert EventKind.SWAP_CONFIRMED in [e.kind for e in res.events]
+    assert res.state.active == 9
+
+
+def test_an_unload_in_a_pending_job_on_an_empty_tool_clears_it():
+    # The idle sensor clear while the tools-mapping screen shows a job, on a tool that
+    # read empty, counts as during the print too.
+    _, _, state = run(
+        [
+            *SWAPPED[:1],
+            (BOOT, r(100, material=None), loc(7), 42),
+        ]
+    )
+    assert state.pending_empty
+    res = account(state, BOOT, r(100, material=None, unloads=1, at_unload=100), loc(7), 42)
+    assert res.runout == 7
+    assert (res.state.job_id, res.state.pending_job, res.state.pending_empty) == (
+        42,
+        None,
+        False,
+    )
+
+
+def test_an_unload_at_a_jobs_first_sight_with_the_tool_empty_starts_it():
+    # A runout in the preheat that no poll saw pending: the job and the unload are seen
+    # together, and the tool is empty after it.
+    _, _, state = run([(BOOT, r(100), loc(7))])
+    res = account(state, BOOT, r(107, material=None, unloads=1, at_unload=107), loc(7), 42)
+    assert res.runout == 7 and EventKind.SWAP_ASSUMED not in [e.kind for e in res.events]
+    assert (res.state.job_id, res.state.pending_job, res.state.swap) == (42, None, SwapFlag(7))
+
+
+def test_an_unload_and_a_load_before_a_jobs_first_sight_leave_it_pending():
+    # S1 or S2 between two polls, then a print: the job isn't under way at the unload.
+    _, _, state = run([(BOOT, r(100), loc(7))])
+    res = account(state, BOOT, r(180, unloads=1, at_unload=100), loc(7), 42)
+    assert res.runout is None
+    assert (res.state.job_id, res.state.pending_job, res.state.pending_at) == (None, 42, 180)
+    assert res.state.swap == SwapFlag(7, 80)
+
+
 def test_spoolman_fixed_during_preheat_confirms_swap():
     _, kinds, state = run(
         [
@@ -1114,21 +1228,25 @@ def test_empty_tool_usage_held_through_reboot_counts_toward_open_swap():
 
 def test_usage_held_through_reboot_counts_toward_provisional_at_print_start():
     # Unload, a print queued during the load, a reboot, and the print's first
-    # extrusion: the held load is part of the reloaded spool's provisional charge.
+    # extrusion: the held load is part of the reloaded spool's provisional charge. The
+    # load ends after the job appears, so the print starts at the first rise past the
+    # poll that sees the material (BF23).
     charges, kinds, state = run(
         [
             (BOOT, r(100), loc(7), None),
             (BOOT, r(700, material=None, unloads=1, at_unload=600), loc(7), None),
             (BOOT, r(760, material=None, unloads=1, at_unload=600), loc(7), 42),
             (BOOT + 1, r(30), loc(7), 42),
+            (BOOT + 1, r(60), loc(7), 42),
         ]
     )
-    assert charges[-2:] == [
+    assert charges[-3:] == [
         Charge(7, 160, "held before the printer restarted"),
         Charge(7, 30, "extruded"),
+        Charge(7, 30, "extruded"),
     ]
-    assert EventKind.SWAP_ASSUMED in kinds
-    assert state.provisional == Provisional(7, 190, 42) and state.swap is None
+    assert kinds[-1] == EventKind.SWAP_ASSUMED
+    assert state.provisional == Provisional(7, 220, 42) and state.swap is None
 
 
 def test_usage_held_through_reboot_is_lost_at_unload_with_no_spool():
@@ -1193,6 +1311,7 @@ def test_state_round_trip():
         job_id=42,
         pending_job=43,
         pending_at=120,
+        pending_empty=True,
         notice=ev.StagedAtPrint(8, 7),
         held_mm=30,
         deleted_spool=19,
@@ -1214,6 +1333,13 @@ def test_state_saved_before_printed_empty_loads():
     data = ToolState(boot_id=BOOT, charged=100).to_json()
     del data["printed_empty"]
     assert ToolState.from_json(data) == ToolState(boot_id=BOOT, charged=100)
+
+
+def test_state_saved_before_pending_empty_loads():
+    # A deployed bridge's database has no `pending_empty` yet.
+    data = ToolState(boot_id=BOOT, charged=100, pending_job=43).to_json()
+    del data["pending_empty"]
+    assert ToolState.from_json(data) == ToolState(boot_id=BOOT, charged=100, pending_job=43)
 
 
 def test_restart_from_saved_state_neither_double_charges_nor_drops():
@@ -1864,6 +1990,10 @@ def test_a_new_tool_and_a_loaded_tool_are_legal():
         (
             replace(LEGAL, job_id=42, pending_job=42),
             "a pending job isn't the job that last started",
+        ),
+        (
+            replace(LEGAL, pending_empty=True),
+            "a tool is empty at a pending job only while a job is pending",
         ),
     ],
 )

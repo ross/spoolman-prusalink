@@ -243,7 +243,7 @@ medium is a new input or condition through `account()` or
   change's ramming before the tool's first extrusion (BF27) was that rise.
   The bridge then closed an open swap as assumed, flagged the spool, and
   staged a Spoolman change that should have confirmed the swap.
-- **Approach**: Decided under D5, in `account()`:
+- **Approach**: Decided under D5 and built, in `account()`:
   - For BF10: a pending job starts only once the counter has risen more
     than `FIRST_EXTRUSION_MM`, 23 mm, past `pending_at`. That's the
     auto-retract ramming's commanded length (F26), and at a feed ratio of
@@ -271,15 +271,25 @@ medium is a new input or condition through `account()` or
 - **User and saved state**: README, "How usage is attributed", says what
   starts a print. One new `ToolState` field, `pending_empty`, saved in
   place and read as false when a saved state lacks it.
-- **Tests**: BF10: `tests/test_print_start.py` runs a cancel in the
-  preheat on every model that auto-retracts and checks the count against
-  `FIRST_EXTRUSION_MM`, and a cancel that rams with an open swap;
-  `test_p8_cancel_ramming_is_not_a_print_start` in
-  `integration/test_prints.py` runs it end to end. The BF27 pin, now
+- **Tests**: `tests/test_print_start.py` runs each finding's "To
+  reproduce" through the harness with the auto-retract on (BF22): a
+  cancel in the preheat on every model that auto-retracts, checked
+  against `FIRST_EXTRUSION_MM`; a cancel that rams with an open swap; a
+  preview load then a declined type; a preview load then a cancel in the
+  preheat, with and without a poll during the load; and a runout in the
+  preheat, polled pending and first seen with the unload. None records
+  `swap_assumed`. The BF27 pin, now
   `test_a_change_on_a_tool_the_print_has_not_used_follows_p2` in
   `tests/test_toolchanger_prints.py`, flipped with the threshold, since
-  INDX's ramming counts 16 mm. `Station.start_print` polls in the preheat
-  and again once the first tool's counter is past the threshold.
+  INDX's ramming counts 16 mm, and
+  `test_a_change_on_a_tool_the_print_has_not_used_follows_p3` there covers
+  the reload with no Spoolman change. `tests/test_accounting.py` checks
+  each rule, and `test_unload_before_a_jobs_first_extrusion_is_a_runout`
+  in `tests/test_writes.py` flipped. End to end,
+  `test_p8_cancel_ramming_is_not_a_print_start` and
+  `test_p8_preview_load_is_not_a_print_start` in
+  `integration/test_prints.py`. `Station.start_print` polls in the
+  preheat and again once the first tool's counter is past the threshold.
 - **Done when**: none of the three paths records `swap_assumed`, and every
   existing print-start test still passes.
 - **Overlap**: `accounting.py` (`print_start`, `unload`, `ToolState`),

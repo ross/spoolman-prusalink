@@ -218,9 +218,20 @@ that tool's print has started. The usage before that is charged as usual;
 only the start waits. Preheat and bed leveling count nothing, so they leave
 time to fix Spoolman. A print cancelled before it extrudes changes nothing,
 even on a Nextruder, whose cancel rams the filament back and counts up to
-about 22 mm while the job still shows. A print that counts 23 mm or less on a
-tool never starts on that tool, so an unconfirmed swap there stays open
-until you change Spoolman or the next unload.
+about 22 mm while the job still shows. A load at the print preview, on a
+tool that had no filament, isn't the first extrusion either: the bridge
+counts from the first poll that sees the filament. A print that counts
+23 mm or less on a tool never starts on that tool, so an unconfirmed swap
+there stays open until you change Spoolman or the next unload.
+
+An unload before the first extrusion, such as a runout in the preheat or a
+filament change on a toolchanger tool the print hasn't used yet, starts the
+print but doesn't close a swap: the swap the unload opens stays open, as for
+any runout during a print. It also counts as a runout for the flag on a
+spool with plenty left (see [Charging and flags](#charging-and-flags)). So
+does a toolchanger's idle sensor clear while its tools-mapping screen shows
+a job, and an unload followed by a print started on the emptied tool before
+the next poll.
 
 You can also move the old spool out of the location before moving the new
 one in. While the location is empty, the bridge holds usage, even during a
@@ -407,7 +418,7 @@ until the spool is loaded from it again. A spool with no instance UUID in
 Spoolman still takes the tag's, which writes only to Spoolman. One exception:
 a runout reload keeps the old spool's tag data while a different spool may be
 loaded. When the printer shows the UUID it showed with another spool, and the
-tool has unloaded during a print the bridge saw start, the bridge writes the
+tool has unloaded during a print the bridge saw, the bridge writes the
 loaded spool over it. Any other unload, including a runout in a print the
 bridge didn't see start (it was down at the start), leaves the tag alone. The
 new spool is then flagged only if the old spool has the tag's UUID in

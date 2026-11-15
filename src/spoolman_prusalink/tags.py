@@ -69,12 +69,12 @@ def without_uuid(seen: SeenTag) -> SeenTag:
 def unloaded(seen: SeenTag, runout: bool) -> SeenTag:
     """Record an unload since the tool's UUID was last seen.
 
-    `runout` is whether it was a runout in a print the bridge saw start. Only M600,
-    during a print, reloads the type from before the unload, so only then can the UUID
-    be a leftover. After any other unload a tag shown next was loaded from the tag, but
-    the spool recorded may have been wrong. A runout in a print the bridge didn't see
-    start looks the same. Either way the spool becomes unknown, and the same UUID shown
-    next is neither a leftover nor trusted.
+    `runout` is whether it was a runout in a print the bridge saw (`Result.runout`).
+    Only M600, during a print, reloads the type from before the unload, so only then can
+    the UUID be a leftover. After any other unload a tag shown next was loaded from the
+    tag, but the spool recorded may have been wrong. A runout in a print the bridge
+    didn't see start looks the same. Either way the spool becomes unknown, and the same
+    UUID shown next is neither a leftover nor trusted.
     """
     if seen.uuid is None:
         return seen

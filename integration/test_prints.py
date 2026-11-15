@@ -21,7 +21,7 @@ from integration.conftest import (
     print_spec,
 )
 from integration.faults import archive_spool
-from simulator.model import PrintSpec, Segment, State
+from simulator.model import JobPhase, PrintSpec, Reason, Segment, State
 from spoolman_prusalink.events import StagedAtPrint, SwapAssumed
 
 
@@ -246,6 +246,40 @@ async def test_p8_cancel_ramming_is_not_a_print_start(world: World):
     assert "assumed reloaded" not in (await w.flag("A") or "")
 
     # Spoolman is fixed after the cancel: the swap is still open, so this confirms it.
+    await w.move("A", w.shelf)
+    await w.move("B", w.tool_location)
+    records = await w.poll()
+    confirmed = event_fields(records, "swap_confirmed")
+    assert [(e["from_spool"], e["to_spool"]) for e in confirmed] == [(a, b)]
+
+
+async def test_p8_preview_load_is_not_a_print_start(world: World):
+    """A load at the preview, unpolled, then a cancel in preheat: no print start (BF23)."""
+    w = world
+    a, b = w.spools["A"], w.spools["B"]
+    await baseline(w)
+    await w.unload()
+    records = await w.poll()
+    assert len(events(records, "swap_unconfirmed")) == 1
+
+    # A print on the empty tool: the preview warns, then asks for a load.
+    w.printer.start_print(PrintSpec([Segment(0, 400, "PLA")], duration_s=4, preheat_s=0.5))
+    w.station.tick_until(lambda: w.printer.job.waits_for(Reason.PREVIEW))
+    await w.poll()
+    w.printer.tap_through()
+    assert w.printer.job.phase is JobPhase.WAIT_LOAD
+    mark = w.mark()
+    # No poll during the load, which counts while the printer reads BUSY with no job.
+    w.printer.load(0, source="preset", name="PLA")
+    w.station.tick_until(lambda: w.printer.job.phase is JobPhase.PREHEAT)
+    await w.poll()
+    job = w.printer.job
+    w.printer.cancel()
+    await w.run_until(lambda: w.printer.job is not job, poll_every=0.1)
+    assert events(w.since(mark), "swap_assumed") == []
+    # The load and the cancel's ramming went to A, as usage since the unload.
+    assert w.charged(w.since(mark), "A") > 0
+
     await w.move("A", w.shelf)
     await w.move("B", w.tool_location)
     records = await w.poll()

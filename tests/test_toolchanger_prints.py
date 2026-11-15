@@ -239,6 +239,40 @@ async def test_a_change_on_a_tool_the_print_has_not_used_follows_p2(tmp_path):
     await bridge.aclose()
 
 
+async def test_a_change_on_a_tool_the_print_has_not_used_follows_p3(tmp_path):
+    """T10 with no Spoolman change: the unload in a job still pending on T1 starts T1's
+    print without the start's effects, so the reload's count doesn't close the swap as
+    assumed. The swap stays open after the print, as P3 says, and the reload is charged
+    to the old spool until Spoolman says otherwise."""
+    tools = [
+        SimTool.loaded_with(0, PLA, extruded=1000.0),
+        SimTool.loaded_with(1, PLA, extruded=500.0),
+    ]
+    bridge, fake, station = indx(tmp_path, tools)
+    printer = station.printer
+    await bridge.poll()  # the baseline
+    mark = len(ledger(tmp_path))
+
+    await station.start_print(PrintSpec([Segment(0, 100)], duration_s=20))
+    station.advance(2)
+    await bridge.poll()
+    printer.change_filament(1)
+    await bridge.poll()
+    await station.swap_cycle(tool=1, poll_every=1.0)
+    printer.resume()
+    await station.run_until(lambda: printer.job is None, poll_every=1.0, limit=60)
+    await bridge.poll()
+    swaps = ("unload", "swap_unconfirmed", "swap_assumed", "swap_staged", "swap_confirmed")
+    events = [(r["tool"], r["event"]) for r in ledger(tmp_path)[mark:] if r.get("event") in swaps]
+    assert events == [(1, "unload"), (1, "swap_unconfirmed")]
+    # T1's 16.23 before the unload and the reload's 47.75: 563, all on spool 2.
+    assert station.counter_at(1) == 563 and totals(fake) == {1: 133, 2: 63}
+    t1 = bridge.printers[0].tools[1]
+    assert t1.job_id == 1 and t1.swap is not None and t1.provisional is None
+    assert "unloaded with no Spoolman change" in fake.flag(2)
+    await bridge.aclose()
+
+
 async def test_a_spool_join_counts_an_unload_on_the_old_tool_mid_print(tmp_path):
     """T9 and BF13, pinned as the bridge behaves today: a runout on T0 with a spool join to
     T1 counts T0's unload mid-print and goes on with T1. The bridge opens an unconfirmed

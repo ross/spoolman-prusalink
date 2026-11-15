@@ -2720,16 +2720,17 @@ async def test_print_start_with_a_spool_staged_flags_both(tmp_path):
     await bridge.aclose()
 
 
-async def test_unload_before_a_jobs_first_extrusion_is_not_a_runout(tmp_path):
-    # M5a: a print starts at its first extrusion (Q4), so this unload isn't mid-print.
+async def test_unload_before_a_jobs_first_extrusion_is_a_runout(tmp_path):
+    # M5a: an unload in a pending job starts the print (Q4), so it's mid-print, as a
+    # runout in the preheat is.
     bridge, fake, station = make(tmp_path, [weighted(spool(19), 400.0)])
     await bridge.poll()
     start_job(station)  # No extrusion yet, as while preheating.
     await bridge.poll()
     station.tool.unload_count, station.tool.extruded_at_unload = 1, 1000
     await bridge.poll()
-    assert "mid-print" not in (fake.flag(19) or "")
-    assert 19 not in bridge.state.runouts
+    assert "unloaded mid-print with 400 g left" in fake.flag(19)
+    assert 19 in bridge.state.runouts
     await bridge.aclose()
 
 
