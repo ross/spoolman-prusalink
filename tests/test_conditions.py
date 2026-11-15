@@ -74,14 +74,16 @@ KINDS = [
     (
         PrintingEmpty(True, level=W),
         "printing with no filament reported; that usage is charged to no spool. The "
-        "filament sensors are on, so a power cut probably did this: the filament was out "
-        "of the tool, or a runout was waiting for its reload, when the power failed",
+        "filament sensors were on when that usage was lost, so a power cut probably did "
+        "this: the filament was out of the tool, or a runout was waiting for its reload, "
+        "when the power failed",
         None,
     ),
     (
         PrintingEmpty(False, level=W),
         "printing with no filament reported; that usage is charged to no spool. The "
-        "filament sensors are off: see the warning about them",
+        "filament sensors were off when that usage was lost: while they were off, the "
+        "printer reported no runout and no unload",
         None,
     ),
     (

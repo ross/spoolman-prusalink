@@ -146,7 +146,8 @@ async def test_the_tools_mapping_screens_sensors_off_warns_before_any_usage_is_l
     t1 = tool_locations(LOC, 8)[1]
     assert [r.getMessage() for r in caplog.records if HINT in r.getMessage()][0] == (
         f"[{t1}] printing with no filament reported; that usage is charged to no spool. The "
-        "filament sensors are off: see the warning about them"
+        "filament sensors were off when that usage was lost: while they were off, the "
+        "printer reported no runout and no unload"
     )
     assert levels(caplog, off) == ["WARNING"]
 

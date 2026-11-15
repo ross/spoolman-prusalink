@@ -136,23 +136,43 @@ async def test_printing_empty_with_the_sensors_on_names_a_power_cut(tmp_path, ca
         (
             "WARNING",
             "[Core One L+] printing with no filament reported; that usage is charged to no "
-            "spool. The filament sensors are on, so a power cut probably did this: the "
-            "filament was out of the tool, or a runout was waiting for its reload, when the "
-            "power failed",
+            "spool. The filament sensors were on when that usage was lost, so a power cut "
+            "probably did this: the filament was out of the tool, or a runout was waiting "
+            "for its reload, when the power failed",
         )
     ]
     await bridge.aclose()
 
 
-async def test_printing_empty_with_the_sensors_off_points_at_their_warning(tmp_path, caplog):
+WERE_OFF = (
+    "[Core One L+] printing with no filament reported; that usage is charged to no spool. "
+    "The filament sensors were off when that usage was lost: while they were off, the "
+    "printer reported no runout and no unload"
+)
+
+
+async def test_printing_empty_with_the_sensors_off_says_so(tmp_path, caplog):
     caplog.set_level(logging.WARNING, logger="spoolman_prusalink")
     bridge, station = await empty_print(tmp_path, sensors=False)
     assert [text for _, text in messages(caplog, "")] == [
         f"printer: {OFF}: filament pulled out or swapped by hand goes unnoticed, and the old "
         "spool keeps being charged. Turn them back on in the printer's settings",
-        "[Core One L+] printing with no filament reported; that usage is charged to no "
-        "spool. The filament sensors are off: see the warning about them",
+        WERE_OFF,
     ]
+    await bridge.aclose()
+
+
+async def test_a_restart_after_the_sensors_come_back_on_logs_the_hint_as_it_was(tmp_path, caplog):
+    """The hint keeps the setting from when the usage was lost, through a restart, and says
+    it in the past tense, so it reads right with the sensors warning gone."""
+    caplog.set_level(logging.WARNING, logger="spoolman_prusalink")
+    bridge, station = await empty_print(tmp_path, sensors=False)
+    station.printer.set_sensors(True)
+    await bridge.poll()
+    bridge = restart(bridge)
+    caplog.clear()
+    await bridge.poll()
+    assert [text for _, text in messages(caplog, "")] == [WERE_OFF]
     await bridge.aclose()
 
 

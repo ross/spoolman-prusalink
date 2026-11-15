@@ -375,7 +375,7 @@ async def test_c7_print_through_an_empty_tool_is_reported_lost(
 ):
     """Print through an empty tool: its usage reported lost and a warning logged once.
 
-    The filament sensors are on, so the warning names a power cut, and the next load is
+    The filament sensors were on, so the warning names a power cut, and the next load is
     charged alone.
     """
     caplog.set_level(logging.INFO, logger="spoolman_prusalink")
@@ -409,7 +409,7 @@ async def test_c7_print_through_an_empty_tool_is_reported_lost(
     hint = "printing with no filament reported; that usage is charged to no spool"
     assert logged_once(caplog, logging.WARNING, f"[{w.tool_location}] {hint}")
     assert logged_once(caplog, logging.WARNING, f"no longer: {hint}")
-    on = "The filament sensors are on, so a power cut"
+    on = "The filament sensors were on when that usage was lost, so a power cut"
     assert logged_once(caplog, logging.WARNING, f"[{w.tool_location}] {hint}. {on}")
 
     # The next load is charged its own count only, to A, which the open swap keeps.

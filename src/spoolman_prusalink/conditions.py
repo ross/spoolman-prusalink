@@ -169,7 +169,8 @@ class PrintingEmpty(Logged, name="printing_empty"):
     """
 
     # The sensors setting when the usage was lost, or None when the firmware doesn't
-    # report it. It stays as it was while the condition stands.
+    # report it. It stays as it was while the condition stands, and through a restart, so
+    # the text gives the setting as it was then, not as it is now.
     sensors: bool | None = None
 
     @property
@@ -187,11 +188,14 @@ class PrintingEmpty(Logged, name="printing_empty"):
             )
         if self.sensors:
             return lost + (
-                "The filament sensors are on, so a power cut probably did this: the "
-                "filament was out of the tool, or a runout was waiting for its reload, when "
-                "the power failed"
+                "The filament sensors were on when that usage was lost, so a power cut "
+                "probably did this: the filament was out of the tool, or a runout was "
+                "waiting for its reload, when the power failed"
             )
-        return lost + "The filament sensors are off: see the warning about them"
+        return lost + (
+            "The filament sensors were off when that usage was lost: while they were off, "
+            "the printer reported no runout and no unload"
+        )
 
 
 def printing_empty(

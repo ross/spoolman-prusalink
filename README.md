@@ -298,10 +298,11 @@ Other rules:
   that the tool is printing with no filament reported, once when it starts
   and once when the print ends or the filament comes back. Usage first seen
   after the print raises no warning. The warning says what the sensors
-  setting was when the usage was lost. With the sensors off, it points at
-  the sensors warning. With them on, a power cut caused it: the filament was
-  out of the tool, or a runout was waiting for its reload, when the power
-  failed. On firmware that doesn't report the setting, it says the sensors
+  setting was when the usage was lost, even if the setting has changed
+  since. With the sensors off then, it says the printer reported no runout
+  and no unload while they were off. With them on, it says a power cut
+  probably caused it: the filament was out of the tool, or a runout was
+  waiting for its reload, when the power failed. On firmware that doesn't report the setting, it says the sensors
   may be off and allows for a power cut too.
 - On a toolchanger, the INDX or the XL, filament pulled out by hand from a
   docked or parked tool counts no unload, because the printer checks only the
