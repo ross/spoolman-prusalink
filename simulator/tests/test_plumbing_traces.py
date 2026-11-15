@@ -146,6 +146,103 @@ def test_signature_job_hidden_by_the_blip_is_the_same_job():
     ]
 
 
+# The sensor fields, which firmware from 2ef028181 serves.
+
+
+def sensed(t, state, extruded, present, enabled=True, material=PLA, unloads=0):
+    """A sample from firmware with the sensor fields; `present` None leaves the tool's
+    reading out, as the firmware does when its sensor can't tell."""
+    s = sample(t, state, extruded, material, unloads=unloads)
+    s.filament["sensors_enabled"] = enabled
+    if present is not None:
+        s.filament["tools"][0]["filament_present"] = present
+    return s
+
+
+def test_signature_reads_the_sensors_setting_and_the_tools_sensor():
+    samples = [
+        sensed(0, "IDLE", 100, True),
+        sensed(1, "IDLE", 100, True),
+        sensed(2, "IDLE", 100, None, enabled=False),
+        sensed(3, "IDLE", 100, None, enabled=False),
+        sensed(4, "IDLE", 100, False),
+        sensed(5, "IDLE", 100, False, material=None, unloads=1),
+    ]
+    steps = trace.signature(samples)
+    assert names(steps) == [
+        "IDLE job=none mat=tagged ext=0 sensors=on present=yes",
+        "IDLE job=none mat=tagged ext=0 sensors=off present=omitted",
+        "IDLE job=none mat=tagged ext=0 sensors=on present=no",
+        "IDLE job=none mat=none! unload+1 ext=0 sensors=on present=no",
+    ]
+    # A reading isn't an event: like the state, it says what is so now.
+    assert [st.is_event() for st in steps] == [False, False, False, True]
+    assert steps[0].samples == 2
+
+
+def test_signature_of_firmware_before_the_sensor_fields_reads_them_unknown():
+    steps = trace.signature([sample(0, "IDLE", 100, PLA), down(1)])
+    assert [(st.sensors, st.present) for st in steps] == [("unknown", "unknown")] * 2
+    assert not trace.has_sensors(steps)
+    # A tool the endpoint doesn't list has no reading, though the setting shows.
+    other = sensed(0, "IDLE", 100, True)
+    other.filament["tools"][0]["index"] = 1
+    (step,) = trace.signature([other])
+    assert (step.sensors, step.present) == ("on", "unknown")
+
+
+def test_compare_drops_the_sensor_fields_for_a_trace_recorded_without_them():
+    # The simulator serves the fields, and its reading changes during the unload; an older
+    # trace of the same unload reads neither and still matches.
+    sim = trace.signature(
+        [
+            sensed(0, "IDLE", 100, True),
+            sensed(1, "BUSY", 100, True),
+            sensed(2, "BUSY", 100, False),
+            sensed(3, "BUSY", 100, False, material=None, unloads=1),
+            sensed(4, "IDLE", 100, False, material=None, unloads=1),
+            sensed(5, "IDLE", 100, False, material=None, unloads=1),
+        ]
+    )
+    live = trace.signature(
+        [
+            sample(0, "IDLE", 100, PLA),
+            sample(1, "BUSY", 100, PLA),
+            sample(3, "BUSY", 100, None, unloads=1),
+            sample(5, "IDLE", 100, None, unloads=1),
+        ]
+    )
+    assert trace.compare(live, sim) == []
+    merged = trace.without_sensors(sim)
+    assert names(merged) == names(live)
+    assert merged[1].samples == 2
+    # A trace with the fields is held to them.
+    with_fields = trace.signature(
+        [
+            sensed(0, "IDLE", 100, True),
+            sensed(1, "BUSY", 100, True),
+            sensed(3, "BUSY", 100, True, material=None, unloads=1),
+            sensed(5, "IDLE", 100, True, material=None, unloads=1),
+        ]
+    )
+    assert trace.compare(with_fields, sim) != []
+
+
+def test_compare_reports_a_simulator_reading_the_probe_would_have_seen():
+    live = trace.signature([sensed(t, "IDLE", 100, True) for t in range(6)])
+    long = trace.signature([sensed(t / 10, "IDLE", 100, t < 10 or t > 40) for t in range(60)])
+    assert "longer than a poll" in "\n".join(trace.compare(live, long, 1.0))
+    brief = trace.signature([sensed(t / 10, "IDLE", 100, t != 20) for t in range(60)])
+    assert trace.compare(live, brief, 1.0) == []
+
+
+def test_thinning_keeps_a_change_of_reading():
+    samples = [sensed(t, "IDLE", 100, t < 3) for t in range(6)]
+    kept = probe.thin(samples, heartbeat=10.0)
+    assert [s.t for s in kept] == [0, 2, 3, 5]
+    assert trace.signature(kept) == trace.signature(samples)
+
+
 # The comparison, on hand-built traces.
 
 BASE = [
@@ -157,6 +254,17 @@ BASE = [
     sample(5, "BUSY", 160, PETG, unloads=1),
     sample(6, "IDLE", 160, PETG, unloads=1),
 ]
+
+
+def with_sensors(s, present):
+    """`s` as firmware with the sensor fields would serve it, the sensors on."""
+    tool = {**s.filament["tools"][0], "filament_present": present}
+    filament = {**s.filament, "sensors_enabled": True, "tools": [tool]}
+    return trace.Sample(s.t, s.status, filament, s.job, s.error)
+
+
+# BASE with the sensor fields: the sensor reads no filament from the unload on.
+SENSED_BASE = [with_sensors(s, i < 2) for i, s in enumerate(BASE)]
 
 
 def test_compare_passes_an_identical_trace_and_a_sparser_one():
@@ -179,11 +287,19 @@ def test_compare_passes_an_identical_trace_and_a_sparser_one():
         (2, lambda: sample(2, "BUSY", 100, {"name": "PLA"}, unloads=1), "material"),
         (2, lambda: sample(2, "BUSY", 100, PLA, unloads=1), "changed"),
         (2, lambda: sample(2, "BUSY", 100, None, unloads=2), "unloads"),
+        (
+            3,
+            lambda: sensed(3, "IDLE", 100, False, enabled=False, material=None, unloads=1),
+            "sensors",
+        ),
+        (3, lambda: sensed(3, "IDLE", 100, None, material=None, unloads=1), "present"),
     ],
 )
 def test_compare_reports_a_difference_in_each_shape_field(index, change, field):
-    live = trace.signature(BASE)
-    altered = list(BASE)
+    # The sensor fields count where the trace has them.
+    base = BASE if field not in ("sensors", "present") else SENSED_BASE
+    live = trace.signature(base)
+    altered = list(base)
     altered[index] = change()
     sim = trace.signature(altered)
     assert trace.compare(live, sim) != [], field

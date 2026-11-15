@@ -6,7 +6,8 @@
 It only reads, so it can run beside the production bridge. It polls `/api/v1/status`,
 `/api/v1/filament` and `/api/v1/job` every `--interval` seconds and writes a sample when
 something the bridge could notice has changed (the state, the job, the boot ID, the
-material, the unload counters, or whether the counter is moving), and otherwise every
+material, the unload counters, whether the counter is moving, the filament sensors
+setting, or what the tool's sensor sees), and otherwise every
 `--heartbeat` seconds. Each line you type on stdin while it runs is saved as a mark with
 its time, so note what you did at the printer as you do it. Stop it with Ctrl-C, or Ctrl-D
 at a terminal. Start it while the printer is idle: the first sample has nothing to be
@@ -66,11 +67,11 @@ class Keeper:
 
     Every sample is run through one `trace.Signer`, so events are judged against the last
     poll, not the last sample kept. A sample is kept when its step is an event, when the
-    state, the presence of a job, the material kind or the counter's direction differ from
-    the last kept sample's, or when `heartbeat` seconds have passed. When a sample is kept
-    for a change, the poll before it is kept too, so the counter movement between the two
-    stays with the run it belongs to. The kept samples then give the same steps as the
-    polled ones.
+    state, the presence of a job, the material kind, the sensors setting, what the tool's
+    sensor sees or the counter's direction differ from the last kept sample's, or when
+    `heartbeat` seconds have passed. When a sample is kept for a change, the poll before
+    it is kept too, so the counter movement between the two stays with the run it belongs
+    to. The kept samples then give the same steps as the polled ones.
     """
 
     def __init__(self, heartbeat: float, tool: int = 0) -> None:
@@ -83,7 +84,14 @@ class Keeper:
     def take(self, s: trace.Sample) -> list[trace.Sample]:
         """The samples to write for this poll: none, this one, or the previous one and this."""
         step = self.signer.step(s)
-        run = (step.state, step.job != "none", step.material, step.extruded)
+        run = (
+            step.state,
+            step.job != "none",
+            step.material,
+            step.sensors,
+            step.present,
+            step.extruded,
+        )
         out: list[trace.Sample] = []
         if self._last is None or step.is_event() or run != self._last:
             if self._prev is not None:
@@ -236,6 +244,11 @@ def _summary(s: trace.Sample, tool: int) -> str:
                 f" temps={m['nozzle_temperature']}/{m.get('preheat_temperature')}"
                 f"/{m.get('bed_temperature')}"
             )
+    if s.filament is not None and "sensors_enabled" in s.filament:
+        text += f" sensors={'on' if s.filament['sensors_enabled'] else 'off'}"
+        if entry is not None:
+            present = entry.get("filament_present")
+            text += f" present={'-' if present is None else 'yes' if present else 'no'}"
     if s.error:
         text += f"  ({s.error})"
     return text

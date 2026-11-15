@@ -10,7 +10,8 @@ Two traces never match sample by sample: a real printer is sampled every second 
 and a simulated one every tick, and the numbers differ. `signature()` reduces a trace to
 the sequence of things the bridge can tell apart: the printer state, whether a job is
 present and whether it's new, a new boot, the kind of material reported, unloads counted,
-and whether the counter moved. Runs of samples that say the same thing collapse into one
+whether the counter moved, whether the filament sensors are on, and what the tool's sensor
+sees. Runs of samples that say the same thing collapse into one
 step. `compare()` then checks that every step the real printer showed appears in the
 simulator's steps, in order. The simulator may show more states, because the probe can
 miss one that lasts less than its interval, but not more events: an unload, a material
@@ -26,6 +27,9 @@ from typing import Any
 
 FORMAT = 1
 UNREACHABLE = "unreachable"
+# A sensor reading a sample doesn't give: the printer was unreachable, the tool isn't
+# listed, or the firmware predates the fields (before `2ef028181`).
+UNKNOWN = "unknown"
 
 
 @dataclass
@@ -127,6 +131,13 @@ class Step:
     change in `unload_count`. A step with a new job, a new boot, a material change or an
     unload is one sample long, since those are events.
 
+    `sensors` is "on" or "off" for `sensors_enabled`, the filament sensors setting.
+    `present` is "yes" or "no" for the tool's `filament_present`, or "omitted" when the
+    firmware leaves it out because the sensor can't tell. Both are "unknown" when the
+    sample doesn't say: the printer was unreachable, or its firmware predates the fields,
+    which `compare()` allows for. Neither is an event: like the state, each says what is
+    so now, and a probe can miss a value that lasts less than its interval.
+
     `extruded` is "+", "-", "±" or "0" for how the counter moved over the step's samples.
     The fields that don't take part in equality describe that movement more closely, for
     `compare()`: `entry` is the first sample's movement, which happened in the interval
@@ -145,6 +156,8 @@ class Step:
     changed: bool
     unloads: int
     extruded: str
+    sensors: str = UNKNOWN
+    present: str = UNKNOWN
     entry: str = field(default="0", compare=False)
     interior: str = field(default="0", compare=False)
     samples: int = field(default=1, compare=False)
@@ -159,7 +172,21 @@ class Step:
 
     def shape(self) -> tuple:
         """Everything but the movement."""
-        return (self.state, self.job, self.boot, self.material, self.changed, self.unloads)
+        return (
+            self.state,
+            self.job,
+            self.boot,
+            self.material,
+            self.changed,
+            self.unloads,
+            self.sensors,
+            self.present,
+        )
+
+    def run(self) -> tuple:
+        """What a run of samples shares: consecutive samples that agree on it, and aren't
+        events, are one step."""
+        return (self.state, self.job, self.material, self.sensors, self.present)
 
     def __str__(self) -> str:
         parts = [self.state, f"job={self.job}"]
@@ -169,6 +196,10 @@ class Step:
         if self.unloads:
             parts.append(f"unload+{self.unloads}" if self.unloads > 0 else f"unload{self.unloads}")
         parts.append(f"ext={self.extruded}")
+        if self.sensors != UNKNOWN:
+            parts.append(f"sensors={self.sensors}")
+        if self.present != UNKNOWN:
+            parts.append(f"present={self.present}")
         return " ".join(parts)
 
 
@@ -202,6 +233,18 @@ def _tool(filament: dict | None, index: int) -> dict | None:
         if t.get("index") == index:
             return t
     return None
+
+
+def _sensors(filament: dict | None, tool: dict | None) -> tuple[str, str]:
+    """The sensors setting and what the tool's sensor sees, as `Step` spells them."""
+    if not filament or "sensors_enabled" not in filament:
+        return UNKNOWN, UNKNOWN
+    sensors = "on" if filament["sensors_enabled"] else "off"
+    if tool is None:
+        return sensors, UNKNOWN
+    if "filament_present" not in tool:
+        return sensors, "omitted"
+    return sensors, "yes" if tool["filament_present"] else "no"
 
 
 def _int(tool: dict, key: str) -> int:
@@ -285,6 +328,7 @@ class Signer:
             else:
                 unloads = _int(here, "unload_count") - _int(before, "unload_count")
                 moved = _direction(_int(here, "extruded") - _int(before, "extruded"))
+        sensors, present = _sensors(filament, here)
         step = Step(
             state,
             job,
@@ -293,6 +337,8 @@ class Signer:
             changed,
             unloads,
             moved,
+            sensors,
+            present,
             entry=moved,
             moves=int(moved != "0"),
             dirs=(moved,),
@@ -305,25 +351,48 @@ class Signer:
         return step
 
     def _add(self, step: Step) -> None:
-        last = self.steps[-1] if self.steps else None
-        if (
-            last is not None
-            and not last.is_event()
-            and not step.is_event()
-            and (last.state, last.job, last.material) == (step.state, step.job, step.material)
-        ):
-            self.steps[-1] = replace(
-                last,
-                extruded=_merge_direction(last.extruded, step.extruded),
-                interior=_merge_direction(last.interior, step.extruded),
-                samples=last.samples + 1,
-                moves=last.moves + step.moves,
-                dirs=last.dirs + step.dirs,
-                blind=last.blind + step.blind,
-                t_last=step.t_last,
-            )
-        else:
-            self.steps.append(step)
+        _append(self.steps, step)
+
+
+def _append(steps: list[Step], step: Step) -> None:
+    """Add `step` to `steps`, merged into the last step when the two are one run.
+
+    `step` may be several samples long when `without_sensors` merges steps again: its
+    whole movement is then the merged step's interior.
+    """
+    last = steps[-1] if steps else None
+    if (
+        last is not None
+        and not last.is_event()
+        and not step.is_event()
+        and last.run() == step.run()
+    ):
+        steps[-1] = replace(
+            last,
+            extruded=_merge_direction(last.extruded, step.extruded),
+            interior=_merge_direction(last.interior, step.extruded),
+            samples=last.samples + step.samples,
+            moves=last.moves + step.moves,
+            dirs=last.dirs + step.dirs,
+            blind=last.blind + step.blind,
+            t_last=step.t_last,
+        )
+    else:
+        steps.append(step)
+
+
+def has_sensors(steps: list[Step]) -> bool:
+    """Whether any step reads the sensor fields, which firmware from `2ef028181` serves."""
+    return any(st.sensors != UNKNOWN for st in steps)
+
+
+def without_sensors(steps: list[Step]) -> list[Step]:
+    """`steps` as a trace without the sensor fields would give them: both "unknown", and
+    the runs they split merged again."""
+    out: list[Step] = []
+    for st in steps:
+        _append(out, replace(st, sensors=UNKNOWN, present=UNKNOWN))
+    return out
 
 
 def signature(samples: list[Sample], tool: int = 0) -> list[Step]:
@@ -372,6 +441,8 @@ def fold(steps: list[Step]) -> Step:
         any(st.changed for st in steps),
         sum(st.unloads for st in steps),
         "0",
+        last.sensors,
+        last.present,
     )
 
 
@@ -473,7 +544,12 @@ def compare(live: list[Step], sim: list[Step], gap: float | None = None) -> list
     replay may run its states faster or slower than the printer, as long as each stretch
     has at least as many simulator samples as the trace has polls there, since two polls
     can't share a place.
+
+    A live trace from firmware that predates the sensor fields reads them nowhere, so the
+    simulator's steps are compared without them (`without_sensors`).
     """
+    if not has_sensors(live):
+        sim = without_sensors(sim)
     problems: list[str] = []
     window = (gap if gap is not None else poll_gap(live)) * SLACK
     tick = poll_gap(sim)
@@ -539,10 +615,10 @@ def _missed_runs(
 ) -> list[str]:
     """Simulator runs the probe never sampled must together fit between two polls.
 
-    Within a live step's stretch, a run whose state, job or material differs from the
-    live step's was never sampled by it (the step's samples all share those). Such runs,
-    taken consecutively, must last less than one poll gap, or the printer would have
-    shown them.
+    Within a live step's stretch, a run whose state, job, material or sensor reading
+    differs from the live step's was never sampled by it (the step's samples all share
+    those). Such runs, taken consecutively, must last less than one poll gap, or the
+    printer would have shown them.
     """
     for i, step in enumerate(live):
         a, b = spans[i]
@@ -550,8 +626,7 @@ def _missed_runs(
         for j in range(a, b):
             st = sim[j]
             sampled = st.is_event() or (
-                st.state == step.state
-                and (step.is_event() or (st.job, st.material) == (step.job, step.material))
+                st.state == step.state and (step.is_event() or st.run() == step.run())
             )
             if sampled:
                 missed, first = 0.0, None
