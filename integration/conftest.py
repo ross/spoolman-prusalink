@@ -544,7 +544,8 @@ def world_model(request: pytest.FixtureRequest, world_tools: int, world_mmu: boo
 def world_printer(request: pytest.FixtureRequest) -> dict:
     """Settings `world` overrides in printer "it"'s `PrinterConfig`, such as `sync_drift`.
 
-    None by default. A test sets them with
+    None by default, apart from `sync_delay`, which is 0 unless a test sets it, so most
+    writes run at the first idle poll. A test sets them with
     `@pytest.mark.parametrize("world_printer", [dict(...)], indirect=True)`.
     """
     return getattr(request, "param", {})

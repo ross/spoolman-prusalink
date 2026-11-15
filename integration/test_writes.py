@@ -28,6 +28,7 @@ from simulator.compatibility import MK4_CHECKS
 from simulator.model import MODELS, JobPhase, Material, ModelInfo, State
 from simulator.prusalink import DROP, Answer, Reply
 from simulator.tool import LOAD_CELL_PRESETS, MK4_EXTRUDER
+from spoolman_prusalink.config import SYNC_DELAY
 from spoolman_prusalink.printer_sync import PRINTER_MODELS, default_preamble
 
 COREONEL_PREAMBLE = default_preamble(PRINTER_MODELS["8.1.0"])
@@ -117,6 +118,41 @@ async def test_w2_write_waits_while_printing(world: World):
     assert w.requests("PUT") == []
 
     # Idle again: the first poll writes B.
+    await w.poll()
+    puts = w.requests("PUT")
+    assert len(puts) == 1 and SYNC_FILE in puts[0].text
+    await wrote_b(w)
+
+
+@pytest.mark.parametrize("world_printer", [dict(sync_delay=SYNC_DELAY)], indirect=True)
+async def test_w2_write_waits_out_the_power_panic_window(world: World):
+    """Default sync_delay: a write waits out a power cut's idle window, and the print resumes.
+
+    B's write is due during the print. The poll in the window holds it, the print resumes
+    with its job, and B is written once the print has ended and the delay has passed."""
+    w = world
+    await write_due(w)
+    await w.start_print(print_spec())
+    w.advance(1.0)
+    await w.poll()
+    assert w.printer.state is State.PRINTING
+    job = w.printer.job.id
+
+    w.printer.set_power("off")
+    w.printer.set_power("on", resume=True)
+    # The printer reads IDLE with no job until the resume starts.
+    await w.poll()
+    assert w.printer.state is State.IDLE and w.printer.resuming.id == job
+    assert w.requests("PUT") == []
+    await w.run_until(lambda: w.printer.state is State.PRINTING, poll_every=0.5)
+    assert w.printer.job.id == job
+    await w.run_until(lambda: w.printer.job is None, poll_every=1.0)
+    assert w.requests("PUT") == []
+
+    # Idle after the print: the write waits out the delay, then runs.
+    await w.poll()
+    assert w.requests("PUT") == []
+    w.advance(SYNC_DELAY)
     await w.poll()
     puts = w.requests("PUT")
     assert len(puts) == 1 and SYNC_FILE in puts[0].text
