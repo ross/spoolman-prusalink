@@ -65,6 +65,7 @@ def full_state() -> State:
         job_id=11,
         pending_job=12,
         pending_at=1190,
+        pending_empty=True,
         notice=StagedAtPrint(8, 7),
         held_mm=30,
         deleted_spool=4,

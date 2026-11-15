@@ -599,7 +599,7 @@ class PrinterBridge:
                 plan.claimed += self._claim_handled(location, claim, others)
             seen = self._seen_tags.get(tool, SeenTag())
             if any(isinstance(ev, Unload) for ev in result.events):
-                # Only a runout in a print the bridge saw start is reported as one.
+                # Only a runout in a print the bridge saw is reported as one.
                 seen = tags.unloaded(seen, runout=result.runout is not None)
 
             lasting: list[Condition] = []

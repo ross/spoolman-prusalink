@@ -405,34 +405,41 @@ written.
   tool that isn't already auto-retracted, such as one fed with Move E or
   Purge filament since its last load or print, or one loaded at this
   print's preview (BF23, F28), the ramming counts about 22 mm (23 mm
-  commanded at 0.95) while the job is still visible.
-  `accounting.print_start` takes the first counter rise in a new job as
-  the print's start (Q4), so it takes the ramming as one. A cancel during
-  the scan or the start blip moves nothing and ends in `IDLE` (F27), so
-  this takes a cancel later in the preheat.
-- **Effect**: A print cancelled before it extruded counts as started. An
-  open unconfirmed swap closes as "assumed same spool" with a provisional
-  charge (S4, Q1), and a staged spool is flagged (S9, Q2). A Spoolman fix
-  made after the cancel's ramming no longer confirms the swap, against
-  what P8 promises. A fix the bridge polls during the preheat, before the
-  cancel, still confirms it.
-- **Evidence**: Inferred from the source and `accounting.py`. Reproduced,
-  no test kept: the bridge records `swap_assumed`, a provisional 22 mm
-  charge and `swap_staged`. Through the unit harness, a tool loaded at
-  the preview gives `swap_assumed` and the 22 mm charge too, with or
-  without polls during the load (BF23). The P8 test doesn't show it: its
-  tool is already auto-retracted, it fixes Spoolman before the cancel,
-  and its `finish()` polls every 1 s while the job parks for 0.2 s.
+  commanded at 0.95) while the job is still visible. Until the fix,
+  `accounting.print_start` took the first counter rise in a new job as the
+  print's start (Q4), so it took the ramming as one. A cancel during the
+  scan or the start blip moves nothing and ends in `IDLE` (F27), so this
+  took a cancel later in the preheat.
+- **Effect**: Until the fix, a print cancelled before it extruded counted
+  as started. An open unconfirmed swap closed as "assumed same spool" with
+  a provisional charge (S4, Q1), and a staged spool was flagged (S9, Q2). A
+  Spoolman fix made after the cancel's ramming no longer confirmed the
+  swap, against what P8 promises. A fix the bridge polled during the
+  preheat, before the cancel, still confirmed it.
+- **Evidence**: Inferred from the source and `accounting.py`. Reproduced
+  before the fix, no test kept: the bridge recorded `swap_assumed`, a
+  provisional 22 mm charge and `swap_staged`. The P8 test of the time
+  didn't show it: its tool was already auto-retracted, it fixed Spoolman
+  before the cancel, and its `finish()` polled every 1 s while the job
+  parked for 0.2 s. Shown fixed in the simulator by
+  `test_a_cancel_in_the_preheat_leaves_the_swap_open` in
+  `tests/test_print_start.py` and, end to end,
+  `test_p8_cancel_ramming_is_not_a_print_start` in
+  `integration/test_prints.py`.
 - **Scenario rows**: P8, Q4, S4, Q1, S9, Q2.
-- **To reproduce**: Start from
-  `test_p8_cancelled_during_preheat_is_not_a_print_start` in
-  `integration/test_prints.py`. Open an unconfirmed swap as it does, then
-  feed the tool (`extrude`) after the load. Start the print, `cancel` in
-  the preheat, and poll every 0.1 s while the job parks. Fix Spoolman only
-  after the cancel. Expect `swap_assumed` for the job. BF23's cancel
-  path, with polls during the load and the auto-retract on, shows the
-  same after a load at the preview.
-- **Status**: Open.
+- **To reproduce**: Before the fix, the steps those two tests take: open
+  an unconfirmed swap, feed the tool (`extrude`) after the reload, start a
+  print, `cancel` in the preheat, and poll every 0.1 s while the job
+  parks, then fix Spoolman. The ledger showed `swap_assumed` for the job.
+- **Status**: Fixed (D5 in bridge-fixes.md). A pending job starts only
+  once the counter has risen more than `FIRST_EXTRUSION_MM`, 23 mm, past
+  where the bridge first saw it, the ramming's commanded length (F26).
+  The ramming is still charged to the active spool. The cost is that a
+  print that counts 23 mm or less on a tool never starts there (Q4).
+  `test_a_cancel_in_the_preheat_counts_no_more_than_the_threshold` in
+  `tests/test_print_start.py` checks every model that auto-retracts
+  against the threshold. F26 and F5 on the Core One L still confirm the
+  ramming's size.
 
 ### BF11. A power-panic resume loses usage and counts a purge
 
@@ -487,54 +494,64 @@ written.
   doesn't know does the load ask for a type. No pick can match that name,
   so the wrong-filament question follows, and the user can decline there.
   The load counts while the printer reads `BUSY` with no job: 57 mm on a
-  Core One L, (20 + 40) × 0.95. `accounting.print_start` takes a new job
-  as started when a later poll of the same job sees the counter past
-  where the first poll saw it. With one poll at the preview's first
-  question and none during the load, the next poll of the job takes the
-  load's count as the print's first extrusion: at the wrong-filament
-  question, or in the preheat once the print goes on. A cancel in that
-  preheat then ends a job already taken as started. That's BF10's outcome
-  even with no ramming, as with auto-retract off. With auto-retract on,
-  the preview's load leaves the tool not retracted (F28), so the cancel
-  rams too, and that alone counts the job as started through BF10.
-- **Effect**: A job that never printed counts as started. An open
-  unconfirmed swap closes as "assumed same spool" with a provisional
-  charge (S4, Q1), and a staged spool is flagged (S9, Q2), as in BF10. It
-  takes a print started on an empty tool, no poll during the load, and
-  then a cancel in the preheat or a declined file whose type the build
-  doesn't know. The simulator's load is 108 mm at 10 mm/s, about 11 s. A
-  Core One L moves 40 mm at 6 mm/s, 20 mm at 25 mm/s and a 40 mm purge at
-  3 mm/s, then retracts 8 mm: about 21 s
+  Core One L, (20 + 40) × 0.95. Until the fix, `accounting.print_start`
+  took a new job as started when a later poll of the same job saw the
+  counter past where the first poll saw it. With one poll at the
+  preview's first question and none during the load, the next poll of the
+  job took the load's count as the print's first extrusion: at the
+  wrong-filament question, or in the preheat once the print went on. A
+  cancel in that preheat then ended a job already taken as started.
+  That's BF10's outcome even with no ramming, as with auto-retract off.
+  With auto-retract on, the preview's load leaves the tool not retracted
+  (F28), so the cancel rams too, and before BF10's fix that alone counted
+  the job as started.
+- **Effect**: Until the fix, a job that never printed counted as started.
+  An open unconfirmed swap closed as "assumed same spool" with a
+  provisional charge (S4, Q1), and a staged spool was flagged (S9, Q2), as
+  in BF10. It took a print started on an empty tool, no poll during the
+  load, and then a cancel in the preheat or a declined file whose type the
+  build doesn't know. The simulator's load is 108 mm at 10 mm/s, about
+  11 s. A Core One L moves 40 mm at 6 mm/s, 20 mm at 25 mm/s and a 40 mm
+  purge at 3 mm/s, then retracts 8 mm: about 21 s
   (`standard_feedrates_nextruder.cpp:12-18`). It also reads `BUSY` while
   it heats to the load temperature and waits for the filament to go in,
   so a 30 s `poll_printing` lands in the load far more often than in the
-  simulator. That poll avoids this finding's load path, but with
-  auto-retract on, a cancel in that preheat still counts as started
-  through BF10. The live check will tell.
+  simulator. That poll avoided this finding's load path, but with
+  auto-retract on, a cancel in that preheat still counted as started
+  through BF10.
 - **Evidence**: The preview's load is read in the firmware source.
-  Reproduced through the unit harness, no test kept, for both paths: a
-  decline at the wrong-filament question and a cancel in the preheat each
-  give `swap_assumed`. The simulator reaches the wrong-filament question
-  for any type, because its preview load is the user's free choice of
-  preset (`simulator/README.md`). A poll during the load avoids the load
-  path: the bridge sees no job then, and takes the job's counter afresh
-  when the job comes back. With polls every 0.2 s during the load, the
-  cancel path still gives `swap_assumed` and a provisional 22 mm charge
-  with the auto-retract on (BF10), and nothing with it off. The printer's
-  timing is to be confirmed.
+  Reproduced through the unit harness before the fix, no test kept, for
+  both paths: a decline at the wrong-filament question and a cancel in
+  the preheat each gave `swap_assumed`. The simulator reaches the
+  wrong-filament question for any type, because its preview load is the
+  user's free choice of preset (`simulator/README.md`). A poll during the
+  load avoids the load path: the bridge sees no job then, and takes the
+  job's counter afresh when the job comes back. With polls every 0.2 s
+  during the load, the cancel path gave `swap_assumed` and a provisional
+  22 mm charge with the auto-retract on (BF10), and nothing with it off.
+  Shown fixed in the simulator by
+  `test_a_preview_load_then_a_declined_type_is_no_print_start` and
+  `test_a_preview_load_then_a_cancel_in_the_preheat_is_no_print_start`,
+  with and without a poll during the load, in `tests/test_print_start.py`,
+  and end to end by `test_p8_preview_load_is_not_a_print_start` in
+  `integration/test_prints.py`. The printer's timing is to be confirmed.
 - **Scenario rows**: P8, Q4, S4, Q1, S9, Q2.
-- **To reproduce**: Unload the tool's spool and poll, to open an
-  unconfirmed swap. Start a print on the empty tool, and poll at the "no
-  filament" question. `tap_through`, then `load` the tool, with no poll
-  during the load. For the decline, load another type than the segment
-  names, poll at the wrong-filament question, then `cancel`. For the
-  cancel, load the segment's type, poll in the preheat, then `cancel`.
-  Either way the ledger shows `swap_assumed` for the job. To see the
-  cancel path through BF10, poll during the load with the auto-retract
-  on, which the unit harness leaves off (BF22). On the Core One L, the
-  live check `F28-load-then-decline` confirms it with the production
-  bridge: sitting D in printer-behaviors.md, under "Capture plan".
-- **Status**: Open.
+- **To reproduce**: Before the fix, the steps those tests take: unload the
+  tool's spool and poll, to open an unconfirmed swap. Start a print on the
+  empty tool, and poll at the preview's warning. `tap_through`, then
+  `load` the tool, with no poll during the load. For the decline, load
+  another type than the segment names, poll at the wrong-filament
+  question, then `cancel`. For the cancel, load the segment's type, poll
+  in the preheat, then `cancel`. Either way the ledger showed
+  `swap_assumed` for the job. On the Core One L, the live check
+  `F28-load-then-decline` confirms it with the production bridge: sitting
+  D in printer-behaviors.md, under "Capture plan".
+- **Status**: Fixed (D5 in bridge-fixes.md). The bridge saves whether the
+  tool reported no material at the pending job's last poll
+  (`ToolState.pending_empty`). While it reports none, each poll takes the
+  job's starting counter again, and the first poll with a material takes
+  it once more without starting, so the load's count is charged but isn't
+  the print's start (Q4). The F28 trace still confirms the printer's side.
 
 ### BF24. Usage counted on an empty tool lands on the next spool
 
@@ -665,41 +682,63 @@ written.
   tool and sends `M600 P T<n>`, which picks that tool, changes its
   filament and changes back (F34, `src/marlin_stubs/pause/M600.cpp:204-340`,
   `src/gui/screen/screen_m600.cpp`). The change counts an unload on the
-  tool, and its ramming counts too. `accounting.print_start` takes a
-  tool's first counter rise in a new job as that tool's print start (Q4).
-  On a tool that hasn't extruded in the running job, the ramming is that
-  rise, so the bridge sees the unload and the tool's print start in the
-  same poll: it records `unload` and `swap_unconfirmed`, then at once
-  `swap_assumed` with a provisional charge, and flags the spool as assumed
-  reloaded. On a tool the print has already extruded with, the swap stays
-  open as P2 and P3 say. A runout during a print's preheat, before any
-  extrusion, takes the same path on a single-tool printer. It needs the
-  unload to count something. A Nextruder that is fully auto-retracted, as
-  it is after a menu load or a finished print, unloads cold with no
-  ramming (`can_cold_unload`, `pause.cpp:1249-1255`), so nothing counts
-  and the swap stays open as P2 says. A Nextruder rams when auto-retract
-  is off, with flexible filament, and on an XL tool that an earlier print
-  used but didn't end on. INDX never unloads cold, so it always rams.
-- **Effect**: A Spoolman change made while the printer waits for the
-  reload, which P2 promises confirms the swap, is staged instead (S13),
-  and the reload and the rest of the print go to the old spool until a
-  claim moves them. With no Spoolman change, the old spool carries an
-  "assumed reloaded" flag where P3 would leave the swap open.
-- **Evidence**: Shown in the simulator on an INDX by
-  `test_a_change_on_a_tool_the_print_has_not_used_looks_like_its_print_start`
-  in `tests/test_toolchanger_prints.py`. Reproduced, no test kept: the
-  same change on a tool the print used earlier follows P2, and a runout in
-  the preheat of a Core One L print gives `unload`, `swap_unconfirmed` and
-  `swap_assumed` in one poll when the tool isn't auto-retracted, and
-  nothing more than P2 when it is. That a real runout can come before the
-  print's first extrusion is inferred: the start G-code's heat waits come
-  before its purge line.
+  tool, and its ramming counts too. Until the fix,
+  `accounting.print_start` took a tool's first counter rise in a new job
+  as that tool's print start (Q4). On a tool that hadn't extruded in the
+  running job, the ramming was that rise, so the bridge saw the unload and
+  the tool's print start in the same poll: it recorded `unload` and
+  `swap_unconfirmed`, then at once `swap_assumed` with a provisional
+  charge, and flagged the spool as assumed reloaded. After BF10's
+  threshold, INDX's ramming, 16 mm, no longer started the print, but the
+  reload's count did, with the same outcome when Spoolman hadn't changed.
+  On a tool the print had already extruded with, the swap stayed open as
+  P2 and P3 say. A runout during a print's preheat, before any extrusion,
+  took the same path on a single-tool printer, and wasn't flagged as a
+  runout, since the bridge counted only an unload in a started print as
+  one. It needs the unload to count something. A Nextruder that is fully
+  auto-retracted, as it is after a menu load or a finished print, unloads
+  cold with no ramming (`can_cold_unload`, `pause.cpp:1249-1255`), so
+  nothing counted and the swap stayed open as P2 says, until the reload.
+  A Nextruder rams when auto-retract is off, with flexible filament, and
+  on an XL tool that an earlier print used but didn't end on. INDX never
+  unloads cold, so it always rams.
+- **Effect**: Until the fix, a Spoolman change made while the printer
+  waited for the reload, which P2 promises confirms the swap, was staged
+  instead (S13), and the reload and the rest of the print went to the old
+  spool until a claim moved them. With no Spoolman change, the old spool
+  carried an "assumed reloaded" flag where P3 would leave the swap open.
+- **Evidence**: Shown in the simulator on an INDX by the test now named
+  `test_a_change_on_a_tool_the_print_has_not_used_follows_p2` in
+  `tests/test_toolchanger_prints.py`, which pinned the assumed swap
+  before the fix. Reproduced before the fix, no test kept: the same change
+  on a tool the print used earlier followed P2, and a runout in the
+  preheat of a Core One L print gave `unload`, `swap_unconfirmed` and
+  `swap_assumed` in one poll when the tool wasn't auto-retracted. That a
+  real runout can come before the print's first extrusion is inferred:
+  the start G-code's heat waits come before its purge line. Shown fixed
+  by that test, by
+  `test_a_change_on_a_tool_the_print_has_not_used_follows_p3` there with
+  no Spoolman change, and by `test_a_runout_in_the_preheat_follows_p2` in
+  `tests/test_print_start.py`, with a poll in the preheat.
 - **Scenario rows**: T10, P2, P3, P8, Q4, S13.
-- **To reproduce**: That test, today. For the single-tool path, start a
-  print with a preheat on a Core One L through the unit harness, with the
-  tool not auto-retracted (the harness's starting state, or `auto_retract`
-  off), poll during the preheat, `runout(0)`, and poll.
-- **Status**: Open.
+- **To reproduce**: Before the fix, those tests. For the single-tool path,
+  start a print with a preheat on a Core One L through the unit harness,
+  with the tool not auto-retracted (the harness's starting state, or
+  `auto_retract` off), poll during the preheat, `runout(0)`, and poll.
+- **Status**: Fixed (D5 in bridge-fixes.md). An unload in a job a poll
+  already saw pending starts the print without the start's effects. The
+  swap the unload opens stays open, as P2 and P3 say, and the unload is a
+  mid-print one: the runout flag (M5a) and the tag rules (Q10, Q11) treat
+  it as a runout. A side effect: an idle sensor clear while a
+  toolchanger's tools-mapping screen shows a job counts as a runout too
+  (Q8). So does a Change at the preview's wrong-filament question (F28),
+  an unload then a load, when a poll saw the job at the question and none
+  lands during the change. The simulator doesn't model the Change. The remaining limit: a runout before any poll has seen the job
+  is treated as a swap before the print, since an idle unload followed by
+  a print started on the emptied tool looks the same and is far more
+  common. `test_a_runout_before_any_poll_saw_the_job_is_a_swap_before_the_print`
+  and `test_an_idle_unload_then_a_print_on_the_empty_tool_is_a_swap_before_it`
+  in `tests/test_print_start.py` show both.
 
 ## Multi-tool
 
@@ -1086,12 +1125,13 @@ panic (F38 to F46). The MMU's scenario rows are T12 to T17.
   hand. `tests/test_families.py` and `tests/test_toolchanger_prints.py`
   turn it on, so the unit suite sees the ram after a load and at a
   print's end in the family story on each family (BF9), and runs INDX
-  prints, whose end doesn't ram. The rest of the unit suite runs with it
-  off, so no unit test sees the ram at a cancel (BF10). The integration
+  prints, whose end doesn't ram. `tests/test_print_start.py` turns it on
+  for the ram at a cancel (BF10) and the preview's load (BF23). The rest
+  of the unit suite runs with it off. The integration
   suite runs the simulator's default, with the auto-retract on.
 - **Effect**: No charge changes. A unit test can pass on behavior the ram
   would change.
-- **Evidence**: Read in `tests/harness.py` and those two test files.
+- **Evidence**: Read in `tests/harness.py` and those three test files.
 - **Scenario rows**: P8.
 - **To reproduce**: `tests/harness.py`, today.
 - **Status**: Accepted (D11 in bridge-fixes.md). Changing the harness's

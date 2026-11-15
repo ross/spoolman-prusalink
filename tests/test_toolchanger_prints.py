@@ -254,12 +254,12 @@ async def test_a_tool_emptied_by_hand_while_docked_counts_no_unload(tmp_path):
     await bridge.aclose()
 
 
-async def test_a_change_on_a_tool_the_print_has_not_used_looks_like_its_print_start(tmp_path):
-    """T10, pinned as the bridge behaves today: Tune > Change filament on T1 while the print
-    is on T0 counts T1's unload mid-print. T1 hasn't extruded in this job, so the bridge
-    takes the change's ramming as T1's print start and assumes the old spool reloaded at
-    once. A Spoolman change during the pause is then staged instead of confirming the swap
-    (P2), and the reload is charged to the old spool."""
+async def test_a_change_on_a_tool_the_print_has_not_used_follows_p2(tmp_path):
+    """T10: Tune > Change filament on T1 while the print is on T0 counts T1's unload
+    mid-print. T1 hasn't extruded in this job, and the change's ramming counts less than
+    `FIRST_EXTRUSION_MM`, so it isn't T1's print start (Q4): the swap stays open, a
+    Spoolman change during the pause confirms it (P2), and the reload goes to the new
+    spool."""
     tools = [
         SimTool.loaded_with(0, PLA, extruded=1000.0),
         SimTool.loaded_with(1, PLA, extruded=500.0),
@@ -277,13 +277,10 @@ async def test_a_change_on_a_tool_the_print_has_not_used_looks_like_its_print_st
     await bridge.poll()
     # T1's park retract, 2 mm purge and ramming count 17 * 550/576 = 16.23: 516.
     assert station.counter_at(1) == 516 and station.tool_at(1).unload_count == 1
-    # A known fault, BF27 in docs/bridge-findings.md: the unload and T1's first counted
-    # move in the job land in the same poll, so the swap closes as assumed at once. A fix
-    # in the bridge changes these lines.
     swaps = ("unload", "swap_unconfirmed", "swap_assumed", "swap_staged", "swap_confirmed")
     events = [(r["tool"], r["event"]) for r in ledger(tmp_path)[mark:] if r.get("event") in swaps]
-    assert events == [(1, "unload"), (1, "swap_unconfirmed"), (1, "swap_assumed")]
-    assert "assumed reloaded" in fake.flag(2)
+    assert events == [(1, "unload"), (1, "swap_unconfirmed")]
+    assert "unloaded with no Spoolman change" in fake.flag(2)
 
     # Spool 3 goes into T1's location while the printer waits for the reload (P2).
     mark = len(ledger(tmp_path))
@@ -296,12 +293,47 @@ async def test_a_change_on_a_tool_the_print_has_not_used_looks_like_its_print_st
     await station.run_until(lambda: printer.job is None, poll_every=1.0, limit=60)
     await bridge.poll()
     events = [(r["tool"], r["event"]) for r in ledger(tmp_path)[mark:] if r.get("event") in swaps]
-    assert events == [(1, "swap_staged")]
-    # The reload counts 50 more: 67 * 550/576 = 63.98 reads 563, all on spool 2. T0's 100
-    # and its priming, G427's 25 + 8 and the profile's 1.6 + 5.4907, make 140.0907 *
-    # 550/576 = 133.77 on spool 1, and spool 3 gets nothing.
+    assert events == [(1, "swap_confirmed")]
+    # Spool 2 keeps the 16.23 before the unload. The reload counts 50 more, 47.75, which
+    # reads 563, all on spool 3. T0's 100 and its priming, G427's 25 + 8 and the
+    # profile's 1.6 + 5.4907, make 140.0907 * 550/576 = 133.77 on spool 1.
     assert station.counter_at(1) == 563
-    assert totals(fake) == {1: 133, 2: 63}
+    assert totals(fake) == {1: 133, 2: 16, 3: 47}
+    assert fake.flag(2) is None
+    await bridge.aclose()
+
+
+async def test_a_change_on_a_tool_the_print_has_not_used_follows_p3(tmp_path):
+    """T10 with no Spoolman change: the unload in a job still pending on T1 starts T1's
+    print without the start's effects, so the reload's count doesn't close the swap as
+    assumed. The swap stays open after the print, as P3 says, and the reload is charged
+    to the old spool until Spoolman says otherwise."""
+    tools = [
+        SimTool.loaded_with(0, PLA, extruded=1000.0),
+        SimTool.loaded_with(1, PLA, extruded=500.0),
+    ]
+    bridge, fake, station = indx(tmp_path, tools)
+    printer = station.printer
+    await bridge.poll()  # the baseline
+    mark = len(ledger(tmp_path))
+
+    await station.start_print(PrintSpec([Segment(0, 100)], duration_s=20))
+    station.advance(2)
+    await bridge.poll()
+    printer.change_filament(1)
+    await bridge.poll()
+    await station.swap_cycle(tool=1, poll_every=1.0)
+    printer.resume()
+    await station.run_until(lambda: printer.job is None, poll_every=1.0, limit=60)
+    await bridge.poll()
+    swaps = ("unload", "swap_unconfirmed", "swap_assumed", "swap_staged", "swap_confirmed")
+    events = [(r["tool"], r["event"]) for r in ledger(tmp_path)[mark:] if r.get("event") in swaps]
+    assert events == [(1, "unload"), (1, "swap_unconfirmed")]
+    # T1's 16.23 before the unload and the reload's 47.75: 563, all on spool 2.
+    assert station.counter_at(1) == 563 and totals(fake) == {1: 133, 2: 63}
+    t1 = bridge.printers[0].tools[1]
+    assert t1.job_id == 1 and t1.swap is not None and t1.provisional is None
+    assert "unloaded with no Spoolman change" in fake.flag(2)
     await bridge.aclose()
 
 
@@ -324,7 +356,7 @@ async def test_a_spool_join_counts_an_unload_on_the_old_tool_mid_print(tmp_path)
 
     spec = PrintSpec([Segment(0, 100)], duration_s=20, spool_join=[Join(0, 1)])
     await station.start_print(spec)
-    station.advance(4)
+    station.tick_until(lambda: printer.job.fed_mm >= 23 - 1e-9)
     await bridge.poll()
     assert printer.job.fed_mm == pytest.approx(23)
     printer.runout(0)

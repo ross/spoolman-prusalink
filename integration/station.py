@@ -24,6 +24,7 @@ from simulator.model import (
     State,
 )
 from simulator.prusalink import Hook, Reply, make_app, make_transport
+from spoolman_prusalink.accounting import FIRST_EXTRUSION_MM
 
 # Short phases keep a scenario to a few hundred ticks. None is zero, so every phase
 # still takes at least one tick and the bridge can see it if a test polls there.
@@ -157,22 +158,26 @@ class Station:
     async def start_print(self, spec: PrintSpec) -> None:
         """Start a print and poll until the bridge counts it as started.
 
-        Scan, blip and a 0.5 s preheat take 0.9 s. On a toolchanger the tools-mapping screen
-        comes up after the scan for every print it applies to; with nothing wrong this
-        answers Print at once, so the timing is the same. A test that wants to see that
-        question uses `begin_print`. The bridge sees a print start when the counter moves
-        between two polls of the same job, so this polls twice once the printer is
-        extruding.
+        On a toolchanger the tools-mapping screen comes up after the scan for every print
+        it applies to; with nothing wrong this answers Print at once. A test that wants to
+        see that question uses `begin_print`. The bridge sees a print start when the
+        counter rises more than `FIRST_EXTRUSION_MM` past where a poll first saw the job
+        (Q4), so this polls in the preheat, ticks until the first tool's counter is past
+        that, and polls again. A print whose first tool counts no more than that while its
+        job shows never starts for that tool: then the second poll comes once the job is
+        gone.
         """
         assert self.poll is not None, "this station has no bridge to poll"
         first = self.tool_at(spec.segments[0].tool)
-        start = first.extruded
         self.begin_print(spec)
         job = self.printer.job
         if job.waits_for(Reason.TOOLS_MAPPING) and job.attention.detail is None:
             self.printer.tap_through()
-        self.advance(1.2 - self.sim.settings.scan_seconds)
-        assert self.printer.state is State.PRINTING and first.extruded > start
+        self.tick_until(lambda: job.phase not in (JobPhase.SCANNING, JobPhase.BLIP))
+        assert self.printer.state is State.PRINTING
         await self.poll()
-        self.advance(0.3)
+        seen = int(first.extruded)
+        self.tick_until(
+            lambda: int(first.extruded) - seen > FIRST_EXTRUSION_MM or self.printer.job is not job
+        )
         await self.poll()

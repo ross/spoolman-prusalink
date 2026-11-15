@@ -238,6 +238,7 @@ async def test_a_cut_while_an_mmu_runout_waits_charges_nothing_after(tmp_path):
     await bridge.poll()
     mark = len(ledger(tmp_path))
     await station.start_print(PrintSpec([Segment(0, 20)], duration_s=4))
+    station.tick_until(lambda: p.job.fed_mm >= 3)
     p.runout(0)
     await bridge.poll()
     # Slot 0's start, 17 + 53, its 3 mm of print and the runout's ramming 12 after the
