@@ -1288,13 +1288,9 @@ class SimPrinter:
             f"T{tool.index} {why}: unload_count {tool.unload_count} at {tool.extruded_at_unload}",
         )
 
-    def _physical_unload(self, tool: SimTool, why: str, *, run_out: bool = False) -> None:
-        """Count the unload and empty the path. On INDX an unload the side sensor didn't
-        trigger, as a runout and a spool join's runout do, leaves the filament in that
-        sensor (`IndxToolchanger.upstream_sensor`)."""
+    def _physical_unload(self, tool: SimTool, why: str) -> None:
         self._count_unload(tool, why)
         tool.path.empty(self.model.gap_mm)
-        tool.path.left_at_sensor = self.feed.upstream_sensor and not run_out
         # The filament left the path, so no slot's filament is past the MMU's selector.
         if self.mmu is not None:
             self.mmu.fed = None
@@ -1302,7 +1298,7 @@ class SimPrinter:
     def _idle_sensor_clear(self, tool: SimTool, *, sensor_fault_counts: bool) -> None:
         if not self.sensors:
             return
-        empty = not tool.path.sensed or (sensor_fault_counts and tool.path.sensor_fault)
+        empty = not tool.path.loaded or (sensor_fault_counts and tool.path.sensor_fault)
         if tool.material is not None and empty:
             self._count_unload(tool, "idle sensor clear")
 
@@ -1451,7 +1447,7 @@ class SimPrinter:
     def _hand_load(self, t: SimTool, material: Material | None) -> None:
         # Filament goes in even when there's no type to restore.
         t.store(t.kept() if material is None else material)
-        t.path.loaded, t.path.gap, t.path.left_at_sensor = True, 0.0, False
+        t.path.loaded, t.path.gap = True, 0.0
         self._log("load", f"T{t.index} loaded by hand while off: {describe(t.material)}")
 
     def unload(self, tool: int) -> None:
@@ -1461,7 +1457,6 @@ class SimPrinter:
         if self.power is Power.OFF:
             self._log("action", f"unload T{tool} by hand while off")
             t.path.loaded, t.path.gap = False, self.model.gap_mm
-            t.path.left_at_sensor = False
             return
         self._log("action", f"unload T{tool}")
         if self.feed is MMU:
@@ -1475,8 +1470,6 @@ class SimPrinter:
         self._show_state()
 
     def _start_load(self, t: SimTool, steps: list[LoadStep], material: Material | None) -> None:
-        # Filament an unload left in the sensor comes out for the new filament.
-        t.path.left_at_sensor = False
         t.process = LoadProcess(steps, material)
         self._next_load_step(t, t.process)  # a load with no slow or fast feed types at once
 
@@ -1990,7 +1983,7 @@ class SimPrinter:
         job.restore = (new.index, old.path.tracked())
         self._log("job", f"spool join T{old.index} -> T{new.index}")
         self._run_steps(old, self._unload_steps(old, "runout"))
-        self._physical_unload(old, "spool join", run_out=True)
+        self._physical_unload(old, "spool join")
         job.enter(JobPhase.JOIN)
         job.remaining = self.settings.unload_seconds
         self._show_state()
@@ -2107,7 +2100,7 @@ class SimPrinter:
             self._log("mmu", f"T{t.index} ejected: load it into the MMU")
         else:
             self._run_steps(t, self._unload_steps(t, "runout"))
-            self._physical_unload(t, str(reason), run_out=reason is Reason.RUNOUT)
+            self._physical_unload(t, str(reason))
         if loads is not None:
             t.kept_type = loads  # what the reload writes (`filament::set_type_to_load`)
         job.enter(JobPhase.WAIT_LOAD, Attention(reason, t.index))
@@ -2425,8 +2418,10 @@ class SimPrinter:
         sensors, picked or docked: every enabled sensor is evaluated on every loop
         (`filament_sensors_handler.cpp:142-150`). The simulator's sensor fault reads no
         filament, as the idle sensor clear takes it. A load reads filament from its start:
-        the filament is at the sensor before the feed begins (`pause.cpp:560-592`). The
-        per-sensor enable bits and the states before a sensor is ready aren't modeled.
+        the filament is at the sensor before the feed begins (`pause.cpp:560-592`). After
+        an unload the path is empty, so the tool reads no filament, on INDX too
+        (`IndxToolchanger`). The per-sensor enable bits and the states before a sensor is
+        ready aren't modeled.
         """
         if not self.sensors:
             return None
@@ -2436,7 +2431,7 @@ class SimPrinter:
             return False
         if isinstance(t.process, LoadProcess) and self.feed is not MMU:
             return True
-        return t.path.sensed
+        return t.path.loaded
 
     def _sensing_slot(self) -> SimTool | None:
         """The slot the extruder's sensor reads for (`currently_selected_virtual_tool`)."""
@@ -2568,12 +2563,11 @@ class SimPrinter:
             if t.index != self.mmu.fed:
                 raise Invalid(f"T{t.index}'s filament isn't in the extruder")
             return
-        hand = self.power is Power.OFF
-        if not (t.path.sensed if hand else t.path.loaded):
+        if not t.path.loaded:
             raise Invalid(f"T{t.index} has no filament")
         if t.process is not None:
             raise Busy("a load or unload is already running")
-        if hand:
+        if self.power is Power.OFF:
             return  # pulled out by hand
         if self.job is not None:
             raise Busy("can't unload during a print; use runout")
@@ -3037,7 +3031,7 @@ class SimPrinter:
 
     def _tool_views(self) -> dict[int, ToolView]:
         # A sensor that's off reads neither filament nor none, so no check fails on it.
-        seen = {i: t.path.sensed or not self.sensors for i, t in self.tools.items()}
+        seen = {i: t.path.loaded or not self.sensors for i, t in self.tools.items()}
         return {
             i: ToolView(self.listed(t), seen[i], t.material.name if t.material else None)
             for i, t in self.tools.items()

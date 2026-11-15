@@ -381,15 +381,6 @@ class FilamentPath:
     # known not to be retracted (`auto_retract.cpp`).
     auto_retracted: float | None = None
     sensor_fault: bool = False
-    # Filament an unload left in the sensor: an INDX unload that its side sensor didn't
-    # trigger (`FeedSystem.upstream_sensor`). The next load, or a pull by hand while off,
-    # takes it out.
-    left_at_sensor: bool = False
-
-    @property
-    def sensed(self) -> bool:
-        """Whether filament is in the path's sensor: loaded, or left there by an unload."""
-        return self.loaded or self.left_at_sensor
 
     def move(self, mm: float, limit: float) -> float:
         """Track a move as the firmware's filament tracker does, and return the commanded
@@ -430,13 +421,13 @@ class FilamentPath:
     def empty(self, limit: float) -> None:
         """Leave the path as an unload leaves it: no filament, the gap at `limit` and not
         trusted, and no auto-retract stored."""
-        self.loaded = self.left_at_sensor = False
+        self.loaded = False
         self.gap, self.gap_valid, self.auto_retracted = limit, False, None
 
     def fill(self, loaded: bool) -> None:
         """Set whether filament is in the path, at gap 0 and valid, with no auto-retract
         stored."""
-        self.loaded, self.left_at_sensor = loaded, False
+        self.loaded = loaded
         self.gap, self.gap_valid, self.auto_retracted = 0.0, True, None
 
 

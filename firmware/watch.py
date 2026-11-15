@@ -456,7 +456,8 @@ WATCHED = (
         "src/feature/filament_sensor/filament_sensors_handler_INDX.cpp",
         "function",
         "GetExtruderFSensor",
-        "IndxToolchanger.upstream_sensor in simulator/feed.py",
+        "SimPrinter.filament_present in simulator/model.py: an INDX tool reads its side"
+        " sensor, as the IndxToolchanger docstring in simulator/feed.py says",
         "aed845e93d323f88",
         UPSTREAM_7D8BF685,
     ),

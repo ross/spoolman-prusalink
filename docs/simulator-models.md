@@ -458,8 +458,7 @@ tables, so each number has a check behind it.
 - A **tool** is what `/api/v1/filament` lists: an index, the three
   counters, the stored type.
 - A **path** is where filament physically is: the gap, the sensor, and
-  whether filament is in it. On INDX it also says whether an unload left
-  filament in the tool's side sensor, which reads it (F48).
+  whether filament is in it.
 
 A single-tool printer has one of each. A toolchanger has one path per
 tool. An MMU printer has five tools and one path. The printer has a

@@ -7,7 +7,7 @@ from __future__ import annotations
 import pytest
 
 from simulator import prusalink
-from simulator.model import Invalid, JobPhase, PrintSpec, Segment, SimTool
+from simulator.model import JobPhase, PrintSpec, Segment, SimTool
 from simulator.tests.util import PLA, loaded, make, make_mmu, run
 
 XL, INDX = "3.1.0", "8.10.0"
@@ -117,40 +117,21 @@ def test_a_docked_tool_emptied_by_hand_reads_no_filament_with_its_type_kept(mode
     assert present(p) == {0: True, 1: False}
 
 
-def test_an_indx_unload_leaves_its_filament_in_the_side_sensor():
-    """The side sensor is upstream of the tool and the unload doesn't wait for it to clear:
-    the reading the source supports best, still to trace (F48)."""
-    sim, p = make(INDX, [loaded(0), loaded(1)])
+@pytest.mark.parametrize("model", [XL, INDX])
+def test_a_toolchanger_unload_reads_no_filament_after_it_and_a_load_reads_it_again(model):
+    """INDX's unload asks the user to confirm the filament is out rather than waiting for
+    its side sensor; the simulator reads it as pulled at that question (F48)."""
+    sim, p = make(model, [loaded(0), loaded(1)])
     p.unload(1)
     sim.advance(60)
-    assert p.tools[1].material is None and not p.tools[1].path.loaded
+    assert p.tools[1].material is None and present(p) == {0: True, 1: False}
+    p.load(1, source="preset", name="PETG")
+    assert present(p)[1] is True
+    sim.advance(60)
     assert present(p) == {0: True, 1: True}
-    # A type written there isn't cleared at a pick: the sensor still sees filament.
-    p.tools[1].store(PLA)
-    p.select_tool(1)
-    assert p.tools[1].material == PLA
-    p.tools[1].clear_type()
-    # Pulled out by hand while off, it reads none; a menu unload has nothing to unload.
-    with pytest.raises(Invalid):
-        p.unload(1)
-    p.set_power("off")
-    p.unload(1)
-    p.set_power("on")
-    assert present(p)[1] is False
 
 
-def test_an_indx_load_takes_out_what_the_unload_left():
-    sim, p = make(INDX, [loaded(0), SimTool(1)])
-    p.unload(0)
-    sim.advance(60)
-    assert p.tools[0].path.left_at_sensor
-    p.load(0, source="preset", name="PETG")
-    assert not p.tools[0].path.left_at_sensor and present(p)[0] is True
-    sim.advance(60)
-    assert p.tools[0].path.loaded and present(p)[0] is True
-
-
-def test_an_indx_runout_leaves_nothing_in_the_side_sensor():
+def test_an_indx_runout_waiting_for_its_reload_reads_no_filament():
     """A runout is the side sensor seeing the filament go."""
     sim, p = make(INDX, [loaded(0), SimTool(1)])
     p.start_print(PrintSpec([Segment(0, 500)]))
@@ -158,15 +139,7 @@ def test_an_indx_runout_leaves_nothing_in_the_side_sensor():
     p.tap_through()  # the tools-mapping screen, with two tools enabled
     run(sim, 60)
     p.runout(0)
-    assert p.job.phase is JobPhase.WAIT_LOAD
-    assert not p.tools[0].path.left_at_sensor and present(p)[0] is False
-
-
-def test_the_xl_unload_leaves_nothing_in_its_extruder_sensor():
-    sim, p = make(XL, [loaded(0), loaded(1)])
-    p.unload(1)
-    sim.advance(60)
-    assert present(p) == {0: True, 1: False}
+    assert p.job.phase is JobPhase.WAIT_LOAD and present(p)[0] is False
 
 
 def test_mmu_slots_share_the_extruder_sensor_and_only_the_selected_slot_reads_it():

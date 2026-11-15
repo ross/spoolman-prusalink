@@ -251,11 +251,12 @@ that trace. The points that matter for the bridge, in short:
   the extruder's sensor reads for: slot 0 until the MMU is Active, then
   the selected slot, or none. A toolchanger's docked tools read their own
   sensors, so a tool emptied by hand while docked reads `false` with its
-  type kept. INDX's sensor is a side sensor upstream of the tool, and an
-  unload that a runout didn't start leaves the filament in it: the tool
-  reads `true` with no type until the next load, or a pull by hand while
-  off. That resting place is inferred from the source, and a trace is to
-  settle it. `set_sensor_fault` reads `false`.
+  type kept. INDX's sensor is a side sensor on the xBuddy Extension. Its
+  unload asks the user to confirm the filament is out instead of waiting
+  for the sensor, and the simulator reads `false` after it, as when the
+  user pulls the filament at that question; a user who pushes the next
+  filament in first would read `true`, which isn't modeled.
+  `set_sensor_fault` reads `false`.
 - An MMU3's slots share one filament path, sensor and gap (F38, F39).
   `set_mmu` is the menu's switch, which a print or any operation blocks.
   With it on, `/api/v1/info` reports `mmu` as true and `/api/v1/filament`
