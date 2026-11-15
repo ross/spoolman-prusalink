@@ -78,7 +78,7 @@ elsewhere names it under "Also touches".
 | 7 | [Writes to toolchangers](#7-writes-to-toolchangers) | BF14, BF1, BF8, BF7 | BF26 | 2 | Medium | D10; workstreams 2 and 3 | Not started |
 | 8 | [Toolchanger swaps](#8-toolchanger-swaps) | BF12, BF13 | | 2 | Small | D12; BF13's decision, with an INDX | Not started |
 | 9 | [MMU printers](#9-mmu-printers) | BF20, BF15 to BF19, BF28, BF29 | | 4 | Medium | D8 | Not started |
-| 10 | [Housekeeping](#10-housekeeping) | BF6, BF11, BF21, BF22 | | 5 | Small | D11; F12 trace for BF11 | BF21 merged, a9a09ea; BF6 and BF22 Accepted; BF11 waits on the F12 trace |
+| 10 | [Housekeeping](#10-housekeeping) | BF6, BF11, BF21, BF22 | | 5 | Small | F12 trace for BF11 | BF21 merged, a9a09ea; BF6 and BF22 Accepted; BF11 waits on the F12 trace |
 
 The sizes rest on reading the code each workstream changes and counting
 the pins it flips: small is one function or a default and its tests,
@@ -417,13 +417,15 @@ medium is a new input or condition through `account()` or
   tool's swap and flags ask for a spool in a tool the print has left.
 - **Needs**: D12, and BF13's decision.
 - **User and saved state**: README only.
-- **Tests**: the pins in `tests/test_toolchanger_prints.py` stay, with
-  their comments changed from "a known fault" to the accepted behavior.
-  T8 and T9 change status from Gap.
+- **Tests**: BF12's pin in `tests/test_toolchanger_prints.py` stays, and
+  T8 keeps its gap, with the README text named. BF13's pin and T9 follow
+  its decision: if BF13 is Accepted, the pin's comment changes from "a
+  known fault" to the accepted behavior and T9 leaves Gap; if it's fixed,
+  the pin flips with the fix.
 - **Done when**: BF13 is fixed or Accepted, and BF12's README text is in.
 - **Overlap**: README and `tests/test_toolchanger_prints.py`'s comments,
   which workstream 4 also edits. If BF13 gets a fix, it's `unload` in
-  `accounting.py`, which workstreams 4 and 5 changed.
+  `accounting.py`, and collides with workstreams 4 and 5.
 
 ### 9. MMU printers
 
