@@ -268,6 +268,50 @@ def test_the_tail_flag_is_set_with_no_usage_and_kept_by_an_ambiguous_poll():
     assert res.skipped and not res.state.printed_empty
 
 
+def test_held_usage_on_an_idle_empty_tool_survives_a_print_on_another_tool():
+    # A toolchanger: a menu load on this tool stopped before the type appeared, 100 -> 120
+    # with no material. A print on another tool makes `printing` true for every tool, but
+    # this tool's counter doesn't move, so it printed nothing and its usage stays held.
+    charges, kinds, state = run(
+        [
+            (BOOT, r(100), loc(7)),
+            (BOOT, r(120, material=None), loc(7)),
+            (BOOT, r(120, material=None), loc(7), 42, True),
+            (BOOT, r(120, material=None), loc(7), 42, True),
+            (BOOT, r(120, material=None), loc(7)),  # the print has ended
+        ]
+    )
+    assert EventKind.LOST_EMPTY not in kinds
+    assert charges == [] and state.charged == 100
+    # The load finishes: the held feed goes to the spool with the rest.
+    charges, _, _ = run([(BOOT, r(160), loc(7))], state)
+    assert charges == [Charge(7, 60, "extruded")]
+
+
+def test_held_usage_goes_with_a_print_that_counts_on_the_tool():
+    # One watermark: once this tool counts during the print, the usage held before goes
+    # with the print's.
+    _, kinds, state = run(
+        [
+            (BOOT, r(100), loc(7)),
+            (BOOT, r(120, material=None), loc(7)),
+            (BOOT, r(120, material=None), loc(7), 42, True),
+            (BOOT, r(130, material=None), loc(7), 42, True),
+        ]
+    )
+    assert kinds[-1] is EventKind.LOST_EMPTY and state.charged == 130
+
+
+def test_a_print_with_filament_leaves_no_tail():
+    # The print had filament in the tool. The poll after it, with no job, sees an unload
+    # and the start of a load (S1): that feed is held for the spool loaded, not lost.
+    _, _, state = run([(BOOT, r(100), loc(7)), (BOOT, r(150), loc(7), 42, True)])
+    assert not state.printed_empty
+    res = account(state, BOOT, r(200, material=None, unloads=1, at_unload=180), loc(7))
+    assert EventKind.LOST_EMPTY not in [e.kind for e in res.events]
+    assert res.events[-1] == ev.HoldEmpty() and res.state.charged == 180
+
+
 def test_a_first_poll_on_an_empty_tool_in_a_print_sets_the_tail_flag():
     res = account(ToolState(), BOOT, r(100, material=None), loc(7), 42, printing=True)
     assert res.state.printed_empty and res.state.charged == 100

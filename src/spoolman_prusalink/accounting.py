@@ -926,7 +926,11 @@ class _Poll:
         # the counter. While the job is still there, as at a filament change's question,
         # the usage is held: it may be a reload's feed.
         tail = self.last.printed_empty and self.job_id is None and not self.rebooted
-        if delta > 0 and reading.material is None and (self.printing or tail):
+        # `printing` is the printer's, so it's true for every tool: only a tool whose own
+        # counter moved since the last poll printed. Across a reboot the counters aren't
+        # comparable, and anything counted since the boot is new.
+        counted = self.rebooted or reading.extruded > self.last.extruded
+        if delta > 0 and reading.material is None and counted and (self.printing or tail):
             # That filament came from no spool. `charged` is one watermark, so this also
             # drops usage held at earlier polls of this empty tool, a load's feed included.
             self.event(LostEmpty(delta))

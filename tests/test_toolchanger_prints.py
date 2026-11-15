@@ -111,6 +111,32 @@ async def test_a_print_through_an_empty_tool_reports_its_usage_lost(tmp_path, ca
     await bridge.aclose()
 
 
+async def test_an_idle_empty_tool_keeps_its_held_usage_through_a_print_on_another(tmp_path):
+    """T1 holds usage with no material, as a menu load stopped before the type does. A print
+    on T0 alone doesn't move T1's counter, so T1's usage stays held through the print and
+    goes to its spool at the next load (C7)."""
+    tools = [SimTool.loaded_with(0, PLA, extruded=1000.0), SimTool(1, extruded=500.0)]
+    bridge, fake, station = indx(tmp_path, tools)
+    printer = station.printer
+    await bridge.poll()  # the baseline
+    station.tool_at(1).extruded += 20  # the feed before the type
+    await bridge.poll()
+    mark = len(ledger(tmp_path))
+
+    station.begin_print(PrintSpec([Segment(0, 100)], duration_s=2))
+    printer.tap_through()  # Print
+    await station.run_until(lambda: printer.job is None, poll_every=0.3)
+    await bridge.poll()  # the poll after the print
+    assert station.counter_at(1) == 520 and station.material(1) == (None, None, None)
+    assert [r for r in ledger(tmp_path)[mark:] if "event" in r] == []
+    assert set(totals(fake)) == {1}
+
+    await station.swap_cycle(tool=1, source="preset", name="PLA")
+    await bridge.poll()
+    assert totals(fake)[2] == station.counter_at(1) - 500
+    await bridge.aclose()
+
+
 async def test_a_tool_emptied_by_hand_while_docked_counts_no_unload(tmp_path):
     """BF12, pinned as the bridge behaves today: a finished print leaves no INDX tool
     picked, so a docked tool emptied by hand keeps its type and counts no unload, at the
