@@ -3678,8 +3678,60 @@ void MI_MMU_ENABLE::OnChange([[maybe_unused]] size_t old_index) {
 }
 """  # noqa: E501 (verbatim firmware lines)  # noqa: E501 (verbatim firmware lines)
 
-# The MMU's start in `app_setup`.
+# The MMU's start in `app_setup`, and the XL's filament sensor samples of every enabled
+# Dwarf.
 APPMAIN_CPP = """\
+// update filament sensor irq = 76Hz
+static void filament_sensor_irq() {
+
+    static uint8_t cnt_filament_sensor_update = 0;
+
+    if (++cnt_filament_sensor_update >= 13) {
+        for (buddy::puppies::Dwarf &dwarf : buddy::puppies::dwarfs) {
+            if (!dwarf.is_enabled()) {
+                continue;
+            }
+
+            // Main filament sensor
+            fs_process_sample(dwarf.get_tool_filament_sensor(), dwarf.tool_index());
+
+            // Side filament sensor
+            auto mapping = side_fsensor_remap::get_mapping();
+            debug_assert(static_cast<size_t>(dwarf.tool_index().to_raw()) < std::size(mapping));
+            const uint8_t remapped = mapping[dwarf.tool_index().to_raw()];
+            debug_assert(remapped < HOTENDS);
+
+            /**
+             * @brief Mapping of ADC channels to each extruder side filament sensor.
+             * ADC channels are laid left top to bottom and right bottom to top.
+             * Left    Right
+             * sfs1    sfs6
+             * sfs2    sfs5
+             * sfs3    sfs4
+             */
+            static const constexpr std::array<AdcChannel::SideFilamnetSensorsAndTempMux, HOTENDS> adc_channel_mapping = {
+                AdcChannel::SideFilamnetSensorsAndTempMux::sfs1, // T0    - left top
+                AdcChannel::SideFilamnetSensorsAndTempMux::sfs2, // T1    - left middle
+                AdcChannel::SideFilamnetSensorsAndTempMux::sfs3, // T2    - left bottom
+                AdcChannel::SideFilamnetSensorsAndTempMux::sfs6, // T3    - right top
+                AdcChannel::SideFilamnetSensorsAndTempMux::sfs5, // T4    - right middle
+                AdcChannel::SideFilamnetSensorsAndTempMux::sfs4, // Empty - right bottom
+            };
+
+            // ensure AdcGet::undefined_value is representable within FSensor::value_type
+            static_assert(static_cast<IFSensor::value_type>(AdcGet::undefined_value) == AdcGet::undefined_value);
+
+            // widen the type to match the main sensor data type and translate the undefined value
+            IFSensor::value_type fs_raw_value = AdcGet::side_filament_sensor(adc_channel_mapping[remapped]);
+            if (fs_raw_value == AdcGet::undefined_value) {
+                fs_raw_value = IFSensor::undefined_value;
+            }
+            side_fs_process_sample(fs_raw_value, dwarf.tool_index());
+        }
+        cnt_filament_sensor_update = 0;
+    }
+}
+
 static void app_setup(void) {
     metric_record_event(&metric_app_start);
 
@@ -3689,10 +3741,51 @@ static void app_setup(void) {
     }
 #endif
 }
-"""
+"""  # noqa: E501 (verbatim firmware lines)
 
 # The filament sensors' MMU setting, idle clear, switch-off and forced sensors.
 FILAMENT_SENSORS_HANDLER_CPP = """\
+void FilamentSensors::step() {
+    static bool old_state = false;
+    const bool new_state = marlin_vars().peek_fsm_states([](const auto &states) { return states.is_active(ClientFSM::Load_unload); });
+
+    if (old_state && !new_state) {
+        FSensors_instance().DecEvLock(); // ClientFSM::Load_unload destroy
+    }
+    if (!old_state && new_state) {
+        FSensors_instance().IncEvLock(); // ClientFSM::Load_unload create
+    }
+
+    old_state = new_state;
+
+    // Reconfigure logical sensors
+    reconfigure_sensors_if_needed(false);
+
+    // Update states of filament sensors
+    if (enable_state_update_pending) {
+        process_enable_state_update();
+        reconfigure_sensors_if_needed(true); // Have to be done due to autoload logical sensor on COREONE
+    }
+
+    // Run cycle to evaluate state of all sensors (even those not active)
+    for_all_sensors([](IFSensor &s, PhysicalToolIndex, bool) {
+        if (s.is_enabled()) {
+            s.cycle();
+        }
+
+        s.record_state();
+        s.check_for_events();
+    });
+
+    // Update logical sensors states
+    for (uint8_t i = 0; i < logical_filament_sensor_count; i++) {
+        IFSensor *fs = logical_sensors_.array[i];
+        logical_sensor_states_.array[i] = fs ? fs->get_state() : FilamentSensorState::Disabled;
+    }
+
+    process_events();
+}
+
 void FilamentSensors::reconfigure_sensors_if_needed(bool force) {
     const auto new_tool = stdext::get_optional<PhysicalToolIndex>(PhysicalToolIndex::currently_selected());
     const auto new_tool_index = new_tool ? new_tool->to_raw() : PhysicalToolIndex::count;
@@ -6382,6 +6475,26 @@ FilamentType CurrentStore::set_filament_type(VirtualToolIndex virtual_tool, Fila
 }
 """
 
+# `filament_sensor.cpp`, excerpt: what a sensor reads once it's disabled.
+FILAMENT_SENSOR_CPP = """\
+void IFSensor::force_set_enabled(bool set) {
+    state = set ? FilamentSensorState::NotInitialized : FilamentSensorState::Disabled;
+}
+"""
+
+# `filament_sensors_handler_INDX.cpp`, excerpt: INDX's extruder and side sensors.
+INDX_SENSORS_CPP = """\
+// function returning abstract sensor - used in higher level api
+IFSensor *GetExtruderFSensor([[maybe_unused]] PhysicalToolIndex index) {
+    /// No extruder sensor on INDX. The sensors are side sensors (on the XBuddy Extension).
+    return nullptr;
+}
+
+// function returning abstract sensor - used in higher level api
+IFSensor *GetSideFSensor(PhysicalToolIndex index) {
+    return getSideFSensor(index);
+"""
+
 FILES = {
     read.MODELS_FILE: MODELS_HPP,
     read.GCODE_INFO_FILE: GCODE_INFO_HPP,
@@ -6443,6 +6556,8 @@ FILES = {
     "src/gui/screen/screen_m600.cpp": SCREEN_M600_CPP,
     "lib/Marlin/Marlin/src/module/prusa/spool_join.cpp": SPOOL_JOIN_CPP,
     "src/feature/filament_sensor/filament_sensor_mmu.cpp": FILAMENT_SENSOR_MMU_CPP,
+    "src/feature/filament_sensor/filament_sensor.cpp": FILAMENT_SENSOR_CPP,
+    "src/feature/filament_sensor/filament_sensors_handler_INDX.cpp": INDX_SENSORS_CPP,
     "src/state/printer_state.cpp": PRINTER_STATE_CPP,
     read.IMAGES_FILE: PRESETS_JSON,
     read.PAUSE_SETTINGS_FILE: PAUSE_SETTINGS_HPP,

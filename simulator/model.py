@@ -2403,6 +2403,42 @@ class SimPrinter:
         self.firmware = Firmware(firmware)
         self._log("action", f"firmware {self.firmware}")
 
+    def filament_present(self, t: SimTool) -> bool | None:
+        """What `/api/v1/filament` reports as `t`'s `filament_present`: what its sensor sees,
+        or None where the firmware leaves the field out (F48).
+
+        The renderer reads the sensor closest to the nozzle, the extruder sensor, else the
+        side sensor on INDX, and reports `HasFilament` and `NoFilament` alone
+        (`filament_present` in `lib/WUI/nhttp/filament_renderer.cpp:29-52` at
+        `2ef028181`). With the sensors setting off every sensor is `Disabled`
+        (`filament_sensors_handler.cpp:400-408`, `filament_sensor.cpp:37`). MMU slots share
+        the extruder's sensor, and only the selected slot reads it
+        (`currently_selected_virtual_tool`, `tool_index.cpp:143-158`): slot 0 while the MMU
+        isn't Active, else the selected slot, or none. A toolchanger's tools read their own
+        sensors, picked or docked: every enabled sensor is evaluated on every loop
+        (`filament_sensors_handler.cpp:142-150`). The simulator's sensor fault reads no
+        filament, as the idle sensor clear takes it. A load reads filament from its start:
+        the filament is at the sensor before the feed begins (`pause.cpp:560-592`). After
+        an unload the path is empty, so the tool reads no filament, on INDX too
+        (`IndxToolchanger`). The per-sensor enable bits and the states before a sensor is
+        ready aren't modeled.
+        """
+        if not self.sensors:
+            return None
+        if self.mmu is not None and t is not self._sensing_slot():
+            return None
+        if t.path.sensor_fault:
+            return False
+        if isinstance(t.process, LoadProcess) and self.feed is not MMU:
+            return True
+        return t.path.loaded
+
+    def _sensing_slot(self) -> SimTool | None:
+        """The slot the extruder's sensor reads for (`currently_selected_virtual_tool`)."""
+        if not self.mmu.active:
+            return self.tools[0]
+        return None if self.selected_tool is None else self.tools[self.selected_tool]
+
     def set_sensor_fault(self, tool: int, value: bool) -> None:
         self._tool(tool).path.sensor_fault = value
         self._log("action", f"T{tool} sensor fault {'on' if value else 'off'}")

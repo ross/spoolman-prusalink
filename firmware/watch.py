@@ -410,8 +410,71 @@ WATCHED = (
         "src/common/tool_index.cpp",
         "function",
         "PhysicalExtension::currently_selected_virtual_tool",
-        "Mmu.credited and Mmu.head_tool in simulator/feed.py",
+        "Mmu.credited and Mmu.head_tool in simulator/feed.py, and the slot that reads the"
+        " extruder's sensor in SimPrinter._sensing_slot in simulator/model.py",
         "77f6c47bb051be3d",
+        UPSTREAM_7D8BF685,
+    ),
+    # The fork's `filament_present` in `filament_renderer.cpp` (F48) reads upstream code the
+    # rows below watch. The renderer itself is the fork's code, which this check can't
+    # read: docs/printer-behaviors.md records it under "Behaviors that rest on one flag or
+    # function".
+    # A sensor is enabled only with the sensors setting on, and then by its own bit;
+    # the MMU's setting forces it on.
+    Watched(
+        "whether a sensor is enabled",
+        "src/feature/filament_sensor/filament_sensors_handler.cpp",
+        "function",
+        "should_enable",
+        "SimPrinter.filament_present in simulator/model.py: no reading with the sensors off",
+        "b029dfc35266ef82",
+        UPSTREAM_7D8BF685,
+    ),
+    # A sensor that isn't enabled reads `Disabled`, which the renderer leaves out.
+    Watched(
+        "a disabled sensor's state",
+        "src/feature/filament_sensor/filament_sensor.cpp",
+        "function",
+        "IFSensor::force_set_enabled",
+        "SimPrinter.filament_present in simulator/model.py: no reading with the sensors off",
+        "91717c75e7de17b7",
+        UPSTREAM_7D8BF685,
+    ),
+    # Every enabled sensor is evaluated on every loop, a docked tool's too.
+    Watched(
+        "the sensors' cycle",
+        "src/feature/filament_sensor/filament_sensors_handler.cpp",
+        "function",
+        "FilamentSensors::step",
+        "SimPrinter.filament_present in simulator/model.py: a docked tool reads its sensor",
+        "270ab95cef08dc15",
+        UPSTREAM_7D8BF685,
+    ),
+    # On the XL, `step()` evaluates a docked Dwarf's sensors on fresh samples because this
+    # loop feeds both sensors of every enabled Dwarf, not only the picked one. The Dwarf's
+    # own sensor value reaches it through the puppy task's slow refresh of each Dwarf that
+    # isn't selected (`puppy_task_loop` in `src/puppies/puppy_task.cpp`, and
+    # `Dwarf::refresh` and `Dwarf::read_general_status` in `src/puppies/Dwarf.cpp`). That
+    # loop isn't watched: its `if` blocks have an `else`, and only the whole function, 192
+    # lines and 30 commits in 2026, could hold it.
+    Watched(
+        "the XL's sensor samples",
+        "src/common/appmain.cpp",
+        "function",
+        "filament_sensor_irq",
+        "SimPrinter.filament_present in simulator/model.py: a docked XL tool reads its sensor",
+        "54fbddcacdb22de2",
+        UPSTREAM_7D8BF685,
+    ),
+    # INDX has no extruder sensor, so the renderer reads each tool's side sensor.
+    Watched(
+        "the INDX extruder sensor",
+        "src/feature/filament_sensor/filament_sensors_handler_INDX.cpp",
+        "function",
+        "GetExtruderFSensor",
+        "SimPrinter.filament_present in simulator/model.py: an INDX tool reads its side"
+        " sensor, as the IndxToolchanger docstring in simulator/feed.py says",
+        "aed845e93d323f88",
         UPSTREAM_7D8BF685,
     ),
     # An E move with no slot selected runs and counts on no slot.

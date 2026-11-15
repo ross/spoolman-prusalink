@@ -242,6 +242,21 @@ that trace. The points that matter for the bridge, in short:
   `sensors` is the menu's switch for every filament sensor. Off, there's no
   runout, no idle sensor clear and no filament question at the preview, and
   it stays off until `set_sensors` turns it on.
+- `/api/v1/filament` serves the sensors as firmware from `2ef028181` does,
+  with counters or without: `sensors_enabled` is the `sensors` switch
+  (F47), and each tool's `filament_present` is what its sensor sees (F48).
+  The reading follows the path: `true` while filament is in it, from a
+  load's start, and through an unload until it ends. It's left out on
+  every tool while the sensors are off, and on each MMU slot but the one
+  the extruder's sensor reads for: slot 0 until the MMU is Active, then
+  the selected slot, or none. A toolchanger's docked tools read their own
+  sensors, so a tool emptied by hand while docked reads `false` with its
+  type kept. INDX's sensor is a side sensor on the xBuddy Extension. Its
+  unload asks the user to confirm the filament is out instead of waiting
+  for the sensor, and the simulator reads `false` after it, as when the
+  user pulls the filament at that question; a user who pushes the next
+  filament in first would read `true`, which isn't modeled.
+  `set_sensor_fault` reads `false`.
 - An MMU3's slots share one filament path, sensor and gap (F38, F39).
   `set_mmu` is the menu's switch, which a print or any operation blocks.
   With it on, `/api/v1/info` reports `mmu` as true and `/api/v1/filament`
@@ -630,6 +645,7 @@ python -m simulator.probe --url http://<printer> --key-env PRUSALINK_API_KEY \
 ```
 
 The probe only reads, so it can run beside a live bridge. It writes a sample
-whenever the state, job, boot ID, material or counters change, and a line
+whenever the state, job, boot ID, material, counters, sensors setting or
+tool's sensor reading change, and a line
 typed on stdin becomes a timed mark. `python -m simulator.trace FILE` prints
 a trace's steps, and with two files compares them the way the test does.

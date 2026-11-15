@@ -201,11 +201,19 @@ def filament(p: SimPrinter) -> dict | None:
                 unload_count=tool.unload_count,
                 extruded_at_unload=tool.extruded_at_unload,
             )
+        present = p.filament_present(tool)
+        if present is not None:
+            entry["filament_present"] = present
         material = _material(p, tool)
         if material:
             entry["material"] = material
         tools.append(entry)
-    return {"boot_id": p.boot_id, "tools": tools} if counters else {"tools": tools}
+    # `sensors_enabled` is written outside `HAS_FILAMENT_TRACKER()`, so a build with no
+    # counters serves it too (`filament_renderer.cpp:121-124` at `2ef028181`).
+    out: dict[str, Any] = {"boot_id": p.boot_id} if counters else {}
+    out["sensors_enabled"] = p.sensors
+    out["tools"] = tools
+    return out
 
 
 # The keys of `version` and `info` are in the firmware's order.

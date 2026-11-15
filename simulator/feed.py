@@ -189,7 +189,17 @@ class XlToolchanger(Toolchanger):
 
 
 class IndxToolchanger(Toolchanger):
-    """INDX: tools picked from docks onto one head (`toolchanger_indx.cpp`)."""
+    """INDX: tools picked from docks onto one head (`toolchanger_indx.cpp`).
+
+    INDX has no extruder sensor: each tool's filament sensor is a side sensor on the
+    xBuddy Extension (`filament_sensors_handler_INDX.cpp:5-23`). Its unload doesn't wait
+    for that sensor to clear; it asks the user to confirm that the filament is out, since
+    some users push the next filament in before confirming (`unloaded_ask_process`,
+    `pause.cpp:1313-1335`). The simulator's unload empties the path, as when the user
+    pulls the filament at that question, so the tool's `filament_present` reads false. A
+    user who pushes the next filament in first would read true, which isn't modeled
+    (F48).
+    """
 
     docks = True
 
