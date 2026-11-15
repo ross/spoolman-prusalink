@@ -76,7 +76,7 @@ elsewhere names it under "Also touches".
 | 5 | [Usage on an empty tool](#5-usage-on-an-empty-tool) | BF24, BF25 | | 1 | Medium | Sittings C and D confirm | BF24 merged, 90eaf2c, before workstream 4, which builds on it; BF25's hint and BF12's README text merged, 02d8f8b |
 | 6 | [The auto-retract](#6-the-auto-retract) | BF9 | | 1 | Small | D7; sittings A and B | Not started |
 | 7 | [Writes to toolchangers](#7-writes-to-toolchangers) | BF14, BF1, BF8, BF7 | BF26 | 2 | Medium | D10; workstreams 2 and 3 | Not started |
-| 8 | [Toolchanger swaps](#8-toolchanger-swaps) | BF12, BF13 | | 2 | Small | BF13's decision, with an INDX | BF12's README text in progress with workstream 5; BF13 waits on its decision |
+| 8 | [Toolchanger swaps](#8-toolchanger-swaps) | BF12, BF13 | | 2 | Small | BF13's decision, with an INDX | BF12's README text merged, 02d8f8b; BF13 waits on its decision |
 | 9 | [MMU printers](#9-mmu-printers) | BF20, BF15 to BF19, BF28, BF29 | | 4 | Medium | D8 | Not started |
 | 10 | [Housekeeping](#10-housekeeping) | BF6, BF11, BF21, BF22 | | 5 | Small | F12 trace for BF11 | BF21 merged, a9a09ea; BF6 and BF22 Accepted; BF11 waits on the F12 trace |
 
