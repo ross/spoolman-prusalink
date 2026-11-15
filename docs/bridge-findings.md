@@ -602,7 +602,12 @@ written.
   no material while a user's print runs, in `PRINTING` or `PAUSED` with a
   job that isn't the sync job, is reported lost (`lost_empty`) and
   charged to no spool, and so is the print's last stretch, first seen at
-  the poll after it ends. The tests above now charge the next load its own
+  the poll after it ends, when the tool counted with no material at a poll
+  during the print. A tool the print never counted on has no last
+  stretch, so a load started on it right after the print is held as a
+  load's feed. A print that counts on the empty tool only after its last
+  printing poll, such as a very short one, leaves that usage held for the
+  next spool, as before the fix. The tests above now charge the next load its own
   count only, and `test_c7_print_through_an_empty_tool_is_reported_lost`
   in `integration/test_counters.py` shows it end to end. A load's feed,
   and a filament change's reload in `ATTENTION`, are still held for the

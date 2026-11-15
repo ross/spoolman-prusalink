@@ -301,15 +301,19 @@ medium is a new input or condition through `account()` or
   that feed. Usage counted between a print's last poll and its end is
   first seen at a poll with no job, so a saved flag,
   `ToolState.printed_empty`, reports the next poll's usage on the empty
-  tool lost too. Built for BF25: lost usage, BF25's only signal, raises a
+  tool lost too. The flag is set by the first printing poll at which the
+  tool counted with no material, and it stays through later printing
+  polls with the tool empty, so a tool the print never counted on has no
+  tail: a load started on it right after the print is held as a load's
+  feed. A print that counts on the empty tool only after its last
+  printing poll leaves that usage held for the next spool. Built for BF25: lost usage, BF25's only signal, raises a
   log-only condition, `PrintingEmpty` in `conditions.py`, at WARNING,
   which says the filament sensors may be off and allows for a power cut
   too. `process` raises it when the poll reports usage lost, and keeps it
   while it stood at the last poll and `printed_empty` is still set, so it
   stands through polls with no new usage and ends at the first poll with
-  the print over or the material back. Usage lost with no print running,
-  the print's tail, raises it for one poll if it wasn't standing, and
-  ends it if it was. An idle empty tool on a toolchanger loses nothing, so
+  the print over or the material back. It's raised only while
+  `printed_empty` is set, so the print's tail only ends one. An idle empty tool on a toolchanger loses nothing, so
   it never raises it.
 - **Needs**: Sitting D's F29 trace confirms the single-tool path and F12
   the power-cut path.
@@ -332,7 +336,10 @@ medium is a new input or condition through `account()` or
   the bridge still sees no unload. C7 names the hint, and tests in
   `tests/test_empty_tool.py`, `tests/test_toolchanger_prints.py` and
   `tests/test_power_panic.py` count its log lines; the C7 integration test
-  checks it's logged once.
+  checks it's logged once. `tests/test_accounting.py` pins the flag's
+  meaning, and `tests/test_toolchanger_prints.py` and
+  `tests/test_empty_tool.py` show that a load right after a print on a
+  tool the print never counted on is charged, not lost.
 - **Done when**: no spool is charged for usage counted during a print on
   a tool with no material, and S1, S2 and the P2 reload charge as before.
 - **Overlap**: `accounting.py` (`usage`, `account()`'s signature) and

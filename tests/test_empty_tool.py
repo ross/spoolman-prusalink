@@ -161,17 +161,37 @@ async def test_an_empty_tool_with_no_lost_usage_raises_no_hint(tmp_path, caplog)
     await bridge.aclose()
 
 
-async def test_a_print_whose_usage_is_first_seen_after_it_warns_for_one_poll(tmp_path, caplog):
-    """The print's tail is the only usage lost: the hint is raised at that poll and ends at
-    the next, with no print to keep it."""
+async def test_a_print_that_counts_only_after_its_last_poll_holds_its_usage(tmp_path, caplog):
+    """The tool counted nothing while the bridge saw the print, as in a very short print, so
+    the print leaves no tail: the usage first seen after it is held for the next spool, as
+    before workstream 5, and nothing warns."""
     caplog.set_level(logging.WARNING, logger="spoolman_prusalink")
     bridge, fake, station = await empty_print(tmp_path)
     await bridge.poll()
     end_job(station)
     station.tool.extruded += 30
     await bridge.poll()
-    assert events(ledger(tmp_path)) == ["baseline", "lost_empty"]
+    assert events(ledger(tmp_path)) == ["baseline"]
+    assert levels(caplog, HOLD) == ["WARNING"]
+    assert levels(caplog, HINT) == []
+    await bridge.aclose()
+
+
+async def test_a_load_after_a_print_cancelled_on_an_empty_tool_is_charged(tmp_path, caplog):
+    """A print starts on an empty tool and is cancelled before the tool counts. A menu
+    load then feeds before its type appears: that feed isn't the print's tail, so it's
+    held and charged in full to the spool with the rest of the load, and nothing warns."""
+    caplog.set_level(logging.WARNING, logger="spoolman_prusalink")
+    bridge, fake, station = await empty_print(tmp_path)
+    before = charged(fake, 19)
+    await bridge.poll()  # printing, nothing counted on the tool
+    end_job(station)
+    station.tool.extruded += 20  # the load's feed before the type
     await bridge.poll()
-    assert levels(caplog, HINT) == ["WARNING", "WARNING"]
-    assert levels(caplog, f"no longer: {HINT}") == ["WARNING"]
+    fill(station.tool, menu("PLA"))
+    station.tool.extruded += 50
+    await bridge.poll()
+    assert "lost_empty" not in events(ledger(tmp_path))
+    assert charged(fake, 19) - before == 70
+    assert levels(caplog, HINT) == []
     await bridge.aclose()

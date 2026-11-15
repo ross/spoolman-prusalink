@@ -145,6 +145,29 @@ async def test_an_idle_empty_tool_keeps_its_held_usage_through_a_print_on_anothe
     await bridge.aclose()
 
 
+async def test_a_load_on_an_idle_empty_tool_right_after_a_print_is_charged(tmp_path, caplog):
+    """A print on T0 alone ends, and a menu load of the empty T1 starts before the next
+    poll. T1 never counted in the print, so the load's feed isn't the print's tail: it's
+    held until the type appears and charged in full to T1's spool, and nothing warns."""
+    caplog.set_level(logging.WARNING, logger="spoolman_prusalink")
+    tools = [SimTool.loaded_with(0, PLA, extruded=1000.0), SimTool(1, extruded=500.0)]
+    bridge, fake, station = indx(tmp_path, tools)
+    printer = station.printer
+    await bridge.poll()  # the baseline
+    mark = len(ledger(tmp_path))
+
+    station.begin_print(PrintSpec([Segment(0, 100)], duration_s=2))
+    printer.tap_through()  # Print
+    await station.run_until(lambda: printer.job is None, poll_every=0.3)
+    await station.swap_cycle(poll_every=0.1, tool=1, source="preset", name="PLA")
+    await bridge.poll()
+    records = ledger(tmp_path)[mark:]
+    assert [r for r in records if r.get("event") == "lost_empty"] == []
+    assert totals(fake)[2] == station.counter_at(1) - 500
+    assert levels(caplog, HINT) == []
+    await bridge.aclose()
+
+
 async def test_a_tool_emptied_by_hand_while_docked_counts_no_unload(tmp_path):
     """BF12, pinned as the bridge behaves today: a finished print leaves no INDX tool
     picked, so a docked tool emptied by hand keeps its type and counts no unload, at the

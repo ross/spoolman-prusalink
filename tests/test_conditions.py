@@ -251,8 +251,8 @@ def test_printing_empty_starts_with_lost_usage_and_stands_while_the_tool_prints_
     # The print's end, or the material's return, ends it, even with the print's tail lost.
     assert printing_empty(True, False, [shown], level=W) is None
     assert printing_empty(False, False, [shown], level=W) is None
-    # A tail lost with nothing standing raises it: the tool printed empty.
-    assert printing_empty(True, False, [ArchivedLoaded(7)], level=W) == shown
+    # A tail lost with nothing standing doesn't raise it: the print is over.
+    assert printing_empty(True, False, [ArchivedLoaded(7)], level=W) is None
 
 
 def test_compared_conditions_stand_while_a_poll_cant_compare():

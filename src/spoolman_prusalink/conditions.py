@@ -170,15 +170,16 @@ def printing_empty(
     """Return the condition for a tool that's printing with no filament, or None.
 
     `lost` is whether this poll reported usage lost on the tool, and `still_empty` whether
-    a user's print still runs on it with no material (`ToolState.printed_empty`). Lost
-    usage raises it, and it stands while the print goes on with the tool empty, through
-    polls with no new usage. Without lost usage, an idle empty tool on a toolchanger
-    never raises it. The print's tail, first seen once the job is gone, ends one that
-    stood rather than keeping it.
+    a user's print still runs on it with no material, after the tool counted in it
+    (`ToolState.printed_empty`). Usage lost while that holds raises it, and it stands
+    while the print goes on with the tool empty, through polls with no new usage. The
+    print's tail, first seen once the job is gone, only ends one.
     """
+    if not still_empty:
+        return None
     stood = next((c for c in last if isinstance(c, PrintingEmpty)), None)
     if stood is not None:
-        return stood if still_empty else None
+        return stood
     return PrintingEmpty(level=level) if lost else None
 
 
