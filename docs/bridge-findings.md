@@ -114,25 +114,25 @@ written.
 ### BF2. The bridge refuses a preamble the printer accepts
 
 - **Printers**: Every model the bridge writes to, with a custom
-  `gcode_preamble`.
+  `gcode_preamble`, until workstream 3 removed the setting.
 - **What happens**: The firmware's model check compares groups, not names:
   a Core One L takes Core One G-code as its own, a Core One takes Core One
   Oak, and an MK4 takes MK3.9. Older models' G-code is "compatibility
   mode", which asks. INDX builds take only their own name
-  (`printer_model.cpp:140-198`). `model_problem` accepts only the exact
-  name or its MMU3 variant.
-- **Effect**: A custom preamble for another model in the group is refused,
-  and waiting spools are flagged (W10), though the printer would run the
-  job. The default preamble names the model exactly, so it isn't affected.
+  (`printer_model.cpp:140-198`). Until workstream 3, `model_problem`
+  accepted only the exact name or its MMU3 variant.
+- **Effect**: A custom preamble for another model in the group was
+  refused, and waiting spools were flagged (W10), though the printer would
+  have run the job. The default preamble names the model exactly, so it
+  wasn't affected.
 - **Evidence**: Read in the firmware source. The printer's side is shown
   in the simulator by
   `test_the_preview_takes_a_group_and_asks_in_compatibility_mode` in
   `simulator/tests/test_model.py`: a Core One L runs a Core One job with
   no question.
 - **Scenario rows**: W1, W10.
-- **To reproduce**: Give a Core One L a `gcode_preamble` whose `M862.3`
-  names `COREONE`. `model_problem` refuses it, though the simulator's
-  preview takes the job. No bridge test runs that pairing.
+- **To reproduce**: No longer reachable: the bridge has no setting for the
+  preamble.
 - **Status**: Fixed by workstream 3: `gcode_preamble` is gone (D4), and
   every job starts with `default_preamble`, which names the model itself.
 
@@ -140,31 +140,30 @@ written.
 
 - **Printers**: Every model the bridge writes to: MK3.9, MK3.9S, MK4, MK4S,
   Core One, Core One Oak, Core One L.
-- **What happens**: `model_problem` checks a custom `gcode_preamble` for
-  its `M862.3` line only. Every build but the iX requires
+- **What happens**: Every build but the iX requires
   `M862.6 P"Input shaper"`, and under the default setting asks about a
   file without it (F27: the check in
   `src/feature/compatibility_checks/gcode_compatibility.cpp`, the parse in
-  `src/common/gcode/gcode_info.cpp`). So every sync job from such a
-  preamble waits in `ATTENTION` for a tap. README.md, under "Requirements
-  for a write", lists the three lines the default job starts with, but
-  says only that a custom preamble's `M862.3` must name the printer's
-  model. The `gcode_preamble` comment in `config.example.toml` says only
-  that too. Its example has the input-shaper line, and neither text says
-  the line is needed.
-- **Effect**: No write lands without someone at the printer, and an
-  unanswered or declined job goes the way of BF5. Under `abort` (BF4) the
-  job is refused.
-- **Evidence**: Read in the firmware source; shown in the simulator by
-  `test_matching_preamble_for_other_model_writes` in `tests/test_writes.py`
-  and `test_w1_custom_preamble_is_written` in
-  `integration/test_configs.py`, which assert the question and tap
+  `src/common/gcode/gcode_info.cpp`). Until workstream 3, `model_problem`
+  checked a custom `gcode_preamble` for its `M862.3` line only, so every
+  sync job from a preamble without the input-shaper line waited in
+  `ATTENTION` for a tap. README.md, under "Requirements for a write", and
+  the `gcode_preamble` comment in `config.example.toml` said only that a
+  custom preamble's `M862.3` must name the printer's model, and neither
+  said the input-shaper line was needed.
+- **Effect**: No write landed without someone at the printer, and an
+  unanswered or declined job went the way of BF5. Under `abort` (BF4) the
+  job was refused.
+- **Evidence**: Read in the firmware source. Until workstream 3, shown in
+  the simulator by `test_matching_preamble_for_other_model_writes` in
+  `tests/test_writes.py` and `test_w1_custom_preamble_is_written` in
+  `integration/test_configs.py`, which asserted the question and tapped
   through it. The default preamble asks nothing on any model the bridge
   writes to
   (`test_the_bridge_default_job_asks_nothing_on_the_models_it_writes_to`
   in `simulator/tests/test_model.py`).
 - **Scenario rows**: W1, W10.
-- **To reproduce**: Those tests, today.
+- **To reproduce**: No longer reachable: the tests went with the setting.
 - **Status**: Fixed by workstream 3: `gcode_preamble` is gone (D4), and
   every job starts with `default_preamble`, which has the input-shaper
   line. The tests named under Evidence went with the setting.
@@ -177,16 +176,18 @@ written.
   abort. Every failed check shows on one screen, and the worst severity
   decides. A warning waits for a tap; an abort can only be declined
   (`gcode_compatibility.cpp:48-153`,
-  `marlin_print_preview.cpp:921-971`). README.md, under "Requirements for
-  a write", describes only the warning. The INDX lock question (BF1)
+  `marlin_print_preview.cpp:921-971`). Until workstream 3, README.md,
+  under "Requirements for a write", described only the warning. The INDX
+  lock question (BF1)
   always asks. Of the checks of a print's tools, the nozzle checks follow
   a setting and the rest have fixed severities
   (`gcode_compatibility.cpp:155-265`). The sync job, which names no
   filament used, raises none of them (F28).
 - **Effect**: Set to abort, a job that fails a check is refused instead of
   held, and goes the way of BF5. Set to ignore, it runs. The default
-  preamble passes every check on a supported model, so this matters only
-  with BF2, BF3 or another preamble that fails a check.
+  preamble passes every check on a supported model, so this mattered only
+  with BF2, BF3 or another custom preamble that failed a check, until
+  workstream 3 removed the setting.
 - **Evidence**: Read in the firmware source. The simulator models the
   three outcomes for an uploaded file (F27).
 - **Scenario rows**: W1, W5, W10.
@@ -194,14 +195,14 @@ written.
   (`ignore`, `warn` or `abort`, or the `set_checks` action) stands for the
   menu's settings. `test_checks_set_to_ignore_ask_nothing` and
   `test_a_fatal_question_offers_only_abort` in
-  `simulator/tests/test_model.py` show ignore and abort on an upload. A
-  bridge with a preamble that fails a check (BF3) meets the same
-  outcomes. No bridge test sets `checks`.
+  `simulator/tests/test_model.py` show ignore and abort on an upload.
+  Until workstream 3, a bridge with a preamble that failed a check (BF3)
+  met the same outcomes. No bridge test sets `checks`.
 - **Status**: Fixed by workstream 3: `gcode_preamble` is gone (D4), and
   the default preamble passes every check on every model the bridge writes
-  to, so no setting raises a question under any check setting. Workstream 2
-  flags a job that still meets one, such as the INDX lock question (BF1)
-  once writes to INDX are on.
+  to, so the job raises no question under any of the printer's check
+  settings. Workstream 2 will flag a job that still meets one, such as the
+  INDX lock question (BF1) once writes to INDX are on.
 
 ### BF5. A declined or refused sync job uses up a job ID and never finishes
 
@@ -740,7 +741,7 @@ written.
   `integration/test_tools.py`, and by the XL and INDX cases of
   `test_family_story`.
 - **Scenario rows**: T6, W10.
-- **To reproduce**: Those tests, today.
+- **To reproduce**: No longer reachable: the tests went with the setting.
 - **Status**: Open.
 
 ## MMU3

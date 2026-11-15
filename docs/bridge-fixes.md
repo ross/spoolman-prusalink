@@ -74,7 +74,7 @@ elsewhere names it under "Also touches".
 | 4 | [Print start](#4-print-start) | BF10, BF23, BF27 | | 1 | Medium | D5; sitting D confirms | Not started |
 | 5 | [Usage on an empty tool](#5-usage-on-an-empty-tool) | BF24, BF25 | | 1 | Medium | D6; sittings C and D confirm | Not started |
 | 6 | [The auto-retract](#6-the-auto-retract) | BF9 | | 1 | Small | D7; sittings A and B | Not started |
-| 7 | [Writes to toolchangers](#7-writes-to-toolchangers) | BF14, BF1, BF8, BF7 | BF26 | 2 | Medium | D4, D10; workstreams 2 and 3 | Not started |
+| 7 | [Writes to toolchangers](#7-writes-to-toolchangers) | BF14, BF1, BF8, BF7 | BF26 | 2 | Medium | D10; workstreams 2 and 3 | Not started |
 | 8 | [Toolchanger swaps](#8-toolchanger-swaps) | BF12, BF13 | | 2 | Small | D11, D12 | Not started |
 | 9 | [MMU printers](#9-mmu-printers) | BF20, BF15 to BF19, BF28, BF29 | | 4 | Medium | D8 | Not started |
 | 10 | [Housekeeping](#10-housekeeping) | BF6, BF11, BF21, BF22 | | 5 | Small | D11; F12 trace for BF11 | Not started |
@@ -176,13 +176,13 @@ medium is a new input or condition through `account()` or
 - **User and saved state**: README, under "Writing to the printer", says
   what the flag means. `WriteState` is saved in the database: change it in
   place.
-- **Tests**: no test declines a sync job today. Don't build the tests on
-  `gcode_preamble`, which workstream 3 may remove. Patch
-  `printer_sync.default_preamble` in the test to leave out the
-  `M862.6 P"Input shaper"` line: the simulator's preview then asks under
-  the default `checks` and refuses under `abort` (F27, as
-  `test_matching_preamble_for_other_model_writes` shows for a custom
-  preamble today). Answer with `cancel` and poll. W5 and W6 change, and
+- **Tests**: no test declines a sync job today. With `gcode_preamble`
+  gone (D4), patch `printer_sync.default_preamble` in the test to leave
+  out the `M862.6 P"Input shaper"` line: the simulator's preview then asks
+  under the default `checks` and refuses under `abort` (F27, as the
+  input-shaper case of `test_each_check` in
+  `simulator/tests/test_preview.py` shows). Answer with `cancel` and
+  poll. W5 and W6 change, and
   W5 gains a `test_w5_...` integration test for a declined job. BF18's
   pin, `test_a_sync_job_on_a_loaded_mmu_waits_on_the_unload_question`,
   gains the flag, unless workstream 9 turns MMU writes off first.
@@ -199,27 +199,19 @@ medium is a new input or condition through `account()` or
 - **Problem**: `model_problem` refuses a preamble the printer would accept
   (BF2) and accepts one the printer asks about (BF3). The printer's
   check settings then decide whether the job waits or is refused (BF4).
-- **Approach (proposal)**: Under D4's recommendation, remove
-  `gcode_preamble`: its parsing in `config.py`, the `preamble` argument of
-  `model_problem` and `preamble_model` in `printer_sync.py`, and
-  `_preamble` in `app.py`, so `_check_model` and the `build_job` call in
-  `sync_printer` use `default_preamble` alone. That passes every check on
-  the models the bridge writes to, so BF2 and BF3 have nothing left to act
-  on, and BF4 needs a preamble that fails a check. Close all three. If D4
-  keeps the setting instead: accept the printer's compatibility group
-  (BF2), which needs a copy of the firmware's group table in
-  `printer_sync.py` and a comparison for it in `firmware/compare.py`;
-  require the `M862.6 P"Input shaper"` line (BF3); and say in the README
-  that a failing check waits or is refused depending on the printer's
-  settings (BF4). Close BF4 with that text and workstream 2's flag.
-- **Needs**: D4.
+- **Approach**: Remove `gcode_preamble` (D4): its parsing in
+  `config.py`, the `preamble` argument of `model_problem` and
+  `preamble_model` in `printer_sync.py`, and `_preamble` in `app.py`, so
+  `_check_model` and the `build_job` call in `sync_printer` use
+  `default_preamble` alone. That passes every check on the models the
+  bridge writes to, so BF2 and BF3 have nothing left to act on, and BF4
+  needs a preamble that fails a check. Close all three.
+- **Needs**: D4, answered: remove the setting.
 - **User and saved state**: README ("Requirements for a write") and
-  `config.example.toml` lose the setting, or gain the rules. No saved
-  state.
+  `config.example.toml` lose the setting. No saved state.
 - **Tests**: `test_matching_preamble_for_other_model_writes` in
   `tests/test_writes.py` and `test_w1_custom_preamble_is_written` in
-  `integration/test_configs.py` go with the setting, or flip to "no
-  question". The preamble cases of `test_w10_model_the_bridge_cannot_write`
+  `integration/test_configs.py` go with the setting. The preamble cases of `test_w10_model_the_bridge_cannot_write`
   in `integration/test_writes.py` and of the W10 tests in
   `tests/test_writes.py` go too. W1 and W10 change.
 - **Done when**: no configuration lets the bridge upload a job that the
@@ -363,9 +355,8 @@ medium is a new input or condition through `account()` or
     check fails to start.
   - Name the nozzle-cleaner calibration in the README as a cause of a
     refused job (BF7). Workstream 2's flag is what the user sees.
-- **Needs**: D10; D4, since a kept `gcode_preamble` would need per-model
-  rules; workstream 2, for BF7's flag; and workstream 3, which changes the
-  same code. It has to merge before the INDX upgrade.
+- **Needs**: D10; workstream 2, for BF7's flag; and workstream 3, which
+  changes the same code. It has to merge before the INDX upgrade.
 - **User and saved state**: README's model table and "Writing to the
   printer". No saved state.
 - **Tests**: `test_t6_writes_on_a_multi_tool_model_are_refused` in
@@ -544,9 +535,6 @@ print uses.
 - Workstream 7 makes BF1, BF7 and BF8 reachable, and makes BF26 reach INDX
   and the XL. Workstream 1's default covers them, since it doesn't depend
   on the model.
-- Workstream 3's group table, if D4 keeps the preamble, must accept only
-  names in the printer's own group: names in compatibility mode still ask
-  (BF4).
 - A BF9 correction, if D7 chooses one, changes the counts workstream 4's
   threshold is measured against.
 
