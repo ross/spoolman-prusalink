@@ -13,9 +13,15 @@ from dataclasses import dataclass, field
 NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,7}$")
 COLOR_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
 
-# Marlin's parser takes an uppercase G, M or T only (`GCodeParser::parse` in
-# `lib/Marlin/Marlin/src/gcode/parser.cpp`); any other line is an unknown command.
+# A command as the print preview's scan matches it: the word, then a space or the end.
 _WORD = re.compile(r"^([GMT]\d+(?:\.\d+)?)(?=\s|$)")
+# A command as a running job reads it. Marlin skips a leading line number and its spaces,
+# then takes an uppercase G, M or T and its number, with no space needed before the first
+# parameter (`GCodeParser::parse` in `lib/Marlin/Marlin/src/gcode/parser.cpp:91-155`).
+# `M865`'s own parser does the same (`GCodeBasicParser::parse`,
+# `gcode_basic_parser.cpp:29-69`). Any other line is an unknown command.
+_RUN_LINE_NUMBER = re.compile(r"^N-?\d+ *")
+_COMMAND = re.compile(r"^([GMT]\d+(?:\.\d+)?)")
 
 # The M865 parameters kept, by letter, with the range `store_option_if_present` reads them
 # in: the type of their `FilamentTypeParameters` field. A value outside it is skipped.
@@ -241,7 +247,7 @@ def _set_filament(line: str, word: str, rest: str) -> SetFilament | Rejected:
 
 
 def _command(line: str, raw: str) -> Command:
-    m = _WORD.match(line)
+    m = _COMMAND.match(line)
     if m is None:
         return Ignored(line)
     word, rest = m.group(1), line[m.end() :]
@@ -280,8 +286,7 @@ def scan(text: str) -> list[Check]:
     """The `M862` checks the print preview sees: those in the file's first `SCAN_LINES`
     G-code lines, as `GCodeInfo::parse_gcode` counts them. A blank line, a comment and
     `M486` don't count, and a line number is skipped. The match is case-sensitive, as
-    `GcodeBuffer::String::skip_gcode` is. The rest of the file isn't read, so a line the
-    job would stop on doesn't matter here."""
+    `GcodeBuffer::String::skip_gcode` is. The rest of the file isn't read."""
     checks: list[Check] = []
     counted = 0
     for raw in text.splitlines():
@@ -310,5 +315,8 @@ def parse(text: str) -> list[Command]:
     for raw in text.splitlines():
         line = _strip_comment(raw).strip()
         if line:
-            commands.append(_command(line, raw.lstrip()))
+            # The line number is the same text at the start of both.
+            number = _RUN_LINE_NUMBER.match(line)
+            cut = number.end() if number else 0
+            commands.append(_command(line[cut:], raw.lstrip()[cut:]))
     return commands

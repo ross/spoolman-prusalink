@@ -69,6 +69,17 @@ def test_quotes_comments_and_blank_lines():
     assert commands == [ModelCheck("A;B"), Message("hello")]
 
 
+def test_a_line_number_and_a_parameter_after_the_number_run():
+    """Marlin and `M865`'s parser skip a leading line number, and need no space between the
+    command and its first parameter (`parser.cpp:91-155`, `gcode_basic_parser.cpp:29-69`)."""
+    assert parse('N12 M865 X R N"PLA" L0\nN-3M117 hi\nM865X L1\nM865.1I0 C""') == [
+        SetFilament(adhoc=True, reset=True, name="PLA", load=0),
+        Message("hi"),
+        SetFilament(adhoc=True, load=1),
+        SetFilament(1, slot=0, uuids={"instance": None}),
+    ]
+
+
 def test_unknown_lines_are_ignored():
     # Marlin takes an uppercase command letter only, so `m865` is an unknown command.
     lines = "T1\nM600\nG1 X10 E5\nm865 X L0\nhello"
