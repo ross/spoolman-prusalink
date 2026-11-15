@@ -641,7 +641,14 @@ written.
   hand and pick it as `test_t4_idle_sensor_clear_on_a_picked_tool` in
   `integration/test_tools.py` does, and poll: no unload counts, where T4
   counts one. No bridge test covers it.
-- **Status**: Open.
+- **Status**: Open (D12 in bridge-fixes.md). When a print loses usage on
+  an empty tool (BF24), the bridge logs a warning, `PrintingEmpty` in
+  `conditions.py`, that the filament sensors may be off and should be
+  turned back on after the print, and that a power cut with the filament
+  out does the same. It's logged once when it starts and once when it
+  ends. The README, under "How usage is attributed", says the same. Only a
+  new firmware reading of the sensors setting would let the bridge see the
+  setting itself and the swaps it hides.
 
 ### BF27. A filament change before a tool's first extrusion in a print looks like its print start
 
@@ -726,7 +733,11 @@ written.
   while off and its spool swapped in Spoolman. The bridge sees no unload
   and the new spool stays staged. A menu load of T1 then counts the unload
   and commits the swap. T4 shows the picked-tool case.
-- **Status**: Open.
+- **Status**: Open (D12 in bridge-fixes.md). The README, under "How usage
+  is attributed", tells a toolchanger's user to unload from the menu or
+  claim the new spool, and says that the next menu load, unload or pick of
+  that tool counts the unload. Only a new firmware reading of each tool's
+  sensor state would let the bridge see the swap.
 
 ### BF13. A spool join counts an unload in the middle of a print
 
