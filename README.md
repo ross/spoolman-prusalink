@@ -230,7 +230,9 @@ print but doesn't close a swap: the swap the unload opens stays open, as for
 any runout during a print. It also counts as a runout for the flag on a
 spool with plenty left (see [Charging and flags](#charging-and-flags)). So
 does a toolchanger's idle sensor clear while its tools-mapping screen shows
-a job. This needs a poll to have seen the job before the unload: an unload
+a job, and a Change at the preview's wrong-filament question, which unloads
+and loads, when a poll saw the job at the question and none lands during
+the change. This needs a poll to have seen the job before the unload: an unload
 the bridge first sees together with the job is a swap before the print, as
 when you unload, start a print and load at the preview. So a runout before
 any poll has seen the job is treated as a swap too, and with no Spoolman
@@ -443,8 +445,9 @@ Spoolman still takes the tag's, which writes only to Spoolman. One exception:
 a runout reload keeps the old spool's tag data while a different spool may be
 loaded. When the printer shows the UUID it showed with another spool, and the
 tool has unloaded during a print the bridge saw, the bridge writes the
-loaded spool over it. Any other unload, including a runout in a print the
-bridge didn't see start (it was down at the start), leaves the tag alone. The
+loaded spool over it. Any other unload, including a runout in a print no poll
+saw before the unload (the bridge was down, or the print had only just
+started), leaves the tag alone. The
 new spool is then flagged only if the old spool has the tag's UUID in
 Spoolman. This
 holds whatever the UUID settings: with `uuid_field = ""`, the bridge still

@@ -262,7 +262,9 @@ medium is a new input or condition through `account()` or
     open, as P2 and P3 say for a started print. The promoted unload is a
     mid-print unload: it gets P2's runout flag, and its tag is handled as
     a runout's (Q10, Q11). So does an idle sensor clear while the
-    tools-mapping screen shows a job, which is pending there. An unload at
+    tools-mapping screen shows a job, which is pending there, and a Change
+    at the preview's wrong-filament question, when a poll saw the job at
+    the question and none lands during the change. An unload at
     the poll that first sees a job isn't promoted: an idle unload followed
     by a print started on the emptied tool, an ordinary swap, looks the
     same. The remaining limit: a runout before any poll has seen the job

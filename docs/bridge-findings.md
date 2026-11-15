@@ -731,7 +731,9 @@ written.
   mid-print one: the runout flag (M5a) and the tag rules (Q10, Q11) treat
   it as a runout. A side effect: an idle sensor clear while a
   toolchanger's tools-mapping screen shows a job counts as a runout too
-  (Q8). The remaining limit: a runout before any poll has seen the job
+  (Q8). So does a Change at the preview's wrong-filament question (F28),
+  an unload then a load, when a poll saw the job at the question and none
+  lands during the change. The simulator doesn't model the Change. The remaining limit: a runout before any poll has seen the job
   is treated as a swap before the print, since an idle unload followed by
   a print started on the emptied tool looks the same and is far more
   common. `test_a_runout_before_any_poll_saw_the_job_is_a_swap_before_the_print`
