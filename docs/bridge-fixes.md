@@ -69,16 +69,16 @@ elsewhere names it under "Also touches".
 
 | # | Workstream | Owns | Also touches | Stage | Size | Waits on | Status |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| 1 | [The power-panic window](#1-the-power-panic-window) | BF26 | | 1 | Small | D3 | In progress |
-| 2 | [A sync job at a question](#2-a-sync-job-at-a-question) | BF5 | BF4, BF7, BF18 | 1 | Medium | Nothing | In progress |
-| 3 | [The custom preamble](#3-the-custom-preamble) | BF2, BF3, BF4 | | 1 | Small | D4 | In progress |
+| 1 | [The power-panic window](#1-the-power-panic-window) | BF26 | | 1 | Small | D3 | Merged, 9df89c8 |
+| 2 | [A sync job at a question](#2-a-sync-job-at-a-question) | BF5 | BF4, BF7, BF18 | 1 | Medium | Nothing | Merged, 064d892 |
+| 3 | [The custom preamble](#3-the-custom-preamble) | BF2, BF3, BF4 | | 1 | Small | D4 | Merged, 064d892 |
 | 4 | [Print start](#4-print-start) | BF10, BF23, BF27 | | 1 | Medium | D5; sitting D confirms | Not started |
-| 5 | [Usage on an empty tool](#5-usage-on-an-empty-tool) | BF24, BF25 | | 1 | Medium | D12 for BF25's hint; sittings C and D confirm | In progress: BF24 fixed, built before workstream 4; BF25's hint waits on D12 |
+| 5 | [Usage on an empty tool](#5-usage-on-an-empty-tool) | BF24, BF25 | | 1 | Medium | D12 for BF25's hint; sittings C and D confirm | BF24 merged, 90eaf2c, built before workstream 4; BF25's hint waits on D12 |
 | 6 | [The auto-retract](#6-the-auto-retract) | BF9 | | 1 | Small | D7; sittings A and B | Not started |
 | 7 | [Writes to toolchangers](#7-writes-to-toolchangers) | BF14, BF1, BF8, BF7 | BF26 | 2 | Medium | D10; workstreams 2 and 3 | Not started |
 | 8 | [Toolchanger swaps](#8-toolchanger-swaps) | BF12, BF13 | | 2 | Small | D11, D12 | Not started |
 | 9 | [MMU printers](#9-mmu-printers) | BF20, BF15 to BF19, BF28, BF29 | | 4 | Medium | D8 | Not started |
-| 10 | [Housekeeping](#10-housekeeping) | BF6, BF11, BF21, BF22 | | 5 | Small | D11; F12 trace for BF11 | In progress: BF21 is fixed; BF6, BF11 and BF22 wait on D11 |
+| 10 | [Housekeeping](#10-housekeeping) | BF6, BF11, BF21, BF22 | | 5 | Small | D11; F12 trace for BF11 | BF21 merged, a9a09ea; BF6, BF11 and BF22 wait on D11 |
 
 The sizes rest on reading the code each workstream changes and counting
 the pins it flips: small is one function or a default and its tests,
