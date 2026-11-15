@@ -301,27 +301,30 @@ written.
   with no job for at least 1.5 s, until the firmware's autostart resumes
   the print (F12; `print_utils.cpp:67-82`, `printer_state.cpp:376-384`).
   A write that waited for the print (W2), such as a Spoolman edit of the
-  loaded spool (W14), is still due. The bridge's first poll after the boot
-  sees an idle printer, reads the status again right before the upload,
-  finds `IDLE` again, and uploads its sync job (`sync_printer` in
-  `app.py`). The job starts a print. At its next try the autostart finds
-  the printer printing and gives the resume up, unless the USB drive, the
+  loaded spool (W14), is still due. Until workstream 1, `sync_delay` was
+  0 by default, and the bridge's first poll after the boot saw an idle
+  printer, read the status again right before the upload, found `IDLE`
+  again, and uploaded its sync job (`sync_printer` in `app.py`). The job
+  starts a print. At its next try the autostart finds the printer
+  printing and gives the resume up, unless the USB drive, the
   temperatures and the screen are all ready by then. Then it resumes over
   the running job: its check that the printer is idle is a debug assertion
-  (`print_utils.cpp:75-79`, `power_panic.cpp:269-271`). Any positive
-  `sync_delay` holds the job at the first idle poll after the boot. The
-  job then runs at the first later poll after the printer has been idle
-  that long, so whether it misses the window depends on when that poll
-  comes. `sync_delay` was 0 by default. With an MMU3, the sync job waits
+  (`print_utils.cpp:75-79`, `power_panic.cpp:269-271`). A positive
+  `sync_delay` held the job at the first idle poll after the boot, but a
+  second cut during the resume could put the next poll in a second window
+  with the delay already passed. Since workstream 1 the idle clock starts
+  over at each new `boot_id`, so the first idle poll after any boot only
+  starts it. With an MMU3, the sync job waits
   at the preview's question to unload the MMU's filament first and reads
   `ATTENTION` until someone answers (F43, BF18): while the MMU still
   connects after the boot, whatever FINDA sees, and once it's Active
   because the cut's slot is still at FINDA. If No runs the job while the
   MMU still connects, its end isn't the MMU's: it auto-retracts, which
   counts on slot 0 (F45).
-- **Effect**: The user's print is lost: it never resumes, and the printer
-  ends the sync job `FINISHED`. If the autostart resumes anyway, the two
-  jobs collide in a way the source doesn't define.
+- **Effect**: The user's print was lost: it never resumed, and the printer
+  ended the sync job `FINISHED`. If the autostart resumed anyway, the two
+  jobs collided in a way the source doesn't define. This now happens only
+  with `sync_delay = 0`.
 - **Evidence**: Read in the firmware source. Shown in the simulator on an
   MMU by `test_a_sync_job_in_the_window_on_a_connecting_mmu_waits_on_the_question`
   in `tests/test_mmu.py` and the window tests in

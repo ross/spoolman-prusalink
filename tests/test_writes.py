@@ -1413,6 +1413,29 @@ async def test_sync_delay_starts_over_at_a_boot_and_waits_one_idle_poll(tmp_path
     await bridge.aclose()
 
 
+async def test_sync_delay_is_measured_at_the_read(tmp_path):
+    # Time the poll spends after reading the printer, here on a slow Spoolman, isn't idle
+    # time anyone saw: in the power-panic window it would let a short delay pass (P12).
+    bridge, fake, station = make(tmp_path, [spool(19)], uuid_field="instance_uuid", sync_delay=30)
+    now = [1000.0]
+    bridge.clock = lambda: now[0]
+    await swap_to_spool_20(bridge, fake, station)  # Idle since the first poll.
+    assert jobs(station) == []
+    read_spools = bridge.spoolman.spools
+
+    async def slow_spools(*args, **kwargs):
+        now[0] += 31
+        return await read_spools(*args, **kwargs)
+
+    bridge.spoolman.spools = slow_spools
+    await bridge.poll()  # Read at once, then 31 s on Spoolman: still idle for 0 s.
+    assert jobs(station) == []
+    bridge.spoolman.spools = read_spools
+    await bridge.poll()  # Read 31 s after the printer was first seen idle.
+    assert len(jobs(station)) == 1
+    await bridge.aclose()
+
+
 async def test_sync_delay_logs_a_fractional_delay(tmp_path, caplog):
     caplog.set_level("INFO")
     bridge, fake, station = make(tmp_path, [spool(19)], uuid_field="instance_uuid", sync_delay=2.5)

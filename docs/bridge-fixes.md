@@ -92,9 +92,9 @@ medium is a new input or condition through `account()` or
 - **Problem**: After a power cut the printer reads `IDLE` with no job for
   at least 1.5 s before the resume. A write that waited for the print runs
   there, and the print never resumes.
-- **Approach (proposal)**: Under D3's recommendation, raise the default
-  `sync_delay` in `config.py` (`PrinterConfig` and `_printer_settings`)
-  to a positive value no greater than `poll_idle`. `_idle_since` in
+- **Approach (decided under D3, and built)**: The default `sync_delay` in
+  `config.py` (`PrinterConfig` and `_printer_settings`) is `SYNC_DELAY`,
+  30 s, no greater than the default `poll_idle`. `_idle_since` in
   `PrinterBridge` starts as `None` and goes back to `None` on every failed
   read, and `sync_printer` holds while the printer has been idle for less
   than `sync_delay`. So the first idle poll after a boot the bridge saw as
@@ -120,9 +120,6 @@ medium is a new input or condition through `account()` or
     runs. Otherwise the time a poll spends on other printers and on
     Spoolman counts as idle time, and a short delay could pass inside
     the window.
-  - If D3 adds the guard, it goes in `sync_printer` and `read()`, and
-    needs the state of the last read before the boot, which `read()`
-    overwrites today.
 - **Needs**: D3. The F12 trace (sitting C) confirms that one poll covers
   the window.
 - **User and saved state**: README, under "Writing to the printer", and
@@ -130,17 +127,21 @@ medium is a new input or condition through `account()` or
   in the power-panic window. No saved state.
 - **Tests**: most write tests expect a job at the first idle poll, so
   `tests/harness.py` and `integration/printers.py` set `sync_delay = 0`
-  unless a test asks for more. `test_a_sync_job_in_the_window_drops_the_resume`
-  in `tests/test_power_panic.py` then runs with the default and flips: the
-  print resumes and the write runs after it. The default's assertion in
-  `tests/test_app.py` changes. P12 and W2 drop the BF26 sentence, and W2
-  gains a `test_w2_...` integration test for the window. Add a unit test
-  for the sequence above, beside `test_a_second_cut_during_the_resume` in
-  `tests/test_power_panic.py`: poll in the first window, let the resume
-  run and cut again with no poll between, then poll in the second window
-  after `sync_delay` has passed. A test with no poll between the two cuts
-  passes without the reset, so it doesn't show the fix. The MMU variant
-  in `tests/test_mmu.py` follows workstream 9.
+  unless a test asks for more.
+  `test_a_write_waits_out_the_window_and_the_print_resumes` in
+  `tests/test_power_panic.py` runs with the default: the print resumes
+  and the write runs after it. The default's assertion in
+  `tests/test_app.py` changed. P12 and W2 dropped the BF26 sentence, and
+  `test_w2_write_waits_out_the_power_panic_window` runs the window end to
+  end. `test_a_second_cut_after_an_idle_poll_in_the_first_window`, beside
+  `test_a_second_cut_during_the_resume`, covers the sequence above: a poll
+  in the first window, the resume and a second cut with no poll between,
+  then a poll in the second window after `sync_delay` has passed. It fails
+  without the reset; a test with no poll between the two cuts doesn't.
+  `test_sync_delay_starts_over_at_a_boot_and_waits_one_idle_poll` and
+  `test_sync_delay_is_measured_at_the_read` in `tests/test_writes.py`
+  cover the reset's place and the read-time measurement. The MMU variant
+  in `tests/test_mmu.py` stays at `sync_delay = 0` until workstream 9.
 - **Done when**: with the default config, no sync job uploads between a
   boot and the resume of a print, a second cut's boot included.
 - **Overlap**: `config.py` (with workstream 3), `read()` in `app.py` (with
