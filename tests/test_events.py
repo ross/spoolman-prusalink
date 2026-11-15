@@ -134,6 +134,7 @@ MESSAGES = [
         "spool 20 is active; charged it 100 mm held after spool 19 was deleted",
     ),
     (ev.LostUnassigned(70), "70 mm before unload had no spool"),
+    (ev.LostEmpty(84), "84 mm printed with no filament reported; no spool charged"),
     (ev.CounterAnomaly(90, 100), "extruded 90 < charged 100 within one boot; resyncing"),
     (
         ev.CounterAnomaly(200, 100, unloads_from=2, unloads_to=1, at_unload=150),

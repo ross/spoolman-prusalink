@@ -73,6 +73,7 @@ def full_state() -> State:
         since_load={7: 100, 8: 40},
         extruded=1250,
         reboot_pending=True,
+        printed_empty=True,
     )
     return State(
         printers={

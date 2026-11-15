@@ -462,7 +462,7 @@ written.
   `integration/test_prints.py` shows the loss and the 8 mm fed back on a
   Core One L, 7.6 mm counted. `simulator/tests/test_model_power_panic.py`
   shows the amount per model. With the filament pulled out while off,
-  `test_an_unload_in_the_window_then_printing_on_an_empty_tool` in
+  `test_an_unload_in_the_window_then_the_resumed_print_is_lost` in
   `tests/test_power_panic.py`. A second cut during the resume charges a
   second feed back, which leaves the nozzle, since that cut doesn't
   retract: `test_a_second_cut_during_the_resume` there.
@@ -555,39 +555,58 @@ written.
   a runout waits for its reload resumes the print on its own, through the
   tool the runout emptied (F12). A cut during Tune > Change filament on
   another tool, or during a spool join's unload, does the same on that
-  tool until the file's next tool change (F34, F35). The bridge holds that
-  usage because the tool reports no material (C7). When filament is next
-  loaded in that tool, the bridge charges the held usage, with the load's
-  own count, to the spool reported there. An MMU's runout writes no type,
+  tool until the file's next tool change (F34, F35). Until workstream 5, the bridge
+  held that usage because the tool reported no material (C7). When
+  filament was next loaded in that tool, the bridge charged the held
+  usage, with the load's own count, to the spool reported there. An MMU's runout writes no type,
   so a cut while it waits holds nothing: slot 0 keeps its type, and the
   resumed print counts on slot 0 while the MMU connects and on no slot
   after (F44, BF17).
-- **Effect**: The new spool is charged for filament that came from no
-  spool: in the test, the held 84 mm on top of the load's own count.
-- **Evidence**: On a toolchanger, shown in the simulator by
-  `test_a_print_through_an_empty_tool_holds_its_usage` in
-  `tests/test_toolchanger_prints.py`, on an INDX, which pins the charge:
-  the held 84 mm plus the load's 70. On a single-tool
+- **Effect**: Until workstream 5, the new spool was charged for filament
+  that came from no spool: in the test, the held 84 mm on top of the
+  load's own count.
+- **Evidence**: On a toolchanger, shown in the simulator on an INDX by
+  the test now named
+  `test_a_print_through_an_empty_tool_reports_its_usage_lost` in
+  `tests/test_toolchanger_prints.py`, which pinned the charge before the
+  fix: the held 84 mm plus the load's 70. On a single-tool
   printer, read in the firmware source (F29): the simulator doesn't model
   that path. After a power cut, shown in the simulator on a Core One L by
-  `test_an_unload_in_the_window_then_printing_on_an_empty_tool` in
+  the test now named
+  `test_an_unload_in_the_window_then_the_resumed_print_is_lost` in
   `tests/test_power_panic.py`: the bridge records the unload and
-  `swap_unconfirmed` in the window, holds the usage of the resumed print,
-  and charges it with the next load's count to the spool reported then.
-  After a cut while a runout waits for its reload, on a Core One L, by
-  `test_a_cut_while_a_runout_waits_for_the_reload` in the same file: the
-  swap the runout opened stays open, the bridge holds the resumed print's
-  usage, and charges it with the next load's count to the spool reported
-  then. On an MMU, by
+  `swap_unconfirmed` in the window, and before the fix held the usage of
+  the resumed print and charged it with the next load's count to the spool
+  reported then. After a cut while a runout waits for its reload, on a
+  Core One L, by the test now named
+  `test_a_cut_while_a_runout_waits_loses_the_resumed_print` in the same
+  file: the swap the runout opened stays open, and before the fix the
+  bridge held the resumed print's usage and charged it with the next
+  load's count to the spool reported then. On an MMU, by
   `test_a_cut_while_an_mmu_runout_waits_charges_nothing_after` in
   `tests/test_mmu.py`: no unload is recorded, no usage is held, and spool 1
   is charged only what slot 0 counted before the runout.
 - **Scenario rows**: C7, T2, P12.
-- **To reproduce**: Those tests, today, on a toolchanger and after a power
-  cut. On the Core One L,
-  the live check `F29-sensors-off-print` confirms it with the production
-  bridge: sitting D in printer-behaviors.md, under "Capture plan".
-- **Status**: Open.
+- **To reproduce**: Those tests, before the fix, on a toolchanger and
+  after a power cut. On the Core One L,
+  the live check `F29-sensors-off-print` confirms the printer's side with
+  the production bridge: sitting D in printer-behaviors.md, under "Capture
+  plan".
+- **Status**: Fixed (D6 in bridge-fixes.md). Usage counted on a tool with
+  no material while a user's print runs, in `PRINTING` or `PAUSED` with a
+  job that isn't the sync job, is reported lost (`lost_empty`) and
+  charged to no spool, and so is the print's last stretch, first seen at
+  the poll after it ends. The tests above now charge the next load its own
+  count only, and `test_c7_print_through_an_empty_tool_is_reported_lost`
+  in `integration/test_counters.py` shows it end to end. A load's feed,
+  and a filament change's reload in `ATTENTION`, are still held for the
+  spool loaded (C7), and so is usage in `BUSY`, which the printer never
+  reports with a job. A power-panic resume's feed back on an empty tool
+  counts in `BUSY`, so it's held, and the next `PRINTING` poll that sees
+  the tool count reports it lost with the print's usage. A remaining
+  limit: if a second cut lands during the resume, the reboot keeps that
+  held feed back, about 8 mm, and charges it to the active spool. The F29
+  trace still confirms the single-tool path.
 
 ### BF25. Printing past an empty tool leaves the filament sensors off
 

@@ -12,6 +12,11 @@ from .models import FilamentReading, Material, ToolReading
 # Printer states in which a job file can start, such as the sync job.
 IDLE_STATES = frozenset({"IDLE", "FINISHED", "STOPPED"})
 BUSY_STATES = frozenset({"PRINTING", "PAUSED", "BUSY", "ATTENTION"})
+# States in which a job's usage on a tool with no filament is the print's, not a load's.
+# `ATTENTION` is left out: a filament change's reload counts its feed before the type comes
+# back. So is `BUSY`: the printer's status shows no job while it's busy, so a state not
+# seen with a job holds.
+PRINTING_STATES = frozenset({"PRINTING", "PAUSED"})
 
 
 class PrinterStatus(NamedTuple):

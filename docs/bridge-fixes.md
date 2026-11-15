@@ -31,7 +31,7 @@ update the workstreams it changes.
 | D3 | How does BF26 get fixed: a positive `sync_delay` default, a guard in the bridge after a boot that interrupted a print, or wait for the F12 trace? | Decided: a positive `sync_delay` default, 30 s, and the idle clock starts again at each new `boot_id`. No guard. The code holds a write while the printer has been idle for less than `sync_delay`, and a new `PrinterBridge`, a failed read or a new boot starts that clock again at that poll, so the first idle poll after a boot only starts it, and the write runs one idle poll later. That covers a bridge that restarts in the window, and a second cut during the resume, whose window a poll can reach `poll_idle` after one in the first window. What it misses: a config that sets `sync_delay = 0`, and a window that outlasts a poll, which the F12 trace checks. What it costs: every write waits one more idle poll, up to 60 s by default. | Workstream 1. |
 | D4 | Keep `gcode_preamble`, or remove it? | Answered: remove it. Its only effects found were BF2, BF3 and BF4, and the default preamble passes every check on every model the bridge writes to. Pre-release, there's no compatibility to keep. | Workstream 3, and the INDX lock line in workstream 7. |
 | D5 | Amend Q4 so that a ramming or a load isn't a print's first extrusion? | Yes. Q4's intent, that a cancelled print changes nothing, holds; only what counts as the first extrusion narrows. | Workstream 4. |
-| D6 | Amend C7: usage counted on a tool with no filament while a user's print runs is reported lost, not charged to the next spool? | Yes. That filament came from no spool. The hold during a load, which S1 and S2 rely on, stays as it is. | Workstream 5. |
+| D6 | Amend C7: usage counted on a tool with no filament while a user's print runs is reported lost, not charged to the next spool? | Answered: yes. That filament came from no spool, so it's reported lost. The hold during a load, which S1 and S2 rely on, stays as it is. | Nothing. |
 | D7 | BF9: accept and document the auto-retract's count, or correct it in the bridge? | Wait for the F3 and F5 traces (sittings A and B), then accept and document it if they show about 28.5 mm per auto-retract. A correction needs the auto-retract setting and the filament's flexibility, which the bridge can't read, and the error is about 0.09 g each time. | Workstream 6. |
 | D8 | MMU3 printers, which you'll never own: fix the findings, detect the MMU and refuse it, or document it? | Detect it from `/api/v1/info`'s `mmu`, and while it's on, charge nothing and write nothing, logged once, as for a printer with no counters. BF16 alone over-charges about 0.63 g per tool change, so a multi-color print's charges are far off, and BF15 and BF17 have no fix the bridge can see. The middle option, writes off and charging on with the errors documented, is cheaper still and keeps those errors. | Workstream 9. |
 | D9 | BF16's open question: if the MMU is fixed (D8), does the target charge count the slicer's 17 mm and 32 mm loads? | Moot under the recommended D8. If you choose to fix, aim at what leaves the spool for good, without the loads: the next unload returns that filament to the MMU. | Workstream 9, only if D8 is "fix". |
@@ -73,7 +73,7 @@ elsewhere names it under "Also touches".
 | 2 | [A sync job at a question](#2-a-sync-job-at-a-question) | BF5 | BF4, BF7, BF18 | 1 | Medium | Nothing | In progress |
 | 3 | [The custom preamble](#3-the-custom-preamble) | BF2, BF3, BF4 | | 1 | Small | D4 | In progress |
 | 4 | [Print start](#4-print-start) | BF10, BF23, BF27 | | 1 | Medium | D5; sitting D confirms | Not started |
-| 5 | [Usage on an empty tool](#5-usage-on-an-empty-tool) | BF24, BF25 | | 1 | Medium | D6; sittings C and D confirm | Not started |
+| 5 | [Usage on an empty tool](#5-usage-on-an-empty-tool) | BF24, BF25 | | 1 | Medium | D12 for BF25's hint; sittings C and D confirm | In progress: BF24 fixed, built before workstream 4; BF25's hint waits on D12 |
 | 6 | [The auto-retract](#6-the-auto-retract) | BF9 | | 1 | Small | D7; sittings A and B | Not started |
 | 7 | [Writes to toolchangers](#7-writes-to-toolchangers) | BF14, BF1, BF8, BF7 | BF26 | 2 | Medium | D10; workstreams 2 and 3 | Not started |
 | 8 | [Toolchanger swaps](#8-toolchanger-swaps) | BF12, BF13 | | 2 | Small | D11, D12 | Not started |
@@ -284,28 +284,41 @@ medium is a new input or condition through `account()` or
   empty tool: after the sensors are turned off (F29), after a power cut
   with the filament pulled out (F12), or on a toolchanger past the
   tools-mapping screen.
-- **Approach (proposal)**: `usage()` in `accounting.py` tells the two
-  apart. Usage counted with no material while a user's job is printing is
-  reported lost, as an event, and `charged` moves past it; usage counted
-  with no job stays held, as now. `account()` gets the job only as
-  `job_id`, so it needs the printer's state as well, passed from
-  `PrinterBridge.process`. Check F8 and F36 first: a filament change's
-  reload reads `ATTENTION`, and if its feed counts before the type comes
-  back, the rule has to keep that feed. The same event raises a condition
-  that says the filament sensor may be off, which is BF25's only signal;
-  a power cut gives it too, so the wording allows for both.
-- **Needs**: D6, D12. Sitting D's F29 trace confirms the single-tool path
-  and F12 the power-cut path.
+- **Approach**: Built for BF24. `account()` takes `printing`, which
+  `PrinterBridge.process` sets for a job the bridge didn't start in
+  `PRINTING` or `PAUSED` (`PRINTING_STATES` in `prusalink.py`). `BUSY` is
+  left out: the firmware's status writes no job while it's busy
+  (`status_renderer.cpp:36`, `printer_state.cpp:611-623`), so a resume's
+  feed back there is held until the print counts on, and a second cut
+  during the resume charges it, about 8 mm, to the active spool. In
+  `usage()`, usage the tool counted since the last poll with no material
+  while printing is reported lost, as a `LostEmpty` event, and `charged`
+  moves past it; otherwise it stays held, as before. Only the tool's own
+  count matters, since `printing` is the printer's: an idle empty tool on
+  a toolchanger keeps its held usage through a print on another tool. `ATTENTION` holds: a filament change's reload
+  counts its feed before the type comes back (F3, F36), so the rule keeps
+  that feed. Usage counted between a print's last poll and its end is
+  first seen at a poll with no job, so a saved flag,
+  `ToolState.printed_empty`, reports the next poll's usage on the empty
+  tool lost too. Still to build, if D12 says so: a condition that says the
+  filament sensor may be off, which is BF25's only signal; a power cut
+  gives it too, so the wording allows for both.
+- **Needs**: D12 for the hint. Sitting D's F29 trace confirms the
+  single-tool path and F12 the power-cut path.
 - **User and saved state**: README, "How usage is attributed", changes the
-  held-usage rule. No saved state expected.
+  held-usage rule. One new `ToolState` field, `printed_empty`, saved in
+  place and read as false when a saved state lacks it.
 - **Tests**: `test_a_print_through_an_empty_tool_holds_its_usage`,
   `test_an_unload_in_the_window_then_printing_on_an_empty_tool` and
-  `test_a_cut_while_a_runout_waits_for_the_reload` flip: the load is
-  charged its own count only. BF24's rows C7, P12 and T2 change, and C7
-  gains a `test_c7_...` integration test for a print through an empty
-  tool. BF25's rows P2, S2 and T4 don't change: they describe the sensors
-  on, and with them off the bridge still sees no unload. C7 names the new
-  hint instead.
+  `test_a_cut_while_a_runout_waits_for_the_reload` flipped, renamed for
+  what they now show: the load is charged its own count only. BF24's rows
+  C7, P12 and T2 changed, and C7 gained
+  `test_c7_print_through_an_empty_tool_is_reported_lost`.
+  `test_c1_usage_held_over_a_reboot_joins_the_provisional_charge` held its
+  usage with a sensor fault while printing, which the rule now reports
+  lost, so it holds it with an ambiguous location instead. BF25's rows P2,
+  S2 and T4 don't change: they describe the sensors on, and with them off
+  the bridge still sees no unload. C7 would name the hint.
 - **Done when**: no spool is charged for usage counted during a print on
   a tool with no material, and S1, S2 and the P2 reload charge as before.
 - **Overlap**: `accounting.py` (`usage`, `account()`'s signature) and
@@ -557,8 +570,6 @@ Left to the work:
 
 - Whether one idle poll always covers the power-panic window. The F12
   trace decides (workstream 1).
-- Whether a filament change's reload counts its feed before the type
-  comes back (workstream 5). F8 and F36 say what the source shows.
 - Which rule excludes a cancel's ramming: a threshold or a rise at two
   polls (workstream 4).
 - Whether `/api/v1/info` is cheap enough to read at every poll, or only

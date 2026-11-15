@@ -51,15 +51,17 @@ def loc(*ids):
 
 
 def run(steps, state=None, matches=lambda _id: False):
-    """Apply (boot_id, reading, location_ids[, job_id]) steps.
+    """Apply (boot_id, reading, location_ids[, job_id[, printing]]) steps.
 
     Returns all charges, all event kinds, and the final state.
     """
     state = state or ToolState()
     charges, kinds = [], []
     for step in steps:
-        boot, reading, ids, *job = step
-        res = account(state, boot, reading, ids, job[0] if job else None, matches)
+        boot, reading, ids, *rest = step
+        job = rest[0] if rest else None
+        printing = len(rest) > 1 and rest[1]
+        res = account(state, boot, reading, ids, job, matches, printing=printing)
         charges += res.charges
         kinds += [e.kind for e in res.events]
         state = res.state
@@ -153,6 +155,168 @@ def test_usage_held_over_reboot_goes_to_the_active_spool_at_an_unload_in_the_sam
     ]
     assert EventKind.HELD_CHARGED in kinds
     assert (state.active, state.held_mm, state.evict) == (8, 0, (7,))
+
+
+# Usage on an empty tool (C7, BF24)
+
+
+def test_a_print_on_an_empty_tool_reports_its_usage_lost():
+    res = account(
+        run([(BOOT, r(100), loc(7))])[2], BOOT, r(150, material=None), loc(7), 42, printing=True
+    )
+    assert res.charges == [] and res.events == [ev.LostEmpty(50)]
+    assert (res.state.charged, res.state.printed_empty) == (150, True)
+    # The load that follows the print, with no job, is held as before and charged alone.
+    charges, kinds, state = run(
+        [
+            (BOOT, r(150, material=None), loc(7)),
+            (BOOT, r(170, material=None), loc(7)),
+            (BOOT, r(200), loc(7)),
+        ],
+        res.state,
+    )
+    assert kinds == [EventKind.HOLD_EMPTY]
+    assert charges == [Charge(7, 50, "extruded")] and not state.printed_empty
+
+
+def test_an_empty_tool_with_no_print_holds_its_usage():
+    _, _, state = run([(BOOT, r(100), loc(7))])
+    for job, printing in ((None, False), (42, False)):
+        res = account(state, BOOT, r(150, material=None), loc(7), job, printing=printing)
+        assert res.charges == [] and res.events == [ev.HoldEmpty()]
+        assert (res.state.charged, res.state.printed_empty) == (100, False)
+
+
+def test_a_print_on_an_empty_tool_drops_the_usage_held_before_it():
+    # `charged` is one watermark: usage held at an earlier poll of the empty tool goes
+    # with the print's.
+    charges, kinds, state = run(
+        [
+            (BOOT, r(100), loc(7)),
+            (BOOT, r(130, material=None), loc(7)),
+            (BOOT, r(180, material=None), loc(7), 42, True),
+        ]
+    )
+    assert charges == []
+    assert kinds == [EventKind.BASELINE, EventKind.HOLD_EMPTY, EventKind.LOST_EMPTY]
+    assert state.charged == 180
+
+
+def test_a_print_on_an_empty_tool_keeps_usage_held_over_a_reboot():
+    # The held usage was counted at the earlier boot, before the print reached the tool:
+    # only the usage since the boot is lost, and the held usage still waits for a spool.
+    charges, kinds, state = run(
+        [
+            (BOOT, r(100), loc()),
+            (BOOT, r(130, material=None), loc()),
+            (222, r(40, material=None), loc(), 42, True),
+        ]
+    )
+    assert charges == [] and state.held_mm == 30
+    assert kinds[-3:] == [EventKind.REBOOT, EventKind.LOST_EMPTY, EventKind.HOLD_EMPTY]
+    charges, _, _ = run([(222, r(60), loc(7))], state)
+    assert charges == [
+        Charge(7, 30, "held before the printer restarted"),
+        Charge(7, 20, "extruded"),
+    ]
+
+
+def test_the_tail_of_a_print_on_an_empty_tool_is_lost_at_the_next_poll():
+    # The usage between the last poll of the print and its end is first seen with no job.
+    _, _, state = run([(BOOT, r(100), loc(7)), (BOOT, r(150, material=None), loc(7), 42, True)])
+    res = account(state, BOOT, r(170, material=None), loc(7))
+    assert res.charges == [] and res.events == [ev.LostEmpty(20)]
+    assert (res.state.charged, res.state.printed_empty) == (170, False)
+    # Only the one poll after the print: later usage is held.
+    res = account(res.state, BOOT, r(190, material=None), loc(7))
+    assert res.events == [ev.HoldEmpty()] and res.state.charged == 170
+
+
+def test_the_tail_rule_waits_for_the_job_to_end():
+    # A question in the print, such as a filament change: the usage may be a reload's
+    # feed, so it's held, and the tail rule is over.
+    _, _, printed = run([(BOOT, r(100), loc(7)), (BOOT, r(150, material=None), loc(7), 42, True)])
+    res = account(printed, BOOT, r(170, material=None), loc(7), 42)
+    assert res.events == [ev.HoldEmpty()]
+    assert (res.state.charged, res.state.printed_empty) == (150, False)
+
+
+def test_the_tail_rule_ends_with_filament_or_a_reboot():
+    _, _, printed = run([(BOOT, r(100), loc(7)), (BOOT, r(150, material=None), loc(7), 42, True)])
+    assert printed.printed_empty
+    # Filament reported: the usage is charged, as before.
+    res = account(printed, BOOT, r(170), loc(7))
+    assert res.charges == [Charge(7, 20, "extruded")] and not res.state.printed_empty
+    # A reboot drops the tail with the counter, so usage since the boot is held.
+    res = account(printed, 222, r(20, material=None), loc(7))
+    assert res.events == [ev.Reboot(BOOT, 222, 0), ev.HoldEmpty()]
+    assert not res.state.printed_empty
+
+
+def test_the_tail_flag_is_set_with_no_usage_and_kept_by_an_ambiguous_poll():
+    # The flag needs no usage at the printing poll: the tail can be all there is.
+    _, _, state = run([(BOOT, r(100), loc(7)), (BOOT, r(100, material=None), loc(7), 42, True)])
+    assert state.printed_empty and state.charged == 100
+    # A skipped poll that's still printing on the empty tool keeps the flag, and its
+    # usage, held by the skip, goes with the tail.
+    res = account(state, BOOT, r(130, material=None), loc(7, 8, 9), 42, printing=True)
+    assert res.skipped and res.state.printed_empty
+    res = account(res.state, BOOT, r(150, material=None), loc(7))
+    assert res.events == [ev.LostEmpty(50)]
+    # A skipped poll with no print clears it.
+    res = account(state, BOOT, r(130, material=None), loc(7, 8, 9))
+    assert res.skipped and not res.state.printed_empty
+
+
+def test_held_usage_on_an_idle_empty_tool_survives_a_print_on_another_tool():
+    # A toolchanger: a menu load on this tool stopped before the type appeared, 100 -> 120
+    # with no material. A print on another tool makes `printing` true for every tool, but
+    # this tool's counter doesn't move, so it printed nothing and its usage stays held.
+    charges, kinds, state = run(
+        [
+            (BOOT, r(100), loc(7)),
+            (BOOT, r(120, material=None), loc(7)),
+            (BOOT, r(120, material=None), loc(7), 42, True),
+            (BOOT, r(120, material=None), loc(7), 42, True),
+            (BOOT, r(120, material=None), loc(7)),  # the print has ended
+        ]
+    )
+    assert EventKind.LOST_EMPTY not in kinds
+    assert charges == [] and state.charged == 100
+    # The load finishes: the held feed goes to the spool with the rest.
+    charges, _, _ = run([(BOOT, r(160), loc(7))], state)
+    assert charges == [Charge(7, 60, "extruded")]
+
+
+def test_held_usage_goes_with_a_print_that_counts_on_the_tool():
+    # One watermark: once this tool counts during the print, the usage held before goes
+    # with the print's.
+    _, kinds, state = run(
+        [
+            (BOOT, r(100), loc(7)),
+            (BOOT, r(120, material=None), loc(7)),
+            (BOOT, r(120, material=None), loc(7), 42, True),
+            (BOOT, r(130, material=None), loc(7), 42, True),
+        ]
+    )
+    assert kinds[-1] is EventKind.LOST_EMPTY and state.charged == 130
+
+
+def test_a_print_with_filament_leaves_no_tail():
+    # The print had filament in the tool. The poll after it, with no job, sees an unload
+    # and the start of a load (S1): that feed is held for the spool loaded, not lost.
+    _, _, state = run([(BOOT, r(100), loc(7)), (BOOT, r(150), loc(7), 42, True)])
+    assert not state.printed_empty
+    res = account(state, BOOT, r(200, material=None, unloads=1, at_unload=180), loc(7))
+    assert EventKind.LOST_EMPTY not in [e.kind for e in res.events]
+    assert res.events[-1] == ev.HoldEmpty() and res.state.charged == 180
+
+
+def test_a_first_poll_on_an_empty_tool_in_a_print_sets_the_tail_flag():
+    res = account(ToolState(), BOOT, r(100, material=None), loc(7), 42, printing=True)
+    assert res.state.printed_empty and res.state.charged == 100
+    res = account(res.state, BOOT, r(120, material=None), loc(7))
+    assert res.events == [ev.LostEmpty(20)]
 
 
 def test_counter_going_backwards_resyncs():
@@ -1019,11 +1183,19 @@ def test_state_round_trip():
         since_load={7: 400, 9: 0},
         extruded=150,
         reboot_pending=True,
+        printed_empty=True,
     )
     # Every field is set, so a field left out of to_json or from_json fails here.
     defaults = ToolState()
     assert all(getattr(s, f.name) != getattr(defaults, f.name) for f in fields(ToolState))
     assert ToolState.from_json(json.loads(json.dumps(s.to_json()))) == s
+
+
+def test_state_saved_before_printed_empty_loads():
+    # A deployed bridge's database has no `printed_empty` yet.
+    data = ToolState(boot_id=BOOT, charged=100).to_json()
+    del data["printed_empty"]
+    assert ToolState.from_json(data) == ToolState(boot_id=BOOT, charged=100)
 
 
 def test_restart_from_saved_state_neither_double_charges_nor_drops():

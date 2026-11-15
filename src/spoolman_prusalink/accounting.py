@@ -41,7 +41,9 @@ differ while a swap is in progress:
   the claimed spool, which becomes active. Claiming the active spool confirms it.
 
 While the tool reports no material, or no spool is active, uncharged usage is held (by
-not advancing `charged`) and goes to the active spool once both are present. A reboot
+not advancing `charged`) and goes to the active spool once both are present. The
+exception is a tool with no material while a user's print runs: that filament came from
+no spool, so it's reported lost and `charged` moves past it (C7). A reboot
 restarts the counter, so the usage held then (`extruded - charged` at the last poll) moves
 to `held_mm`. It's charged to the active spool as soon as there is one, or goes with the
 usage before the next unload: to the active spool, or reported lost if there's none.
@@ -76,6 +78,7 @@ from .events import (
     HoldDeleted,
     HoldEmpty,
     HoldUnassigned,
+    LostEmpty,
     LostUnassigned,
     Moved,
     ProvisionalKept,
@@ -168,6 +171,10 @@ class ToolState:
     # A poll skipped as ambiguous applied a reboot: the next poll that isn't skipped
     # checks for a staged spool as if it saw the reboot itself.
     reboot_pending: bool = False
+    # The last poll found a user's print running with no material in the tool. Usage
+    # counted after it and first seen at a poll with no print is the print's tail, so it's
+    # reported lost too, not held for the next spool.
+    printed_empty: bool = False
 
     def to_json(self) -> dict:
         return {
@@ -201,6 +208,7 @@ class ToolState:
             "since_load": {str(k): v for k, v in sorted(self.since_load.items())},
             "extruded": self.extruded,
             "reboot_pending": self.reboot_pending,
+            "printed_empty": self.printed_empty,
         }
 
     @classmethod
@@ -238,6 +246,8 @@ class ToolState:
             since_load={int(k): int(v) for k, v in data["since_load"].items()},
             extruded=int(data["extruded"]),
             reboot_pending=bool(data["reboot_pending"]),
+            # A database saved before this field existed still loads.
+            printed_empty=bool(data.get("printed_empty", False)),
         )
 
 
@@ -457,6 +467,8 @@ def account(
     job_id: int | None = None,
     matches: Callable[[int], bool] = lambda _spool_id: False,
     claim: int | None = None,
+    *,
+    printing: bool = False,
 ) -> Result:
     """Advance one tool's accounting by one poll.
 
@@ -465,10 +477,13 @@ def account(
     when no job is running; pass None for the bridge's own sync jobs.
     `matches(spool_id)` tells whether the printer reports that spool's instance UUID.
     `claim` is a spool in `location_ids` that the user says is in the tool;
-    `Result.claimed` tells whether it was handled. The caller must skip the poll (not
-    call this) when Spoolman is unreachable.
+    `Result.claimed` tells whether it was handled. `printing` is True while a user's print
+    runs, and False at a question or a filament change, during a load, and for the
+    bridge's own sync job: usage counted while it's True on a tool with no material is
+    reported lost instead of held. The caller must skip the
+    poll (not call this) when Spoolman is unreachable.
     """
-    return _Poll(last, boot_id, reading, location_ids, job_id, matches, claim).run()
+    return _Poll(last, boot_id, reading, location_ids, job_id, matches, claim, printing).run()
 
 
 class _Poll:
@@ -491,6 +506,7 @@ class _Poll:
         job_id: int | None,
         matches: Callable[[int], bool],
         claim: int | None,
+        printing: bool,
     ) -> None:
         self.last = last
         self.current = _Draft(last)
@@ -501,6 +517,7 @@ class _Poll:
         self.job_id = job_id
         self.matches = matches
         self.claim = claim
+        self.printing = printing
         self.rebooted = last.boot_id is not None and boot_id != last.boot_id
         self.unloaded = False  # Set by the unload step.
 
@@ -610,6 +627,7 @@ class _Poll:
         current.unload_count = reading.unload_count
         current.active = current.assigned = assigned
         current.job_id = self.job_id
+        current.printed_empty = self.printed_empty()
         if self.claim is not None:
             current.active, self.out.claimed = self.claim, True
             self.event(ClaimConfirmed(self.claim, first_poll=True))
@@ -644,6 +662,7 @@ class _Poll:
             # including one while the location stays ambiguous.
             self.current.extruded = self.reading.extruded
             self.current.reboot_pending = self.last.reboot_pending or self.rebooted
+            self.current.printed_empty = self.printed_empty()
 
     def check_counter(self) -> None:
         current, extruded = self.current, self.reading.extruded
@@ -894,10 +913,29 @@ class _Poll:
         self.event(HeldCharged(target, held))
         self.current.held_mm = 0
 
+    def printed_empty(self) -> bool:
+        """A user's print is running on this tool with no material reported."""
+        return self.printing and self.reading.material is None
+
     def usage(self) -> None:
         """5. Usage since the last charge goes to the active spool."""
         current, reading = self.current, self.reading
         delta = reading.extruded - current.charged
+        # The print's tail: usage between the last poll of a print through this empty tool
+        # and the end of the print, seen once the job is gone. A reboot drops the tail with
+        # the counter. While the job is still there, as at a filament change's question,
+        # the usage is held: it may be a reload's feed.
+        tail = self.last.printed_empty and self.job_id is None and not self.rebooted
+        # `printing` is the printer's, so it's true for every tool: only a tool whose own
+        # counter moved since the last poll printed. Across a reboot the counters aren't
+        # comparable, and anything counted since the boot is new.
+        counted = self.rebooted or reading.extruded > self.last.extruded
+        if delta > 0 and reading.material is None and counted and (self.printing or tail):
+            # That filament came from no spool. `charged` is one watermark, so this also
+            # drops usage held at earlier polls of this empty tool, a load's feed included.
+            self.event(LostEmpty(delta))
+            current.charged = reading.extruded
+            delta = 0
         if delta > 0:
             if reading.material is None:
                 self.event(HoldEmpty())
@@ -940,3 +978,4 @@ class _Poll:
         self.out.resync = self.unloaded or current.active != last.active or self.out.claimed
         current.extruded = self.reading.extruded
         current.reboot_pending = False
+        current.printed_empty = self.printed_empty()

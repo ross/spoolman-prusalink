@@ -17,6 +17,11 @@ def events(records):
     return [r["event"] for r in records if "event" in r]
 
 
+def lost(records):
+    """The usage the bridge reported lost on an empty tool in a print."""
+    return sum(r["mm"] for r in records if r.get("event") == "lost_empty")
+
+
 def charged(fake, spool_id):
     return sum(fake.used.get(spool_id, []))
 
@@ -35,9 +40,10 @@ async def start(bridge, station):
     return printer.job.id
 
 
-async def test_an_unload_in_the_window_then_printing_on_an_empty_tool(tmp_path, caplog):
+async def test_an_unload_in_the_window_then_the_resumed_print_is_lost(tmp_path, caplog):
     """The filament is pulled out while the power is off. In the window the idle sensor
-    clear counts an unload, and the resumed print goes on through the empty tool (F29)."""
+    clear counts an unload, and the resumed print goes on through the empty tool (F29).
+    The bridge reports that usage lost, and the next load is charged its own count."""
     caplog.set_level(logging.WARNING, logger="spoolman_prusalink")
     bridge, fake, station = make(tmp_path, [spool(19)])
     printer = station.printer
@@ -59,27 +65,31 @@ async def test_an_unload_in_the_window_then_printing_on_an_empty_tool(tmp_path, 
     assert printer.job.id == job and station.material() == (None, None, None)
     assert station.counter > 0
 
-    # Two known faults, pinned as the bridge behaves today; a fix changes these lines.
-    # BF11: the resume's 8 mm feed back counts on the empty tool. BF24: the bridge holds
-    # the empty tool's usage (C7), then charges it to the next spool reported in the
-    # tool, with the load's own count, though it never left a spool.
-    assert events(ledger(tmp_path)[mark:]) == ["reboot", "unload", "swap_unconfirmed"]
+    # BF11, a known fault: the resume's 8 mm feed back counts on the empty tool, in
+    # `BUSY`, which holds. That filament came from no spool, so once the print counts on,
+    # the bridge reports it lost with the print's usage there (C7, BF24) and charges
+    # nothing.
+    after = events(ledger(tmp_path)[mark:])
+    assert after[:3] == ["reboot", "unload", "swap_unconfirmed"]
+    assert set(after[3:]) == {"lost_empty"}
     assert charged(fake, 19) == before
-    assert levels(caplog, "holding usage until filament is reported") == ["WARNING"]
+    assert levels(caplog, "holding usage until filament is reported") == []
 
     await station.run_until(lambda: printer.job is None, poll_every=0.5, limit=60)
-    held = station.counter
+    printed = station.counter
+    assert lost(ledger(tmp_path)[mark:]) == printed
     await station.swap_cycle(source="preset", name="PLA")
     await bridge.poll()
-    load = station.counter - held
-    assert load > 0 and charged(fake, 19) == before + held + load
+    load = station.counter - printed
+    assert load > 0 and charged(fake, 19) == before + load
     await bridge.aclose()
 
 
-async def test_a_cut_while_a_runout_waits_for_the_reload(tmp_path, caplog):
+async def test_a_cut_while_a_runout_waits_loses_the_resumed_print(tmp_path, caplog):
     """A runout unloads the tool, and the power fails while the printer waits for the
     reload. The dialog isn't a pause, so the print resumes on its own and goes on through
-    the empty tool (F12, F29)."""
+    the empty tool (F12, F29). The bridge reports that usage lost, and the next load is
+    charged its own count."""
     caplog.set_level(logging.WARNING, logger="spoolman_prusalink")
     bridge, fake, station = make(tmp_path, [spool(19)])
     printer = station.printer
@@ -103,20 +113,21 @@ async def test_a_cut_while_a_runout_waits_for_the_reload(tmp_path, caplog):
     assert printer.job.id == job and station.material() == (None, None, None)
     assert station.counter > 0
 
-    # A known fault, pinned as the bridge behaves today; a fix changes these lines. BF24:
-    # the bridge holds the empty tool's usage, the resume's 8 mm feed back included (BF11),
-    # then charges it to the spool reported in the tool at the next load, with the load's
-    # own count, though it never left a spool. The swap the runout opened stays open.
-    assert events(ledger(tmp_path)[mark:]) == ["reboot"]
+    # The empty tool's usage came from no spool, so the bridge reports it lost (C7, BF24),
+    # with the resume's 8 mm feed back (BF11), held in `BUSY` until the print counted on.
+    # The swap the runout opened stays open.
+    after = events(ledger(tmp_path)[mark:])
+    assert after[0] == "reboot" and set(after[1:]) == {"lost_empty"}
     assert charged(fake, 19) == before
-    assert levels(caplog, "holding usage until filament is reported") == ["WARNING"]
+    assert levels(caplog, "holding usage until filament is reported") == []
 
     await station.run_until(lambda: printer.job is None, poll_every=0.5, limit=60)
-    held = station.counter
+    printed = station.counter
+    assert lost(ledger(tmp_path)[mark:]) == printed
     await station.swap_cycle(source="preset", name="PLA")
     await bridge.poll()
-    load = station.counter - held
-    assert load > 0 and charged(fake, 19) == before + held + load
+    load = station.counter - printed
+    assert load > 0 and charged(fake, 19) == before + load
     await bridge.aclose()
 
 

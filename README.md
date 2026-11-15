@@ -229,6 +229,26 @@ Other rules:
   reboots is kept, and charged as soon as a spool is active, even before the
   tool reports filament. An unload with no spool active first
   reports it lost.
+- Usage that a tool reporting no filament counts while a print runs,
+  printing or paused, is reported lost instead: that filament came from no spool, so it isn't held for the
+  next one. The bridge logs it at INFO and records `lost_empty` in the ledger.
+  A print runs through an empty tool when you turn the filament sensors off
+  at the filament-not-inserted screen or a toolchanger's tools-mapping
+  screen, when the filament is pulled out during a power cut and the print
+  resumes, or when the power fails while a runout waits for its reload. The
+  usage of a load stays held, including a filament change's reload during a
+  print, which feeds before the printer reports the type. A tool the print
+  doesn't use counts nothing, so its held usage stays held. Once the print
+  counts on the empty tool, usage held at its earlier polls goes with the
+  print's, and so does the print's last stretch, which the bridge first sees
+  at the poll after the print ends.
+  The feed back of a resume after a power cut counts while the printer is
+  busy, which holds, and goes with the print's usage once it prints on. If
+  the power fails again during the resume, that feed back, about 8 mm, is
+  charged to the active spool.
+  If the filament is really in the tool but the printer reports none, the
+  usage is reported lost, not charged: for example, when a sensor fault
+  cleared the type and the print then ran with the sensors off.
 - If the location holds two spools and neither is the loaded one, or more
   than two, the bridge skips the tool and logs a warning until it clears.
 - A Spoolman change with no unload switches immediately only if the printer

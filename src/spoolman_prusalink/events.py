@@ -73,6 +73,9 @@ class EventKind(StrEnum):
     HOLD_DELETED = "hold_deleted", Report.STATE
     HELD_CHARGED = "held_charged"
     LOST_UNASSIGNED = "lost_unassigned", Report.WARNING
+    # Usage counted on a tool with no filament while a user's print ran. It can recur at
+    # every poll of the print, so it isn't a warning.
+    LOST_EMPTY = "lost_empty"
     COUNTER_ANOMALY = "counter_anomaly", Report.WARNING
 
 
@@ -452,6 +455,15 @@ class LostUnassigned(Event, kind=EventKind.LOST_UNASSIGNED):
     @property
     def message(self) -> str:
         return f"{self.mm} mm before unload had no spool"
+
+
+@dataclass(frozen=True)
+class LostEmpty(Event, kind=EventKind.LOST_EMPTY):
+    mm: int
+
+    @property
+    def message(self) -> str:
+        return f"{self.mm} mm printed with no filament reported; no spool charged"
 
 
 @dataclass(frozen=True)
