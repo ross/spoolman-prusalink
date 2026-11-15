@@ -12,6 +12,8 @@ from harness import jobs, ledger, levels, make, spool, swap_to_spool_20
 from simulator.model import JobPhase, PrintSpec, Segment, State
 from spoolman_prusalink.config import SYNC_DELAY
 
+HINT = "printing with no filament reported"
+
 
 def events(records):
     return [r["event"] for r in records if "event" in r]
@@ -82,6 +84,9 @@ async def test_an_unload_in_the_window_then_the_resumed_print_is_lost(tmp_path, 
     await bridge.poll()
     load = station.counter - printed
     assert load > 0 and charged(fake, 19) == before + load
+    # BF25: the hint about the sensors starts once with the lost usage and ends once.
+    assert levels(caplog, HINT) == ["WARNING", "WARNING"]
+    assert levels(caplog, f"no longer: {HINT}") == ["WARNING"]
     await bridge.aclose()
 
 
@@ -128,6 +133,9 @@ async def test_a_cut_while_a_runout_waits_loses_the_resumed_print(tmp_path, capl
     await bridge.poll()
     load = station.counter - printed
     assert load > 0 and charged(fake, 19) == before + load
+    # BF25: the hint about the sensors starts once with the lost usage and ends once.
+    assert levels(caplog, HINT) == ["WARNING", "WARNING"]
+    assert levels(caplog, f"no longer: {HINT}") == ["WARNING"]
     await bridge.aclose()
 
 

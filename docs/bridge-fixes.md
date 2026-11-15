@@ -37,7 +37,7 @@ update the workstreams it changes.
 | D9 | BF16's open question: if the MMU is fixed (D8), does the target charge count the slicer's 17 mm and 32 mm loads? | Moot under the recommended D8. If you choose to fix, aim at what leaves the spool for good, without the loads: the next unload returns that filament to the MMU. | Workstream 9, only if D8 is "fix". |
 | D10 | Do writes to multi-tool models (BF14) cover the XL as well as INDX? | Yes. The job already writes per tool, so the XL needs only its refusal lifted and its presets compared. The README keeps the XL as untested. | Workstream 7. |
 | D11 | Mark these Accepted: BF6, BF11 (once the F12 trace confirms the 8 mm), BF13, BF22? | Answered: BF6 and BF22 are Accepted. BF11 becomes Accepted once the F12 trace confirms the 8 mm. BF13 stays Open: its effect isn't settled, the INDX upgrade will show a spool join on the printer, and other users may have toolchangers too. It's decided with workstream 8. Reasons for the rest are under [Findings not planned](#findings-not-planned). | BF11's acceptance waits on the F12 trace. BF13 waits on workstream 8. |
-| D12 | BF12 and BF25 have no fix the bridge can see. Document them and leave them Open? | Yes. Workstream 5 adds a hint for BF25, and workstream 8 documents BF12. | Workstreams 5 and 8. |
+| D12 | BF12 and BF25 have no fix the bridge can see. Document them and leave them Open? | Answered: yes, both stay Open. Workstream 5 adds a warning for BF25 and the README text for both: BF12's goes in with it rather than with workstream 8. | Nothing. |
 
 ## Goals and non-goals
 
@@ -73,10 +73,10 @@ elsewhere names it under "Also touches".
 | 2 | [A sync job at a question](#2-a-sync-job-at-a-question) | BF5 | BF4, BF7, BF18 | 1 | Medium | Nothing | Merged, 064d892 |
 | 3 | [The custom preamble](#3-the-custom-preamble) | BF2, BF3, BF4 | | 1 | Small | D4 | Merged, 064d892 |
 | 4 | [Print start](#4-print-start) | BF10, BF23, BF27 | | 1 | Medium | D5; sitting D confirms | Not started |
-| 5 | [Usage on an empty tool](#5-usage-on-an-empty-tool) | BF24, BF25 | | 1 | Medium | D12 for BF25's hint; sittings C and D confirm | BF24 merged, 90eaf2c, built before workstream 4; BF25's hint waits on D12 |
+| 5 | [Usage on an empty tool](#5-usage-on-an-empty-tool) | BF24, BF25 | | 1 | Medium | Sittings C and D confirm | BF24 merged, 90eaf2c, built before workstream 4; BF25's hint and BF12's README text in progress |
 | 6 | [The auto-retract](#6-the-auto-retract) | BF9 | | 1 | Small | D7; sittings A and B | Not started |
 | 7 | [Writes to toolchangers](#7-writes-to-toolchangers) | BF14, BF1, BF8, BF7 | BF26 | 2 | Medium | D10; workstreams 2 and 3 | Not started |
-| 8 | [Toolchanger swaps](#8-toolchanger-swaps) | BF12, BF13 | | 2 | Small | D12; BF13's decision, with an INDX | Not started |
+| 8 | [Toolchanger swaps](#8-toolchanger-swaps) | BF12, BF13 | | 2 | Small | BF13's decision, with an INDX | BF12's README text in progress with workstream 5; BF13 waits on its decision |
 | 9 | [MMU printers](#9-mmu-printers) | BF20, BF15 to BF19, BF28, BF29 | | 4 | Medium | D8 | Not started |
 | 10 | [Housekeeping](#10-housekeeping) | BF6, BF11, BF21, BF22 | | 5 | Small | F12 trace for BF11 | BF21 merged, a9a09ea; BF6 and BF22 Accepted; BF11 waits on the F12 trace |
 
@@ -277,7 +277,8 @@ medium is a new input or condition through `account()` or
 ### 5. Usage on an empty tool
 
 - **Findings**: owns BF24 and BF25, stage 1. BF25 gets a hint only and
-  stays Open (D12).
+  stays Open (D12). Also writes BF12's README text, which workstream 8
+  owns (D12).
 - **Problem**: Usage counted while a tool reports no material is held and
   charged to the next spool loaded there (C7). That's right for a load's
   feed before the type appears, and wrong for a print that runs through an
@@ -300,14 +301,28 @@ medium is a new input or condition through `account()` or
   that feed. Usage counted between a print's last poll and its end is
   first seen at a poll with no job, so a saved flag,
   `ToolState.printed_empty`, reports the next poll's usage on the empty
-  tool lost too. Still to build, if D12 says so: a condition that says the
-  filament sensor may be off, which is BF25's only signal; a power cut
-  gives it too, so the wording allows for both.
-- **Needs**: D12 for the hint. Sitting D's F29 trace confirms the
-  single-tool path and F12 the power-cut path.
+  tool lost too. The flag is set by the first printing poll at which the
+  tool counted with no material, and it stays through later printing
+  polls with the tool empty, so a tool the print never counted on has no
+  tail: a load started on it right after the print is held as a load's
+  feed. A print that counts on the empty tool only after its last
+  printing poll leaves that usage held for the next spool. Built for BF25: lost usage, BF25's only signal, raises a
+  log-only condition, `PrintingEmpty` in `conditions.py`, at WARNING,
+  which says the filament sensors may be off and allows for a power cut
+  too. `process` raises it when the poll reports usage lost, and keeps it
+  while it stood at the last poll and `printed_empty` is still set, so it
+  stands through polls with no new usage and ends at the first poll with
+  the print over or the material back. It's raised only while
+  `printed_empty` is set, so the print's tail only ends one. An idle empty tool on a toolchanger loses nothing, so
+  it never raises it.
+- **Needs**: Sitting D's F29 trace confirms the single-tool path and F12
+  the power-cut path.
 - **User and saved state**: README, "How usage is attributed", changes the
-  held-usage rule. One new `ToolState` field, `printed_empty`, saved in
-  place and read as false when a saved state lacks it.
+  held-usage rule, explains the warning, and has BF12's text. One new
+  `ToolState` field, `printed_empty`, saved in place and read as false
+  when a saved state lacks it. One new condition kind, saved in the
+  conditions table as the others are; older databases don't have it and
+  load unchanged.
 - **Tests**: `test_a_print_through_an_empty_tool_holds_its_usage`,
   `test_an_unload_in_the_window_then_printing_on_an_empty_tool` and
   `test_a_cut_while_a_runout_waits_for_the_reload` flipped, renamed for
@@ -318,7 +333,13 @@ medium is a new input or condition through `account()` or
   usage with a sensor fault while printing, which the rule now reports
   lost, so it holds it with an ambiguous location instead. BF25's rows P2,
   S2 and T4 don't change: they describe the sensors on, and with them off
-  the bridge still sees no unload. C7 would name the hint.
+  the bridge still sees no unload. C7 names the hint, and tests in
+  `tests/test_empty_tool.py`, `tests/test_toolchanger_prints.py` and
+  `tests/test_power_panic.py` count its log lines; the C7 integration test
+  checks it's logged once. `tests/test_accounting.py` pins the flag's
+  meaning, and `tests/test_toolchanger_prints.py` and
+  `tests/test_empty_tool.py` show that a load right after a print on a
+  tool the print never counted on is charged, not lost.
 - **Done when**: no spool is charged for usage counted during a print on
   a tool with no material, and S1, S2 and the P2 reload charge as before.
 - **Overlap**: `accounting.py` (`usage`, `account()`'s signature) and
@@ -407,22 +428,23 @@ medium is a new input or condition through `account()` or
 - **Problem**: A hand swap of a docked tool counts no unload (BF12). A
   spool join counts an unload on the old tool mid-print, which the bridge
   takes as a runout (BF13).
-- **Approach (proposal)**: Documentation only. For BF12, README, under
-  "How usage is attributed", tells a toolchanger's user to unload from the
-  menu or to claim, since nothing the bridge reads shows the swap. For
+- **Approach (proposal)**: Documentation only. For BF12, done with
+  workstream 5 (D12): README, under "How usage is attributed", tells a
+  toolchanger's user to unload from the menu or to claim, since nothing
+  the bridge reads shows the swap. For
   BF13, the proposal was to accept today's behavior: the join's unload
   does leave the old tool empty, and M5a's flag on a spool that ran out
   with weight left is the flag's purpose. D11 leaves BF13 Open instead:
   decide it here, with a spool join seen on an INDX, since the old
   tool's swap and flags ask for a spool in a tool the print has left.
-- **Needs**: D12, and BF13's decision.
+- **Needs**: BF13's decision.
 - **User and saved state**: README only.
 - **Tests**: BF12's pin in `tests/test_toolchanger_prints.py` stays, and
-  T8 changes status from Gap once the README text is in. BF13's pin and T9 follow
+  T8 stays Gap, with the README text named in its status. BF13's pin and T9 follow
   its decision: if BF13 is Accepted, the pin's comment changes from "a
   known fault" to the accepted behavior and T9 leaves Gap; if it's fixed,
   the pin flips with the fix.
-- **Done when**: BF13 is fixed or Accepted, and BF12's README text is in.
+- **Done when**: BF13 is fixed or Accepted. BF12's README text is in.
 - **Overlap**: README and `tests/test_toolchanger_prints.py`'s comments,
   which workstream 4 also edits. If BF13 gets a fix, it's `unload` in
   `accounting.py`, and collides with workstreams 4 and 5.
@@ -537,9 +559,9 @@ in this list: D11 leaves it Open for workstream 8.
 | BF6 | The bridge only writes names inside the firmware's rules and preset names `firmware-check` compares. W5's flag catches the rest. |
 | BF7 | The cause can't be read. Workstream 2's flag and workstream 7's README text are all the bridge can do. |
 | BF11 | The lost usage needs the counters in the firmware's power-panic data. The resume's feed is charged where it belongs, and so is a second cut's, which leaves the nozzle because that cut doesn't retract. |
-| BF12 | No reading shows a docked tool emptied by hand. Only a new firmware field, such as each tool's sensor state, would. |
+| BF12 | No reading shows a docked tool emptied by hand. Only a new firmware field, such as each tool's sensor state, would. The README says how to avoid it. |
 | BF22 | Changing the harness's default flips many unrelated tests. Workstream 4's new tests turn the auto-retract on themselves. |
-| BF25 | No reading says the sensors are off. Workstream 5's hint covers the case the bridge can see. |
+| BF25 | No reading says the sensors are off. Only a new firmware reading of the setting would. Workstream 5's warning covers the case the bridge can see. |
 
 Under D8's recommendation, BF15 to BF19, BF28 and BF29 close through the
 refusal rather than a fix. If D8 is "fix", BF15 and BF17 still have no

@@ -253,18 +253,49 @@ def test_the_tail_rule_ends_with_filament_or_a_reboot():
     assert not res.state.printed_empty
 
 
-def test_the_tail_flag_is_set_with_no_usage_and_kept_by_an_ambiguous_poll():
-    # The flag needs no usage at the printing poll: the tail can be all there is.
+def test_the_tail_flag_needs_the_tool_to_count_in_the_print():
+    # A print on an empty tool that hasn't counted on it: no flag, so no tail. The usage
+    # first seen after the print is held for the next spool, as a load's feed is.
+    _, _, idle = run([(BOOT, r(100), loc(7)), (BOOT, r(100, material=None), loc(7), 42, True)])
+    assert not idle.printed_empty and idle.charged == 100
+    res = account(idle, BOOT, r(120, material=None), loc(7))
+    assert res.events == [ev.HoldEmpty()] and res.state.charged == 100
+    # The tool counts: the flag is set, and it stays through a printing poll that counts
+    # nothing more.
+    counted = account(idle, BOOT, r(110, material=None), loc(7), 42, printing=True).state
+    assert counted.printed_empty
+    res = account(counted, BOOT, r(110, material=None), loc(7), 42, printing=True)
+    assert res.events == [] and res.state.printed_empty
+    # The tail after it is still lost.
+    res = account(res.state, BOOT, r(130, material=None), loc(7))
+    assert res.events == [ev.LostEmpty(20)] and not res.state.printed_empty
+
+
+def test_a_reboot_poll_sets_the_tail_flag_only_if_the_tool_counted_since_the_boot():
+    # A power-panic resume first polled while it prints: the counters restart at 0, so a
+    # tool the print doesn't use reads 0 and printed nothing.
     _, _, state = run([(BOOT, r(100), loc(7)), (BOOT, r(100, material=None), loc(7), 42, True)])
-    assert state.printed_empty and state.charged == 100
-    # A skipped poll that's still printing on the empty tool keeps the flag, and its
-    # usage, held by the skip, goes with the tail.
+    res = account(state, 222, r(0, material=None), loc(7), 42, printing=True)
+    assert not res.state.printed_empty
+    res = account(state, 222, r(15, material=None), loc(7), 42, printing=True)
+    assert res.state.printed_empty
+
+
+def test_the_tail_flag_is_set_and_kept_by_an_ambiguous_poll():
+    # A skipped poll that's still printing on the empty tool sets the flag when the tool
+    # counted, and its usage, held by the skip, goes with the tail.
+    _, _, state = run([(BOOT, r(100), loc(7)), (BOOT, r(100, material=None), loc(7), 42, True)])
     res = account(state, BOOT, r(130, material=None), loc(7, 8, 9), 42, printing=True)
     assert res.skipped and res.state.printed_empty
-    res = account(res.state, BOOT, r(150, material=None), loc(7))
+    kept = account(res.state, BOOT, r(130, material=None), loc(7, 8, 9), 42, printing=True)
+    assert kept.skipped and kept.state.printed_empty
+    res = account(kept.state, BOOT, r(150, material=None), loc(7))
     assert res.events == [ev.LostEmpty(50)]
+    # A skipped poll that counted nothing in the print leaves it unset.
+    res = account(state, BOOT, r(100, material=None), loc(7, 8, 9), 42, printing=True)
+    assert res.skipped and not res.state.printed_empty
     # A skipped poll with no print clears it.
-    res = account(state, BOOT, r(130, material=None), loc(7, 8, 9))
+    res = account(kept.state, BOOT, r(130, material=None), loc(7, 8, 9))
     assert res.skipped and not res.state.printed_empty
 
 
@@ -312,11 +343,12 @@ def test_a_print_with_filament_leaves_no_tail():
     assert res.events[-1] == ev.HoldEmpty() and res.state.charged == 180
 
 
-def test_a_first_poll_on_an_empty_tool_in_a_print_sets_the_tail_flag():
+def test_a_first_poll_on_an_empty_tool_in_a_print_leaves_the_tail_flag_unset():
+    # With no last counter, the bridge can't tell whether the tool counted in the print.
     res = account(ToolState(), BOOT, r(100, material=None), loc(7), 42, printing=True)
-    assert res.state.printed_empty and res.state.charged == 100
+    assert not res.state.printed_empty and res.state.charged == 100
     res = account(res.state, BOOT, r(120, material=None), loc(7))
-    assert res.events == [ev.LostEmpty(20)]
+    assert res.events == [ev.HoldEmpty()]
 
 
 def test_counter_going_backwards_resyncs():
