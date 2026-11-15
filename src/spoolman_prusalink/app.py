@@ -265,8 +265,11 @@ class PrinterBridge:
     # Per tool: the deleted spool a hold was last logged for. Starts empty, so a hold
     # restored after a restart is logged once.
     _hold_logged: dict[int, int] = field(default_factory=dict)
-    # When the printer was first seen idle since it was last busy or unreachable.
+    # When the printer was first seen idle since it was last busy, unreachable or booted,
+    # the boot that clock belongs to, and when the last read was taken.
     _idle_since: float | None = None
+    _idle_boot: int | None = None
+    _read_at: float = 0.0
 
     def __post_init__(self) -> None:
         self._printer_reach = Reachability(self.label, self.clock)
@@ -343,7 +346,14 @@ class PrinterBridge:
             self._idle_since = None
             return None
         _log_ok(self._printer_reach)
-        self._note_state(status.state)
+        if reading.boot_id != self._idle_boot:
+            # A boot opens a power-panic window: the printer reads idle with no job until
+            # it resumes the print (P12). A second cut during the resume opens another,
+            # with no busy read between them, so the idle clock starts over at each boot.
+            self._idle_since = None
+            self._idle_boot = reading.boot_id
+        self._read_at = self.clock()
+        self._note_state(status.state, self._read_at)
         if self._unsupported:
             self._unsupported = False
             log.error("%s now reports filament; resuming", self.label)
@@ -352,12 +362,12 @@ class PrinterBridge:
         sync_job = status.job_id is not None and job_id is None
         return status._replace(job_id=job_id, sync_job=sync_job), reading
 
-    def _note_state(self, state: str) -> None:
+    def _note_state(self, state: str, now: float) -> None:
         """Track how long the printer has been idle, for `sync_delay`."""
         if state not in IDLE_STATES:
             self._idle_since = None
         elif self._idle_since is None:
-            self._idle_since = self.clock()
+            self._idle_since = now
 
     async def check_missing(self, spools: list[Spool]) -> dict[int, int]:
         """Find out why an active spool is missing from Spoolman's list.
@@ -1022,7 +1032,9 @@ class PrinterBridge:
             self._sync_busy = self._sync_failed = None
             return False
         delay = self.config.sync_delay
-        idle_for = 0.0 if self._idle_since is None else self.clock() - self._idle_since
+        # Measured at the read this poll acted on, not now: the time since then grows with
+        # slow services and unreachable printers, and isn't idle time anyone saw.
+        idle_for = 0.0 if self._idle_since is None else self._read_at - self._idle_since
         if idle_for < delay:
             # The printer may have only just become idle, with someone at it about to
             # start a print. Give them time before taking it over.
@@ -1041,7 +1053,7 @@ class PrinterBridge:
             # The state this poll acted on was read a few requests ago. Check it again
             # right before taking over the printer, in case a print started since.
             state = (await self.client.status()).state
-            self._note_state(state)
+            self._note_state(state, self.clock())
             if state not in IDLE_STATES:
                 if self._sync_busy != state:
                     log.info(

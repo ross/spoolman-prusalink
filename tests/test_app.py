@@ -14,7 +14,7 @@ from spoolman_prusalink import __main__ as main_module
 from spoolman_prusalink.__main__ import main
 from spoolman_prusalink.accounting import ToolState
 from spoolman_prusalink.app import Bridge, Reachability, _log_failed, _log_ok
-from spoolman_prusalink.config import Config, ConfigError, PrinterConfig, load
+from spoolman_prusalink.config import SYNC_DELAY, Config, ConfigError, PrinterConfig, load
 from spoolman_prusalink.db import Database, DatabaseError, read_ledger, read_state
 from spoolman_prusalink.errors import BadAnswer, Unreachable
 from spoolman_prusalink.models import Material
@@ -447,7 +447,8 @@ def test_config_load(tmp_path):
     # P1 and C2: poll every 30 s while printing and every 60 s otherwise.
     assert cfg.poll_printing == 30
     assert cfg.poll_idle == 60
-    assert cfg.printers[0].sync_delay == 0
+    # P12: a write waits out the idle window a power cut leaves before the resume.
+    assert cfg.printers[0].sync_delay == SYNC_DELAY == 30
 
     with pytest.raises(ConfigError, match="PRUSALINK_API_KEY"):
         load(p, env={})

@@ -124,7 +124,7 @@ variable that holds it, its own `[[printers.tools]]` entries, and any of
 the other `[printer]` settings: `sync_storage`, `sync_file`,
 `printer_sync`, `sync_delay`, `sync_drift`, `flag_drift` and
 `length_factor`. Each printer has its own value, and an entry that doesn't set
-one takes the default:
+one takes the default, as in `config.example.toml`:
 
 ```toml
 [[printers]]
@@ -396,13 +396,21 @@ alone, unless `sync_drift = true`.
 
 The job takes over the printer, so the bridge checks the printer's state
 again just before uploading it and holds the job if a print has started.
-The printer still reports idle while someone browses its menus, so a job
-can interrupt you choosing a print, often right after a filament load. Set
-`sync_delay` to the number of seconds the printer must stay idle before the
-job runs. The wait starts at the first poll that sees the printer idle, and
-starts over after any poll that couldn't read the printer. It's checked once
-per poll, so the job runs up to `poll_idle` seconds later.
-The default, 0, runs the job on the first idle poll.
+`sync_delay` sets how many seconds the printer must stay idle before the
+job runs, 30 by default. The wait starts at the first poll that sees the
+printer idle. It starts over after any poll that couldn't read the printer,
+and after the printer reboots. It's checked once per poll, so with the
+default `poll_idle` of 60 a write runs at the second idle poll.
+
+The wait protects a print interrupted by a power cut. When the power comes
+back, the printer reads idle with no job for a moment before it resumes the
+print, and a job started in that moment takes the printer: the print never
+resumes. The first idle poll after a reboot only starts the wait, so the
+job can't run there. The wait also keeps a job from interrupting you while
+you choose a print in the printer's menus, which read as idle too.
+
+`sync_delay = 0` runs the job at the first idle poll, including one in the
+moment after a power cut, so a write due during a print can lose that print.
 
 Requirements for a write:
 

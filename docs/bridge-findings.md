@@ -323,30 +323,31 @@ written.
   with no job for at least 1.5 s, until the firmware's autostart resumes
   the print (F12; `print_utils.cpp:67-82`, `printer_state.cpp:376-384`).
   A write that waited for the print (W2), such as a Spoolman edit of the
-  loaded spool (W14), is still due. The bridge's first poll after the boot
-  sees an idle printer, reads the status again right before the upload,
-  finds `IDLE` again, and uploads its sync job (`sync_printer` in
-  `app.py`). The job starts a print. At its next try the autostart finds
-  the printer printing and gives the resume up, unless the USB drive, the
+  loaded spool (W14), is still due. Until workstream 1, `sync_delay` was
+  0 by default, and the bridge's first poll after the boot saw an idle
+  printer, read the status again right before the upload, found `IDLE`
+  again, and uploaded its sync job (`sync_printer` in `app.py`). The job
+  starts a print. At its next try the autostart finds the printer
+  printing and gives the resume up, unless the USB drive, the
   temperatures and the screen are all ready by then. Then it resumes over
   the running job: its check that the printer is idle is a debug assertion
-  (`print_utils.cpp:75-79`, `power_panic.cpp:269-271`). Any positive
-  `sync_delay` holds the job at the first idle poll after the boot. The
-  job then runs at the first later poll after the printer has been idle
-  that long, so whether it misses the window depends on when that poll
-  comes. `sync_delay` is 0 by default. With an MMU3, the sync job waits
+  (`print_utils.cpp:75-79`, `power_panic.cpp:269-271`). A positive
+  `sync_delay` held the job at the first idle poll after the boot, but a
+  second cut during the resume could put the next poll in a second window
+  with the delay already passed. Since workstream 1 the idle clock starts
+  over at each new `boot_id`, so the first idle poll after any boot only
+  starts it. With an MMU3, the sync job waits
   at the preview's question to unload the MMU's filament first and reads
   `ATTENTION` until someone answers (F43, BF18): while the MMU still
   connects after the boot, whatever FINDA sees, and once it's Active
   because the cut's slot is still at FINDA. If No runs the job while the
   MMU still connects, its end isn't the MMU's: it auto-retracts, which
   counts on slot 0 (F45).
-- **Effect**: The user's print is lost: it never resumes, and the printer
-  ends the sync job `FINISHED`. If the autostart resumes anyway, the two
-  jobs collide in a way the source doesn't define.
-- **Evidence**: Read in the firmware source. Shown in the simulator by
-  `test_a_sync_job_in_the_window_drops_the_resume` in
-  `tests/test_power_panic.py`, which pins it on a Core One L, and on an
+- **Effect**: The user's print was lost: it never resumed, and the printer
+  ended the sync job `FINISHED`. If the autostart resumed anyway, the two
+  jobs collided in a way the source doesn't define. This now happens only
+  with `sync_delay = 0`.
+- **Evidence**: Read in the firmware source. Shown in the simulator on an
   MMU by `test_a_sync_job_in_the_window_on_a_connecting_mmu_waits_on_the_question`
   in `tests/test_mmu.py` and the window tests in
   `simulator/tests/test_mmu_power_panic.py`. To be
@@ -354,8 +355,16 @@ written.
   autostart's first try. The F12 trace shows the window, and has to be
   taken before the INDX upgrade.
 - **Scenario rows**: P12, W2, W14.
-- **To reproduce**: That test, today.
-- **Status**: Open.
+- **To reproduce**: Set `sync_delay = 0`, as the MMU test does.
+- **Status**: Fixed (workstream 1). `sync_delay` is 30 s by default, and the
+  idle clock starts over at each new `boot_id`, so the first idle poll after
+  a boot, a second cut's included, only starts it.
+  `test_a_write_waits_out_the_window_and_the_print_resumes` and
+  `test_a_second_cut_after_an_idle_poll_in_the_first_window` in
+  `tests/test_power_panic.py` show the print resume, and
+  `test_w2_write_waits_out_the_power_panic_window` runs it end to end.
+  `sync_delay = 0` still runs a write in the window, and the MMU test stays
+  pinned at 0 until workstream 9.
 
 ## Charging
 
@@ -1019,12 +1028,12 @@ panic (F38 to F46). The MMU's scenario rows are T12 to T17.
 - **Printers**: All.
 - **What happens**: Only Prusa Connect is told `READY`. PrusaLink reports
   the state underneath (`status_renderer.cpp:30`). `IDLE_STATES` in
-  `prusalink.py` lists it.
+  `prusalink.py` listed it until workstream 10.
 - **Effect**: None. The entry is never matched.
 - **Evidence**: Read in the firmware source.
 - **Scenario rows**: None directly. W2 and W3 rely on `IDLE_STATES`.
 - **To reproduce**: Nothing to show: the simulator never reports `READY`.
-- **Status**: Open. A candidate for Accepted.
+- **Status**: Fixed. `IDLE_STATES` no longer lists `READY` (workstream 10).
 
 ### BF22. The unit harness runs with the auto-retract off
 

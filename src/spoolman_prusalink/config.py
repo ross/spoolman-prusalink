@@ -13,6 +13,10 @@ from urllib.parse import urlsplit
 # The name of the printer in the single-printer config form, which has no name of its own.
 DEFAULT_PRINTER_NAME = "default"
 _NAME_PATTERN = r"[A-Za-z0-9_.-]{1,64}"
+# Seconds the printer must stay idle before a sync job runs. After a power cut the printer
+# reads idle for a moment before it resumes the print, and a job started there drops the
+# print (P12): a positive delay holds the job past that window.
+SYNC_DELAY = 30.0
 
 
 class ConfigError(ValueError):
@@ -40,7 +44,7 @@ class PrinterConfig:
     # Write the spool to the printer after a swap or unload, once the printer is idle.
     printer_sync: bool = True
     # Seconds the printer must stay idle before the sync job runs; 0 runs it at once.
-    sync_delay: float = 0.0
+    sync_delay: float = SYNC_DELAY
     # Also overwrite drift (a mismatch with no swap or unload to explain it).
     sync_drift: bool = False
 
@@ -174,7 +178,7 @@ def _printer_settings(table: dict, prefix: str) -> dict:
         "length_factor": length_factor,
         "flag_drift": _bool(table, "flag_drift", True, f"{prefix}.flag_drift"),
         "printer_sync": _bool(table, "printer_sync", True, f"{prefix}.printer_sync"),
-        "sync_delay": _number(table, "sync_delay", 0, f"{prefix}.sync_delay", at_least=0),
+        "sync_delay": _number(table, "sync_delay", SYNC_DELAY, f"{prefix}.sync_delay", at_least=0),
         "sync_drift": _bool(table, "sync_drift", False, f"{prefix}.sync_drift"),
     }
 

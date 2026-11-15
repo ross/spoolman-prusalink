@@ -10,7 +10,7 @@ from .errors import check, parsing, send
 from .models import FilamentReading, Material, ToolReading
 
 # Printer states in which a job file can start, such as the sync job.
-IDLE_STATES = frozenset({"IDLE", "FINISHED", "READY", "STOPPED"})
+IDLE_STATES = frozenset({"IDLE", "FINISHED", "STOPPED"})
 BUSY_STATES = frozenset({"PRINTING", "PAUSED", "BUSY", "ATTENTION"})
 
 

@@ -245,6 +245,7 @@ def make(tmp_path, spools, *, model="8.1.0", tools=1, auto_retract=False, mmu=Fa
     fake = FakeSpoolman(spools)
     sim = Simulation(Settings(**SETTINGS))
     printer = add_station(sim, "default", model, tools, auto_retract=auto_retract, mmu=mmu)
+    cfg.setdefault("sync_delay", 0)  # Most write tests expect a job at the first idle poll.
     printer_cfg = PrinterConfig(
         name="default",
         url="http://printer",
@@ -434,6 +435,7 @@ def two_printers(tmp_path, spools, *, model="8.1.0", tools=1, **cfg):
                 url=f"http://{name}",
                 api_key="k",
                 tools=tool_locations(f"Tool {name}", tools),
+                sync_delay=0,
             )
             for name in printers
         ),

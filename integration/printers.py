@@ -151,6 +151,7 @@ async def start(spec: Spec, world: World) -> tuple[Station, PrinterConfig]:
         url=f"http://{made.server.host}:{made.server.port}",
         api_key=KEY,
         tools=dict(locations),
-        **spec.config,
+        # Most write tests expect a job at the first idle poll.
+        **{"sync_delay": 0, **spec.config},
     )
     return made, config
