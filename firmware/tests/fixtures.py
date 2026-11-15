@@ -359,6 +359,8 @@ FilamentTypeParameters preset_filament_parameters(PresetFilamentType t) {
 """
 
 FILAMENT_HPP = """\
+constexpr size_t filament_name_buffer_size = 8;
+
 struct FilamentTypeParameters {
 
 public:
@@ -5256,7 +5258,8 @@ void filament_gcodes::M702_unload(std::optional<float> unload_length, float z_mi
 }
 """  # noqa: E501 (verbatim firmware lines)
 
-# The read of an ad-hoc slot's parameters, with the UUIDs for tool 0 only.
+# The read of an ad-hoc slot's parameters, with the UUIDs for tool 0 only, a type parameter,
+# and the write of a type's parameters.
 FILAMENT_CPP = """\
         } else if constexpr (std::is_same_v<T, AdHocFilamentType>) {
             const auto i = v.tool.to_raw();
@@ -5284,8 +5287,930 @@ FILAMENT_CPP = """\
                 i == 0 ? config_store().adhoc_filament_parameters_6.get(i) : FilamentTypeParameters_EEPROM6 {},
 #endif
                 std::monostate());
+
+std::optional<FilamentType> FilamentType::from_gcode_param(const std::string_view &value) {
+    if (value.length() == 0) {
+        return std::nullopt;
+    }
+
+    if (value.length() > 1 && value[0] == '#') {
+        uint8_t encoded;
+        const auto conv_r = from_chars_light(value.begin() + 1, value.end(), encoded);
+        if (conv_r.ec != std::errc {} || conv_r.ptr != value.end()) {
+            return std::nullopt;
+        }
+
+        const auto result = EncodedFilamentType::from_data(encoded).decode();
+        if (result == FilamentType::none) {
+            return std::nullopt;
+        }
+
+        return result;
+    }
+
+    if (value == adhoc_pending_gcode_code) {
+        return PendingAdHocFilamentType {};
+    }
+
+    if (const FilamentType r = from_name(value); r != FilamentType::none) {
+        return r;
+    }
+
+    return std::nullopt;
+}
+
+void FilamentType::set_parameters(const FilamentTypeParameters &set) const {
+    debug_assert(can_be_renamed_to(set.name));
+    static_assert(
+        aggregate_arity<FilamentTypeParameters>()
+            == 7
+                + HAS_FILAMENT_HEATBREAK_PARAM() * 1
+                + HAS_CHAMBER_API() * 3
+                + HAS_CHAMBER_FILTRATION_API() * 1
+                + HAS_FILAMENT_BASE_PRESET_PARAM() * 1
+                + HAS_ANFC() * 4
+                + HAS_HT_HOTEND() * 1
+        
+        ,
+        "Revise FilamentType::set_parameters");
+
+    const FilamentTypeParameters_EEPROM1 e1 {
+        .name = set.name,
+        .nozzle_temperature = static_cast<uint16_t>(set.nozzle_temperature),
+        .nozzle_preheat_temperature = static_cast<uint16_t>(set.nozzle_preheat_temperature),
+        .heatbed_temperature = static_cast<uint8_t>(set.heatbed_temperature),
+#if HAS_CHAMBER_FILTRATION_API()
+        .requires_filtration = set.requires_filtration,
+#endif
+        .is_abrasive = set.is_abrasive,
+        .is_flexible = set.is_flexible,
+    };
+    
+    static_assert(aggregate_arity<FilamentTypeParameters_EEPROM1>() == 7 + 1 , "Revise the initializer");
+    static_assert(requires { FilamentTypeParameters_EEPROM1::_unused; });
+
+#if HAS_CHAMBER_API()
+    const FilamentTypeParameters_EEPROM2 e2 {
+        .chamber_min_temperature = e2.encode_chamber_temp(set.chamber_min_temperature),
+        .chamber_max_temperature = e2.encode_chamber_temp(set.chamber_max_temperature),
+        .chamber_target_temperature = e2.encode_chamber_temp(set.chamber_target_temperature),
+    };
+    static_assert(aggregate_arity<FilamentTypeParameters_EEPROM2>() == 3, "Revise the initializer");
+#endif
+
+#if HAS_FILAMENT_HEATBREAK_PARAM()
+    const FilamentTypeParameters_EEPROM3 e3 {
+        .heatbreak_temperature = set.heatbreak_temperature,
+    };
+    static_assert(aggregate_arity<FilamentTypeParameters_EEPROM3>() == 1, "Revise the initializer");
+#endif
+
+#if HAS_FILAMENT_BASE_PRESET_PARAM()
+    const FilamentTypeParameters_EEPROM4 e4 {
+        .base_preset = FilamentTypeParameters_EEPROM4::encode_base_preset(set.base_preset),
+    };
+    static_assert(aggregate_arity<FilamentTypeParameters_EEPROM4>() == 1, "Revise the initializer");
+#endif
+
+    const FilamentTypeParameters_EEPROM5 e5 {
+        .encoded_color = FilamentTypeParameters_EEPROM5::encode_color(set.color),
+    };
+    static_assert(aggregate_arity<FilamentTypeParameters_EEPROM5>() == 1, "Revise the initializer");
+
+#if HAS_ANFC()
+    const FilamentTypeParameters_EEPROM6 e6 {
+        .material_uuid = FilamentTypeParameters_EEPROM6::encode_uuid(set.material_uuid),
+        .package_uuid = FilamentTypeParameters_EEPROM6::encode_uuid(set.package_uuid),
+        .instance_uuid = FilamentTypeParameters_EEPROM6::encode_uuid(set.instance_uuid),
+    };
+#endif
+
+    std::visit([&]<typename T>(const T &v) {
+        if constexpr (std::is_same_v<T, PresetFilamentType>) {
+            debug_assert(false);
+
+        } else if constexpr (std::is_same_v<T, UserFilamentType>) {
+            config_store().user_filament_parameters.set(v.index, e1);
+#if HAS_CHAMBER_API()
+            config_store().user_filament_parameters_2.set(v.index, e2);
+#endif
+#if HAS_FILAMENT_HEATBREAK_PARAM()
+            config_store().user_filament_parameters_3.set(v.index, e3);
+#endif
+#if HAS_FILAMENT_BASE_PRESET_PARAM()
+            config_store().user_filament_parameters_4.set(v.index, e4);
+#endif
+            
+            debug_assert(set.color == std::nullopt);
+#if HAS_ANFC()
+            
+            debug_assert(set.openprinttag_uid_hash == buddy::openprinttag::ToolTag::no_tag_hash);
+            debug_assert(set.instance_uuid == std::nullopt);
+            debug_assert(set.package_uuid == std::nullopt);
+            debug_assert(set.material_uuid == std::nullopt);
+#endif
+
+        } else if constexpr (std::is_same_v<T, AdHocFilamentType>) {
+            const auto i = v.tool.to_raw();
+
+            config_store().adhoc_filament_parameters.set(i, e1);
+#if HAS_CHAMBER_API()
+            config_store().adhoc_filament_parameters_2.set(i, e2);
+#endif
+#if HAS_FILAMENT_HEATBREAK_PARAM()
+            config_store().adhoc_filament_parameters_3.set(i, e3);
+#endif
+#if HAS_FILAMENT_BASE_PRESET_PARAM()
+            config_store().adhoc_filament_parameters_4.set(i, e4);
+#endif
+            config_store().adhoc_filament_parameters_5.set(i, e5);
+#if HAS_ANFC()
+            config_store().adhoc_filament_assigned_openprinttag.set(i, set.openprinttag_uid_hash);
+
+            if (i == 0) {
+                static_assert(decltype(config_store().adhoc_filament_parameters_6)::item_count == 1);
+                config_store().adhoc_filament_parameters_6.set(i, e6);
+            } else {
+                
+                debug_assert(false);
+            }
+#endif
+
+        } else if constexpr (std::is_same_v<T, PendingAdHocFilamentType>) {
+            pending_adhoc_filament_parameters_.store(set);
+
+        } else if constexpr (std::is_same_v<T, NoFilamentType>) {
+            debug_assert(false);
+
+        } else {
+            static_assert(false);
+        }
+    },
+        *this);
+}
 """  # noqa: E501 (verbatim firmware lines)
 
+
+# `M865`, which picks a type, sets its parameters and loads it.
+M865_CPP = """\
+void PrusaGcodeSuite::M865() {
+    GCodeParser2 p;
+    if (!p.parse_marlin_command()) {
+        return;
+    }
+
+    FilamentType filament_type;
+
+    if (const auto slot = p.option<uint8_t, uint8_t, uint8_t>('I', 0, VirtualToolIndex::count - 1)) {
+        filament_type = config_store().get_filament_type(*slot);
+
+    } else if (p.option<bool>('X').value_or(false)) {
+        filament_type = PendingAdHocFilamentType {};
+
+    } else if (const auto slot = p.option<uint8_t>('U', static_cast<uint8_t>(0), static_cast<uint8_t>(user_filament_type_count - 1))) {
+        filament_type = UserFilamentType { .index = *slot };
+
+    } else if (const auto ft = p.option<FilamentType>('S')) {
+        filament_type = *ft;
+
+    } else {
+        SERIAL_ERROR_MSG("Filament type invalid or not specified.");
+        return;
+    }
+
+    FilamentTypeParameters params = filament_type.parameters();
+
+    if (p.option<bool>('R').value_or(false)) {
+        params = {};
+    }
+
+    switch (p.command().subcode.value_or(0)) {
+
+    case 0: {
+
+        p.store_option_if_present('T', params.nozzle_temperature);
+        p.store_option_if_present('P', params.nozzle_preheat_temperature);
+        p.store_option_if_present('B', params.heatbed_temperature);
+
+        p.store_option_if_present('A', params.is_abrasive);
+        p.store_option_if_present('G', params.is_flexible);
+
+#if HAS_FILAMENT_HEATBREAK_PARAM()
+        p.store_option_if_present('H', params.heatbreak_temperature);
+#endif
+
+#if HAS_FILAMENT_BASE_PRESET_PARAM()
+        FilamentTypeParameters::Name base_preset_name;
+        if (auto str = p.option<std::string_view>('J', base_preset_name)) {
+            const auto base_filament_type = FilamentType::from_name(*str);
+
+            if (str->empty()) {
+                params.base_preset = std::nullopt;
+
+            } else if (const auto preset = std::get_if<PresetFilamentType>(&base_filament_type)) {
+                params.base_preset = *preset;
+
+            } else {
+                p.report_option_error('J', "Needs to be a preset filament type");
+            }
+        }
+#endif
+
+        if (auto c = p.option<Color>('O')) {
+            params.color = *c;
+        }
+
+#if HAS_CHAMBER_API()
+        p.store_option_if_present('C', params.chamber_target_temperature);
+        p.store_option_if_present('D', params.chamber_min_temperature);
+        p.store_option_if_present('E', params.chamber_max_temperature);
+#endif
+#if HAS_CHAMBER_FILTRATION_API()
+        p.store_option_if_present('F', params.requires_filtration);
+#endif
+
+        std::array<char, filament_name_buffer_size - 1> name_buf;
+        if (const auto opt = p.option<std::string_view>('N', name_buf)) {
+            if (const auto r = filament_type.can_be_renamed_to(*opt); !r) {
+                SERIAL_ERROR_START();
+                SERIAL_ECHOLN(r.error());
+                return;
+            }
+            params.name = *opt;
+        }
+
+        break;
+    }
+
+    case 1: {
+#if HAS_ANFC()
+        constexpr auto parse_uuid = [](GCodeParser2 &p2, char key, FilamentTypeParameters::OptionalUUID &target) {
+            std::array<char, UUID::string_length> buf;
+            std::string_view str;
+            if (!p2.store_option_if_present(key, str, buf)) {
+                return;
+            }
+
+            if (str.empty()) {
+                target = std::nullopt;
+                return;
+            }
+
+            const auto uuid = UUID::from_string(str);
+            if (!uuid.has_value()) {
+                p2.report_option_error(key, "Invalid UUID");
+                return;
+            }
+
+            
+            target = FilamentTypeParameters::OptionalUUID { *uuid, FilamentTypeParameters::OptionalUUID::NulloptCheck::no };
+        };
+
+        parse_uuid(p, 'A', params.material_uuid);
+        parse_uuid(p, 'B', params.package_uuid);
+        parse_uuid(p, 'C', params.instance_uuid);
+#endif
+    } break;
+    }
+
+    static_assert(
+        aggregate_arity<FilamentTypeParameters>()
+            == 7
+                + HAS_FILAMENT_HEATBREAK_PARAM() * 1
+                + HAS_CHAMBER_API() * 3
+                + HAS_CHAMBER_FILTRATION_API() * 1
+                + HAS_FILAMENT_BASE_PRESET_PARAM() * 1
+                + HAS_ANFC() * 4 
+                + HAS_HT_HOTEND() * 1 
+        
+        ,
+        "Revise M865 parameters");
+
+    if (filament_type.is_customizable()) {
+        filament_type.set_parameters(params);
+    }
+
+    
+    if (auto load = p.option<uint8_t, uint8_t, uint8_t>('L', 0, VirtualToolIndex::count - 1)) {
+        config_store().set_filament_type(VirtualToolIndex::from_raw(*load), filament_type);
+    }
+
+    if (filament_type != FilamentType::none) {
+        SERIAL_ECHOLNPAIR("name:", params.name.data());
+        SERIAL_ECHOLNPAIR("nozzle_temperature:", params.nozzle_temperature);
+        SERIAL_ECHOLNPAIR("heatbed_temperature:", params.heatbed_temperature);
+        SERIAL_ECHOLNPAIR("is_abrasive:", params.is_abrasive);
+#if HAS_CHAMBER_FILTRATION_API()
+        SERIAL_ECHOLNPAIR("requires_filtration:", params.requires_filtration);
+#endif
+    }
+}
+"""  # noqa: E501 (verbatim firmware lines)
+
+# A type by its name, and the names a type takes.
+FILAMENT_COMMON_CPP = """\
+std::expected<void, const char *> FilamentType::can_be_renamed_to(const std::string_view &new_name) const {
+    if (!is_customizable()) {
+        return std::unexpected(N_("Filament is not customizable"));
+    }
+
+    
+    if (new_name.size() == 0) {
+        return std::unexpected(N_("Name must not be empty"));
+    }
+
+    
+    if (new_name == "---") {
+        return std::unexpected(N_("Name must not be '---'"));
+    }
+
+    
+    if (!std::ranges::all_of(new_name, [](char ch) {
+            return (isalnum(ch)) || strchr("_-", ch);
+        })) {
+        return std::unexpected(N_("Name must contain only 'a-zA-Z0-9_-' characters"));
+    }
+
+    
+    if (
+        
+        !is_adhoc()
+
+        && std::ranges::any_of(all_filament_types, [&](FilamentType ft) {
+               return (ft != *this) && (new_name == ft.parameters().name);
+           })
+
+    ) {
+        return std::unexpected(N_("Filament with this name already exists"));
+    }
+
+    return {};
+}
+
+FilamentType FilamentType::from_name(const std::string_view &name) {
+    if (name.length() >= filament_name_buffer_size) {
+        return FilamentType::none;
+    }
+
+    for (const FilamentType filament_type : all_filament_types) {
+        if (name == filament_type.parameters().name) {
+            return filament_type;
+        }
+    }
+
+    return FilamentType::none;
+}
+"""  # noqa: E501 (verbatim firmware lines)
+
+# How `M865`'s parser splits a line and reads a flag and an integer.
+GCODE_PARSER_CPP = """\
+bool GCodeParser2::parse(const std::string_view &gcode) {
+    
+    option_positions = {};
+
+    if (!GCodeBasicParser::parse(gcode)) {
+        return false;
+    }
+
+    if (body().empty()) {
+        return true;
+    }
+
+    GCodeParserHelper p(*this, body());
+
+    
+    while (true) {
+        p.skip_whitespaces();
+
+        if (p.ch() == '\\0') {
+            
+            break;
+
+        } else if (p.ch() < first_option_letter || p.ch() > last_option_letter) {
+            p.report_error("Expected uppercase parameter letter");
+            return false;
+        }
+
+        const char option_letter = p.ch();
+        p.advance();
+        p.skip_whitespaces();
+
+        debug_assert(p.pos() < 256);
+        auto &opt_pos = option_positions[option_letter - first_option_letter];
+        if (opt_pos != 0) {
+            p.report_error("Option '%c' already defined", option_letter);
+            return false;
+        }
+        opt_pos = static_cast<uint8_t>(p.pos());
+
+        if (!parse_option_value(p)) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+std::optional<std::string_view> GCodeParser2::parse_option_value(GCodeParserHelper &p, std::span<char> accumulator) const {
+    auto accum_it = accumulator.begin();
+
+    const auto accumulate = [&](char ch) {
+        debug_assert(ch != '\\0');
+
+        if (accumulator.empty()) {
+            return true;
+        }
+
+        if (accum_it == accumulator.end()) {
+            p.report_error("Value too long");
+            return false;
+        }
+
+        *accum_it = ch;
+        accum_it++;
+        return true;
+    };
+
+    if (p.ch() == '"') {
+        
+        bool escape_char = false;
+
+        
+        while (true) {
+            p.advance();
+
+            if (p.ch() == '\\0') {
+                p.report_error("Unterminated quotes");
+                return std::nullopt;
+            }
+
+            if (escape_char) {
+                escape_char = false;
+                if (!accumulate(p.ch())) {
+                    return std::nullopt;
+                }
+                continue;
+            }
+
+            switch (p.ch()) {
+
+            case '\\\\':
+                escape_char = true;
+                break;
+
+            case '"':
+                p.advance();
+                return std::string_view(accumulator.begin(), accum_it);
+
+            default:
+                if (!accumulate(p.ch())) {
+                    return std::nullopt;
+                }
+                break;
+            }
+        }
+    } else {
+        
+        
+        while (p.ch() && strchr("0123456789+-.,", p.ch())) {
+            if (!accumulate(p.ch())) {
+                return std::nullopt;
+            }
+            p.advance();
+        }
+
+        return std::string_view(accumulator.begin(), accum_it);
+    }
+}
+
+GCodeParser2::StoreOptionResult GCodeParser2::store_option_if_present(char key, bool &target) const {
+    std::array<char, 2> buffer;
+    const auto str = option_expected<std::string_view>(key, buffer);
+    if (!str) {
+        return std::unexpected(str.error());
+    }
+
+    if (str->empty() || str == "1") {
+        target = true;
+        return {};
+
+    } else if (str == "0") {
+        target = false;
+        return {};
+
+    } else {
+        report_option_error(key, "Expected 0, 1 or no value");
+        return std::unexpected(OptionError::parse_error);
+    }
+}
+
+GCodeParser2::StoreOptionResult GCodeParser2::store_option_if_present(char key, LargestInteger &target, LargestInteger min_value, LargestInteger max_value) const {
+    std::array<char, 32> buffer;
+    const auto str = option_expected<std::string_view>(key, buffer);
+    if (!str) {
+        return std::unexpected(str.error());
+    }
+
+    LargestInteger val;
+    const auto err = from_chars_light(str->begin(), str->end(), val, 10);
+    if (err.ec != std::errc {}) {
+        report_option_error(key, "Integer parsing failed");
+        return std::unexpected(OptionError::parse_error);
+
+    } else if (val < min_value || val > max_value) {
+        static_assert(std::is_same_v<LargestInteger, int32_t>);
+        report_option_error(key, "Numeric value %" PRIi32 " out of bounds <%" PRIi32 ", %" PRIi32 ">", val, min_value, max_value);
+        return std::unexpected(OptionError::parse_error);
+    }
+
+    target = val;
+    return {};
+}
+"""  # noqa: E501 (verbatim firmware lines)
+
+# A parse error with no error callback reports nothing.
+GCODE_PARSER_HELPER_CPP = """\
+void GCodeParserHelper::report_error(const char *msg, ...) {
+    if (!parent.error_callback_) {
+        return;
+    }
+
+    va_list args;
+    va_start(args, msg);
+    parent.error_callback_(GCodeBasicParser::ErrorCallbackArgs {
+                               .parser = parent,
+                               .position = pos(),
+                               .message = msg,
+                           },
+        args);
+    va_end(args);
+}
+"""
+
+# A line's command and body.
+GCODE_BASIC_PARSER_CPP = """\
+bool GCodeBasicParser::parse(const std::string_view &gcode) {
+    data_ = {};
+    data_.gcode = gcode;
+
+    GCodeParserHelper p(*this, gcode);
+
+    p.skip_whitespaces();
+
+    
+    if (p.ch() == 'N') {
+        p.advance();
+        const auto line_number = p.parse_integer<LineNumber>();
+        if (!line_number.has_value()) {
+            return false; 
+        }
+        data_.line_number = line_number;
+
+        p.skip_whitespaces();
+    }
+
+    
+    {
+        
+        if (p.ch() < 'A' || p.ch() > 'Z') {
+            p.report_error("Expected command letter");
+            return false;
+        }
+        data_.command.letter = p.ch();
+        p.advance();
+
+        
+        const auto codenum = p.parse_integer<GCodeCommand::Codenum>();
+        if (!codenum.has_value()) {
+            return false; 
+        }
+        data_.command.codenum = *codenum;
+
+        
+        if (p.ch() == '.') {
+            p.advance();
+            const auto subcode = p.parse_integer<GCodeCommand::Subcode>();
+            if (!subcode.has_value()) {
+                return false; 
+            }
+            data_.command.subcode = subcode;
+        }
+    }
+
+    p.skip_whitespaces();
+
+    
+    {
+        const char *body_start = p.ch_ptr();
+        const char *body_end = body_start;
+
+        
+        
+        while (p.ch() != ';' && p.ch() != '*' && p.ch() != '\\0') {
+            
+            
+            if (!isspace(p.ch())) {
+                body_end = p.ch_ptr() + 1;
+            }
+
+            p.advance();
+        }
+
+        data_.body = std::string_view(body_start, body_end);
+    }
+
+    return true;
+}
+"""
+
+# Marlin's command letter, and its unknown command.
+MARLIN_PARSER_CPP = """\
+void GCodeParser::parse(char *p) {
+
+  reset(); 
+
+  
+  while (*p == ' ') ++p;
+
+  
+  if (*p == 'N' && NUMERIC_SIGNED(p[1])) {
+    #if ENABLED(FASTER_GCODE_PARSER)
+      
+    #endif
+    p += 2;                  
+    while (NUMERIC(*p)) ++p; 
+    while (*p == ' ')   ++p; 
+  }
+
+  
+  command_ptr = p;
+
+  
+  const char letter = *p++;
+
+  
+  char *starpos = strchr(p, '*');
+  if (starpos) {
+    --starpos;                          
+    while (*starpos == ' ') --starpos;  
+    starpos[1] = '\\0';
+  }
+
+  
+  
+  switch (letter) {
+
+    case 'G': case 'M': case 'T': case 'P':
+
+      
+      while (*p == ' ') p++;
+
+      #if HAS_MMU2()
+        if (letter == 'T') {
+          
+          if (*p == '?' || *p == 'x' || *p == 'c') {
+            command_letter = letter;
+            string_arg = p;
+            return;
+          }
+        }
+      #endif
+
+      
+      if (!NUMERIC(*p)) return;
+
+      
+      
+      command_letter = letter;
+
+      
+      codenum = 0;
+      do { codenum *= 10, codenum += *p++ - '0'; } while (NUMERIC(*p));
+
+      
+      #if USE_GCODE_SUBCODES
+      if (*p == '.') {
+        p++;
+        while (NUMERIC(*p))
+        subcode *= 10, subcode += *p++ - '0';
+      }
+      #endif
+
+      
+      while (*p == ' ') p++;
+
+      break;
+
+    default: return;
+  }
+
+  
+
+  #if DISABLED(FASTER_GCODE_PARSER)
+    command_args = p; 
+  #endif
+
+  
+  if (letter == 'M') switch (codenum) {
+    #if ENABLED(EXPECTED_PRINTER_CHECK)
+      
+      case 16:
+    #endif
+    case 23: case 28: case 30: case 117: case 118: case 973: case 928: string_arg = p; return;
+    default: break;
+  }
+
+  #if ENABLED(DEBUG_GCODE_PARSER)
+    
+    const bool debug = codenum == 800;
+  #endif
+
+  
+  string_arg = nullptr;
+  while (const char code = *p++) {              
+    if (code == ';') {
+      
+      break;
+    }
+
+    
+    
+    if (code == '!' && letter == 'M' && codenum == 32) {
+      string_arg = p;                           
+      char * const lb = strchr(p, '#');         
+      if (lb) *lb = '\\0';                       
+      return;
+    }
+
+    
+    #if ENABLED(FASTER_GCODE_PARSER)
+      #define PARAM_TEST WITHIN(code, 'A', 'Z')
+    #else
+      #define PARAM_TEST true
+    #endif
+
+    if (PARAM_TEST) {
+
+      while (*p == ' ') p++;                    
+
+      const bool has_num = valid_float(p);
+
+      #if ENABLED(DEBUG_GCODE_PARSER)
+        
+        if (debug) {
+          SERIAL_ECHOPAIR("Got letter ", code, " at index ", (int)(p - command_ptr - 1));
+          if (has_num) SERIAL_ECHOPGM(" (has_num)");
+        }
+      #endif
+
+      if (!has_num && !string_arg) {            
+        string_arg = p - 1;
+        #if ENABLED(DEBUG_GCODE_PARSER)
+          
+          if (debug) SERIAL_ECHOPAIR(" string_arg: ", hex_address((void*)string_arg)); 
+        #endif
+      }
+
+      #if ENABLED(DEBUG_GCODE_PARSER)
+        
+        if (debug) SERIAL_EOL();
+      #endif
+
+      #if ENABLED(FASTER_GCODE_PARSER)
+        set(code, has_num ? p : nullptr);       
+      #endif
+    }
+    else if (!string_arg) {                     
+      string_arg = p - 1;
+      #if ENABLED(DEBUG_GCODE_PARSER)
+        
+        if (debug) SERIAL_ECHOPAIR(" string_arg: ", hex_address((void*)string_arg)); 
+      #endif
+    }
+
+    if (!WITHIN(*p, 'A', 'Z')) {                
+      while (*p && DECIMAL_SIGNED(*p)) p++;     
+      while (*p == ' ') p++;                    
+    }
+  }
+}
+
+void GCodeParser::unknown_command_error() {
+  SERIAL_ECHO_START();
+  SERIAL_ECHOLNPAIR(MSG_UNKNOWN_COMMAND, command_ptr, "\\"");
+}
+"""
+
+# A color parameter.
+COLOR_CPP = """\
+std::optional<Color> Color::from_string(const std::string_view &str) {
+    if (str.size() == 0) {
+        return std::nullopt;
+    }
+
+    if (Color c; str.starts_with('#') && from_chars_light(str.begin() + 1, str.end(), c.raw, 16).ec == std::errc {}) {
+        c._unused = 0;
+        return c;
+    }
+
+    
+    for (const ColorPreset &c : color_presets) {
+        if (str == c.name) {
+            return c.color;
+        }
+    }
+
+    
+    if (Color c; from_chars_light(str.begin(), str.end(), c.raw).ec == std::errc {}) {
+        c._unused = 0;
+        return c;
+    }
+
+    return std::nullopt;
+}
+"""  # noqa: E501 (verbatim firmware lines)
+
+# A UUID parameter.
+UUID_CONSTEXPR_HPP = """\
+constexpr std::optional<UUID> UUID::from_string_constexpr(std::string_view str) {
+    UUID result {};
+    uint8_t halfbyte_pos = 0;
+
+    for (char c : str) {
+        
+        if (c == '-') {
+            continue;
+        }
+
+        if (halfbyte_pos >= size_bytes * 2) {
+            return std::nullopt;
+        }
+
+        uint8_t halfbyte_val;
+        if (c >= '0' && c <= '9') {
+            halfbyte_val = c - '0';
+        } else if (c >= 'a' && c <= 'f') {
+            halfbyte_val = c - 'a' + 10;
+        } else if (c >= 'A' && c <= 'F') {
+            halfbyte_val = c - 'A' + 10;
+        } else {
+            return std::nullopt;
+        }
+
+        auto &result_byte = result.bytes[halfbyte_pos / 2];
+        result_byte = (result_byte << 4) | std::byte(halfbyte_val);
+        halfbyte_pos++;
+    }
+
+    if (halfbyte_pos != size_bytes * 2) {
+        return std::nullopt;
+    }
+
+    return result;
+}
+"""
+
+# The length of a UUID's text.
+UUID_HPP = """\
+static constexpr size_t string_length = size_bytes * 2 + 4;
+"""
+
+# Loading a type into a tool.
+STORE_DEFINITION_CPP = """\
+FilamentType CurrentStore::set_filament_type(VirtualToolIndex virtual_tool, FilamentType value) {
+    if (value == PendingAdHocFilamentType {}) {
+        const FilamentType new_value = AdHocFilamentType { virtual_tool };
+        new_value.set_parameters(value.parameters());
+
+#if HAS_ANFC()
+        value.modify_parameters([](FilamentTypeParameters &p) {
+            
+            p.openprinttag_uid_hash = buddy::openprinttag::ToolTag::no_tag_hash;
+        });
+#endif
+
+        value = new_value;
+    }
+
+    if (value == FilamentType::none) {
+#if HAS_AUTO_RETRACT()
+        
+        buddy::auto_retract().set_retracted_distance(virtual_tool.to_physical(), std::nullopt);
+#endif
+
+        loaded_filament_is_previous.apply([&](auto &item) {
+            item.set(virtual_tool.to_raw(), true);
+        });
+    } else {
+        loaded_filament_type.set(virtual_tool.to_raw(), value);
+        loaded_filament_is_previous.apply([&](auto &item) {
+            item.set(virtual_tool.to_raw(), false);
+        });
+    }
+
+    return value;
+}
+"""
 
 FILES = {
     read.MODELS_FILE: MODELS_HPP,
@@ -5357,6 +6282,16 @@ FILES = {
     "src/common/print_utils.cpp": PRINT_UTILS_CPP,
     "src/marlin_stubs/pause/M701_2.cpp": M701_2_CPP,
     "src/common/filament.cpp": FILAMENT_CPP,
+    "src/marlin_stubs/M865.cpp": M865_CPP,
+    "src/common/filament_common.cpp": FILAMENT_COMMON_CPP,
+    "src/common/gcode/gcode_parser.cpp": GCODE_PARSER_CPP,
+    "src/common/gcode/gcode_parser_helper.cpp": GCODE_PARSER_HELPER_CPP,
+    "src/common/gcode/gcode_basic_parser.cpp": GCODE_BASIC_PARSER_CPP,
+    "lib/Marlin/Marlin/src/gcode/parser.cpp": MARLIN_PARSER_CPP,
+    "src/common/utils/color.cpp": COLOR_CPP,
+    "src/module/utils/uuid/include/uuid/uuid_constexpr.hpp": UUID_CONSTEXPR_HPP,
+    "src/module/utils/uuid/include/uuid/uuid.hpp": UUID_HPP,
+    "src/persistent_stores/store_instances/config_store/store_definition.cpp": STORE_DEFINITION_CPP,
 }
 
 

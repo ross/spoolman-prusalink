@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 
 import pytest
 
@@ -790,20 +791,95 @@ def test_the_bridge_default_job_asks_nothing_on_the_models_it_writes_to():
         assert p.state is State.PRINTING and p.job.phase is JobPhase.RUN, code
 
 
-def test_parse_error_holds_and_tap_through_stops():
+def finish_sync(sim, p, body):
+    """Run a sync job of `body` after the model checks to its end, which is always
+    `FINISHED`: no line the firmware can't run stops a print."""
+    run_sync(sim, p, sliced(p, body + "M117 done\n"))
+    sim.tick(4)
+    assert p.state is State.FINISHED and p.job is None
+    assert p.message == "done"  # the lines after it still ran
+
+
+def test_a_name_too_long_is_skipped_and_the_rest_of_the_line_loads():
+    # `R` cleared the name, and N doesn't fit the 7-byte buffer, so the type has none.
     sim, p = make()
-    run_sync(sim, p, sliced(p, 'M865 X N"WAYTOOLONG" L0\n'))
-    assert p.state is State.ATTENTION and str(p.job.attention).startswith("parse error: line 4")
-    p.tap_through()
-    sim.tick(2)
-    assert p.state is State.STOPPED
+    finish_sync(sim, p, 'M865 X R N"WAYTOOLONG" T230 B85 O"#186bb5" L0\n')
+    assert tool0(p).material == Material("", "#186bb5", nozzle=230, preheat=170, bed=85)
+    assert prusalink.filament(p)["tools"][0]["material"]["name"] == ""
+    # Without `R`, the type keeps the name it had.
+    sim, p = make()
+    finish_sync(sim, p, 'M865 X N"WAYTOOLONG" T230 L0\n')
+    assert tool0(p).material.name == "PLA" and tool0(p).material.nozzle == 230
 
 
-def test_m865_on_missing_tool_is_a_parse_error():
+@pytest.mark.parametrize(
+    "line",
+    [
+        'M865 X R N"P L A" T230 L0',  # a character outside a-zA-Z0-9_-
+        'M865 X R N"" T230 L0',  # an empty name
+        "M865 X R N T230 L0",  # no value: an empty name
+        'M865 X R N"---" T230 L0',
+        'M865 S"PETG" N"MINE" L0',  # a preset takes no name
+        'M865 I1 N"MINE" L0',  # nor does an empty slot's type
+        'M865 S"NOSUCH" L0',  # a preset the build lacks
+        'M865 N"PETG" T230 L0',  # no type picked
+        "M865 I9 L0",  # I past the slots, and no other type picked
+        'M865 X R N"PETG L0',  # unterminated quotes: the line doesn't parse
+        'M865 X R N"PETG" T230 L0 L0',  # a parameter given twice
+        'M865 X R n"PETG" L0',  # a lowercase parameter letter
+        'm865 X R N"PETG" L0',  # a lowercase command: an unknown command
+        "M999 X",  # unknown in a job: Marlin prints "Unknown command"
+        "hello",
+    ],
+)
+def test_a_line_the_firmware_does_not_run_stores_nothing(line):
+    sim, p = make()
+    before = tool0(p).material
+    finish_sync(sim, p, line + "\n")
+    assert tool0(p).material == before and tool0(p).unload_count == 0
+
+
+@pytest.mark.parametrize(
+    ("line", "temperatures"),
+    [
+        ("M865 X R T40000 P-5 B300 L0", (215, -5, 44)),  # B is stored in a byte
+        ('M865 X R T"hot" B"" P180 L0', (215, 180, 60)),
+        ("M865 X R T230.5 B85 L0", (230, 170, 85)),  # read up to the point
+    ],
+)
+def test_a_temperature_out_of_its_range_is_skipped(line, temperatures):
+    sim, p = make()
+    finish_sync(sim, p, line + "\n")
+    assert tool0(p).material.temperatures() == temperatures
+
+
+def test_an_unknown_parameter_is_never_read():
+    sim, p = make()
+    finish_sync(sim, p, 'M865 X R N"PETG" Q5 K"x" T230 L0\n')
+    assert tool0(p).material == Material("PETG", nozzle=230, preheat=170, bed=60)
+
+
+def test_a_preset_loads_with_its_parameters_ignored():
+    sim, p = make()
+    finish_sync(sim, p, 'M865 S"PETG" T300 O"#ffffff" L0\n')
+    assert tool0(p).material == Material("PETG", adhoc=False, **p.model.preset_temperatures("PETG"))
+
+
+def test_m865_for_a_tool_the_build_lacks_loads_nothing():
     # The iX build has no MMU, so one tool. An MMU build takes L0 to L4 (F22).
-    sim, p = make("4.1.0")
-    run_sync(sim, p, sliced(p, 'M865 X R N"PLA" L3\n'))
-    assert str(p.job.attention).startswith("parse error")
+    sim, p = make("4.1.0", [loaded(0, PETG)])
+    before = tool0(p).material
+    finish_sync(sim, p, 'M865 X R N"PETG" L3\nM865 I0 L3\nM865 I3 L0\n')
+    assert list(p.tools) == [0] and tool0(p).material == before
+
+
+def test_m865_1_values_that_do_not_read_change_nothing():
+    sim, p = make()
+    before = tool0(p).material
+    finish_sync(sim, p, 'M865.1 I0 C"not-a-uuid"\nM865.1 C"8b6a3e3e-3f6c-4d7b-9a43-6c1f0e7d2a11"\n')
+    assert tool0(p).material == before
+    finish_sync(sim, p, 'M865.1 I0 C""\n')  # an empty value clears the UUID
+    assert tool0(p).material == replace(before, instance_uuid=None)
 
 
 def test_m865_writes_disabled_and_unconfigured_tools():
@@ -814,8 +890,8 @@ def test_m865_writes_disabled_and_unconfigured_tools():
     assert p.tools[5].material.name == "ASA" and not p.tools[5].enabled
     assert [t["index"] for t in prusalink.filament(p)["tools"]] == [0]
     sim, p = make("8.10.0", [loaded(0, PETG)])
-    run_sync(sim, p, sliced(p, 'M865 X R N"PLA" L8\n'))
-    assert str(p.job.attention).startswith("parse error")
+    finish_sync(sim, p, 'M865 X R N"PLA" L8\n')
+    assert list(p.tools) == [0]
 
 
 def test_stuck_write_ignores_m865():

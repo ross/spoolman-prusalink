@@ -204,7 +204,6 @@ class Reason(StrEnum):
     # tool empty asks to turn the sensors off, then a used tool of another type asks too.
     SENSORS_OFF = "filament sensors off"
     MAPPING_TYPE = "wrong filament type"
-    PARSE_ERROR = "parse error"  # a sync job's G-code can't run
     JAM = "jam"
     RUNOUT = "runout"
     COLOR_CHANGE = "color change"
@@ -224,7 +223,6 @@ PHASE_REASONS = {
             Reason.SENSORS_OFF,
             Reason.MAPPING_TYPE,
             Reason.MMU_LOADED,
-            Reason.PARSE_ERROR,
             Reason.JAM,
         }
     ),
@@ -243,9 +241,9 @@ PREVIEW_QUESTIONS = MAPPING_QUESTIONS | {Reason.PREVIEW, Reason.WRONG_FILAMENT, 
 
 @dataclass(frozen=True)
 class Attention:
-    """What the screen asks the user, with the tool it names, or the text of a parse error
-    or of the preview's failed checks. A fatal preview question offers only Abort. The
-    tools-mapping screen can have no failed checks, and then no text."""
+    """What the screen asks the user, with the tool it names, or the text of the preview's
+    failed checks. A fatal preview question offers only Abort. The tools-mapping screen can
+    have no failed checks, and then no text."""
 
     reason: Reason
     tool: int | None = None
@@ -261,8 +259,6 @@ class Attention:
             case reason if reason in PREVIEW_QUESTIONS:
                 detail = self.detail or "nothing wrong"
                 return f"{self.reason}{' (abort only)' if self.fatal else ''}: {detail}"
-            case Reason.PARSE_ERROR:
-                return f"parse error: {self.detail}"
             case Reason.NO_FILAMENT:
                 return f"no filament in tool {self.tool}"
             case Reason.COLD_BED:
@@ -2112,8 +2108,8 @@ class SimPrinter:
         self._show_state()
 
     def tap_through(self) -> None:
-        """Answer the screen's question: Print or Ok at the preview, No at the MMU's unload
-        question, which prints with the filament where it is, or abort on a parse error."""
+        """Answer the screen's question: Print or Ok at the preview, or No at the MMU's unload
+        question, which prints with the filament where it is."""
         self._check_tap_through()
         job = self.job
         self._log("action", f"tap through: {job.attention}")
@@ -2129,10 +2125,8 @@ class SimPrinter:
                 self._wait(job, following[0])
             else:
                 self._begin(job)
-        elif any(job.waits_for(r) for r in PREVIEW_QUESTIONS):
-            self._begin(job)
         else:
-            self._park(job, State.STOPPED)
+            self._begin(job)
 
     def unload_first(self) -> None:
         """Answer Yes at the MMU's unload question: `M702 W0`, which unloads into the MMU,
@@ -3281,24 +3275,8 @@ class SimPrinter:
     # The sync job.
 
     def _run_sync(self, job: SyncJob) -> None:
-        try:
-            commands = gcode.parse(job.gcode)
-        except gcode.GcodeError as e:
-            self._hold(job, str(e))
-            return
-        problem = sync.tool_problem(self, commands)
-        if problem:
-            self._hold(job, problem)
-            return
-        self._run_commands(job, commands)
-
-    def _hold(self, job: SyncJob, problem: str) -> None:
-        job.enter(JobPhase.HOLD, Attention(Reason.PARSE_ERROR, detail=problem))
-        self._log("job", f"job {job.id} stopped: {job.attention}")
-        self._show_state()
-
-    def _run_commands(self, job: SyncJob, commands: list[gcode.Command]) -> None:
-        sync.apply(self, commands)
+        # No line stops the job: one the firmware can't run does nothing (`sync.py`).
+        sync.apply(self, gcode.parse(job.gcode))
         job.enter(JobPhase.RUN)
         job.remaining = job.run_seconds = self.settings.sync_job_seconds
         self._show_state()

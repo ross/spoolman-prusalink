@@ -109,13 +109,6 @@ def preview_fatal():
     return sim, p
 
 
-def parse_error():
-    sim, p = make()
-    p.upload("x.gcode", sliced(p, 'M865 L9 N"PLA"\n'), print_after=True, overwrite=False)
-    run(sim, 1)
-    return sim, p
-
-
 def finished():
     sim, p = make()
     p.start_print(one_segment(5, preheat_s=0))
@@ -377,7 +370,6 @@ SITUATIONS = [
     jam_held,
     preview_question,
     preview_fatal,
-    parse_error,
     finished,
     off,
     off_mid_print,

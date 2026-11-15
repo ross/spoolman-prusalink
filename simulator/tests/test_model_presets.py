@@ -31,7 +31,7 @@ def test_a_menu_load_reports_the_builds_preset(code, name, temps):
 @pytest.mark.parametrize(("code", "name", "temps"), CASES)
 def test_a_preset_write_reports_the_builds_preset(code, name, temps):
     sim, p = make(code)
-    sync.apply(p, gcode.parse(f'M865 N"{name}" L0'))
+    sync.apply(p, gcode.parse(f'M865 S"{name}" L0'))
     assert tool0(p).material.name == name and temperatures(p) == temps
 
 
@@ -44,11 +44,11 @@ def test_a_preset_the_build_lacks():
         p.load(0, source="preset", name="PPS")
     p.load(0, source="preset", name="PLA")
     sim.tick(300.0)
-    # The firmware's preset form, `M865 S"PPS"`, doesn't parse there: it prints an error and
-    # stores nothing. `N"PPS"` with no `X` is the simulator's spelling of that form.
-    sync.apply(p, gcode.parse('M865 N"PPS" L0'))
+    # `M865 S"PPS"` doesn't read there (`FilamentType::from_name`), so no type is picked: it
+    # prints an error and stores nothing.
+    sync.apply(p, gcode.parse('M865 S"PPS" L0'))
     assert tool0(p).material == Material("PLA", adhoc=False, nozzle=215, preheat=170, bed=60)
-    assert sim.events[-1].text == "M865 L0 failed: MK4S has no PPS preset"
+    assert sim.events[-1].text == "M865 failed: Filament type invalid or not specified."
     # An ad-hoc type can take the name, starting from the reset defaults.
     sync.apply(p, gcode.parse('M865 X R N"PPS" T320 B105 L0'))
     assert tool0(p).material == Material("PPS", nozzle=320, preheat=170, bed=105)

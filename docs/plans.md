@@ -232,7 +232,8 @@ bridge starts sending is visible at once. Lines it honors:
 - `G28 O`: no effect; the page notes "homed".
 - `M865 X R N"<name>" T<n> B<n> P<n> C<n> D<n> E<n> F1 G1 O"#rrggbb" L<tool>`:
   writes tool `L`'s ad-hoc slot: name (1 to 7 characters from
-  `a-zA-Z0-9_-`, else the job fails), color, and temperatures: the
+  `a-zA-Z0-9_-`; F10 in printer-behaviors.md says what another name does),
+  color, and temperatures: the
   filament endpoint reports nozzle, preheat and bed, and the rest are for
   display. `R`
   clears everything first, including the UUID, as the firmware does.
@@ -242,7 +243,8 @@ bridge starts sending is visible at once. Lines it honors:
   Dropped elsewhere.
 - `M117 <text>`: stored as the last message and shown on the page.
 
-A parse error fails the job in `ATTENTION` with the offending line.
+No line stops the job: one the firmware can't run does what it reads, or
+nothing, as in the firmware, and the job ends `FINISHED`.
 
 ## Architecture
 
