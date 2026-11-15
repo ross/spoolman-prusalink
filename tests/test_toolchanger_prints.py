@@ -168,6 +168,39 @@ async def test_a_load_on_an_idle_empty_tool_right_after_a_print_is_charged(tmp_p
     await bridge.aclose()
 
 
+async def test_an_idle_empty_tool_has_no_tail_after_a_power_panic_resume(tmp_path, caplog):
+    """The first poll after a power cut lands once the resume prints on T0. T1, empty, reads
+    0 since the boot and printed nothing, so a menu load of T1 right after the print is
+    held until the type appears and charged in full to T1's spool, and nothing warns."""
+    caplog.set_level(logging.WARNING, logger="spoolman_prusalink")
+    tools = [SimTool.loaded_with(0, PLA, extruded=1000.0), SimTool(1, extruded=500.0)]
+    bridge, fake, station = indx(tmp_path, tools)
+    printer = station.printer
+    await bridge.poll()  # the baseline
+    station.begin_print(PrintSpec([Segment(0, 300)], duration_s=20))
+    printer.tap_through()  # Print
+    await station.run_until(lambda: station.counter_at(0) > 1000)
+    await bridge.poll()
+    station.advance(1)
+    await bridge.poll()
+    printer.set_power("off")
+    printer.set_power("on", resume=True)
+    station.tick_until(lambda: printer.state is State.PRINTING and printer.job is not None)
+    await bridge.poll()
+    assert bridge.printers[0].tools[1].printed_empty is False
+    mark = len(ledger(tmp_path))
+
+    await station.run_until(lambda: printer.job is None, poll_every=0.3, limit=120)
+    start = station.counter_at(1)
+    await station.swap_cycle(poll_every=0.1, tool=1, source="preset", name="PLA")
+    await bridge.poll()
+    records = ledger(tmp_path)[mark:]
+    assert [r for r in records if r.get("event") == "lost_empty"] == []
+    assert totals(fake)[2] == station.counter_at(1) - start
+    assert levels(caplog, HINT) == []
+    await bridge.aclose()
+
+
 async def test_a_tool_emptied_by_hand_while_docked_counts_no_unload(tmp_path):
     """BF12, pinned as the bridge behaves today: a finished print leaves no INDX tool
     picked, so a docked tool emptied by hand keeps its type and counts no unload, at the

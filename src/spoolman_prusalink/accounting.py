@@ -918,10 +918,10 @@ class _Poll:
         """This tool's own counter moved since the last poll.
 
         `printing` is the printer's, so it's true for every tool: only a tool whose own
-        counter moved printed. Across a reboot the counters aren't comparable, and
-        anything counted since the boot is new.
+        counter moved printed. Across a reboot the counters aren't comparable, so only
+        what the tool counted since the boot, from 0, is new.
         """
-        return self.rebooted or self.reading.extruded > self.last.extruded
+        return self.reading.extruded > (0 if self.rebooted else self.last.extruded)
 
     def printed_empty(self) -> bool:
         """A user's print is running with no material reported on this tool, and the

@@ -271,6 +271,16 @@ def test_the_tail_flag_needs_the_tool_to_count_in_the_print():
     assert res.events == [ev.LostEmpty(20)] and not res.state.printed_empty
 
 
+def test_a_reboot_poll_sets_the_tail_flag_only_if_the_tool_counted_since_the_boot():
+    # A power-panic resume first polled while it prints: the counters restart at 0, so a
+    # tool the print doesn't use reads 0 and printed nothing.
+    _, _, state = run([(BOOT, r(100), loc(7)), (BOOT, r(100, material=None), loc(7), 42, True)])
+    res = account(state, 222, r(0, material=None), loc(7), 42, printing=True)
+    assert not res.state.printed_empty
+    res = account(state, 222, r(15, material=None), loc(7), 42, printing=True)
+    assert res.state.printed_empty
+
+
 def test_the_tail_flag_is_set_and_kept_by_an_ambiguous_poll():
     # A skipped poll that's still printing on the empty tool sets the flag when the tool
     # counted, and its usage, held by the skip, goes with the tail.
