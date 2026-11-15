@@ -701,21 +701,24 @@ written.
   by that test, by
   `test_a_change_on_a_tool_the_print_has_not_used_follows_p3` there with
   no Spoolman change, and by `test_a_runout_in_the_preheat_follows_p2` in
-  `tests/test_print_start.py`, with a poll in the preheat and without.
+  `tests/test_print_start.py`, with a poll in the preheat.
 - **Scenario rows**: T10, P2, P3, P8, Q4, S13.
 - **To reproduce**: Before the fix, those tests. For the single-tool path,
   start a print with a preheat on a Core One L through the unit harness,
   with the tool not auto-retracted (the harness's starting state, or
   `auto_retract` off), poll during the preheat, `runout(0)`, and poll.
-- **Status**: Fixed (D5 in bridge-fixes.md). An unload in a pending job
-  starts the print without the start's effects, and so does an unload at
-  the poll that first sees a job, when the tool is empty after it. The
+- **Status**: Fixed (D5 in bridge-fixes.md). An unload in a job a poll
+  already saw pending starts the print without the start's effects. The
   swap the unload opens stays open, as P2 and P3 say, and the unload is a
   mid-print one: the runout flag (M5a) and the tag rules (Q10, Q11) treat
   it as a runout. A side effect: an idle sensor clear while a
-  toolchanger's tools-mapping screen shows a job, and an idle unload
-  followed by a print started on the emptied tool before the next poll,
-  count as runouts too (Q8).
+  toolchanger's tools-mapping screen shows a job counts as a runout too
+  (Q8). The remaining limit: a runout before any poll has seen the job
+  is treated as a swap before the print, since an idle unload followed by
+  a print started on the emptied tool looks the same and is far more
+  common. `test_a_runout_before_any_poll_saw_the_job_is_a_swap_before_the_print`
+  and `test_an_idle_unload_then_a_print_on_the_empty_tool_is_a_swap_before_it`
+  in `tests/test_print_start.py` show both.
 
 ## Multi-tool
 

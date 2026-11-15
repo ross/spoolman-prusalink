@@ -30,7 +30,7 @@ update the workstreams it changes.
 | D2 | Does stage 1 ship alone, merged and deployed to the Core One L before stage 2 or 4 work merges? | Yes. Workstream 7 can be built at the same time, but it merges after workstreams 2 and 3, which change the same code in `app.py` and `printer_sync.py`. | Merging workstreams 7 and 9. |
 | D3 | How does BF26 get fixed: a positive `sync_delay` default, a guard in the bridge after a boot that interrupted a print, or wait for the F12 trace? | Decided: a positive `sync_delay` default, 30 s, and the idle clock starts again at each new `boot_id`. No guard. The code holds a write while the printer has been idle for less than `sync_delay`, and a new `PrinterBridge`, a failed read or a new boot starts that clock again at that poll, so the first idle poll after a boot only starts it, and the write runs one idle poll later. That covers a bridge that restarts in the window, and a second cut during the resume, whose window a poll can reach `poll_idle` after one in the first window. What it misses: a config that sets `sync_delay = 0`, and a window that outlasts a poll, which the F12 trace checks. What it costs: every write waits one more idle poll, up to 60 s by default. | Workstream 1. |
 | D4 | Keep `gcode_preamble`, or remove it? | Answered: remove it. Its only effects found were BF2, BF3 and BF4, and the default preamble passes every check on every model the bridge writes to. Pre-release, there's no compatibility to keep. | Workstream 3, and the INDX lock line in workstream 7. |
-| D5 | Amend Q4 so that a ramming or a load isn't a print's first extrusion? | Answered: yes, with a threshold. A pending job starts once the tool's counter has risen more than 23 mm, the auto-retract ramming's commanded length, past where the bridge first saw the job. A rise at two polls was rejected: the ramming counts in two moves that two polls can split. A load between the job's first sight and its first extrusion takes the starting point again, and an unload in a pending job starts it without the start's effects. That unload counts as a mid-print unload, with P2's runout flag and tag handling. Q4's intent, that a cancelled print changes nothing, holds. | Nothing. |
+| D5 | Amend Q4 so that a ramming or a load isn't a print's first extrusion? | Answered: yes, with a threshold. A pending job starts once the tool's counter has risen more than 23 mm, the auto-retract ramming's commanded length, past where the bridge first saw the job. A rise at two polls was rejected: the ramming counts in two moves that two polls can split. A load between the job's first sight and its first extrusion takes the starting point again, and an unload in a job a poll already saw pending starts it without the start's effects. That unload counts as a mid-print unload, with P2's runout flag and tag handling. An unload first seen with the job is a swap before the print. Q4's intent, that a cancelled print changes nothing, holds. | Nothing. |
 | D6 | Amend C7: usage counted on a tool with no filament while a user's print runs is reported lost, not charged to the next spool? | Answered: yes. That filament came from no spool, so it's reported lost. The hold during a load, which S1 and S2 rely on, stays as it is. | Nothing. |
 | D7 | BF9: accept and document the auto-retract's count, or correct it in the bridge? | Wait for the F3 and F5 traces (sittings A and B), then accept and document it if they show about 28.5 mm per auto-retract. A correction needs the auto-retract setting and the filament's flexibility, which the bridge can't read, and the error is about 0.09 g each time. | Workstream 6. |
 | D8 | MMU3 printers, which you'll never own: fix the findings, detect the MMU and refuse it, or document it? | Detect it from `/api/v1/info`'s `mmu`, and while it's on, charge nothing and write nothing, logged once, as for a printer with no counters. BF16 alone over-charges about 0.63 g per tool change, so a multi-color print's charges are far off, and BF15 and BF17 have no fix the bridge can see. The middle option, writes off and charging on with the errors documented, is cheaper still and keeps those errors. | Workstream 9. |
@@ -259,12 +259,16 @@ medium is a new input or condition through `account()` or
   - For BF27: an unload in a job that's still pending promotes the job to
     started, without the start's effects. The unload already supersedes
     the open swap and commits any staging, so the swap it opens stays
-    open, as P2 and P3 say for a started print. A job first seen at the
-    poll of an unload, with the tool empty after it, is promoted too: a
-    runout in the preheat that no poll saw pending. The promoted unload
-    is a mid-print unload: it gets P2's runout flag, and its tag is
-    handled as a runout's (Q10, Q11). So does an idle sensor clear while
-    the tools-mapping screen shows a job.
+    open, as P2 and P3 say for a started print. The promoted unload is a
+    mid-print unload: it gets P2's runout flag, and its tag is handled as
+    a runout's (Q10, Q11). So does an idle sensor clear while the
+    tools-mapping screen shows a job, which is pending there. An unload at
+    the poll that first sees a job isn't promoted: an idle unload followed
+    by a print started on the emptied tool, an ordinary swap, looks the
+    same. The remaining limit: a runout before any poll has seen the job
+    is treated as a swap before the print. The job is pending on the
+    empty tool, and with no Spoolman change the print's start closes the
+    swap as assumed.
 - **Needs**: The F28 trace (sitting D) confirms BF23 on the printer, and
   F26 and F5 (sittings A and B) the size of a ramming. If a trace
   disagrees, the simulator changes first, then the fix.
@@ -277,8 +281,9 @@ medium is a new input or condition through `account()` or
   against `FIRST_EXTRUSION_MM`; a cancel that rams with an open swap; a
   preview load then a declined type; a preview load then a cancel in the
   preheat, with and without a poll during the load; and a runout in the
-  preheat, polled pending and first seen with the unload. None records
-  `swap_assumed`. The BF27 pin, now
+  preheat that a poll saw pending, which records no `swap_assumed`. A
+  runout no poll saw pending, and an idle unload before a print on the
+  emptied tool, are each a swap before the print. The BF27 pin, now
   `test_a_change_on_a_tool_the_print_has_not_used_follows_p2` in
   `tests/test_toolchanger_prints.py`, flipped with the threshold, since
   INDX's ramming counts 16 mm, and

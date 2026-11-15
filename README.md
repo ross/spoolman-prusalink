@@ -230,8 +230,11 @@ print but doesn't close a swap: the swap the unload opens stays open, as for
 any runout during a print. It also counts as a runout for the flag on a
 spool with plenty left (see [Charging and flags](#charging-and-flags)). So
 does a toolchanger's idle sensor clear while its tools-mapping screen shows
-a job, and an unload followed by a print started on the emptied tool before
-the next poll.
+a job. This needs a poll to have seen the job before the unload: an unload
+the bridge first sees together with the job is a swap before the print, as
+when you unload, start a print and load at the preview. So a runout before
+any poll has seen the job is treated as a swap too, and with no Spoolman
+change the print's start assumes you reloaded the same spool.
 
 You can also move the old spool out of the location before moving the new
 one in. While the location is empty, the bridge holds usage, even during a

@@ -722,13 +722,30 @@ def test_an_unload_in_a_pending_job_on_an_empty_tool_clears_it():
     )
 
 
-def test_an_unload_at_a_jobs_first_sight_with_the_tool_empty_starts_it():
-    # A runout in the preheat that no poll saw pending: the job and the unload are seen
-    # together, and the tool is empty after it.
+def test_an_unload_at_a_jobs_first_sight_is_a_swap_before_the_print():
+    # The job and an unload seen together, the tool empty after it: an idle unload and a
+    # print started on the emptied tool, or a runout in the preheat that no poll saw
+    # pending. They look the same, and the first is far more common, so it's a swap
+    # before the print: no runout, the job pending on an empty tool, the reload's count
+    # not a start, and the print's start closing the swap as assumed.
     _, _, state = run([(BOOT, r(100), loc(7))])
     res = account(state, BOOT, r(107, material=None, unloads=1, at_unload=107), loc(7), 42)
-    assert res.runout == 7 and EventKind.SWAP_ASSUMED not in [e.kind for e in res.events]
-    assert (res.state.job_id, res.state.pending_job, res.state.swap) == (42, None, SwapFlag(7))
+    assert res.runout is None
+    assert (res.state.job_id, res.state.pending_job, res.state.pending_empty) == (
+        None,
+        42,
+        True,
+    )
+    assert res.state.swap == SwapFlag(7)
+    res = account(res.state, BOOT, r(167, unloads=1, at_unload=107), loc(7), 42)
+    assert (res.state.job_id, res.state.pending_at, res.state.pending_empty) == (
+        None,
+        167,
+        False,
+    )
+    res = account(res.state, BOOT, r(197, unloads=1, at_unload=107), loc(7), 42)
+    assert EventKind.SWAP_ASSUMED in [e.kind for e in res.events]
+    assert res.state.job_id == 42 and res.state.provisional == Provisional(7, 90, 42)
 
 
 def test_an_unload_and_a_load_before_a_jobs_first_sight_leave_it_pending():

@@ -298,9 +298,9 @@ class Result:
     # and any reboot are recorded.
     skipped: bool = False
     claimed: bool = False  # True when the claim passed in was handled.
-    # The spool that was in the tool when it unloaded during a print, started or pending
-    # (`_Poll.in_print`): a runout, a jam or tangle, or a planned color change, which all
-    # look the same.
+    # The spool that was in the tool when it unloaded during a print, started or seen
+    # pending at an earlier poll (`_Poll.in_print`): a runout, a jam or tangle, or a planned
+    # color change, which all look the same.
     runout: int | None = None
     # True when the active spool changed or the tool unloaded, so what the printer
     # shows for the tool may no longer be the active spool's. A menu load drops the
@@ -870,15 +870,14 @@ class _Poll:
     def in_print(self) -> bool:
         """Whether an unload at this poll is one during a print.
 
-        It is in a job that started, and in one that's pending: an unload before the
-        print's first extrusion starts the print (see `print_start`). So is an unload at
-        the poll that first sees a job, when the tool is empty after it: a runout in the
-        preheat that no poll saw pending.
+        It is in a job that started, and in one a poll already saw pending: an unload
+        before the print's first extrusion starts the print (see `print_start`). An unload
+        at the poll that first sees a job isn't: an idle unload followed by a print started
+        on the emptied tool looks the same as a runout in the preheat, and is far more
+        common, so both are a swap before the print.
         """
         job_id, last = self.job_id, self.last
-        return job_id is not None and (
-            job_id in (last.job_id, last.pending_job) or self.reading.material is None
-        )
+        return job_id is not None and job_id in (last.job_id, last.pending_job)
 
     def print_start(self) -> None:
         """4. A print starting closes the confirmation window.
