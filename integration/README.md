@@ -196,6 +196,7 @@ end Status.
 | W1 | `test_writes.py::test_w1_uuid_mint_fails` | Storing a minted UUID fails: logged once, and B's write waits for its UUID (W1). |
 | W1 | `test_writes.py::test_w1_uuid_minted_once_spoolman_takes_it` | Storing a minted UUID fails, then works: B gets a UUID and the printer shows it (W1). |
 | W1 | `test_writes.py::test_w1_write_after_swap` | Menu load after a Spoolman-first swap: the bridge writes name, color and UUID. |
+| W2 | `test_writes.py::test_w2_write_waits_out_the_power_panic_window` | Default sync_delay: a write waits out a power cut's idle window, and the print resumes. |
 | W2 | `test_writes.py::test_w2_write_waits_while_printing` | Write due when a print starts: nothing is written until the print ends. |
 | W3 | `test_writes.py::test_w3_print_started_before_the_upload` | A print starts between the poll's read and the upload: nothing is uploaded until idle. |
 | W3 | `test_writes.py::test_w3_upload_refused_busy` | Upload refused with 409 when a print starts mid-poll: the next idle poll writes. |
