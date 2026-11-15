@@ -670,7 +670,10 @@ written.
   out does the same. It's logged once when it starts and once when it
   ends. The README, under "How usage is attributed", says the same. Only a
   new firmware reading of the sensors setting would let the bridge see the
-  setting itself and the swaps it hides.
+  setting itself and the swaps it hides. The fork now serves that reading:
+  `sensors_enabled` in `/api/v1/filament`, from `2ef028181` (F47 in
+  printer-behaviors.md), which the simulator serves too. The bridge
+  doesn't use it yet.
 
 ### BF27. A filament change before a tool's first extrusion in a print looks like its print start
 
@@ -781,7 +784,11 @@ written.
   is attributed", tells a toolchanger's user to unload from the menu or
   claim the new spool, and says that the next menu load, unload or pick of
   that tool counts the unload. Only a new firmware reading of each tool's
-  sensor state would let the bridge see the swap.
+  sensor state would let the bridge see the swap. The fork now serves that
+  reading: each tool's `filament_present` in `/api/v1/filament`, from
+  `2ef028181`, which reads a docked tool's own sensor (F48 in
+  printer-behaviors.md). The simulator serves it too. The bridge doesn't
+  use it yet.
 
 ### BF13. A spool join counts an unload in the middle of a print
 

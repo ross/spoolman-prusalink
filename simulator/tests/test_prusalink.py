@@ -252,7 +252,7 @@ async def test_no_counters_shape_over_http():
     p.set_firmware("no_counters")
     async with TestClient(TestServer(prusalink.make_app(sim, "p"))) as client:
         data = await (await client.get("/api/v1/filament", headers=AUTH)).json()
-    assert data == {"tools": [{"index": 0}]}
+    assert data == {"sensors_enabled": True, "tools": [{"index": 0, "filament_present": False}]}
 
 
 async def test_before_request_sees_each_request_and_may_change_the_printer():
@@ -376,14 +376,17 @@ async def test_transport_raises_when_the_printer_gives_no_answer():
 def test_filament_full():
     sim, p = make()
     tool0(p).extruded = 12.9
-    assert prusalink.filament(p) == {
+    data = prusalink.filament(p)
+    assert data == {
         "boot_id": p.boot_id,
+        "sensors_enabled": True,
         "tools": [
             {
                 "index": 0,
                 "extruded": 12,
                 "unload_count": 0,
                 "extruded_at_unload": 0,
+                "filament_present": True,
                 "material": {
                     "name": "PLA",
                     "nozzle_temperature": 215,
@@ -395,15 +398,30 @@ def test_filament_full():
             }
         ],
     }
+    # The renderer's order: the sensors setting before the tools, and the sensor's reading
+    # after the counters and before the material (`filament_renderer.cpp` at 2ef028181).
+    assert list(data) == ["boot_id", "sensors_enabled", "tools"]
+    assert list(data["tools"][0]) == [
+        "index",
+        "extruded",
+        "unload_count",
+        "extruded_at_unload",
+        "filament_present",
+        "material",
+    ]
 
 
 def test_filament_no_counters_and_no_endpoint():
     sim, p = make()
     p.set_firmware("no_counters")
+    # The sensor fields are written outside `HAS_FILAMENT_TRACKER()`, so the MINI and
+    # MK3.5 serve them too.
     assert prusalink.filament(p) == {
+        "sensors_enabled": True,
         "tools": [
             {
                 "index": 0,
+                "filament_present": True,
                 "material": {
                     "name": "PLA",
                     "nozzle_temperature": 215,
@@ -413,7 +431,7 @@ def test_filament_no_counters_and_no_endpoint():
                     "instance_uuid": PLA.instance_uuid,
                 },
             }
-        ]
+        ],
     }
     p.set_firmware(Firmware.NO_ENDPOINT)
     assert prusalink.filament(p) is None

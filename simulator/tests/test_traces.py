@@ -315,6 +315,15 @@ def f13_power_panic_cold(rec: Recorder) -> None:
     rec.advance(2.0)
 
 
+def f47_sensors_setting(rec: Recorder) -> None:
+    """The sensors turned off and on from the menu, filament loaded and idle."""
+    rec.advance(LEAD)
+    rec.printer.set_sensors(False)
+    rec.advance(3.0)
+    rec.printer.set_sensors(True)
+    rec.advance(2.0)
+
+
 REPLAYS: dict[str, Callable[[Recorder], None]] = {
     "F1-reboot": f1_reboot,
     "F2-unload": f2_unload,
@@ -331,6 +340,9 @@ REPLAYS: dict[str, Callable[[Recorder], None]] = {
     "F11-manual-extrude": f11_manual_extrude,
     "F12-power-panic": f12_power_panic,
     "F13-power-panic-cold": f13_power_panic_cold,
+    "F47-sensors-setting": f47_sensors_setting,
+    # A menu unload, then a menu load, as F3: the sensor's reading through both.
+    "F48-unload-load": f3_load_preset,
 }
 
 

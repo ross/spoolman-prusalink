@@ -32,6 +32,9 @@ class FeedSystem:
     # Whether an E move runs with no tool credited: it then counts nothing and leaves the
     # gap where it is. Elsewhere it can't run (`credited`).
     moves_without_tool: ClassVar[bool] = False
+    # Whether a tool's filament sensor is upstream of its extruder, so that an unload the
+    # sensor didn't trigger can leave the filament in it (`FilamentPath.left_at_sensor`).
+    upstream_sensor: ClassVar[bool] = False
 
     def maps_tools(self, p: SimPrinter) -> bool:
         """Whether the preview's tools-mapping screen applies (`HAS_TOOL_MAPPING`). A direct
@@ -192,6 +195,14 @@ class IndxToolchanger(Toolchanger):
     """INDX: tools picked from docks onto one head (`toolchanger_indx.cpp`)."""
 
     docks = True
+    # INDX has no extruder sensor: each tool's sensor is a side sensor on the xBuddy
+    # Extension (`filament_sensors_handler_INDX.cpp:5-22`), upstream of the tool. Its
+    # unload retracts only 55 mm (`FILAMENT_CHANGE_UNLOAD_LENGTH`,
+    # `Configuration_COREONEL_adv.h:620-621`), and with no extruder sensor it doesn't wait
+    # for the sensor to clear: users may leave the old filament in (`pause.cpp:1321-1328`).
+    # So the filament most likely rests in the side sensor afterwards. That's inferred,
+    # and a trace is to settle it (F48).
+    upstream_sensor = True
 
     def rest(self, p: SimPrinter) -> None:
         """Dock the picked tool, if one is picked: `tool_change(NoTool {}, dock_backoff)`

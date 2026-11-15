@@ -3693,6 +3693,47 @@ static void app_setup(void) {
 
 # The filament sensors' MMU setting, idle clear, switch-off and forced sensors.
 FILAMENT_SENSORS_HANDLER_CPP = """\
+void FilamentSensors::step() {
+    static bool old_state = false;
+    const bool new_state = marlin_vars().peek_fsm_states([](const auto &states) { return states.is_active(ClientFSM::Load_unload); });
+
+    if (old_state && !new_state) {
+        FSensors_instance().DecEvLock(); // ClientFSM::Load_unload destroy
+    }
+    if (!old_state && new_state) {
+        FSensors_instance().IncEvLock(); // ClientFSM::Load_unload create
+    }
+
+    old_state = new_state;
+
+    // Reconfigure logical sensors
+    reconfigure_sensors_if_needed(false);
+
+    // Update states of filament sensors
+    if (enable_state_update_pending) {
+        process_enable_state_update();
+        reconfigure_sensors_if_needed(true); // Have to be done due to autoload logical sensor on COREONE
+    }
+
+    // Run cycle to evaluate state of all sensors (even those not active)
+    for_all_sensors([](IFSensor &s, PhysicalToolIndex, bool) {
+        if (s.is_enabled()) {
+            s.cycle();
+        }
+
+        s.record_state();
+        s.check_for_events();
+    });
+
+    // Update logical sensors states
+    for (uint8_t i = 0; i < logical_filament_sensor_count; i++) {
+        IFSensor *fs = logical_sensors_.array[i];
+        logical_sensor_states_.array[i] = fs ? fs->get_state() : FilamentSensorState::Disabled;
+    }
+
+    process_events();
+}
+
 void FilamentSensors::reconfigure_sensors_if_needed(bool force) {
     const auto new_tool = stdext::get_optional<PhysicalToolIndex>(PhysicalToolIndex::currently_selected());
     const auto new_tool_index = new_tool ? new_tool->to_raw() : PhysicalToolIndex::count;
@@ -6382,6 +6423,26 @@ FilamentType CurrentStore::set_filament_type(VirtualToolIndex virtual_tool, Fila
 }
 """
 
+# `filament_sensor.cpp`, excerpt: what a sensor reads once it's disabled.
+FILAMENT_SENSOR_CPP = """\
+void IFSensor::force_set_enabled(bool set) {
+    state = set ? FilamentSensorState::NotInitialized : FilamentSensorState::Disabled;
+}
+"""
+
+# `filament_sensors_handler_INDX.cpp`, excerpt: INDX's extruder and side sensors.
+INDX_SENSORS_CPP = """\
+// function returning abstract sensor - used in higher level api
+IFSensor *GetExtruderFSensor([[maybe_unused]] PhysicalToolIndex index) {
+    /// No extruder sensor on INDX. The sensors are side sensors (on the XBuddy Extension).
+    return nullptr;
+}
+
+// function returning abstract sensor - used in higher level api
+IFSensor *GetSideFSensor(PhysicalToolIndex index) {
+    return getSideFSensor(index);
+"""
+
 FILES = {
     read.MODELS_FILE: MODELS_HPP,
     read.GCODE_INFO_FILE: GCODE_INFO_HPP,
@@ -6443,6 +6504,8 @@ FILES = {
     "src/gui/screen/screen_m600.cpp": SCREEN_M600_CPP,
     "lib/Marlin/Marlin/src/module/prusa/spool_join.cpp": SPOOL_JOIN_CPP,
     "src/feature/filament_sensor/filament_sensor_mmu.cpp": FILAMENT_SENSOR_MMU_CPP,
+    "src/feature/filament_sensor/filament_sensor.cpp": FILAMENT_SENSOR_CPP,
+    "src/feature/filament_sensor/filament_sensors_handler_INDX.cpp": INDX_SENSORS_CPP,
     "src/state/printer_state.cpp": PRINTER_STATE_CPP,
     read.IMAGES_FILE: PRESETS_JSON,
     read.PAUSE_SETTINGS_FILE: PAUSE_SETTINGS_HPP,
