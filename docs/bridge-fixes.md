@@ -36,7 +36,7 @@ update the workstreams it changes.
 | D8 | MMU3 printers, which you'll never own: fix the findings, detect the MMU and refuse it, or document it? | Detect it from `/api/v1/info`'s `mmu`, and while it's on, charge nothing and write nothing, logged once, as for a printer with no counters. BF16 alone over-charges about 0.63 g per tool change, so a multi-color print's charges are far off, and BF15 and BF17 have no fix the bridge can see. The middle option, writes off and charging on with the errors documented, is cheaper still and keeps those errors. | Workstream 9. |
 | D9 | BF16's open question: if the MMU is fixed (D8), does the target charge count the slicer's 17 mm and 32 mm loads? | Moot under the recommended D8. If you choose to fix, aim at what leaves the spool for good, without the loads: the next unload returns that filament to the MMU. | Workstream 9, only if D8 is "fix". |
 | D10 | Do writes to multi-tool models (BF14) cover the XL as well as INDX? | Yes. The job already writes per tool, so the XL needs only its refusal lifted and its presets compared. The README keeps the XL as untested. | Workstream 7. |
-| D11 | Mark these Accepted: BF6, BF11 (once the F12 trace confirms the 8 mm), BF13, BF22? | Yes for all four. Reasons are under [Findings not planned](#findings-not-planned). | Workstreams 8 and 10. |
+| D11 | Mark these Accepted: BF6, BF11 (once the F12 trace confirms the 8 mm), BF13, BF22? | Answered: BF6 and BF22 are Accepted. BF11 becomes Accepted once the F12 trace confirms the 8 mm. BF13 stays Open: its effect isn't settled, the INDX upgrade will show a spool join on the printer, and other users may have toolchangers too. It's decided with workstream 8. Reasons for the rest are under [Findings not planned](#findings-not-planned). | BF11's acceptance waits on the F12 trace. BF13 waits on workstream 8. |
 | D12 | BF12 and BF25 have no fix the bridge can see. Document them and leave them Open? | Yes. Workstream 5 adds a hint for BF25, and workstream 8 documents BF12. | Workstreams 5 and 8. |
 
 ## Goals and non-goals
@@ -76,9 +76,9 @@ elsewhere names it under "Also touches".
 | 5 | [Usage on an empty tool](#5-usage-on-an-empty-tool) | BF24, BF25 | | 1 | Medium | D12 for BF25's hint; sittings C and D confirm | BF24 merged, 90eaf2c, before workstream 4, which builds on it; BF25's hint waits on D12 |
 | 6 | [The auto-retract](#6-the-auto-retract) | BF9 | | 1 | Small | D7; sittings A and B | Not started |
 | 7 | [Writes to toolchangers](#7-writes-to-toolchangers) | BF14, BF1, BF8, BF7 | BF26 | 2 | Medium | D10; workstreams 2 and 3 | Not started |
-| 8 | [Toolchanger swaps](#8-toolchanger-swaps) | BF12, BF13 | | 2 | Small | D11, D12 | Not started |
+| 8 | [Toolchanger swaps](#8-toolchanger-swaps) | BF12, BF13 | | 2 | Small | D12; BF13's decision, with an INDX | Not started |
 | 9 | [MMU printers](#9-mmu-printers) | BF20, BF15 to BF19, BF28, BF29 | | 4 | Medium | D8 | Not started |
-| 10 | [Housekeeping](#10-housekeeping) | BF6, BF11, BF21, BF22 | | 5 | Small | D11; F12 trace for BF11 | BF21 merged, a9a09ea; BF6, BF11 and BF22 wait on D11 |
+| 10 | [Housekeeping](#10-housekeeping) | BF6, BF11, BF21, BF22 | | 5 | Small | F12 trace for BF11 | BF21 merged, a9a09ea; BF6 and BF22 Accepted; BF11 waits on the F12 trace |
 
 The sizes rest on reading the code each workstream changes and counting
 the pins it flips: small is one function or a default and its tests,
@@ -437,18 +437,22 @@ medium is a new input or condition through `account()` or
 - **Approach (proposal)**: Documentation only. For BF12, README, under
   "How usage is attributed", tells a toolchanger's user to unload from the
   menu or to claim, since nothing the bridge reads shows the swap. For
-  BF13, the join's unload does leave the old tool empty, and M5a's flag
-  on a spool that ran out with weight left is the flag's purpose, so the
-  current behavior stands (D11).
-- **Needs**: D11, D12.
+  BF13, the proposal was to accept today's behavior: the join's unload
+  does leave the old tool empty, and M5a's flag on a spool that ran out
+  with weight left is the flag's purpose. D11 leaves BF13 Open instead:
+  decide it here, with a spool join seen on an INDX, since the old
+  tool's swap and flags ask for a spool in a tool the print has left.
+- **Needs**: D12, and BF13's decision.
 - **User and saved state**: README only.
-- **Tests**: the pins in `tests/test_toolchanger_prints.py` stay, with
-  their comments changed from "a known fault" to the accepted behavior.
-  T8 and T9 change status from Gap.
-- **Done when**: BF13 is Accepted, and BF12's README text is in.
+- **Tests**: BF12's pin in `tests/test_toolchanger_prints.py` stays, and
+  T8 changes status from Gap once the README text is in. BF13's pin and T9 follow
+  its decision: if BF13 is Accepted, the pin's comment changes from "a
+  known fault" to the accepted behavior and T9 leaves Gap; if it's fixed,
+  the pin flips with the fix.
+- **Done when**: BF13 is fixed or Accepted, and BF12's README text is in.
 - **Overlap**: README and `tests/test_toolchanger_prints.py`'s comments,
-  which workstream 4 also edits. If D11 rejects BF13's acceptance, it's
-  `unload` in `accounting.py` and collides with workstreams 4 and 5.
+  which workstream 4 also edits. If BF13 gets a fix, it's `unload` in
+  `accounting.py`, and collides with workstreams 4 and 5.
 
 ### 9. MMU printers
 
@@ -489,14 +493,14 @@ medium is a new input or condition through `account()` or
 
 - **Findings**: owns BF6, BF11, BF21 and BF22, stage 5 (BF11 sits in
   stage 1).
-- **Approach (proposal)**: Remove `READY` from `IDLE_STATES` in
-  `prusalink.py` (BF21): it's never matched, and a dead entry misleads
-  the next reader. Mark BF6, BF11 and BF22 Accepted (D11). P12 already
-  says the bridge charges each resume's feed back, a second cut's
-  included. For BF11, once the F12 trace confirms the 8 mm, P12 also says
+- **Approach**: `READY` is out of `IDLE_STATES` in `prusalink.py` (BF21):
+  it was never matched, and a dead entry misled the next reader. BF6 and
+  BF22 are Accepted (D11). BF11 becomes Accepted once the F12 trace
+  confirms the 8 mm. P12 already says the bridge charges each resume's
+  feed back, a second cut's included. With the trace, P12 also says
   that's where the feed belongs, as "Bridge follow-ups found here" in
   printer-behaviors.md asks.
-- **Needs**: D11; the F12 trace for BF11.
+- **Needs**: the F12 trace for BF11.
 - **Tests**: none flip.
 - **Done when**: the four findings are fixed or Accepted.
 - **Overlap**: `prusalink.py`, with workstream 9: one line, so either
@@ -552,7 +556,8 @@ These rules bind, beyond AGENTS.md:
 
 ## Findings not planned
 
-These get no code. Each is documented, or Accepted under D11.
+These get no code. Each is documented, or Accepted under D11. BF13 isn't
+in this list: D11 leaves it Open for workstream 8.
 
 | Finding | Why |
 | --- | --- |
@@ -560,7 +565,6 @@ These get no code. Each is documented, or Accepted under D11.
 | BF7 | The cause can't be read. Workstream 2's flag and workstream 7's README text are all the bridge can do. |
 | BF11 | The lost usage needs the counters in the firmware's power-panic data. The resume's feed is charged where it belongs, and so is a second cut's, which leaves the nozzle because that cut doesn't retract. |
 | BF12 | No reading shows a docked tool emptied by hand. Only a new firmware field, such as each tool's sensor state, would. |
-| BF13 | The charges follow the filament, and the old tool's swap and flag are what an emptied tool needs. |
 | BF22 | Changing the harness's default flips many unrelated tests. Workstream 4's new tests turn the auto-retract on themselves. |
 | BF25 | No reading says the sensors are off. Workstream 5's hint covers the case the bridge can see. |
 
