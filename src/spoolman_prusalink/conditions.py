@@ -142,6 +142,47 @@ class Lasting(Logged, name="lasting"):
         return self.event.message
 
 
+@dataclass(frozen=True)
+class PrintingEmpty(Logged, name="printing_empty"):
+    """A user's print counts usage on a tool with no filament reported (C7, BF25).
+
+    The bridge can't tell why. The filament sensors may be off, or a power cut may have
+    left the filament out or a runout waiting for its reload.
+    """
+
+    @property
+    def key(self) -> Hashable:
+        return self.name
+
+    def log(self, ctx: Context) -> str:
+        return (
+            "printing with no filament reported; that usage is charged to no spool. "
+            "If the filament sensors were turned off for this print, turn them back on "
+            "after it: while they're off, the printer reports no runout and no unload, "
+            "so the bridge misses spool swaps. A power cut with the filament out does "
+            "this too"
+        )
+
+
+def printing_empty(
+    lost: bool, still_empty: bool, last: Iterable[Condition], *, level: int
+) -> PrintingEmpty | None:
+    """Return the condition for a tool that's printing with no filament, or None.
+
+    `lost` is whether this poll reported usage lost on the tool, and `still_empty` whether
+    a user's print still runs on it with no material, after the tool counted in it
+    (`ToolState.printed_empty`). Usage lost while that holds raises it, and it stands
+    while the print goes on with the tool empty, through polls with no new usage. The
+    print's tail, first seen once the job is gone, only ends one.
+    """
+    if not still_empty:
+        return None
+    stood = next((c for c in last if isinstance(c, PrintingEmpty)), None)
+    if stood is not None:
+        return stood
+    return PrintingEmpty(level=level) if lost else None
+
+
 # From the tool's saved state. Flag only: the event that led to each was logged once.
 
 

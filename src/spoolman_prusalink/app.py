@@ -41,7 +41,7 @@ from .conditions import (
 from .config import Config, PrinterConfig
 from .db import Database
 from .errors import Busy, NotFound, Rejected, ServiceError, Unreachable, record_failure
-from .events import Report, Unload
+from .events import LostEmpty, Report, Unload
 from .fields import SpoolFields
 from .flags import Flags, FlagSync, SharedSpools
 from .models import FilamentReading, Spool
@@ -651,6 +651,14 @@ class PrinterBridge:
             # nothing is logged for it yet.
             self._note_hold(tool)
             found = self._state_conditions(tool, st, status) + lasting
+            empty = conditions.printing_empty(
+                any(isinstance(ev, LostEmpty) for ev in result.events),
+                result.state.printed_empty,
+                self.conditions.get(tool, ()),
+                level=logging.WARNING,
+            )
+            if empty is not None:
+                found.append(empty)
             active = by_id.get(st.active) if st.active is not None else None
             if active is not None and active.id != before.active:
                 plan.runouts[active.id] = None
