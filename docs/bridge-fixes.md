@@ -28,7 +28,7 @@ update the workstreams it changes.
 | D1 | In what order do the workstreams go? | As [Order and parallelism](#order-and-parallelism) lists: what protects the printer first (workstreams 1 and 3, then 2), then charging (4 to 6), then the toolchangers before the INDX upgrade (7 and 8), then the MMU (9). This breaks the stage table's rule that, within stage 1, charges come before writes: BF26 loses a print, and the write fixes are small. | The order only. |
 | D2 | Does stage 1 ship alone, merged and deployed to the Core One L before stage 2 or 4 work merges? | Yes. Workstream 7 can be built at the same time, but it merges after workstreams 2 and 3, which change the same code in `app.py` and `printer_sync.py`. | Merging workstreams 7 and 9. |
 | D3 | How does BF26 get fixed: a positive `sync_delay` default, a guard in the bridge after a boot that interrupted a print, or wait for the F12 trace? | A positive default, at most `poll_idle`. The code already holds a write while the printer has been idle for less than `sync_delay`, and a new `PrinterBridge` or a failed read starts that clock again, so the first idle poll after a boot only starts it. That covers a bridge that restarts in the window too, as when one power cut takes down the printer and the bridge's host. A second cut during the resume opens a second window, which the delay alone misses when a poll in the first window started the clock and the next poll, `poll_idle` later, lands in the second; workstream 1 starts the clock again at each new `boot_id` to close that. What it misses: a config that sets `sync_delay = 0`, and a window that outlasts a poll. What it costs: every write waits one more idle poll, up to 60 s by default. The guard instead keeps ordinary writes at the first idle poll and covers a config with 0, but it misses a restarted bridge: what the printer was doing before the boot is known only in memory. Add the guard as well only if writes at the first idle poll matter to you. Until the default ships, set `sync_delay` above 0 on your own printer. The F12 trace confirms that the window ends within one poll. | Workstream 1. |
-| D4 | Keep `gcode_preamble`, or remove it? | Remove it, unless your own config sets it. Its only effects found are BF2, BF3 and BF4, and the default preamble passes every check on every model the bridge writes to. Pre-release, there's no compatibility to keep. If you keep it, workstream 3 validates it instead. | Workstream 3, and the INDX lock line in workstream 7. |
+| D4 | Keep `gcode_preamble`, or remove it? | Answered: remove it. Its only effects found were BF2, BF3 and BF4, and the default preamble passes every check on every model the bridge writes to. Pre-release, there's no compatibility to keep. | Workstream 3, and the INDX lock line in workstream 7. |
 | D5 | Amend Q4 so that a ramming or a load isn't a print's first extrusion? | Yes. Q4's intent, that a cancelled print changes nothing, holds; only what counts as the first extrusion narrows. | Workstream 4. |
 | D6 | Amend C7: usage counted on a tool with no filament while a user's print runs is reported lost, not charged to the next spool? | Yes. That filament came from no spool. The hold during a load, which S1 and S2 rely on, stays as it is. | Workstream 5. |
 | D7 | BF9: accept and document the auto-retract's count, or correct it in the bridge? | Wait for the F3 and F5 traces (sittings A and B), then accept and document it if they show about 28.5 mm per auto-retract. A correction needs the auto-retract setting and the filament's flexibility, which the bridge can't read, and the error is about 0.09 g each time. | Workstream 6. |
@@ -70,7 +70,7 @@ elsewhere names it under "Also touches".
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | 1 | [The power-panic window](#1-the-power-panic-window) | BF26 | | 1 | Small | D3 | Not started |
 | 2 | [A sync job at a question](#2-a-sync-job-at-a-question) | BF5 | BF4, BF7, BF18 | 1 | Medium | Nothing | Not started |
-| 3 | [The custom preamble](#3-the-custom-preamble) | BF2, BF3, BF4 | | 1 | Small | D4 | Not started |
+| 3 | [The custom preamble](#3-the-custom-preamble) | BF2, BF3, BF4 | | 1 | Small | D4 | In progress |
 | 4 | [Print start](#4-print-start) | BF10, BF23, BF27 | | 1 | Medium | D5; sitting D confirms | Not started |
 | 5 | [Usage on an empty tool](#5-usage-on-an-empty-tool) | BF24, BF25 | | 1 | Medium | D6; sittings C and D confirm | Not started |
 | 6 | [The auto-retract](#6-the-auto-retract) | BF9 | | 1 | Small | D7; sittings A and B | Not started |
@@ -172,8 +172,7 @@ medium is a new input or condition through `account()` or
   question about the bridge's job on a single-tool printer. The
   workstream then guards INDX, where an uncalibrated nozzle cleaner
   refuses every job (BF7) and the lock line has to be right (BF1), and
-  any check a later firmware adds. If D4 keeps the preamble, it guards
-  BF3's question on the Core One L today.
+  any check a later firmware adds.
 - **User and saved state**: README, under "Writing to the printer", says
   what the flag means. `WriteState` is saved in the database: change it in
   place.

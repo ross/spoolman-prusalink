@@ -29,14 +29,12 @@ from harness import (
     two_printers,
 )
 
-from simulator.model import MODELS, Reason, State
+from simulator.model import MODELS
 from simulator.prusalink import Answer
 from spoolman_prusalink.accounting import ToolState
 from spoolman_prusalink.db import read_state
-from spoolman_prusalink.printer_sync import PRINTER_MODELS, WriteState, default_preamble
+from spoolman_prusalink.printer_sync import WriteState
 from spoolman_prusalink.records import ChargeRecord
-
-COREONEL_PREAMBLE = default_preamble(PRINTER_MODELS["8.1.0"])
 
 
 async def test_charges_are_applied_and_recorded(tmp_path):
@@ -823,19 +821,6 @@ async def test_staged_swap_waits_for_unload_before_writing(tmp_path):
     await bridge.aclose()
 
 
-async def test_preamble_for_wrong_model_blocks_writes_and_flags(tmp_path, caplog):
-    bridge, fake, station = make(
-        tmp_path, [spool(19)], uuid_field="instance_uuid", gcode_preamble=COREONEL_PREAMBLE
-    )
-    station.printer.model = MODELS["1.4.0"]  # MK4
-    await swap_to_spool_20(bridge, fake, station)
-    assert jobs(station) == []
-    assert "printer is MK4 (1.4.0): gcode_preamble is for COREONEL" in caplog.text
-    assert "can't write to the printer: gcode_preamble is for COREONEL" in fake.flag(20)
-    assert fake.used[20] == [116.0]  # charging is unaffected
-    await bridge.aclose()
-
-
 async def test_mk4_gets_its_own_preamble_and_no_uuid(tmp_path):
     bridge, fake, station = make(tmp_path, [spool(19)], uuid_field="instance_uuid")
     station.printer.model = MODELS["1.4.0"]
@@ -867,27 +852,6 @@ async def test_unknown_model_blocks_writes(tmp_path, caplog):
     await swap_to_spool_20(bridge, fake, station)
     assert jobs(station) == []
     assert "printer type '99.1.0' isn't one the bridge knows" in fake.flag(20)
-    await bridge.aclose()
-
-
-async def test_matching_preamble_for_other_model_writes(tmp_path):
-    preamble = ('M862.3 P "MK4S" ; printer model check', "M862.5 P2")
-    bridge, fake, station = make(
-        tmp_path, [spool(19)], uuid_field="instance_uuid", gcode_preamble=preamble
-    )
-    station.printer.model = MODELS["1.4.1"]
-    await swap_to_spool_20(bridge, fake, station)
-    (gcode,) = jobs(station)
-    assert gcode.startswith('M862.3 P "MK4S"')
-    # The preamble has no M862.6 P"Input shaper", so the printer asks before the job runs.
-    p = station.printer
-    station.tick_until(lambda: p.state is State.ATTENTION)
-    assert p.job.waits_for(Reason.PREVIEW)
-    assert p.job.attention.detail == "not sliced with input shaper"
-    p.tap_through()
-    station.finish_job()
-    await bridge.poll()  # the write took: no second job
-    assert len(jobs(station)) == 1
     await bridge.aclose()
 
 
@@ -2850,17 +2814,15 @@ async def test_spoolman_name_edit_is_written_when_the_filament_has_no_material(t
 
 
 @pytest.mark.parametrize(
-    "printer_type, preamble, logged",
+    "printer_type, logged",
     [
-        ("1.4.0", COREONEL_PREAMBLE, "printer is MK4 (1.4.0): gcode_preamble is for COREONEL"),
-        ("99.1.0", None, "printer is unknown (99.1.0): printer type '99.1.0' isn't one"),
+        ("4.1.0", "printer is iX (4.1.0): iX isn't supported: the iX isn't supported yet"),
+        ("99.1.0", "printer is unknown (99.1.0): printer type '99.1.0' isn't one"),
     ],
 )
-async def test_model_problem_logged_once(tmp_path, caplog, printer_type, preamble, logged):
+async def test_model_problem_logged_once(tmp_path, caplog, printer_type, logged):
     # W10: logged once, however many polls; writes stay off and charging goes on.
-    bridge, fake, station = make(
-        tmp_path, [spool(19)], uuid_field="instance_uuid", gcode_preamble=preamble
-    )
+    bridge, fake, station = make(tmp_path, [spool(19)], uuid_field="instance_uuid")
     model = MODELS.get(printer_type) or replace(station.printer.model, code=printer_type)
     station.printer.model = model
     await swap_to_spool_20(bridge, fake, station)

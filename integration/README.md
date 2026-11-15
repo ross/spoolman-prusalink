@@ -191,7 +191,6 @@ end Status.
 | P10 | `test_prints.py::test_p10_spoolman_changed_mid_print_is_staged` | Spoolman changed mid-print with no unload: staged, the old spool charged until unload. |
 | P11 | `test_prints.py::test_p11_pause_and_resume_changes_nothing` | Pause and resume with no filament change: one print start, and the counter carries on. |
 | P12 | `test_prints.py::test_p12_power_panic_resume_keeps_the_job` | Power loss mid-print and resume: a reboot with the same job, so no new print start. |
-| W1 | `test_configs.py::test_w1_custom_preamble_is_written` | A custom preamble with the model's check, or its MMU3 name, starts the job as given. |
 | W1 | `test_configs.py::test_w1_write_content` | Flexible, colorless, materialless and RGBA filaments: the M865 line and no false drift. |
 | W1 | `test_configs.py::test_w1_write_without_uuids` | No UUIDs to write: an M865 line with no M865.1, and the spool isn't given a UUID. |
 | W1 | `test_writes.py::test_w1_uuid_mint_fails` | Storing a minted UUID fails: logged once, and B's write waits for its UUID (W1). |
@@ -213,7 +212,7 @@ end Status.
 | W9 | `test_writes.py::test_w9_drift_is_flagged_unless_sync_drift` | Printer changed with no unload: flagged and left alone, or rewritten with sync_drift. |
 | W9 | `test_writes.py::test_w9_malformed_color_is_drift` | The printer reports a color that isn't a hex color: drift, logged and cleared once. |
 | W9 | `test_writes.py::test_w9_temperature_drift_is_flagged_unless_sync_drift` | A temperature changed on the printer is drift too: flagged, or rewritten. |
-| W10 | `test_writes.py::test_w10_model_the_bridge_cannot_write` | Unknown, unsupported or mismatched model: logged once, spool flagged, still charged. |
+| W10 | `test_writes.py::test_w10_model_the_bridge_cannot_write` | Unknown or unsupported model: logged once, spool flagged, still charged. |
 | W10 | `test_writes.py::test_w10_model_unreadable_until_it_answers` | `/api/version` fails while other reads work: writes stay off, logged once each way. |
 | W11 | `test_writes.py::test_w11_tag_is_not_written_back` | Unload with no Spoolman change, then a tag load: A isn't written back over it (Q11). |
 | W11 | `test_writes.py::test_w11_unconfirmed_swap_writes_the_assigned_spool` | Unload with no Spoolman change, then a menu load: the printer gets A written back. |

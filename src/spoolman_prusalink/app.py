@@ -473,7 +473,7 @@ class PrinterBridge:
         self._model = printer_sync.PRINTER_MODELS.get(printer_type or "")
         # Writes were off and said so: the line saying they're back on is its recovery.
         was_off = self._model_error is not None
-        self._model_error = printer_sync.model_problem(printer_type, self.config.gcode_preamble)
+        self._model_error = printer_sync.model_problem(printer_type)
         name = self._model.name if self._model else "unknown"
         if self._model_error:
             log.warning(
@@ -505,12 +505,6 @@ class PrinterBridge:
         """Whether to write and compare instance UUIDs: configured with a Spoolman field to
         keep them in, and the model keeps them."""
         return self.uuids.enabled and self._tag_reader
-
-    def _preamble(self) -> tuple[str, ...]:
-        if self.config.gcode_preamble is not None:
-            return self.config.gcode_preamble
-        assert self._model is not None
-        return printer_sync.default_preamble(self._model)
 
     async def _user_job_id(self, status: PrinterStatus) -> int | None:
         """Return the job id, or None for the bridge's own sync job.
@@ -994,7 +988,8 @@ class PrinterBridge:
             self._sync_delaying = True
             return False
         self._sync_delaying = False
-        gcode = printer_sync.build_job(self._preamble(), writes)
+        assert self._model is not None
+        gcode = printer_sync.build_job(printer_sync.default_preamble(self._model), writes)
         try:
             # The state this poll acted on was read a few requests ago. Check it again
             # right before taking over the printer, in case a print started since.

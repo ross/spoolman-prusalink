@@ -121,8 +121,8 @@ To serve several printers from one bridge, replace `[printer]` and `[[tools]]`
 in the config file with a `[[printers]]` list. Each entry has a `name`, a
 `url`, the API key as `api_key` or as `api_key_env` naming the environment
 variable that holds it, its own `[[printers.tools]]` entries, and any of
-the other `[printer]` settings: `gcode_preamble`, `sync_storage`,
-`sync_file`, `printer_sync`, `sync_delay`, `sync_drift`, `flag_drift` and
+the other `[printer]` settings: `sync_storage`, `sync_file`,
+`printer_sync`, `sync_delay`, `sync_drift`, `flag_drift` and
 `length_factor`. Each printer has its own value, and an entry that doesn't set
 one takes the default:
 
@@ -390,11 +390,10 @@ Requirements for a write:
   printer reboot, it reads the model from `GET /api/version`. On a model
   that's unsupported or unknown, it doesn't write to the printer and flags
   any spool waiting to be written. Charging isn't affected.
-- The job's compatibility checks come from the model: `M862.3 P"<model>"`,
-  `M862.5 P2` and `M862.6 P"Input shaper"`. If you set `gcode_preamble`, its
-  `M862.3` must name the printer's model exactly (or its MMU3 variant), or
-  the bridge doesn't write. A job for the wrong model would stop on the
-  printer's compatibility warning until someone tapped through it.
+- The job's compatibility checks come from the printer's model:
+  `M862.3 P"<model>"`, `M862.5 P2` and `M862.6 P"Input shaper"`. They pass
+  under the printer's default check settings, so the job runs without a
+  question on the printer's screen.
 - The spool's material must be a printer preset (PLA, PETG, ASA, PC, PVB,
   ABS, HIPS, PP, FLEX, PA, PVA, BVOH; TPU maps to FLEX), or its
   filament must have extruder and bed temperatures in Spoolman. `M865 X R`

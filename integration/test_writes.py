@@ -28,9 +28,7 @@ from simulator.compatibility import MK4_CHECKS
 from simulator.model import MODELS, JobPhase, Material, ModelInfo, State
 from simulator.prusalink import DROP, Answer, Reply
 from simulator.tool import LOAD_CELL_PRESETS, MK4_EXTRUDER
-from spoolman_prusalink.printer_sync import PRINTER_MODELS, default_preamble
 
-COREONEL_PREAMBLE = default_preamble(PRINTER_MODELS["8.1.0"])
 SYNC_FILE = "spoolman-sync.gcode"
 
 
@@ -405,10 +403,9 @@ async def test_w9_temperature_drift_is_flagged_unless_sync_drift(
 # 1021.85. The load's auto-retract rams 23 and leaves the filament 55 mm retracted, so the
 # first extrude feeds 15 past the gap: the extrudes count 15 + 30 = 45 mm. The MK4
 # extruder loads 30 slow + 50 fast, 40 past its 40 mm gap, and purges 27:
-# 1021.85 + (40 + 27 + 23 + 45) * 0.95 = 1150.10, so 1150 - 1021 = 129. The Core One L's
-# load is LOADS["8.1.0"]: 1021.85 + 78.85 + 45 * 0.95 = 1143.45, so 1143 - 1021 = 122.
+# 1021.85 + (40 + 27 + 23 + 45) * 0.95 = 1150.10, so 1150 - 1021 = 129.
 @pytest.mark.parametrize(
-    "model, preamble, problem, charged",
+    "model, problem",
     [
         (
             ModelInfo(
@@ -419,47 +416,26 @@ async def test_w9_temperature_drift_is_flagged_unless_sync_drift(
                 group="future",
                 checks=MK4_CHECKS,
             ),
-            None,
             "printer type '99.1.0' isn't one the bridge knows",
-            129,
         ),
         (
             MODELS["3.1.0"],
-            None,
             "XL isn't supported: multi-tool printers aren't supported yet",
-            129,
-        ),
-        (
-            MODELS["1.4.0"],
-            COREONEL_PREAMBLE,
-            "gcode_preamble is for COREONEL but the printer is MK4",
-            129,
-        ),
-        (
-            MODELS["8.1.0"],
-            ("M862.5 P2 ; level check", 'M862.6 P"Input shaper"'),
-            "gcode_preamble has no M862.3 model check; set one for COREONEL",
-            122,
         ),
     ],
-    ids=["unknown", "unsupported", "mismatched", "no_model_check"],
+    ids=["unknown", "unsupported"],
 )
 async def test_w10_model_the_bridge_cannot_write(
     world: World,
     caplog: pytest.LogCaptureFixture,
     model: ModelInfo,
-    preamble: tuple[str, ...] | None,
     problem: str,
-    charged: int,
 ):
-    """Unknown, unsupported or mismatched model: logged once, spool flagged, still charged."""
+    """Unknown or unsupported model: logged once, spool flagged, still charged."""
     caplog.set_level(logging.INFO, logger="spoolman_prusalink")
     w = world
     b = w.spools["B"]
     w.printer.model = model
-    if preamble is not None:
-        # The preamble is per printer, so it's set by starting the bridge with it.
-        await w.restart(printers=(replace(w.cfg.printers[0], gcode_preamble=preamble),))
     records = await w.poll()
     assert len(events(records, "baseline")) == 1
     assert logged_once(caplog, logging.WARNING, f"{problem}; printer writes are off")
@@ -476,7 +452,7 @@ async def test_w10_model_the_bridge_cannot_write(
         w.printer.extrude(0, 10)
         records += await w.poll()
     assert w.requests("PUT") == []
-    assert w.charged(records, "B") == charged
+    assert w.charged(records, "B") == 129
     flag = await w.flag("B")
     assert flag == f"{w.tool_location}: can't write to the printer: {problem}"
     assert logged_once(caplog, logging.WARNING, f"] can't write spool {b} to the printer")

@@ -17,7 +17,9 @@ from .models import Material, Spool
 
 @dataclass(frozen=True)
 class PrinterModel:
-    name: str  # What `M862.3 P"..."` checks for. The firmware compares it exactly.
+    # What the job's `M862.3 P"..."` names. The printer accepts any name in its
+    # compatibility group, so naming the model itself always passes.
+    name: str
     unsupported: str | None = None  # Why the bridge can't run it, or None.
     uuids: bool = False  # Whether `M865.1` stores an instance UUID (`HAS_ANFC`).
 
@@ -68,40 +70,13 @@ def default_preamble(model: PrinterModel) -> tuple[str, ...]:
     )
 
 
-_MODEL_CHECK = re.compile(r'^\s*M862\.3\s+P\s*"([^"]+)"', re.IGNORECASE)
-
-
-def preamble_model(preamble: tuple[str, ...] | list[str]) -> str | None:
-    """Return the model name the preamble's `M862.3 P"..."` line checks for."""
-    for line in preamble:
-        m = _MODEL_CHECK.match(line)
-        if m:
-            return m.group(1)
-    return None
-
-
-def model_problem(
-    printer_type: str | None, preamble: tuple[str, ...] | list[str] | None
-) -> str | None:
-    """Return why the bridge can't write to this printer, or None if it can.
-
-    `preamble` is the configured override, or None for the model's default. A job
-    whose `M862.3` names another model stops on the printer's compatibility warning
-    until someone taps through it, so the name has to match exactly. The firmware also
-    accepts the model's MMU3 variant name.
-    """
+def model_problem(printer_type: str | None) -> str | None:
+    """Return why the bridge can't write to this printer, or None if it can."""
     model = PRINTER_MODELS.get(printer_type or "")
     if model is None:
         return f"printer type {printer_type!r} isn't one the bridge knows"
     if model.unsupported:
         return f"{model.name} isn't supported: {model.unsupported}"
-    if preamble is None:
-        return None
-    wanted = preamble_model(preamble)
-    if wanted is None:
-        return f"gcode_preamble has no M862.3 model check; set one for {model.name}"
-    if wanted not in (model.name, f"{model.name}MMU3"):
-        return f"gcode_preamble is for {wanted} but the printer is {model.name}"
     return None
 
 

@@ -478,8 +478,6 @@ CONFIG_BASE = (
         ('[printer]\nprinter_sync = "false"\n', "printer.printer_sync must be true or false"),
         ('[printer]\nflag_drift = "no"\n', "printer.flag_drift must be true or false"),
         ("[printer]\nsync_drift = 1\n", "printer.sync_drift must be true or false"),
-        ('[printer]\ngcode_preamble = "M862.3"\n', "gcode_preamble must be a list of strings"),
-        ('[printer]\ngcode_preamble = ["M862.3", 1]\n', "gcode_preamble must be a list of strings"),
         ("[bridge]\npoll_idle = 0\n", "bridge.poll_idle must be greater than 0"),
         ("[printer]\nsync_delay = -1\n", "printer.sync_delay must be 0 or more"),
         ('[printer]\nsync_delay = "5m"\n', "printer.sync_delay must be a number"),
@@ -604,18 +602,14 @@ def test_main_exits_2_on_a_malformed_config(tmp_path, clean_env, monkeypatch, ca
     assert "config: can't parse" in caplog.text
 
 
-def test_config_accepts_booleans_and_preamble_list(tmp_path):
+def test_config_accepts_booleans(tmp_path):
     p = tmp_path / "c.toml"
     p.write_text(
-        CONFIG_BASE.replace(
-            "[printer]\n",
-            '[printer]\nprinter_sync = false\ngcode_preamble = ["M862.3 P \\"COREONEL\\""]\n',
-        )
+        CONFIG_BASE.replace("[printer]\n", "[printer]\nprinter_sync = false\n")
         + "[bridge]\npoll_idle = 0.5\n"
     )
     cfg = load(p, env={"PRUSALINK_API_KEY": "k"})
     assert cfg.printers[0].printer_sync is False
-    assert cfg.printers[0].gcode_preamble == ('M862.3 P "COREONEL"',)
     assert cfg.poll_idle == 0.5
 
 

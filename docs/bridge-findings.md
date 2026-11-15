@@ -133,7 +133,8 @@ written.
 - **To reproduce**: Give a Core One L a `gcode_preamble` whose `M862.3`
   names `COREONE`. `model_problem` refuses it, though the simulator's
   preview takes the job. No bridge test runs that pairing.
-- **Status**: Open.
+- **Status**: Fixed by workstream 3: `gcode_preamble` is gone (D4), and
+  every job starts with `default_preamble`, which names the model itself.
 
 ### BF3. A custom preamble without the input-shaper check makes every sync job wait
 
@@ -164,7 +165,9 @@ written.
   in `simulator/tests/test_model.py`).
 - **Scenario rows**: W1, W10.
 - **To reproduce**: Those tests, today.
-- **Status**: Open.
+- **Status**: Fixed by workstream 3: `gcode_preamble` is gone (D4), and
+  every job starts with `default_preamble`, which has the input-shaper
+  line. The tests named under Evidence went with the setting.
 
 ### BF4. The printer's check settings change what a failed check does
 
@@ -194,7 +197,11 @@ written.
   `simulator/tests/test_model.py` show ignore and abort on an upload. A
   bridge with a preamble that fails a check (BF3) meets the same
   outcomes. No bridge test sets `checks`.
-- **Status**: Open.
+- **Status**: Fixed by workstream 3: `gcode_preamble` is gone (D4), and
+  the default preamble passes every check on every model the bridge writes
+  to, so no setting raises a question under any check setting. Workstream 2
+  flags a job that still meets one, such as the INDX lock question (BF1)
+  once writes to INDX are on.
 
 ### BF5. A declined or refused sync job uses up a job ID and never finishes
 
