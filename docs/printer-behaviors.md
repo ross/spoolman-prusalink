@@ -214,7 +214,7 @@ here in the same PR.
 | The auto-retract after an idle load and at a print's end, the sync job's included (F26) | `HAS_AUTO_RETRACT` (`ProjectOptions.cmake:629-638`), and the end's call in `pre_finalize_print` (`marlin_server.cpp:1077-1081`). | Compared: `ramming.auto_retract`, `full_retract_mm`, `cold_unload` and `auto_retract_switchable` in "simulator MODELS". Watched: "the end of a print with an MMU". | `SimPrinter._auto_retract_steps` and `_end_of_print`. BF9, BF10, BF22 and BF27's cold unload rest on it. |
 | An `M865` the firmware can't run changes what it reads and nothing else, and the job goes on (F10) | `PrusaGcodeSuite::M865` (`src/marlin_stubs/M865.cpp:56-207`): it builds its parser with no error callback, skips a value that doesn't read, and returns after a serial error, with no pause. | Watched: "the M865 command", and "the parser's error report" for the silent skip. | `_apply_filament` in `simulator/sync.py` and `Rejected` in `simulator/gcode.py`. BF6 rests on it: a failed write still ends `FINISHED`, and only W5's flag shows it. |
 | A filament change in a print reloads the type the tool had (F8, F24) | `M600_execute`'s type: the stored one, else `FilamentType::for_tool_heuristic` (`src/marlin_stubs/pause/M600.cpp:282-290`, `src/common/filament_tools.cpp:15-45`). | Watched: "the filament change" for `M600_execute`, and "the filament change's type" for the fallback. Each covers a whole function, so it also trips on unrelated changes. | `SimPrinter.load` with no source. P2's reload of the same spool and Q11 rest on it. |
-| `sensors_enabled` reports the sensors setting, on every build with the endpoint (F17, F47) | The fork's `JSON_FIELD_BOOL("sensors_enabled", config_store().fsensor_enabled.get())`, outside `HAS_FILAMENT_TRACKER()` (`lib/WUI/nhttp/filament_renderer.cpp:121-124` at `2ef028181`). | Not guarded: it's the fork's code, and the check reads upstream. A row in `WATCHED` would make every upstream run fail, since upstream has no `filament_renderer.cpp`. Re-read it whenever the fork moves to a new upstream commit. | `filament()` in `simulator/prusalink.py`. BF25: it's the reading that shows the setting the sensors-off answer leaves. |
+| `sensors_enabled` reports the sensors setting, on every build with the endpoint (F17, F47) | The fork's `JSON_FIELD_BOOL("sensors_enabled", config_store().fsensor_enabled.get())`, outside `HAS_FILAMENT_TRACKER()` (`lib/WUI/nhttp/filament_renderer.cpp:121-124` at `2ef028181`). | Not guarded: it's the fork's code, and the check reads upstream. A row in `WATCHED` would make every upstream run fail, since upstream has no `filament_renderer.cpp`. Re-read it whenever the fork moves to a new upstream commit. | `filament()` in `simulator/prusalink.py`, and `parse_filament` and `SensorsOff` in the bridge. BF25: it's the reading that shows the setting the sensors-off answer leaves, and the bridge warns while it reads `false`. |
 | `filament_present` reports the sensor closest to the nozzle, for the selected virtual tool only, and only `HasFilament` and `NoFilament` (F48) | The fork's `filament_present` (`lib/WUI/nhttp/filament_renderer.cpp:29-52` at `2ef028181`). It calls upstream code: `PhysicalExtension::currently_selected_virtual_tool` (`tool_index.cpp:140-158`), `should_enable` (`filament_sensors_handler.cpp:391-408`), `IFSensor::force_set_enabled` (`filament_sensor.cpp:36-38`), `FilamentSensors::step` (`filament_sensors_handler.cpp:120-159`), and INDX's `GetExtruderFSensor` (`filament_sensors_handler_INDX.cpp:20-23`). | The renderer: not guarded, as above. The upstream code: watched, "the MMU's selected slot", "whether a sensor is enabled", "a disabled sensor's state", "the sensors' cycle" and "the INDX extruder sensor". | `SimPrinter.filament_present` and `_sensing_slot` in `simulator/model.py`, and the INDX note on `IndxToolchanger` in `simulator/feed.py`. BF12 and BF25: it's the reading that shows a docked tool emptied by hand, and a sensor that can't tell. |
 | Every build but the iX asks about a file with no input-shaper line (F27) | The statement at `gcode_compatibility.cpp:368-370` in `CompatibilityReport::generate_without_toolmapping`. | Watched: "the required features", and "the M862 parser" for the name. Compared: `feature_names` in "simulator MODELS". | `GCodeChecks.required` in `simulator/compatibility.py`, and `default_preamble` in `printer_sync.py`, which declares the line. BF3 and BF4. |
 
@@ -516,7 +516,8 @@ don't leave the printer before step 7.
    sensor off from the menu, and go to step 5. Expect `PRINTING` with no
    `ATTENTION` and no reload, and no `material` in `/api/v1/filament`.
    On firmware with the sensor fields, expect `sensors_enabled` `false`
-   from the answer on, and no `filament_present` (F47, F48).
+   from the answer on, and no `filament_present` (F47, F48). A bridge
+   that reads the field warns once that the filament sensors are off.
    Once the preheat is over, watch whether `extruded` grows: BF24 rests
    on it growing with no `material`. After a minute of printing, cancel.
    Expect `PRINTING` while it parks, then `STOPPED` with no `job` (F7).
@@ -546,7 +547,8 @@ don't leave the printer before step 7.
    someone turns it on, and while it's off the bridge misses every hand
    swap and runout (BF25). Expect `sensors_enabled` `true`,
    `filament_present` `false`, and the idle sensor clear: `material` goes
-   and `unload_count` goes up by one. Stop the probe a heartbeat later.
+   and `unload_count` goes up by one. A bridge that reads the field logs
+   the end of its sensors-off warning. Stop the probe a heartbeat later.
    Then load the spool from the menu, to leave the printer as you found
    it.
 

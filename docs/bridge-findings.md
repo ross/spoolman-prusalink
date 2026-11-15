@@ -643,8 +643,10 @@ written.
   persistent (F29). Until the user turns it on again, the printer detects
   no runout and runs no idle sensor clear, so filament pulled out by hand
   counts no unload. Only a menu unload counts. The bridge's swap detection
-  rests on those unloads. Nothing the simulator serves says the sensors
-  are off, and the bridge has no reading for it that this work found.
+  rests on those unloads. Until the fork's `2ef028181`, nothing the
+  firmware or the simulator served said the sensors were off, and the
+  bridge had no reading for it. That commit serves the setting as
+  `sensors_enabled` in `/api/v1/filament` (F47).
 - **Effect**: A hand swap opens no swap, as in BF12, so the old spool is
   charged for the new one until a claim moves it. A spool that runs out
   isn't noticed, and the print goes on through the empty tool, which is
@@ -653,8 +655,12 @@ written.
   shown in the simulator on a toolchanger, by
   `test_with_the_sensors_off_nothing_reads_them` in
   `simulator/tests/test_model.py`. The simulator doesn't model the
-  single-tool path to the setting. The bridge's side is inferred.
-- **Scenario rows**: P2, S2, T4.
+  single-tool path to the setting. The bridge's side is inferred. The
+  warning is shown by `tests/test_sensors_off.py`, by
+  `test_the_tools_mapping_screens_sensors_off_warns_before_any_usage_is_lost`
+  in `tests/test_toolchanger_prints.py`, and end to end by
+  `test_c7_sensors_off_warned_once` in `integration/test_counters.py`.
+- **Scenario rows**: P2, S2, T4, C7, T2.
 - **To reproduce**: On the Core One L, the live check
   `F29-sensors-off-print` shows the printer's side: sitting D in
   printer-behaviors.md, under "Capture plan". In the simulator, the
@@ -662,18 +668,24 @@ written.
   the simulator's `sensors` setting or `set_sensors`, then empty a tool by
   hand and pick it as `test_t4_idle_sensor_clear_on_a_picked_tool` in
   `integration/test_tools.py` does, and poll: no unload counts, where T4
-  counts one. No bridge test covers it.
-- **Status**: Open (D12 in bridge-fixes.md). When a print loses usage on
-  an empty tool (BF24), the bridge logs a warning, `PrintingEmpty` in
-  `conditions.py`, that the filament sensors may be off and should be
-  turned back on after the print, and that a power cut with the filament
-  out does the same. It's logged once when it starts and once when it
-  ends. The README, under "How usage is attributed", says the same. Only a
-  new firmware reading of the sensors setting would let the bridge see the
-  setting itself and the swaps it hides. The fork now serves that reading:
-  `sensors_enabled` in `/api/v1/filament`, from `2ef028181` (F47 in
-  printer-behaviors.md), which the simulator serves too. The bridge
-  doesn't use it yet.
+  counts one, and the bridge warns that the sensors are off. No bridge
+  test covers the missed swap.
+- **Status**: Fixed on firmware that serves `sensors_enabled`, from the
+  fork's `2ef028181` (F47 in printer-behaviors.md; D12 in
+  bridge-fixes.md). While the setting reads false, the bridge logs a
+  warning for the printer, `SensorsOff` in `conditions.py`: the filament
+  sensors are off, so the printer reports no runout and no unload, and a
+  hand swap goes unnoticed. It's logged once when the bridge first reads
+  the setting off, again after a restart while it's still off, and once
+  when it's back on. It flags no spool. The fix is the warning: the bridge
+  still can't see the swaps the setting hides. When a print loses usage on
+  an empty tool (BF24), the bridge also logs `PrintingEmpty`, worded by
+  the setting: with the sensors off it points at the sensors warning, and
+  with them on it names a power cut. On firmware without the field, the
+  hint stays as it was: `PrintingEmpty` says the filament sensors may be
+  off and should be turned back on after the print, and that a power cut
+  with the filament out does the same. The README, under "How usage is
+  attributed", says the same.
 
 ### BF27. A filament change before a tool's first extrusion in a print looks like its print start
 
@@ -788,7 +800,7 @@ written.
   reading: each tool's `filament_present` in `/api/v1/filament`, from
   `2ef028181`, which reads a docked tool's own sensor (F48 in
   printer-behaviors.md). The simulator serves it too. The bridge doesn't
-  use it yet.
+  use `filament_present` yet.
 
 ### BF13. A spool join counts an unload in the middle of a print
 
