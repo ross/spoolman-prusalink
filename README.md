@@ -251,7 +251,11 @@ Other rules:
   doesn't use counts nothing, so its held usage stays held. Once the print
   counts on the empty tool, usage held at its earlier polls goes with the
   print's, and so does the print's last stretch, which the bridge first sees
-  at the poll after the print ends.
+  at the poll after the print ends. That needs the tool to have counted at a
+  poll during the print: a tool the print never used has no last stretch, so
+  a load started on it right after the print is held and charged as usual.
+  A print that counts on the empty tool only after its last poll, such as a
+  very short print, leaves that usage held for the next spool.
   The feed back of a resume after a power cut counts while the printer is
   busy, which holds, and goes with the print's usage once it prints on. If
   the power fails again during the resume, that feed back, about 8 mm, is
@@ -259,6 +263,23 @@ Other rules:
   If the filament is really in the tool but the printer reports none, the
   usage is reported lost, not charged: for example, when a sensor fault
   cleared the type and the print then ran with the sensors off.
+- While a print loses usage on an empty tool, the bridge also logs a warning
+  that the tool is printing with no filament reported, once when it starts
+  and once when the print ends or the filament comes back. Usage first seen
+  after the print raises no warning. If you turned the
+  filament sensors off to start that print, turn them back on after it. The
+  printer keeps the setting, and while the sensors are off it reports no
+  runout and no unload, even for filament you pull out by hand, so the bridge
+  misses every swap and keeps charging the old spool. The bridge can't read
+  the setting, so the same warning also follows a power cut that left the
+  filament out of the tool.
+- On a toolchanger, the INDX or the XL, filament pulled out by hand from a
+  docked or parked tool counts no unload, because the printer checks only the
+  picked tool's sensor. The bridge misses the swap and keeps charging the old
+  spool, and a spool moved into that tool's location stays staged. Unload
+  from the printer's menu instead, or [claim](#claims) the new spool. The
+  next menu load, unload or pick of that tool also counts the unload, and a
+  staged swap takes effect there.
 - If the location holds two spools and neither is the loaded one, or more
   than two, the bridge skips the tool and logs a warning until it clears.
 - A Spoolman change with no unload switches immediately only if the printer

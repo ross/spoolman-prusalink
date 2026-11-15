@@ -19,6 +19,7 @@ from simulator.model import MODELS, Join, PrintSpec, Reason, Segment, SimTool, S
 
 INDX = "8.10.0"
 SHELF = "shelf"
+HINT = "printing with no filament reported"
 
 
 def indx(tmp_path, tools):
@@ -102,6 +103,11 @@ async def test_a_print_through_an_empty_tool_reports_its_usage_lost(tmp_path, ca
     assert [(event, tool) for event, tool, _ in lost] == [("lost_empty", 1)] * 2
     assert sum(mm for _, _, mm in lost) == 584 - 500
     assert fake.flag(1) is None and fake.flag(2) is None
+    # BF25: T1 alone warns, once, and the poll that sees the print over ends it. The idle
+    # empty tools, T2 to T7, print nothing and raise nothing.
+    hints = [r.getMessage().split(HINT)[0] for r in caplog.records if HINT in r.getMessage()]
+    t1 = tool_locations(LOC, 8)[1]
+    assert hints == [f"[{t1}] ", f"[{t1}] no longer: "]
 
     # BF24: the 84 mm never left a spool, so T1's next load is charged its own count.
     await station.swap_cycle(tool=1, source="preset", name="PLA")
@@ -111,10 +117,11 @@ async def test_a_print_through_an_empty_tool_reports_its_usage_lost(tmp_path, ca
     await bridge.aclose()
 
 
-async def test_an_idle_empty_tool_keeps_its_held_usage_through_a_print_on_another(tmp_path):
+async def test_an_idle_empty_tool_keeps_its_held_usage_through_a_print_on_another(tmp_path, caplog):
     """T1 holds usage with no material, as a menu load stopped before the type does. A print
     on T0 alone doesn't move T1's counter, so T1's usage stays held through the print and
-    goes to its spool at the next load (C7)."""
+    goes to its spool at the next load (C7). No usage is lost, so no tool warns (BF25)."""
+    caplog.set_level(logging.WARNING, logger="spoolman_prusalink")
     tools = [SimTool.loaded_with(0, PLA, extruded=1000.0), SimTool(1, extruded=500.0)]
     bridge, fake, station = indx(tmp_path, tools)
     printer = station.printer
@@ -130,10 +137,67 @@ async def test_an_idle_empty_tool_keeps_its_held_usage_through_a_print_on_anothe
     assert station.counter_at(1) == 520 and station.material(1) == (None, None, None)
     assert [r for r in ledger(tmp_path)[mark:] if "event" in r] == []
     assert set(totals(fake)) == {1}
+    assert levels(caplog, HINT) == []
 
     await station.swap_cycle(tool=1, source="preset", name="PLA")
     await bridge.poll()
     assert totals(fake)[2] == station.counter_at(1) - 500
+    await bridge.aclose()
+
+
+async def test_a_load_on_an_idle_empty_tool_right_after_a_print_is_charged(tmp_path, caplog):
+    """A print on T0 alone ends, and a menu load of the empty T1 starts before the next
+    poll. T1 never counted in the print, so the load's feed isn't the print's tail: it's
+    held until the type appears and charged in full to T1's spool, and nothing warns."""
+    caplog.set_level(logging.WARNING, logger="spoolman_prusalink")
+    tools = [SimTool.loaded_with(0, PLA, extruded=1000.0), SimTool(1, extruded=500.0)]
+    bridge, fake, station = indx(tmp_path, tools)
+    printer = station.printer
+    await bridge.poll()  # the baseline
+    mark = len(ledger(tmp_path))
+
+    station.begin_print(PrintSpec([Segment(0, 100)], duration_s=2))
+    printer.tap_through()  # Print
+    await station.run_until(lambda: printer.job is None, poll_every=0.3)
+    await station.swap_cycle(poll_every=0.1, tool=1, source="preset", name="PLA")
+    await bridge.poll()
+    records = ledger(tmp_path)[mark:]
+    assert [r for r in records if r.get("event") == "lost_empty"] == []
+    assert totals(fake)[2] == station.counter_at(1) - 500
+    assert levels(caplog, HINT) == []
+    await bridge.aclose()
+
+
+async def test_an_idle_empty_tool_has_no_tail_after_a_power_panic_resume(tmp_path, caplog):
+    """The first poll after a power cut lands once the resume prints on T0. T1, empty, reads
+    0 since the boot and printed nothing, so a menu load of T1 right after the print is
+    held until the type appears and charged in full to T1's spool, and nothing warns."""
+    caplog.set_level(logging.WARNING, logger="spoolman_prusalink")
+    tools = [SimTool.loaded_with(0, PLA, extruded=1000.0), SimTool(1, extruded=500.0)]
+    bridge, fake, station = indx(tmp_path, tools)
+    printer = station.printer
+    await bridge.poll()  # the baseline
+    station.begin_print(PrintSpec([Segment(0, 300)], duration_s=20))
+    printer.tap_through()  # Print
+    await station.run_until(lambda: station.counter_at(0) > 1000)
+    await bridge.poll()
+    station.advance(1)
+    await bridge.poll()
+    printer.set_power("off")
+    printer.set_power("on", resume=True)
+    station.tick_until(lambda: printer.state is State.PRINTING and printer.job is not None)
+    await bridge.poll()
+    assert bridge.printers[0].tools[1].printed_empty is False
+    mark = len(ledger(tmp_path))
+
+    await station.run_until(lambda: printer.job is None, poll_every=0.3, limit=120)
+    start = station.counter_at(1)
+    await station.swap_cycle(poll_every=0.1, tool=1, source="preset", name="PLA")
+    await bridge.poll()
+    records = ledger(tmp_path)[mark:]
+    assert [r for r in records if r.get("event") == "lost_empty"] == []
+    assert totals(fake)[2] == station.counter_at(1) - start
+    assert levels(caplog, HINT) == []
     await bridge.aclose()
 
 

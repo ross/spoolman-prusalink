@@ -179,9 +179,10 @@ class ToolState:
     # A poll skipped as ambiguous applied a reboot: the next poll that isn't skipped
     # checks for a staged spool as if it saw the reboot itself.
     reboot_pending: bool = False
-    # The last poll found a user's print running with no material in the tool. Usage
-    # counted after it and first seen at a poll with no print is the print's tail, so it's
-    # reported lost too, not held for the next spool.
+    # The tool has counted during a user's print with no material in it, and the last
+    # poll found that print still running with the tool empty. Usage counted after it and
+    # first seen at a poll with no print is the print's tail, so it's reported lost too,
+    # not held for the next spool. A tool the print never counted on has no tail.
     printed_empty: bool = False
 
     def to_json(self) -> dict:
@@ -922,9 +923,26 @@ class _Poll:
         self.event(HeldCharged(target, held))
         self.current.held_mm = 0
 
+    def counted(self) -> bool:
+        """This tool's own counter moved since the last poll.
+
+        `printing` is the printer's, so it's true for every tool: only a tool whose own
+        counter moved printed. Across a reboot the counters aren't comparable, so only
+        what the tool counted since the boot, from 0, is new.
+        """
+        return self.reading.extruded > (0 if self.rebooted else self.last.extruded)
+
     def printed_empty(self) -> bool:
-        """A user's print is running on this tool with no material reported."""
-        return self.printing and self.reading.material is None
+        """A user's print is running with no material reported on this tool, and the
+        tool has counted during it: at this poll, or at an earlier one that set the flag.
+
+        On a first poll there's no last counter, so it's false.
+        """
+        if not self.printing or self.reading.material is not None:
+            return False
+        if self.last.boot_id is None:
+            return False
+        return self.last.printed_empty or self.counted()
 
     def usage(self) -> None:
         """5. Usage since the last charge goes to the active spool."""
@@ -935,11 +953,7 @@ class _Poll:
         # the counter. While the job is still there, as at a filament change's question,
         # the usage is held: it may be a reload's feed.
         tail = self.last.printed_empty and self.job_id is None and not self.rebooted
-        # `printing` is the printer's, so it's true for every tool: only a tool whose own
-        # counter moved since the last poll printed. Across a reboot the counters aren't
-        # comparable, and anything counted since the boot is new.
-        counted = self.rebooted or reading.extruded > self.last.extruded
-        if delta > 0 and reading.material is None and counted and (self.printing or tail):
+        if delta > 0 and reading.material is None and self.counted() and (self.printing or tail):
             # That filament came from no spool. `charged` is one watermark, so this also
             # drops usage held at earlier polls of this empty tool, a load's feed included.
             self.event(LostEmpty(delta))
