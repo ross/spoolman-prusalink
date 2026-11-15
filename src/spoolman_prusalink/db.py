@@ -52,6 +52,7 @@ CREATE TABLE writes (
     due INTEGER NOT NULL,
     attempts INTEGER NOT NULL,
     written TEXT,
+    asked INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (printer, tool)
 );
 CREATE TABLE outbox (
@@ -92,7 +93,7 @@ _KEYED = {
     "tools": (("printer", "tool"), ("data",)),
     "conditions": (("printer", "tool"), ("data",)),
     "seen_tags": (("printer", "tool"), ("uuid", "spool_id", "runout")),
-    "writes": (("printer", "tool"), ("due", "attempts", "written")),
+    "writes": (("printer", "tool"), ("due", "attempts", "written", "asked")),
     "flagged": (("spool_id",), ()),
     "claimed": (("spool_id",), ()),
     "runouts": (("spool_id",), ("location", "remaining", "net", "used")),
@@ -398,7 +399,7 @@ def _rows(state: State) -> Rows:
                 rows["seen_tags"][(name, tool)] = (seen.uuid, seen.spool_id, int(seen.runout))
         for tool, w in p.writes.items():
             written = None if w.written is None else _canonical(w.written.to_json())
-            rows["writes"][(name, tool)] = (int(w.due), w.attempts, written)
+            rows["writes"][(name, tool)] = (int(w.due), w.attempts, written, int(w.asked))
     for spool_id in state.flagged:
         rows["flagged"][(spool_id,)] = ()
     for spool_id in state.claimed:
@@ -440,7 +441,7 @@ def _read(conn: sqlite3.Connection) -> tuple[State, Rows]:
     for (printer, tool), (uuid, spool_id, runout) in rows["seen_tags"].items():
         seen = state.printers.setdefault(printer, PrinterState()).seen_tags
         seen[tool] = SeenTag(uuid, spool_id, runout=bool(runout))
-    for (printer, tool), (due, attempts, written) in rows["writes"].items():
+    for (printer, tool), (due, attempts, written, asked) in rows["writes"].items():
         try:
             filament = None if written is None else WrittenFilament.from_json(json.loads(written))
         except KeyError as e:
@@ -448,7 +449,7 @@ def _read(conn: sqlite3.Connection) -> tuple[State, Rows]:
         except (TypeError, ValueError) as e:
             raise ValueError(f"writes row ({printer!r}, {tool}): a value of the wrong type") from e
         writes = state.printers.setdefault(printer, PrinterState()).writes
-        writes[tool] = WriteState(bool(due), attempts, filament)
+        writes[tool] = WriteState(bool(due), attempts, filament, bool(asked))
     state.printers = dict(sorted(state.printers.items()))
     state.flagged = [k for (k,) in rows["flagged"]]
     state.claimed = [k for (k,) in rows["claimed"]]

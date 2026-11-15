@@ -13,6 +13,10 @@ from urllib.parse import urlsplit
 # The name of the printer in the single-printer config form, which has no name of its own.
 DEFAULT_PRINTER_NAME = "default"
 _NAME_PATTERN = r"[A-Za-z0-9_.-]{1,64}"
+# Seconds the printer must stay idle before a sync job runs. After a power cut the printer
+# reads idle for a moment before it resumes the print, and a job started there drops the
+# print (P12): a positive delay holds the job past that window.
+SYNC_DELAY = 30.0
 
 
 class ConfigError(ValueError):
@@ -30,8 +34,6 @@ class PrinterConfig:
     api_key: str
     # Tool index -> exact Spoolman location name.
     tools: dict[int, str]
-    # Compatibility checks for the sync job; None uses the printer model's default.
-    gcode_preamble: tuple[str, ...] | None = None
     # Where the sync job is uploaded, and its file name (overwritten each time).
     sync_storage: str = "usb"
     sync_file: str = "spoolman-sync.gcode"
@@ -42,7 +44,7 @@ class PrinterConfig:
     # Write the spool to the printer after a swap or unload, once the printer is idle.
     printer_sync: bool = True
     # Seconds the printer must stay idle before the sync job runs; 0 runs it at once.
-    sync_delay: float = 0.0
+    sync_delay: float = SYNC_DELAY
     # Also overwrite drift (a mismatch with no swap or unload to explain it).
     sync_drift: bool = False
 
@@ -167,22 +169,16 @@ def _printer_settings(table: dict, prefix: str) -> dict:
     sync_file = _str(table, "sync_file", "spoolman-sync.gcode", f"{prefix}.sync_file")
     if not re.fullmatch(r"[A-Za-z0-9_.-]+\.gcode", sync_file):
         raise ConfigError(f"{prefix}.sync_file must be a plain .gcode file name, got {sync_file!r}")
-    preamble = table.get("gcode_preamble")
-    if preamble is not None and (
-        not isinstance(preamble, list) or not all(isinstance(x, str) for x in preamble)
-    ):
-        raise ConfigError(f"{prefix}.gcode_preamble must be a list of strings, got {preamble!r}")
     length_factor = _number(table, "length_factor", 1.0, f"{prefix}.length_factor")
     if not 0 < length_factor <= 2:
         raise ConfigError(f"{prefix}.length_factor must be in (0, 2], got {length_factor}")
     return {
-        "gcode_preamble": None if preamble is None else tuple(preamble),
         "sync_storage": _str(table, "sync_storage", "usb", f"{prefix}.sync_storage"),
         "sync_file": sync_file,
         "length_factor": length_factor,
         "flag_drift": _bool(table, "flag_drift", True, f"{prefix}.flag_drift"),
         "printer_sync": _bool(table, "printer_sync", True, f"{prefix}.printer_sync"),
-        "sync_delay": _number(table, "sync_delay", 0, f"{prefix}.sync_delay", at_least=0),
+        "sync_delay": _number(table, "sync_delay", SYNC_DELAY, f"{prefix}.sync_delay", at_least=0),
         "sync_drift": _bool(table, "sync_drift", False, f"{prefix}.sync_drift"),
     }
 

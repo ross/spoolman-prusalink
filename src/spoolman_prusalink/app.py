@@ -33,6 +33,7 @@ from .conditions import (
     UnloadedMovedOut,
     UnloadUnconfirmed,
     UuidConflict,
+    WriteAsked,
     WriteDidntTake,
     WritePending,
     WriteWaitsForLoad,
@@ -271,8 +272,11 @@ class PrinterBridge:
     # Per tool: the deleted spool a hold was last logged for. Starts empty, so a hold
     # restored after a restart is logged once.
     _hold_logged: dict[int, int] = field(default_factory=dict)
-    # When the printer was first seen idle since it was last busy or unreachable.
+    # When the printer was first seen idle since it was last busy, unreachable or booted,
+    # the boot that clock belongs to, and when the last read was taken.
     _idle_since: float | None = None
+    _idle_boot: int | None = None
+    _read_at: float = 0.0
 
     def __post_init__(self) -> None:
         self._printer_reach = Reachability(self.label, self.clock)
@@ -318,7 +322,8 @@ class PrinterBridge:
     async def read(self) -> tuple[PrinterStatus, FilamentReading] | None:
         """Read the printer's status and counters, or None if this poll can't use it.
 
-        The status carries the user's job ID: None for the bridge's own sync job.
+        The status carries the user's job ID: None for the bridge's own sync job, which
+        sets `sync_job` instead.
         """
         try:
             status = await self.client.status()
@@ -348,20 +353,28 @@ class PrinterBridge:
             self._idle_since = None
             return None
         _log_ok(self._printer_reach)
-        self._note_state(status.state)
+        if reading.boot_id != self._idle_boot:
+            # A boot opens a power-panic window: the printer reads idle with no job until
+            # it resumes the print (P12). A second cut during the resume opens another,
+            # with no busy read between them, so the idle clock starts over at each boot.
+            self._idle_since = None
+            self._idle_boot = reading.boot_id
+        self._read_at = self.clock()
+        self._note_state(status.state, self._read_at)
         if self._unsupported:
             self._unsupported = False
             log.error("%s now reports filament; resuming", self.label)
         if self._model_boot != reading.boot_id:
             await self._check_model(reading.boot_id)
-        return status._replace(job_id=job_id), reading
+        sync_job = status.job_id is not None and job_id is None
+        return status._replace(job_id=job_id, sync_job=sync_job), reading
 
-    def _note_state(self, state: str) -> None:
+    def _note_state(self, state: str, now: float) -> None:
         """Track how long the printer has been idle, for `sync_delay`."""
         if state not in IDLE_STATES:
             self._idle_since = None
         elif self._idle_since is None:
-            self._idle_since = self.clock()
+            self._idle_since = now
 
     async def check_missing(self, spools: list[Spool]) -> dict[int, int]:
         """Find out why an active spool is missing from Spoolman's list.
@@ -480,7 +493,7 @@ class PrinterBridge:
         self._model = printer_sync.PRINTER_MODELS.get(printer_type or "")
         # Writes were off and said so: the line saying they're back on is its recovery.
         was_off = self._model_error is not None
-        self._model_error = printer_sync.model_problem(printer_type, self.config.gcode_preamble)
+        self._model_error = printer_sync.model_problem(printer_type)
         name = self._model.name if self._model else "unknown"
         if self._model_error:
             log.warning(
@@ -512,12 +525,6 @@ class PrinterBridge:
         """Whether to write and compare instance UUIDs: configured with a Spoolman field to
         keep them in, and the model keeps them."""
         return self.uuids.enabled and self._tag_reader
-
-    def _preamble(self) -> tuple[str, ...]:
-        if self.config.gcode_preamble is not None:
-            return self.config.gcode_preamble
-        assert self._model is not None
-        return printer_sync.default_preamble(self._model)
 
     async def _user_job_id(self, status: PrinterStatus) -> int | None:
         """Return the job id, or None for the bridge's own sync job.
@@ -709,6 +716,7 @@ class PrinterBridge:
                         st,
                         active,
                         (*diffs, *([edited] if edited else [])),
+                        status,
                         edited=edited is not None,
                     )
                     if mismatch is not None:
@@ -873,19 +881,24 @@ class PrinterBridge:
         printer.
         """
         written = self._write(tool).written
-        if written is None:
+        if not self._changed_since_written(tool, spool):
             return None
+        if not printer_sync.printer_matches_write(material, written, self._uuids):
+            return None
+        return drift.Difference(drift.What.EDIT)
+
+    def _changed_since_written(self, tool: int, spool: Spool) -> bool:
+        """Whether writing `spool` now would set something other than the last write."""
+        written = self._write(tool).written
+        if written is None:
+            return False
         try:
             want = self._filament(tool, spool, spool.instance_uuid)
         except printer_sync.CannotSync:
             # The edit can't be written, but it's still an edit, not drift:
             # _classify_mismatch flags why.
             want = None
-        if want == written:
-            return None
-        if not printer_sync.printer_matches_write(material, written, self._uuids):
-            return None
-        return drift.Difference(drift.What.EDIT)
+        return want != written
 
     def _filament(
         self, tool: int, spool: Spool, uuid_value: str | None
@@ -902,12 +915,45 @@ class PrinterBridge:
             return str(e)
         return None
 
+    def _check_asked(
+        self,
+        tool: int,
+        active: Spool,
+        diffs: tuple[drift.Difference, ...],
+        status: PrinterStatus,
+    ) -> Condition | None:
+        """Follow a write's sync job through a question on the printer's screen (W5).
+
+        Returns the condition while the job waits at the question, or once it's gone
+        without running, and None for the usual paths. The printer can't say why it asked,
+        and a job refused under the printer's check settings also waits until someone
+        presses Abort, so a declined job and a refused one end the same way.
+        """
+        write = self._write(tool)
+        if write.due and write.attempts and status.sync_job:
+            # `attempts` counts the jobs since the write became due, so this one carries it.
+            asked = status.state == "ATTENTION"
+            if asked != write.asked:
+                self.writes[tool] = replace(write, asked=asked)
+            return WriteAsked(active.id, level=logging.WARNING) if asked else None
+        gave_up = write.asked or write.attempts >= MAX_SYNC_ATTEMPTS
+        if gave_up and self._changed_since_written(tool, active):
+            # Changed in Spoolman since the write was given up on: try the new one.
+            self.writes[tool] = write.retry()
+            return None
+        if write.asked:
+            return WriteDidntTake(
+                active.id, write.attempts, diffs, asked=True, level=logging.WARNING
+            )
+        return None
+
     def _classify_mismatch(
         self,
         tool: int,
         st: ToolState,
         active: Spool,
         diffs: tuple[drift.Difference, ...],
+        status: PrinterStatus,
         edited: bool = False,
     ) -> tuple[Condition | None, bool]:
         """Decide whether a printer/spool mismatch is a pending write or drift.
@@ -922,6 +968,11 @@ class PrinterBridge:
         # unconfirmed swap, write the assigned spool: the printer then shows what Spoolman
         # thinks is loaded, and confirming a different spool rewrites it.
         settled = st.assigned == st.active
+        if self.config.printer_sync and expected:
+            asked = self._check_asked(tool, active, diffs, status)
+            if asked is not None:
+                return asked, False
+            write = self._write(tool)
         if self.config.printer_sync and expected and write.attempts < MAX_SYNC_ATTEMPTS:
             if settled and self._model_error:
                 return PrinterUnwritable(active.id, self._model_error, level=logging.WARNING), False
@@ -990,7 +1041,9 @@ class PrinterBridge:
             self._sync_busy = self._sync_failed = None
             return False
         delay = self.config.sync_delay
-        idle_for = 0.0 if self._idle_since is None else self.clock() - self._idle_since
+        # Measured at the read this poll acted on, not now: the time since then grows with
+        # slow services and unreachable printers, and isn't idle time anyone saw.
+        idle_for = 0.0 if self._idle_since is None else self._read_at - self._idle_since
         if idle_for < delay:
             # The printer may have only just become idle, with someone at it about to
             # start a print. Give them time before taking it over.
@@ -1003,12 +1056,13 @@ class PrinterBridge:
             self._sync_delaying = True
             return False
         self._sync_delaying = False
-        gcode = printer_sync.build_job(self._preamble(), writes)
+        assert self._model is not None
+        gcode = printer_sync.build_job(printer_sync.default_preamble(self._model), writes)
         try:
             # The state this poll acted on was read a few requests ago. Check it again
             # right before taking over the printer, in case a print started since.
             state = (await self.client.status()).state
-            self._note_state(state)
+            self._note_state(state, self.clock())
             if state not in IDLE_STATES:
                 if self._sync_busy != state:
                     log.info(

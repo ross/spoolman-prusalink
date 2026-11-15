@@ -121,10 +121,10 @@ To serve several printers from one bridge, replace `[printer]` and `[[tools]]`
 in the config file with a `[[printers]]` list. Each entry has a `name`, a
 `url`, the API key as `api_key` or as `api_key_env` naming the environment
 variable that holds it, its own `[[printers.tools]]` entries, and any of
-the other `[printer]` settings: `gcode_preamble`, `sync_storage`,
-`sync_file`, `printer_sync`, `sync_delay`, `sync_drift`, `flag_drift` and
+the other `[printer]` settings: `sync_storage`, `sync_file`,
+`printer_sync`, `sync_delay`, `sync_drift`, `flag_drift` and
 `length_factor`. Each printer has its own value, and an entry that doesn't set
-one takes the default:
+one takes the default, as in `config.example.toml`:
 
 ```toml
 [[printers]]
@@ -367,8 +367,28 @@ or the tool unloads. A menu load replaces the filament with a preset, which
 drops the color and UUID, so a write is expected then. It waits while a swap
 is staged and while the tool is empty. During an unconfirmed swap it writes
 the spool Spoolman still assigns, so the printer shows what Spoolman
-thinks is loaded; confirming a different spool rewrites the printer. If the printer still
-differs after two jobs, it stops and flags the spool.
+thinks is loaded; confirming a different spool rewrites the printer.
+
+When a job doesn't change the printer, the bridge stops and flags the spool:
+
+- **Didn't take.** The printer still differs after two jobs, as when the
+  job ran but changed nothing. The flag lists the differences.
+- **The printer is asking about the sync job.** The printer stopped the job
+  at a question on its screen, such as a failed compatibility check, and
+  waits there until someone answers. Answer it on the printer: Print, or
+  No on an MMU's unload question, runs the job and clears the flag. The job's own checks pass under the
+  printer's default check settings, so this shouldn't happen on a supported
+  single-tool printer, but a printer with an MMU asks when filament is
+  loaded past its selector.
+- **The printer asked about the sync job and it didn't run.** Someone
+  answered the question with Abort, or the printer's check settings made
+  the check fatal, so Abort was the only answer. The bridge can't tell
+  which, and it doesn't upload another job, which would ask again. Check
+  the printer's screen and its check settings.
+
+Each flag clears when the printer matches the spool. A new spool, an unload,
+or a change to the spool in Spoolman starts the write again. A change on the
+printer alone doesn't.
 
 The bridge never writes a tool loaded from an NFC tag, whatever Spoolman says
 about its name, color or temperatures. The job's `M865` would clear the
@@ -396,13 +416,21 @@ alone, unless `sync_drift = true`.
 
 The job takes over the printer, so the bridge checks the printer's state
 again just before uploading it and holds the job if a print has started.
-The printer still reports idle while someone browses its menus, so a job
-can interrupt you choosing a print, often right after a filament load. Set
-`sync_delay` to the number of seconds the printer must stay idle before the
-job runs. The wait starts at the first poll that sees the printer idle, and
-starts over after any poll that couldn't read the printer. It's checked once
-per poll, so the job runs up to `poll_idle` seconds later.
-The default, 0, runs the job on the first idle poll.
+`sync_delay` sets how many seconds the printer must stay idle before the
+job runs, 30 by default. The wait starts at the first poll that sees the
+printer idle. It starts over after any poll that couldn't read the printer,
+and after the printer reboots. It's checked once per poll, so with the
+default `poll_idle` of 60 a write runs at the second idle poll.
+
+The wait protects a print interrupted by a power cut. When the power comes
+back, the printer reads idle with no job for a moment before it resumes the
+print, and a job started in that moment takes the printer: the print never
+resumes. The first idle poll after a reboot only starts the wait, so the
+job can't run there. The wait also keeps a job from interrupting you while
+you choose a print in the printer's menus, which read as idle too.
+
+`sync_delay = 0` runs the job at the first idle poll, including one in the
+moment after a power cut, so a write due during a print can lose that print.
 
 Requirements for a write:
 
@@ -410,11 +438,10 @@ Requirements for a write:
   printer reboot, it reads the model from `GET /api/version`. On a model
   that's unsupported or unknown, it doesn't write to the printer and flags
   any spool waiting to be written. Charging isn't affected.
-- The job's compatibility checks come from the model: `M862.3 P"<model>"`,
-  `M862.5 P2` and `M862.6 P"Input shaper"`. If you set `gcode_preamble`, its
-  `M862.3` must name the printer's model exactly (or its MMU3 variant), or
-  the bridge doesn't write. A job for the wrong model would stop on the
-  printer's compatibility warning until someone tapped through it.
+- The job's compatibility checks come from the printer's model:
+  `M862.3 P"<model>"`, `M862.5 P2` and `M862.6 P"Input shaper"`. They pass
+  under the printer's default check settings, so the job runs without a
+  question on the printer's screen.
 - The spool's material must be a printer preset (PLA, PETG, ASA, PC, PVB,
   ABS, HIPS, PP, FLEX, PA, PVA, BVOH; TPU maps to FLEX), or its
   filament must have extruder and bed temperatures in Spoolman. `M865 X R`

@@ -33,10 +33,7 @@ from integration.conftest import (
 from integration.faults import set_extra_text
 from integration.temperatures import TEMPERATURES, WRITTEN
 from integration.test_writes import SYNC_FILE, gcode, write_due, wrote_b
-from simulator.model import Material, PrintSpec, Segment, State
-from spoolman_prusalink.printer_sync import PRINTER_MODELS, default_preamble
-
-COREONEL_PREAMBLE = default_preamble(PRINTER_MODELS["8.1.0"])
+from simulator.model import Material, PrintSpec, Segment
 
 # Setups that leave the bridge with no instance UUIDs to write or compare: models with no
 # tag reader, and a Core One L with the Spoolman field off.
@@ -469,39 +466,6 @@ async def test_w7_malformed_instance_uuid_is_flagged(
     await wrote_b(w)
     await w.poll()
     assert await w.flag("B") is None
-
-
-# The line before the model check, and the model's MMU3 name: both are what the firmware accepts.
-# Neither has `M862.6 P"Input shaper"`, so the printer asks before each job runs.
-PREAMBLES = [
-    pytest.param(
-        ("G90 ; absolute", 'M862.3 P "COREONEL"', "M862.5 P2 ; level check"), id="lines_before"
-    ),
-    pytest.param(('M862.3 P "COREONELMMU3"', "M862.5 P2 ; level check"), id="mmu3"),
-]
-
-
-@pytest.mark.parametrize("preamble", PREAMBLES)
-async def test_w1_custom_preamble_is_written(world: World, preamble: tuple[str, ...]):
-    """A custom preamble with the model's check, or its MMU3 name, starts the job as given."""
-    w = world
-    assert preamble != COREONEL_PREAMBLE
-    await w.restart(printers=(replace(w.cfg.printers[0], gcode_preamble=preamble),))
-    await write_due(w)
-
-    await w.poll()
-    assert len(w.requests("PUT")) == 1
-    lines = w.printer.files[SYNC_FILE].splitlines()
-    assert lines[: len(preamble)] == list(preamble)
-    assert lines[len(preamble)].startswith("G28 O")
-    # Without the input shaper line the preview asks, and someone taps Print.
-    await w.run_until(lambda: w.printer.state is State.ATTENTION)
-    assert w.printer.job.attention.detail == "not sliced with input shaper"
-    w.printer.tap_through()
-    await wrote_b(w)
-    await w.poll()
-    assert await w.flag("B") is None
-    assert len(w.requests("PUT")) == 1
 
 
 # --- Drift and edits after a write ---

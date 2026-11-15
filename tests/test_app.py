@@ -14,7 +14,7 @@ from spoolman_prusalink import __main__ as main_module
 from spoolman_prusalink.__main__ import main
 from spoolman_prusalink.accounting import ToolState
 from spoolman_prusalink.app import Bridge, Reachability, _log_failed, _log_ok
-from spoolman_prusalink.config import Config, ConfigError, PrinterConfig, load
+from spoolman_prusalink.config import SYNC_DELAY, Config, ConfigError, PrinterConfig, load
 from spoolman_prusalink.db import Database, DatabaseError, read_ledger, read_state
 from spoolman_prusalink.errors import BadAnswer, Unreachable
 from spoolman_prusalink.models import Material
@@ -447,7 +447,8 @@ def test_config_load(tmp_path):
     # P1 and C2: poll every 30 s while printing and every 60 s otherwise.
     assert cfg.poll_printing == 30
     assert cfg.poll_idle == 60
-    assert cfg.printers[0].sync_delay == 0
+    # P12: a write waits out the idle window a power cut leaves before the resume.
+    assert cfg.printers[0].sync_delay == SYNC_DELAY == 30
 
     with pytest.raises(ConfigError, match="PRUSALINK_API_KEY"):
         load(p, env={})
@@ -478,8 +479,6 @@ CONFIG_BASE = (
         ('[printer]\nprinter_sync = "false"\n', "printer.printer_sync must be true or false"),
         ('[printer]\nflag_drift = "no"\n', "printer.flag_drift must be true or false"),
         ("[printer]\nsync_drift = 1\n", "printer.sync_drift must be true or false"),
-        ('[printer]\ngcode_preamble = "M862.3"\n', "gcode_preamble must be a list of strings"),
-        ('[printer]\ngcode_preamble = ["M862.3", 1]\n', "gcode_preamble must be a list of strings"),
         ("[bridge]\npoll_idle = 0\n", "bridge.poll_idle must be greater than 0"),
         ("[printer]\nsync_delay = -1\n", "printer.sync_delay must be 0 or more"),
         ('[printer]\nsync_delay = "5m"\n', "printer.sync_delay must be a number"),
@@ -604,18 +603,14 @@ def test_main_exits_2_on_a_malformed_config(tmp_path, clean_env, monkeypatch, ca
     assert "config: can't parse" in caplog.text
 
 
-def test_config_accepts_booleans_and_preamble_list(tmp_path):
+def test_config_accepts_booleans(tmp_path):
     p = tmp_path / "c.toml"
     p.write_text(
-        CONFIG_BASE.replace(
-            "[printer]\n",
-            '[printer]\nprinter_sync = false\ngcode_preamble = ["M862.3 P \\"COREONEL\\""]\n',
-        )
+        CONFIG_BASE.replace("[printer]\n", "[printer]\nprinter_sync = false\n")
         + "[bridge]\npoll_idle = 0.5\n"
     )
     cfg = load(p, env={"PRUSALINK_API_KEY": "k"})
     assert cfg.printers[0].printer_sync is False
-    assert cfg.printers[0].gcode_preamble == ('M862.3 P "COREONEL"',)
     assert cfg.poll_idle == 0.5
 
 

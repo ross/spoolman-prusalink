@@ -20,6 +20,7 @@ from spoolman_prusalink.conditions import (
     UnloadedMovedOut,
     UnloadUnconfirmed,
     UuidConflict,
+    WriteAsked,
     WriteDidntTake,
     WritePending,
     WriteWaitsForLoad,
@@ -129,6 +130,19 @@ KINDS = [
         f"printer still differs from spool 7 after 3 sync jobs: {DETAIL}",
         f"writing this spool to the printer didn't take: {DETAIL}",
     ),
+    (
+        WriteDidntTake(7, 1, DIFFS, asked=True, level=W),
+        "printer asked about the sync job for spool 7 and it didn't run; check the "
+        f"printer's screen and its check settings: {DETAIL}",
+        "the printer asked about the sync job writing this spool and it didn't run; check "
+        f"the printer's screen and its check settings: {DETAIL}",
+    ),
+    (
+        WriteAsked(7, level=W),
+        "printer is asking about the sync job for spool 7; answer it on the printer's screen",
+        "the printer is asking about the sync job writing this spool; answer it on the "
+        "printer's screen",
+    ),
     (Drift(7, DIFFS, level=W), f"printer differs from spool 7: {DETAIL}", None),
 ]
 
@@ -142,6 +156,12 @@ def test_kind_renders_and_round_trips(condition, log_text, flag_text):
     assert condition.log(CTX) == log_text
     assert condition.flag(CTX) == flag_text
     assert Condition.from_json(json.loads(json.dumps(condition.to_json()))) == condition
+
+
+def test_a_didnt_take_saved_before_asked_loads():
+    saved = WriteDidntTake(7, 2, DIFFS, level=W).to_json()
+    del saved["asked"]
+    assert Condition.from_json(saved) == WriteDidntTake(7, 2, DIFFS, level=W)
 
 
 def test_flag_texts_that_depend_on_the_settings():

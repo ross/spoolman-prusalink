@@ -11,23 +11,18 @@ url = "http://192.168.1.22"
 # The API key, or the environment variable that holds it. Set one, not both.
 # api_key = ""
 # api_key_env = "PRUSALINK_API_KEY"
-# Compatibility checks at the start of every job the bridge runs. By default they come
-# from the printer's model. If you set them, the M862.3 model must match the printer, or
-# the bridge doesn't write to the printer.
-# gcode_preamble = [
-#   'M862.3 P "COREONEL" ; printer model check',
-#   "M862.5 P2 ; g-code level check",
-#   'M862.6 P"Input shaper" ; FW feature check',
-# ]
 # Storage and file name for the sync job, which is overwritten each time.
 # sync_storage = "usb"
 # sync_file = "spoolman-sync.gcode"
 # After a swap or unload, write the loaded spool's name, color and UUID to the printer
 # once it's idle, through a job uploaded to the printer.
 # printer_sync = true
-# Seconds the printer must stay idle before that job runs, so it doesn't take over
-# the printer while you're at it choosing a print. 0 runs it on the first idle poll.
-# sync_delay = 0
+# Seconds the printer must stay idle before that job runs. After a power cut the
+# printer reads idle for a moment before it resumes the print, and a job started then
+# loses the print. The wait starts over when the printer reboots, so the job can't run
+# in that moment. It also keeps the job from taking over the printer while you're at it
+# choosing a print. 0 runs the job on the first idle poll, power cut or not.
+# sync_delay = 30
 # Also overwrite the printer when it differs with no swap or unload to explain it.
 # sync_drift = false
 # Also flag a spool when the printer's filament name, color or UUID doesn't match it.

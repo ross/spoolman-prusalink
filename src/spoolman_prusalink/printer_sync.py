@@ -17,7 +17,9 @@ from .models import Material, Spool
 
 @dataclass(frozen=True)
 class PrinterModel:
-    name: str  # What `M862.3 P"..."` checks for. The firmware compares it exactly.
+    # What the job's `M862.3 P"..."` names. The printer accepts any name in its
+    # compatibility group, so naming the model itself always passes.
+    name: str
     unsupported: str | None = None  # Why the bridge can't run it, or None.
     uuids: bool = False  # Whether `M865.1` stores an instance UUID (`HAS_ANFC`).
 
@@ -68,40 +70,13 @@ def default_preamble(model: PrinterModel) -> tuple[str, ...]:
     )
 
 
-_MODEL_CHECK = re.compile(r'^\s*M862\.3\s+P\s*"([^"]+)"', re.IGNORECASE)
-
-
-def preamble_model(preamble: tuple[str, ...] | list[str]) -> str | None:
-    """Return the model name the preamble's `M862.3 P"..."` line checks for."""
-    for line in preamble:
-        m = _MODEL_CHECK.match(line)
-        if m:
-            return m.group(1)
-    return None
-
-
-def model_problem(
-    printer_type: str | None, preamble: tuple[str, ...] | list[str] | None
-) -> str | None:
-    """Return why the bridge can't write to this printer, or None if it can.
-
-    `preamble` is the configured override, or None for the model's default. A job
-    whose `M862.3` names another model stops on the printer's compatibility warning
-    until someone taps through it, so the name has to match exactly. The firmware also
-    accepts the model's MMU3 variant name.
-    """
+def model_problem(printer_type: str | None) -> str | None:
+    """Return why the bridge can't write to this printer, or None if it can."""
     model = PRINTER_MODELS.get(printer_type or "")
     if model is None:
         return f"printer type {printer_type!r} isn't one the bridge knows"
     if model.unsupported:
         return f"{model.name} isn't supported: {model.unsupported}"
-    if preamble is None:
-        return None
-    wanted = preamble_model(preamble)
-    if wanted is None:
-        return f"gcode_preamble has no M862.3 model check; set one for {model.name}"
-    if wanted not in (model.name, f"{model.name}MMU3"):
-        return f"gcode_preamble is for {wanted} but the printer is {model.name}"
     return None
 
 
@@ -317,14 +292,22 @@ class WriteState:
     # What the bridge last wrote to the tool, so an edit in Spoolman can be told apart
     # from a change on the printer. None when the bridge hasn't written this tool.
     written: WrittenFilament | None = None
+    # The latest sync job was last seen waiting at a question on the printer's screen,
+    # so if it's gone and the printer still differs, the question was declined or
+    # refused: the bridge flags it and doesn't upload again (W5).
+    asked: bool = False
 
     def resync(self) -> WriteState:
         """The active spool changed or the tool unloaded: a write is due."""
-        return replace(self, due=True, attempts=0)
+        return replace(self, due=True, attempts=0, asked=False)
 
     def settled(self) -> WriteState:
         """Nothing is to be written: the printer matches, or the tool is left alone."""
-        return replace(self, due=False, attempts=0)
+        return replace(self, due=False, attempts=0, asked=False)
+
+    def retry(self) -> WriteState:
+        """The write the bridge gave up on changed in Spoolman: write it again."""
+        return replace(self, due=True, attempts=0, asked=False)
 
     def wrote(self, filament: WrittenFilament) -> WriteState:
         """A sync job wrote `filament`. It stays due until a poll sees the printer

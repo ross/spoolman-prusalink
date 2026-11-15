@@ -10,7 +10,7 @@ from .errors import check, parsing, send
 from .models import FilamentReading, Material, ToolReading
 
 # Printer states in which a job file can start, such as the sync job.
-IDLE_STATES = frozenset({"IDLE", "FINISHED", "READY", "STOPPED"})
+IDLE_STATES = frozenset({"IDLE", "FINISHED", "STOPPED"})
 BUSY_STATES = frozenset({"PRINTING", "PAUSED", "BUSY", "ATTENTION"})
 # States in which a job's usage on a tool with no filament is the print's, not a load's.
 # `ATTENTION` is left out: a filament change's reload counts its feed before the type comes
@@ -22,6 +22,9 @@ PRINTING_STATES = frozenset({"PRINTING", "PAUSED"})
 class PrinterStatus(NamedTuple):
     state: str
     job_id: int | None
+    # The printer's job is the bridge's own sync job. Set by `PrinterBridge.read()`,
+    # which then reports `job_id` as None.
+    sync_job: bool = False
 
 
 def parse_filament(data: dict) -> FilamentReading:

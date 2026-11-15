@@ -91,6 +91,7 @@ def full_state() -> State:
                 writes={
                     0: WriteState(True, 1, WrittenFilament("PLA", 215, 60, color="#8c9099")),
                     1: WriteState(due=True),
+                    2: WriteState(True, 1, WrittenFilament("PETG", 240, 80), asked=True),
                 },
             ),
             "mk4s": PrinterState(tools={0: ToolState(boot_id=1, charged=5)}),

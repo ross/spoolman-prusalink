@@ -7,9 +7,10 @@ A poll in that window sees an idle printer with nothing printing.
 
 import logging
 
-from harness import jobs, ledger, levels, make, poll_during_job, spool, swap_to_spool_20
+from harness import jobs, ledger, levels, make, spool, swap_to_spool_20
 
 from simulator.model import JobPhase, PrintSpec, Segment, State
+from spoolman_prusalink.config import SYNC_DELAY
 
 
 def events(records):
@@ -130,36 +131,62 @@ async def test_a_cut_while_a_runout_waits_loses_the_resumed_print(tmp_path, capl
     await bridge.aclose()
 
 
-async def test_a_sync_job_in_the_window_drops_the_resume(tmp_path):
-    """A write waits while the print runs. In the window the printer reads idle, so the
-    bridge uploads its sync job, and the firmware gives the resume up (BF26)."""
-    bridge, fake, station = make(tmp_path, [spool(19)], uuid_field="instance_uuid")
-    printer = station.printer
+async def written_and_printing(tmp_path):
+    """A bridge with the default `sync_delay`, on the simulator's time plus `skip[0]`
+    seconds, whose write of an edit waits for a running print.
+
+    Returns the bridge, the station, the print's job ID and `skip`, which moves the
+    bridge's clock on without moving the printer.
+    """
+    bridge, fake, station = make(
+        tmp_path, [spool(19)], uuid_field="instance_uuid", sync_delay=SYNC_DELAY
+    )
+    skip = [1e6]
+    bridge.clock = lambda: station.sim.now + skip[0]
     await swap_to_spool_20(bridge, fake, station)
-    station.finish_job()
+    assert jobs(station) == []  # the write waits for the delay
+    station.advance(SYNC_DELAY)
     await bridge.poll()
     assert len(jobs(station)) == 1
+    station.finish_job()
+    await bridge.poll()
     job = await start(bridge, station)
     fake.spools[20]["filament"]["color_hex"] = "00ff00"  # an edit in Spoolman
     station.advance(1)
     await bridge.poll()
     assert len(jobs(station)) == 1  # the write waits for the print
+    return bridge, station, job, skip
 
+
+async def write_after_the_print(bridge, station, job):
+    """Run the resumed print to its end, then check that the write waits out the delay
+    and runs."""
+    printer = station.printer
+    await station.run_until(lambda: printer.state is State.PRINTING, poll_every=0.5)
+    assert printer.job.id == job and len(jobs(station)) == 1
+    await station.run_until(lambda: printer.job is None, poll_every=0.5, limit=60)
+    await bridge.poll()
+    assert printer.state is State.FINISHED and printer.job_counter == job
+    assert len(jobs(station)) == 1
+    station.advance(SYNC_DELAY)
+    await bridge.poll()
+    assert len(jobs(station)) == 2 and 'O"#00ff00"' in jobs(station)[-1]
+    station.finish_job()
+
+
+async def test_a_write_waits_out_the_window_and_the_print_resumes(tmp_path):
+    """A write waits while the print runs. The printer reads idle in the window, but the
+    idle clock starts over at the boot, so the sync job waits out `sync_delay`: the print
+    resumes with its ID, and the write runs once the print has ended (P12, W2)."""
+    bridge, station, job, _ = await written_and_printing(tmp_path)
+    printer = station.printer
     printer.set_power("off")
     printer.set_power("on", resume=True)
     assert printer.state is State.IDLE and printer.job is None and printer.resuming.id == job
 
-    # A known fault, BF26 in docs/bridge-findings.md: the first poll after the boot runs
-    # the sync job, and the user's print never resumes. A fix changes these lines.
-    await poll_during_job(bridge)
-    assert len(jobs(station)) == 2 and 'O"#00ff00"' in jobs(station)[-1]
-    assert printer.job.kind == "sync" and printer.resuming is None
-    station.finish_job()
-    await bridge.poll()
-    station.advance(60)
-    await bridge.poll()
-    assert printer.state is State.FINISHED and printer.job is None
-    assert printer.job_counter == job + 1
+    await bridge.poll()  # in the window
+    assert len(jobs(station)) == 1 and printer.resuming.id == job
+    await write_after_the_print(bridge, station, job)
     await bridge.aclose()
 
 
@@ -198,4 +225,30 @@ async def test_a_second_cut_during_the_resume(tmp_path):
     await bridge.poll()
     assert charged(fake, 19) == before + 7 + station.counter
     assert events(ledger(tmp_path)[mark:]) == ["reboot", "reboot"]
+    await bridge.aclose()
+
+
+async def test_a_second_cut_after_an_idle_poll_in_the_first_window(tmp_path):
+    """A poll in the first window starts the idle clock and holds the write. With the
+    printer idle, the next poll comes `poll_idle` later. In between, the resume starts and
+    a second cut reboots the printer, and that poll lands in the second window. No read
+    saw the printer busy, but the boot starts the idle clock again, so the write still
+    waits and the print resumes (P12, W2)."""
+    bridge, station, job, skip = await written_and_printing(tmp_path)
+    printer = station.printer
+    printer.set_power("off")
+    printer.set_power("on", resume=True)
+    await bridge.poll()  # in the first window
+    assert printer.resuming.id == job and len(jobs(station)) == 1
+
+    station.tick_until(lambda: printer.job is not None)  # the resume runs, with no poll
+    assert printer.job.id == job and printer.state is State.BUSY
+    printer.set_power("off")
+    printer.set_power("on", resume=True)
+    skip[0] += bridge.config.poll_idle
+    assert bridge.config.poll_idle > SYNC_DELAY
+    await bridge.poll()  # in the second window
+    assert len(jobs(station)) == 1
+    assert printer.state is State.IDLE and printer.resuming.id == job
+    await write_after_the_print(bridge, station, job)
     await bridge.aclose()
