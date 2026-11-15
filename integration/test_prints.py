@@ -34,8 +34,8 @@ async def test_p2_runout_with_spoolman_updated_during_pause(world: World):
     start = w.tool.extruded
 
     # Scan, blip and preheat take 0.9 s, so this is a few tenths of a second of printing.
-    # The bridge sees a print start when the counter moves between two polls of the same
-    # job, and only a runout after that start counts as mid-print, so poll twice.
+    # The bridge sees a print start when the counter rises more than FIRST_EXTRUSION_MM
+    # past where it first saw the job, about 28 mm in the 0.3 s between these polls.
     w.printer.start_print(PrintSpec([Segment(0, 400)], duration_s=4, preheat_s=0.5))
     w.advance(1.2)
     assert w.printer.state is State.PRINTING and w.tool.extruded > start
@@ -211,6 +211,46 @@ async def test_p8_cancelled_during_preheat_is_not_a_print_start(
     assert events(w.since(0), "swap_assumed") == []
     assert not any("provisionally" in m for m in warnings(caplog))
     assert await w.flag("A") is None
+
+
+async def test_p8_cancel_ramming_is_not_a_print_start(world: World):
+    """A cancel's ramming in preheat isn't a print start: a later Spoolman fix confirms."""
+    w = world
+    a, b = w.spools["A"], w.spools["B"]
+    await baseline(w)
+
+    await w.unload()  # Auto-retracted since the baseline's load: a cold unload.
+    records = await w.poll()
+    assert len(events(records, "swap_unconfirmed")) == 1
+    await w.swap_cycle(source="preset", name="PLA")
+    await w.poll()
+    await w.run_until(lambda: w.printer.job is None)
+    # Fed since the reload's auto-retract, so the cancel rams the whole sequence.
+    w.printer.extrude(0, 30)
+    await w.run_until(lambda: w.tool.process is None)
+    await w.poll()
+
+    w.printer.start_print(print_spec())
+    w.advance(0.5)
+    assert w.printer.state is State.PRINTING and w.printer.job is not None
+    records = await w.poll()
+    assert events(records) == []
+    mark, start = w.mark(), w.counter
+    w.printer.cancel()
+    records = await w.run_until(lambda: w.printer.job is None, poll_every=0.1)
+    records += await w.poll()
+    # The auto-retract's 23 mm at 0.95, 21.85, counted while the job parks.
+    assert w.counter - start in (21, 22)
+    assert w.charged(w.since(mark), "A") == w.counter - start
+    assert events(w.since(mark), "swap_assumed") == []
+    assert "assumed reloaded" not in (await w.flag("A") or "")
+
+    # Spoolman is fixed after the cancel: the swap is still open, so this confirms it.
+    await w.move("A", w.shelf)
+    await w.move("B", w.tool_location)
+    records = await w.poll()
+    confirmed = event_fields(records, "swap_confirmed")
+    assert [(e["from_spool"], e["to_spool"]) for e in confirmed] == [(a, b)]
 
 
 async def test_p9_restart_after_a_failure_is_a_new_print_start(

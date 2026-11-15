@@ -73,8 +73,10 @@ async def test_b2_restart_mid_print(world: World):
     records = w.since(0)
     assert w.charged(records, "A") == w.counter - start
     assert all(r["extruded_mm"] > 0 for r in charges(records))
-    grams = round(sum(r["grams"] for r in charges(records)), 2)
-    assert round(await w.used("A"), 2) == grams
+    # The ledger rounds each charge's grams to 0.001, so the sum can be off by half of
+    # that per charge.
+    grams = [r["grams"] for r in charges(records)]
+    assert await w.used("A") == pytest.approx(sum(grams), abs=0.0005 * len(grams))
 
 
 async def test_b4_database_lost(world: World):

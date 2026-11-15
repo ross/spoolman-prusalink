@@ -5,6 +5,7 @@ import pytest
 
 from spoolman_prusalink import events as ev
 from spoolman_prusalink.accounting import (
+    FIRST_EXTRUSION_MM,
     Charge,
     Provisional,
     Result,
@@ -608,6 +609,23 @@ def test_job_cancelled_before_extruding_is_not_a_print_start():
     assert (state.active, state.job_id, state.pending_job) == (9, None, None)
 
 
+@pytest.mark.parametrize(("rise", "started"), [(FIRST_EXTRUSION_MM, False), (24, True)])
+def test_a_pending_job_starts_only_past_a_rammings_count(rise, started):
+    # BF10: a cancel's ramming counts up to FIRST_EXTRUSION_MM while the job shows. The
+    # rise is charged either way; only the start waits.
+    _, _, state = run(
+        [
+            (BOOT, r(100), loc(7)),
+            (BOOT, r(200, unloads=1, at_unload=100), loc(7)),
+            (BOOT, r(200, unloads=1, at_unload=100), loc(7), 42),
+        ]
+    )
+    res = account(state, BOOT, r(200 + rise, unloads=1, at_unload=100), loc(7), 42)
+    assert res.charges == [Charge(7, rise, "extruded")]
+    assert (EventKind.SWAP_ASSUMED in [e.kind for e in res.events]) is started
+    assert (res.state.job_id, res.state.pending_job) == ((42, None) if started else (None, 42))
+
+
 def test_spoolman_fixed_during_preheat_confirms_swap():
     _, kinds, state = run(
         [
@@ -1102,15 +1120,15 @@ def test_usage_held_through_reboot_counts_toward_provisional_at_print_start():
             (BOOT, r(100), loc(7), None),
             (BOOT, r(700, material=None, unloads=1, at_unload=600), loc(7), None),
             (BOOT, r(760, material=None, unloads=1, at_unload=600), loc(7), 42),
-            (BOOT + 1, r(20), loc(7), 42),
+            (BOOT + 1, r(30), loc(7), 42),
         ]
     )
     assert charges[-2:] == [
         Charge(7, 160, "held before the printer restarted"),
-        Charge(7, 20, "extruded"),
+        Charge(7, 30, "extruded"),
     ]
     assert EventKind.SWAP_ASSUMED in kinds
-    assert state.provisional == Provisional(7, 180, 42) and state.swap is None
+    assert state.provisional == Provisional(7, 190, 42) and state.swap is None
 
 
 def test_usage_held_through_reboot_is_lost_at_unload_with_no_spool():
@@ -1300,10 +1318,10 @@ def test_staged_spool_takes_held_usage_at_print_start():
     _, _, state = run([(BOOT, r(300), loc(20))], deleted(ids=(20,)))
     # The job appears at 320 (pending, so those 20 mm are held too) and starts at its
     # first extrusion.
-    charges, _, state = run([(BOOT, r(320), loc(20), 77), (BOOT, r(340), loc(20), 77)], state)
+    charges, _, state = run([(BOOT, r(320), loc(20), 77), (BOOT, r(350), loc(20), 77)], state)
     assert charges == [
         Charge(20, 120, "held after spool 19 was deleted"),
-        Charge(20, 20, "extruded"),
+        Charge(20, 30, "extruded"),
     ]
     assert state.active == 20
 

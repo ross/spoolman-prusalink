@@ -402,34 +402,41 @@ written.
   tool that isn't already auto-retracted, such as one fed with Move E or
   Purge filament since its last load or print, or one loaded at this
   print's preview (BF23, F28), the ramming counts about 22 mm (23 mm
-  commanded at 0.95) while the job is still visible.
-  `accounting.print_start` takes the first counter rise in a new job as
-  the print's start (Q4), so it takes the ramming as one. A cancel during
-  the scan or the start blip moves nothing and ends in `IDLE` (F27), so
-  this takes a cancel later in the preheat.
-- **Effect**: A print cancelled before it extruded counts as started. An
-  open unconfirmed swap closes as "assumed same spool" with a provisional
-  charge (S4, Q1), and a staged spool is flagged (S9, Q2). A Spoolman fix
-  made after the cancel's ramming no longer confirms the swap, against
-  what P8 promises. A fix the bridge polls during the preheat, before the
-  cancel, still confirms it.
-- **Evidence**: Inferred from the source and `accounting.py`. Reproduced,
-  no test kept: the bridge records `swap_assumed`, a provisional 22 mm
-  charge and `swap_staged`. Through the unit harness, a tool loaded at
-  the preview gives `swap_assumed` and the 22 mm charge too, with or
-  without polls during the load (BF23). The P8 test doesn't show it: its
-  tool is already auto-retracted, it fixes Spoolman before the cancel,
-  and its `finish()` polls every 1 s while the job parks for 0.2 s.
+  commanded at 0.95) while the job is still visible. Until the fix,
+  `accounting.print_start` took the first counter rise in a new job as the
+  print's start (Q4), so it took the ramming as one. A cancel during the
+  scan or the start blip moves nothing and ends in `IDLE` (F27), so this
+  took a cancel later in the preheat.
+- **Effect**: Until the fix, a print cancelled before it extruded counted
+  as started. An open unconfirmed swap closed as "assumed same spool" with
+  a provisional charge (S4, Q1), and a staged spool was flagged (S9, Q2). A
+  Spoolman fix made after the cancel's ramming no longer confirmed the
+  swap, against what P8 promises. A fix the bridge polled during the
+  preheat, before the cancel, still confirmed it.
+- **Evidence**: Inferred from the source and `accounting.py`. Reproduced
+  before the fix, no test kept: the bridge recorded `swap_assumed`, a
+  provisional 22 mm charge and `swap_staged`. The P8 test of the time
+  didn't show it: its tool was already auto-retracted, it fixed Spoolman
+  before the cancel, and its `finish()` polled every 1 s while the job
+  parked for 0.2 s. Shown fixed in the simulator by
+  `test_a_cancel_in_the_preheat_leaves_the_swap_open` in
+  `tests/test_print_start.py` and, end to end,
+  `test_p8_cancel_ramming_is_not_a_print_start` in
+  `integration/test_prints.py`.
 - **Scenario rows**: P8, Q4, S4, Q1, S9, Q2.
-- **To reproduce**: Start from
-  `test_p8_cancelled_during_preheat_is_not_a_print_start` in
-  `integration/test_prints.py`. Open an unconfirmed swap as it does, then
-  feed the tool (`extrude`) after the load. Start the print, `cancel` in
-  the preheat, and poll every 0.1 s while the job parks. Fix Spoolman only
-  after the cancel. Expect `swap_assumed` for the job. BF23's cancel
-  path, with polls during the load and the auto-retract on, shows the
-  same after a load at the preview.
-- **Status**: Open.
+- **To reproduce**: Before the fix, the steps those two tests take: open
+  an unconfirmed swap, feed the tool (`extrude`) after the reload, start a
+  print, `cancel` in the preheat, and poll every 0.1 s while the job
+  parks, then fix Spoolman. The ledger showed `swap_assumed` for the job.
+- **Status**: Fixed (D5 in bridge-fixes.md). A pending job starts only
+  once the counter has risen more than `FIRST_EXTRUSION_MM`, 23 mm, past
+  where the bridge first saw it, the ramming's commanded length (F26).
+  The ramming is still charged to the active spool. The cost is that a
+  print that counts 23 mm or less on a tool never starts there (Q4).
+  `test_a_cancel_in_the_preheat_counts_no_more_than_the_threshold` in
+  `tests/test_print_start.py` checks every model that auto-retracts
+  against the threshold. F26 and F5 on the Core One L still confirm the
+  ramming's size.
 
 ### BF11. A power-panic resume loses usage and counts a purge
 
@@ -667,9 +674,12 @@ written.
   and the reload and the rest of the print go to the old spool until a
   claim moves them. With no Spoolman change, the old spool carries an
   "assumed reloaded" flag where P3 would leave the swap open.
-- **Evidence**: Shown in the simulator on an INDX by
-  `test_a_change_on_a_tool_the_print_has_not_used_looks_like_its_print_start`
-  in `tests/test_toolchanger_prints.py`. Reproduced, no test kept: the
+- **Evidence**: Shown in the simulator on an INDX by the test now named
+  `test_a_change_on_a_tool_the_print_has_not_used_follows_p2` in
+  `tests/test_toolchanger_prints.py`, before BF10's threshold. INDX's
+  ramming counts 16 mm, under it, so the test now shows P2; with no
+  Spoolman change, the reload's count still starts the tool's print.
+  Reproduced, no test kept: the
   same change on a tool the print used earlier follows P2, and a runout in
   the preheat of a Core One L print gives `unload`, `swap_unconfirmed` and
   `swap_assumed` in one poll when the tool isn't auto-retracted, and
@@ -677,7 +687,7 @@ written.
   print's first extrusion is inferred: the start G-code's heat waits come
   before its purge line.
 - **Scenario rows**: T10, P2, P3, P8, Q4, S13.
-- **To reproduce**: That test, today. For the single-tool path, start a
+- **To reproduce**: That test, without the Spoolman change. For the single-tool path, start a
   print with a preheat on a Core One L through the unit harness, with the
   tool not auto-retracted (the harness's starting state, or `auto_retract`
   off), poll during the preheat, `runout(0)`, and poll.

@@ -133,7 +133,7 @@ async def test_x3_spool_moved_in_spoolman_but_never_loaded_elsewhere(tmp_path):
     assert st["b"].assigned == 19 and st["b"].active == 20  # S9: staged on b.
     start_job(b)
     await bridge.poll()
-    b.tool.extruded += 10
+    b.tool.extruded += 30
     await bridge.poll()  # The print starts at its first extrusion (Q4).
     assert "staged" in (fake.flag(19) or "") and "Tool b" in fake.flag(19)
     # Moving it back cancels the staging on b and resumes a's assignment.

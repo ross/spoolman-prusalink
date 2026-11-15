@@ -30,7 +30,7 @@ update the workstreams it changes.
 | D2 | Does stage 1 ship alone, merged and deployed to the Core One L before stage 2 or 4 work merges? | Yes. Workstream 7 can be built at the same time, but it merges after workstreams 2 and 3, which change the same code in `app.py` and `printer_sync.py`. | Merging workstreams 7 and 9. |
 | D3 | How does BF26 get fixed: a positive `sync_delay` default, a guard in the bridge after a boot that interrupted a print, or wait for the F12 trace? | Decided: a positive `sync_delay` default, 30 s, and the idle clock starts again at each new `boot_id`. No guard. The code holds a write while the printer has been idle for less than `sync_delay`, and a new `PrinterBridge`, a failed read or a new boot starts that clock again at that poll, so the first idle poll after a boot only starts it, and the write runs one idle poll later. That covers a bridge that restarts in the window, and a second cut during the resume, whose window a poll can reach `poll_idle` after one in the first window. What it misses: a config that sets `sync_delay = 0`, and a window that outlasts a poll, which the F12 trace checks. What it costs: every write waits one more idle poll, up to 60 s by default. | Workstream 1. |
 | D4 | Keep `gcode_preamble`, or remove it? | Answered: remove it. Its only effects found were BF2, BF3 and BF4, and the default preamble passes every check on every model the bridge writes to. Pre-release, there's no compatibility to keep. | Workstream 3, and the INDX lock line in workstream 7. |
-| D5 | Amend Q4 so that a ramming or a load isn't a print's first extrusion? | Yes. Q4's intent, that a cancelled print changes nothing, holds; only what counts as the first extrusion narrows. | Workstream 4. |
+| D5 | Amend Q4 so that a ramming or a load isn't a print's first extrusion? | Answered: yes, with a threshold. A pending job starts once the tool's counter has risen more than 23 mm, the auto-retract ramming's commanded length, past where the bridge first saw the job. A rise at two polls was rejected: the ramming counts in two moves that two polls can split. A load between the job's first sight and its first extrusion takes the starting point again, and an unload in a pending job starts it without the start's effects. That unload counts as a mid-print unload, with P2's runout flag and tag handling. Q4's intent, that a cancelled print changes nothing, holds. | Nothing. |
 | D6 | Amend C7: usage counted on a tool with no filament while a user's print runs is reported lost, not charged to the next spool? | Answered: yes. That filament came from no spool, so it's reported lost. The hold during a load, which S1 and S2 rely on, stays as it is. | Nothing. |
 | D7 | BF9: accept and document the auto-retract's count, or correct it in the bridge? | Wait for the F3 and F5 traces (sittings A and B), then accept and document it if they show about 28.5 mm per auto-retract. A correction needs the auto-retract setting and the filament's flexibility, which the bridge can't read, and the error is about 0.09 g each time. | Workstream 6. |
 | D8 | MMU3 printers, which you'll never own: fix the findings, detect the MMU and refuse it, or document it? | Detect it from `/api/v1/info`'s `mmu`, and while it's on, charge nothing and write nothing, logged once, as for a printer with no counters. BF16 alone over-charges about 0.63 g per tool change, so a multi-color print's charges are far off, and BF15 and BF17 have no fix the bridge can see. The middle option, writes off and charging on with the errors documented, is cheaper still and keeps those errors. | Workstream 9. |
@@ -72,8 +72,8 @@ elsewhere names it under "Also touches".
 | 1 | [The power-panic window](#1-the-power-panic-window) | BF26 | | 1 | Small | D3 | Merged, 9df89c8 |
 | 2 | [A sync job at a question](#2-a-sync-job-at-a-question) | BF5 | BF4, BF7, BF18 | 1 | Medium | Nothing | Merged, 064d892 |
 | 3 | [The custom preamble](#3-the-custom-preamble) | BF2, BF3, BF4 | | 1 | Small | D4 | Merged, 064d892 |
-| 4 | [Print start](#4-print-start) | BF10, BF23, BF27 | | 1 | Medium | D5; sitting D confirms | Not started |
-| 5 | [Usage on an empty tool](#5-usage-on-an-empty-tool) | BF24, BF25 | | 1 | Medium | D12 for BF25's hint; sittings C and D confirm | BF24 merged, 90eaf2c, built before workstream 4; BF25's hint waits on D12 |
+| 4 | [Print start](#4-print-start) | BF10, BF23, BF27 | | 1 | Medium | Sitting D confirms | In progress |
+| 5 | [Usage on an empty tool](#5-usage-on-an-empty-tool) | BF24, BF25 | | 1 | Medium | D12 for BF25's hint; sittings C and D confirm | BF24 merged, 90eaf2c, before workstream 4, which builds on it; BF25's hint waits on D12 |
 | 6 | [The auto-retract](#6-the-auto-retract) | BF9 | | 1 | Small | D7; sittings A and B | Not started |
 | 7 | [Writes to toolchangers](#7-writes-to-toolchangers) | BF14, BF1, BF8, BF7 | BF26 | 2 | Medium | D10; workstreams 2 and 3 | Not started |
 | 8 | [Toolchanger swaps](#8-toolchanger-swaps) | BF12, BF13 | | 2 | Small | D11, D12 | Not started |
@@ -237,42 +237,54 @@ medium is a new input or condition through `account()` or
 ### 4. Print start
 
 - **Findings**: owns BF10, BF23 and BF27, stage 1.
-- **Problem**: `print_start` in `accounting.py` takes a job's first
+- **Problem**: `print_start` in `accounting.py` took a job's first
   counter rise as the print's start (Q4). A ramming at a cancel (BF10), a
   load at the preview with no poll during it (BF23), or a filament
-  change's ramming before the tool's first extrusion (BF27) is that rise.
-  The bridge then closes an open swap as assumed, flags the spool, and
-  stages a Spoolman change that should have confirmed the swap.
-- **Approach (proposal)**: Three changes in `account()`, each to verify:
+  change's ramming before the tool's first extrusion (BF27) was that rise.
+  The bridge then closed an open swap as assumed, flagged the spool, and
+  staged a Spoolman change that should have confirmed the swap.
+- **Approach**: Decided under D5, in `account()`:
+  - For BF10: a pending job starts only once the counter has risen more
+    than `FIRST_EXTRUSION_MM`, 23 mm, past `pending_at`. That's the
+    auto-retract ramming's commanded length (F26), and at a feed ratio of
+    1 or less the counted part can't exceed it. The usage under it is
+    charged as usual; only the start waits.
+  - For BF23: a new saved field, `ToolState.pending_empty`, says the tool
+    reported no material at the last poll of the pending job. While the
+    job is pending, a tool with no material takes `pending_at` again and
+    sets the field. The first poll with a material after it takes
+    `pending_at` once more and clears the field, without starting. That
+    also keeps an empty tool's count during a print with the sensors off
+    from starting that tool's print.
   - For BF27: an unload in a job that's still pending promotes the job to
-    started without the start's effects. The unload already supersedes
-    the open swap and commits any staging, so the swap the unload opens
-    stays open, as P2 and P3 say for a started print.
-  - For BF23: a tool that reported no material at the poll that set
-    `pending_at`, and reports one now, loaded in between. Take
-    `pending_at` again from the current counter instead of starting the
-    print. `ToolState` has `pending_job` and `pending_at` but nothing
-    about the material, so it needs a field for "empty when pending".
-  - For BF10: a ramming counts once, as the job ends. Either require the
-    rise past `pending_at` to exceed what a ramming counts (about 22 mm
-    by the source; F26 and F5 measure it), or require a rise at two polls
-    of the job. Pick one and say why in Q4.
-- **Needs**: D5. The F28 trace (sitting D) confirms BF23 on the printer,
-  and F26 and F5 (sittings A and B) the size of a ramming. Build against
-  the simulator now; if a trace disagrees, the simulator changes first,
-  then the fix.
+    started, without the start's effects. The unload already supersedes
+    the open swap and commits any staging, so the swap it opens stays
+    open, as P2 and P3 say for a started print. A job first seen at the
+    poll of an unload, with the tool empty after it, is promoted too: a
+    runout in the preheat that no poll saw pending. The promoted unload
+    is a mid-print unload: it gets P2's runout flag, and its tag is
+    handled as a runout's (Q10, Q11). So does an idle sensor clear while
+    the tools-mapping screen shows a job.
+- **Needs**: The F28 trace (sitting D) confirms BF23 on the printer, and
+  F26 and F5 (sittings A and B) the size of a ramming. If a trace
+  disagrees, the simulator changes first, then the fix.
 - **User and saved state**: README, "How usage is attributed", says what
-  starts a print. One new `ToolState` field, saved in place.
-- **Tests**: `test_a_change_on_a_tool_the_print_has_not_used_looks_like_its_print_start`
-  in `tests/test_toolchanger_prints.py` flips. BF10 and BF23 have no kept
-  test: add them from their "To reproduce" steps, with the auto-retract on
-  (BF22). P8 gains `test_p8_...` integration tests for the cancel ramming
-  and the preview load. Q4, P8 and T10 change.
+  starts a print. One new `ToolState` field, `pending_empty`, saved in
+  place and read as false when a saved state lacks it.
+- **Tests**: BF10: `tests/test_print_start.py` runs a cancel in the
+  preheat on every model that auto-retracts and checks the count against
+  `FIRST_EXTRUSION_MM`, and a cancel that rams with an open swap;
+  `test_p8_cancel_ramming_is_not_a_print_start` in
+  `integration/test_prints.py` runs it end to end. The BF27 pin, now
+  `test_a_change_on_a_tool_the_print_has_not_used_follows_p2` in
+  `tests/test_toolchanger_prints.py`, flipped with the threshold, since
+  INDX's ramming counts 16 mm. `Station.start_print` polls in the preheat
+  and again once the first tool's counter is past the threshold.
 - **Done when**: none of the three paths records `swap_assumed`, and every
   existing print-start test still passes.
-- **Overlap**: `accounting.py` (`print_start`, `unload`, `ToolState`) and
-  `tests/test_accounting.py`. Collides with workstream 5: run them one
-  after another, or as one stack.
+- **Overlap**: `accounting.py` (`print_start`, `unload`, `ToolState`),
+  `tests/test_accounting.py`, and `integration/station.py`, which both
+  suites share.
 
 ### 5. Usage on an empty tool
 
@@ -323,7 +335,7 @@ medium is a new input or condition through `account()` or
   a tool with no material, and S1, S2 and the P2 reload charge as before.
 - **Overlap**: `accounting.py` (`usage`, `account()`'s signature) and
   `tests/test_accounting.py`'s checking wrapper; `process` in `app.py`;
-  `conditions.py`. Collides with workstream 4.
+  `conditions.py`. Workstream 4 builds on it.
 
 ### 6. The auto-retract
 
@@ -570,7 +582,5 @@ Left to the work:
 
 - Whether one idle poll always covers the power-panic window. The F12
   trace decides (workstream 1).
-- Which rule excludes a cancel's ramming: a threshold or a rise at two
-  polls (workstream 4).
 - Whether `/api/v1/info` is cheap enough to read at every poll, or only
   at a boot and when the tool count changes (workstream 9).

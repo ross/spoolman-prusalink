@@ -97,6 +97,14 @@ from .events import (
 )
 from .models import ToolReading
 
+# How far a pending job's counter has to rise past where the job was first seen before the
+# print counts as started (Q4). A cancel in the preheat ends the print with the Nextruder's
+# auto-retract, whose ramming commands 23 mm while the job is still visible (F26). At a feed
+# ratio of 1 or less the counted part can't exceed that, about 21.85 mm on a Core One L, so
+# a rise of 23 mm or less can be a ramming, not the print's first extrusion. The usage is
+# charged as usual either way: only the start waits.
+FIRST_EXTRUSION_MM = 23
+
 
 @dataclass(frozen=True)
 class Charge:
@@ -851,7 +859,8 @@ class _Poll:
         """4. A print starting closes the confirmation window.
 
         A print starts at its first extrusion: a new job is pending until the counter
-        passes where it was first seen.
+        passes where it was first seen by more than `FIRST_EXTRUSION_MM`, more than a
+        cancel's ramming counts.
         """
         current, job_id = self.current, self.job_id
         if job_id is None or job_id == self.last.job_id:
@@ -860,7 +869,7 @@ class _Poll:
         if current.pending_job != job_id:
             current.pending_job, current.pending_at = job_id, self.reading.extruded
             return
-        if self.reading.extruded <= current.pending_at:
+        if self.reading.extruded - current.pending_at <= FIRST_EXTRUSION_MM:
             return
         current.pending_job = None
         current.job_id = job_id

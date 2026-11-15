@@ -186,6 +186,7 @@ end Status.
 | P5 | `test_prints.py::test_p5_planned_color_changes_are_unloads` | Two `M600` color changes: each an unload, one confirmed in Spoolman, one left open. |
 | P6 | `test_prints.py::test_p6_jam_is_an_unconfirmed_swap_and_its_purge_is_charged` | Jam with an unload: an unconfirmed swap, and the reload's longer purge is charged. |
 | P7 | `test_prints.py::test_p7_cancel_partway_charges_what_was_extruded` | Print cancelled partway: what was extruded is charged, and nothing else happens. |
+| P8 | `test_prints.py::test_p8_cancel_ramming_is_not_a_print_start` | A cancel's ramming in preheat isn't a print start: a later Spoolman fix confirms. |
 | P8 | `test_prints.py::test_p8_cancelled_during_preheat_is_not_a_print_start` | Print cancelled in preheat: not a print start, so the open swap is still confirmed. |
 | P9 | `test_prints.py::test_p9_restart_after_a_failure_is_a_new_print_start` | A print cancelled and started again under a new job ID is a second print start. |
 | P10 | `test_prints.py::test_p10_spoolman_changed_mid_print_is_staged` | Spoolman changed mid-print with no unload: staged, the old spool charged until unload. |
@@ -354,4 +355,5 @@ close the connection with no answer. Returning None serves the request as usual.
 
 Poll where a real bridge would have polled. Some behaviour depends on what two
 polls in a row see: the bridge counts a print as started only when the counter
-moves between two polls of the same job, for example.
+rises more than `FIRST_EXTRUSION_MM` past where a poll first saw the job, for
+example.
