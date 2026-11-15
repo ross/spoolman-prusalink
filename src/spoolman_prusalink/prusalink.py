@@ -17,6 +17,9 @@ BUSY_STATES = frozenset({"PRINTING", "PAUSED", "BUSY", "ATTENTION"})
 class PrinterStatus(NamedTuple):
     state: str
     job_id: int | None
+    # The printer's job is the bridge's own sync job. Set by `PrinterBridge.read()`,
+    # which then reports `job_id` as None.
+    sync_job: bool = False
 
 
 def parse_filament(data: dict) -> FilamentReading:

@@ -29,7 +29,7 @@ update the workstreams it changes.
 | D1 | In what order do the workstreams go? | As [Order and parallelism](#order-and-parallelism) lists: what protects the printer first (workstreams 1 and 3, then 2), then charging (4 to 6), then the toolchangers before the INDX upgrade (7 and 8), then the MMU (9). This breaks the stage table's rule that, within stage 1, charges come before writes: BF26 loses a print, and the write fixes are small. | The order only. |
 | D2 | Does stage 1 ship alone, merged and deployed to the Core One L before stage 2 or 4 work merges? | Yes. Workstream 7 can be built at the same time, but it merges after workstreams 2 and 3, which change the same code in `app.py` and `printer_sync.py`. | Merging workstreams 7 and 9. |
 | D3 | How does BF26 get fixed: a positive `sync_delay` default, a guard in the bridge after a boot that interrupted a print, or wait for the F12 trace? | Decided: a positive `sync_delay` default, 30 s, and the idle clock starts again at each new `boot_id`. No guard. The code holds a write while the printer has been idle for less than `sync_delay`, and a new `PrinterBridge`, a failed read or a new boot starts that clock again at that poll, so the first idle poll after a boot only starts it, and the write runs one idle poll later. That covers a bridge that restarts in the window, and a second cut during the resume, whose window a poll can reach `poll_idle` after one in the first window. What it misses: a config that sets `sync_delay = 0`, and a window that outlasts a poll, which the F12 trace checks. What it costs: every write waits one more idle poll, up to 60 s by default. | Workstream 1. |
-| D4 | Keep `gcode_preamble`, or remove it? | Remove it, unless your own config sets it. Its only effects found are BF2, BF3 and BF4, and the default preamble passes every check on every model the bridge writes to. Pre-release, there's no compatibility to keep. If you keep it, workstream 3 validates it instead. | Workstream 3, and the INDX lock line in workstream 7. |
+| D4 | Keep `gcode_preamble`, or remove it? | Answered: remove it. Its only effects found were BF2, BF3 and BF4, and the default preamble passes every check on every model the bridge writes to. Pre-release, there's no compatibility to keep. | Workstream 3, and the INDX lock line in workstream 7. |
 | D5 | Amend Q4 so that a ramming or a load isn't a print's first extrusion? | Yes. Q4's intent, that a cancelled print changes nothing, holds; only what counts as the first extrusion narrows. | Workstream 4. |
 | D6 | Amend C7: usage counted on a tool with no filament while a user's print runs is reported lost, not charged to the next spool? | Yes. That filament came from no spool. The hold during a load, which S1 and S2 rely on, stays as it is. | Workstream 5. |
 | D7 | BF9: accept and document the auto-retract's count, or correct it in the bridge? | Wait for the F3 and F5 traces (sittings A and B), then accept and document it if they show about 28.5 mm per auto-retract. A correction needs the auto-retract setting and the filament's flexibility, which the bridge can't read, and the error is about 0.09 g each time. | Workstream 6. |
@@ -70,12 +70,12 @@ elsewhere names it under "Also touches".
 | # | Workstream | Owns | Also touches | Stage | Size | Waits on | Status |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | 1 | [The power-panic window](#1-the-power-panic-window) | BF26 | | 1 | Small | D3 | In progress |
-| 2 | [A sync job at a question](#2-a-sync-job-at-a-question) | BF5 | BF4, BF7, BF18 | 1 | Medium | Nothing | Not started |
-| 3 | [The custom preamble](#3-the-custom-preamble) | BF2, BF3, BF4 | | 1 | Small | D4 | Not started |
+| 2 | [A sync job at a question](#2-a-sync-job-at-a-question) | BF5 | BF4, BF7, BF18 | 1 | Medium | Nothing | In progress |
+| 3 | [The custom preamble](#3-the-custom-preamble) | BF2, BF3, BF4 | | 1 | Small | D4 | In progress |
 | 4 | [Print start](#4-print-start) | BF10, BF23, BF27 | | 1 | Medium | D5; sitting D confirms | Not started |
 | 5 | [Usage on an empty tool](#5-usage-on-an-empty-tool) | BF24, BF25 | | 1 | Medium | D6; sittings C and D confirm | Not started |
 | 6 | [The auto-retract](#6-the-auto-retract) | BF9 | | 1 | Small | D7; sittings A and B | Not started |
-| 7 | [Writes to toolchangers](#7-writes-to-toolchangers) | BF14, BF1, BF8, BF7 | BF26 | 2 | Medium | D4, D10; workstreams 2 and 3 | Not started |
+| 7 | [Writes to toolchangers](#7-writes-to-toolchangers) | BF14, BF1, BF8, BF7 | BF26 | 2 | Medium | D10; workstreams 2 and 3 | Not started |
 | 8 | [Toolchanger swaps](#8-toolchanger-swaps) | BF12, BF13 | | 2 | Small | D11, D12 | Not started |
 | 9 | [MMU printers](#9-mmu-printers) | BF20, BF15 to BF19, BF28, BF29 | | 4 | Medium | D8 | Not started |
 | 10 | [Housekeeping](#10-housekeeping) | BF6, BF11, BF21, BF22 | | 5 | Small | D11; F12 trace for BF11 | In progress: BF21 is fixed; BF6, BF11 and BF22 wait on D11 |
@@ -154,20 +154,25 @@ medium is a new input or condition through `account()` or
 
 - **Findings**: owns BF5, stage 1. Also gives BF4's, BF7's and BF18's
   outcome a flag, but workstreams 3, 7 and 9 close those findings.
-- **Problem**: When the printer asks about a sync job, the bridge waits in
-  `ATTENTION` with no flag and no limit. A declined job ends `IDLE`, the
-  printer still differs, and the bridge uploads again, holding the printer
-  at a second question.
-- **Approach (proposal)**: The bridge already knows its own job by name
-  (`_user_job_id`), so a read of `ATTENTION` with the sync job is "the sync
-  job waits at a question". Raise a condition on the spools being written
+- **Problem**: When the printer asked about a sync job, the bridge waited
+  in `ATTENTION` with no flag and no limit. A declined job ended `IDLE`,
+  the printer still differed, and the bridge uploaded again, holding the
+  printer at a second question.
+- **Approach**: `PrinterBridge.read()` knows the bridge's own job by
+  name (`_user_job_id`) and marks it in `PrinterStatus.sync_job`, so a
+  read of `ATTENTION` with the sync job is "the sync job waits at a
+  question". The spools being written get the `WriteAsked` condition
   (logged once, flagged), saying the printer is asking about the bridge's
-  job. If that job then ends with the printer still different, flag the
-  spool at once with that cause, and don't upload again until the spool,
-  the printer's filament or the write changes. `WriteDidntTake` in
-  `conditions.py` and `WriteState.attempts` in `printer_sync.py` may carry
-  this with a field each; check before adding new ones. The bridge can't
-  read why the printer asked: the flag says to check the printer.
+  job. `WriteState.asked` records that the latest job was seen at the
+  question. If that job then ends with the printer still different, the
+  spool is flagged at once with that cause (`WriteDidntTake` with
+  `asked`), and nothing more is uploaded until a new spool, an unload, or
+  a change to the spool in Spoolman since the last write; the same edit
+  also restarts a write given up after two jobs. A change on the printer
+  alone doesn't restart it. The bridge can't read why the printer asked,
+  and a job refused under `abort` also waits for Abort, so a declined job
+  and a refused one end the same way: the flag says to check the
+  printer's screen and its check settings.
 - **Needs**: Nothing. Merge it before workstream 7, which makes BF1 and
   BF7 reachable.
 - **Why it still matters after workstream 3**: once `gcode_preamble` is
@@ -175,21 +180,25 @@ medium is a new input or condition through `account()` or
   question about the bridge's job on a single-tool printer. The
   workstream then guards INDX, where an uncalibrated nozzle cleaner
   refuses every job (BF7) and the lock line has to be right (BF1), and
-  any check a later firmware adds. If D4 keeps the preamble, it guards
-  BF3's question on the Core One L today.
+  any check a later firmware adds.
 - **User and saved state**: README, under "Writing to the printer", says
-  what the flag means. `WriteState` is saved in the database: change it in
-  place.
-- **Tests**: no test declines a sync job today. Don't build the tests on
-  `gcode_preamble`, which workstream 3 may remove. Patch
-  `printer_sync.default_preamble` in the test to leave out the
-  `M862.6 P"Input shaper"` line: the simulator's preview then asks under
-  the default `checks` and refuses under `abort` (F27, as
-  `test_matching_preamble_for_other_model_writes` shows for a custom
-  preamble today). Answer with `cancel` and poll. W5 and W6 change, and
-  W5 gains a `test_w5_...` integration test for a declined job. BF18's
-  pin, `test_a_sync_job_on_a_loaded_mmu_waits_on_the_unload_question`,
-  gains the flag, unless workstream 9 turns MMU writes off first.
+  what each flag means and what clears it. `WriteState.asked` is saved in
+  a new `writes.asked` column, changed in place. A deployed bridge needs
+  `ALTER TABLE writes ADD COLUMN asked INTEGER NOT NULL DEFAULT 0`, or a
+  new database.
+- **Tests**: `tests/test_sync_question.py` patches
+  `printer_sync.default_preamble` to leave out the
+  `M862.6 P"Input shaper"` line, since `gcode_preamble` is gone (D4): the
+  simulator's preview then asks under the default `checks` and refuses
+  under `abort` (F27, as the input-shaper case of `test_each_check` in
+  `simulator/tests/test_preview.py` shows). It covers the flag while the
+  job waits, a decline under `warn` and under `abort`, Print at the
+  question, and the retries after an edit or an unload. The integration
+  test `test_w5_declined_sync_job_is_flagged` declines a job end to end.
+  BF18's pin, `test_a_sync_job_on_a_loaded_mmu_waits_on_the_unload_question`
+  in `tests/test_mmu.py`, and
+  `test_a_sync_job_in_the_window_on_a_connecting_mmu_waits_on_the_question`
+  now assert the flag. W5 and W6 changed.
 - **Done when**: a declined or refused sync job flags its spool with the
   cause after one job, and a job waiting at a question is flagged while it
   waits.
@@ -203,27 +212,19 @@ medium is a new input or condition through `account()` or
 - **Problem**: `model_problem` refuses a preamble the printer would accept
   (BF2) and accepts one the printer asks about (BF3). The printer's
   check settings then decide whether the job waits or is refused (BF4).
-- **Approach (proposal)**: Under D4's recommendation, remove
-  `gcode_preamble`: its parsing in `config.py`, the `preamble` argument of
-  `model_problem` and `preamble_model` in `printer_sync.py`, and
-  `_preamble` in `app.py`, so `_check_model` and the `build_job` call in
-  `sync_printer` use `default_preamble` alone. That passes every check on
-  the models the bridge writes to, so BF2 and BF3 have nothing left to act
-  on, and BF4 needs a preamble that fails a check. Close all three. If D4
-  keeps the setting instead: accept the printer's compatibility group
-  (BF2), which needs a copy of the firmware's group table in
-  `printer_sync.py` and a comparison for it in `firmware/compare.py`;
-  require the `M862.6 P"Input shaper"` line (BF3); and say in the README
-  that a failing check waits or is refused depending on the printer's
-  settings (BF4). Close BF4 with that text and workstream 2's flag.
-- **Needs**: D4.
+- **Approach**: Remove `gcode_preamble` (D4): its parsing in
+  `config.py`, the `preamble` argument of `model_problem` and
+  `preamble_model` in `printer_sync.py`, and `_preamble` in `app.py`, so
+  `_check_model` and the `build_job` call in `sync_printer` use
+  `default_preamble` alone. That passes every check on the models the
+  bridge writes to, so BF2 and BF3 have nothing left to act on, and BF4
+  needs a preamble that fails a check. Close all three.
+- **Needs**: D4, answered: remove the setting.
 - **User and saved state**: README ("Requirements for a write") and
-  `config.example.toml` lose the setting, or gain the rules. No saved
-  state.
+  `config.example.toml` lose the setting. No saved state.
 - **Tests**: `test_matching_preamble_for_other_model_writes` in
   `tests/test_writes.py` and `test_w1_custom_preamble_is_written` in
-  `integration/test_configs.py` go with the setting, or flip to "no
-  question". The preamble cases of `test_w10_model_the_bridge_cannot_write`
+  `integration/test_configs.py` go with the setting. The preamble cases of `test_w10_model_the_bridge_cannot_write`
   in `integration/test_writes.py` and of the W10 tests in
   `tests/test_writes.py` go too. W1 and W10 change.
 - **Done when**: no configuration lets the bridge upload a job that the
@@ -367,9 +368,8 @@ medium is a new input or condition through `account()` or
     check fails to start.
   - Name the nozzle-cleaner calibration in the README as a cause of a
     refused job (BF7). Workstream 2's flag is what the user sees.
-- **Needs**: D10; D4, since a kept `gcode_preamble` would need per-model
-  rules; workstream 2, for BF7's flag; and workstream 3, which changes the
-  same code. It has to merge before the INDX upgrade.
+- **Needs**: D10; workstream 2, for BF7's flag; and workstream 3, which
+  changes the same code. It has to merge before the INDX upgrade.
 - **User and saved state**: README's model table and "Writing to the
   printer". No saved state.
 - **Tests**: `test_t6_writes_on_a_multi_tool_model_are_refused` in
@@ -548,9 +548,6 @@ print uses.
 - Workstream 7 makes BF1, BF7 and BF8 reachable, and makes BF26 reach INDX
   and the XL. Workstream 1's default covers them, since it doesn't depend
   on the model.
-- Workstream 3's group table, if D4 keeps the preamble, must accept only
-  names in the printer's own group: names in compatibility mode still ask
-  (BF4).
 - A BF9 correction, if D7 chooses one, changes the counts workstream 4's
   threshold is measured against.
 

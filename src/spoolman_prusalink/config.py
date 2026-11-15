@@ -34,8 +34,6 @@ class PrinterConfig:
     api_key: str
     # Tool index -> exact Spoolman location name.
     tools: dict[int, str]
-    # Compatibility checks for the sync job; None uses the printer model's default.
-    gcode_preamble: tuple[str, ...] | None = None
     # Where the sync job is uploaded, and its file name (overwritten each time).
     sync_storage: str = "usb"
     sync_file: str = "spoolman-sync.gcode"
@@ -171,16 +169,10 @@ def _printer_settings(table: dict, prefix: str) -> dict:
     sync_file = _str(table, "sync_file", "spoolman-sync.gcode", f"{prefix}.sync_file")
     if not re.fullmatch(r"[A-Za-z0-9_.-]+\.gcode", sync_file):
         raise ConfigError(f"{prefix}.sync_file must be a plain .gcode file name, got {sync_file!r}")
-    preamble = table.get("gcode_preamble")
-    if preamble is not None and (
-        not isinstance(preamble, list) or not all(isinstance(x, str) for x in preamble)
-    ):
-        raise ConfigError(f"{prefix}.gcode_preamble must be a list of strings, got {preamble!r}")
     length_factor = _number(table, "length_factor", 1.0, f"{prefix}.length_factor")
     if not 0 < length_factor <= 2:
         raise ConfigError(f"{prefix}.length_factor must be in (0, 2], got {length_factor}")
     return {
-        "gcode_preamble": None if preamble is None else tuple(preamble),
         "sync_storage": _str(table, "sync_storage", "usb", f"{prefix}.sync_storage"),
         "sync_file": sync_file,
         "length_factor": length_factor,

@@ -113,14 +113,11 @@ def test_ht_idler_door_materials_need_menu_load(material):
 
 
 def test_model_problems():
-    assert model_problem("8.1.0", None) is None
-    assert model_problem("1.4.1", None) is None
-    assert model_problem("1.4.1", ['M862.3 P "MK4SMMU3"']) is None
-    assert "is for COREONEL but the printer is MK4" in model_problem("1.4.0", COREONEL_PREAMBLE)
-    assert "MINI isn't supported" in model_problem("2.1.0", None)
-    assert "multi-tool" in model_problem("8.10.0", None)
-    assert "isn't one the bridge knows" in model_problem("99.0.0", None)
-    assert "no M862.3" in model_problem("1.4.0", ["M862.5 P2"])
+    assert model_problem("8.1.0") is None
+    assert model_problem("1.4.1") is None
+    assert "MINI isn't supported" in model_problem("2.1.0")
+    assert "multi-tool" in model_problem("8.10.0")
+    assert "isn't one the bridge knows" in model_problem("99.0.0")
 
 
 def test_default_preamble_names_model():

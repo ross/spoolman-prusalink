@@ -114,57 +114,59 @@ written.
 ### BF2. The bridge refuses a preamble the printer accepts
 
 - **Printers**: Every model the bridge writes to, with a custom
-  `gcode_preamble`.
+  `gcode_preamble`, until workstream 3 removed the setting.
 - **What happens**: The firmware's model check compares groups, not names:
   a Core One L takes Core One G-code as its own, a Core One takes Core One
   Oak, and an MK4 takes MK3.9. Older models' G-code is "compatibility
   mode", which asks. INDX builds take only their own name
-  (`printer_model.cpp:140-198`). `model_problem` accepts only the exact
-  name or its MMU3 variant.
-- **Effect**: A custom preamble for another model in the group is refused,
-  and waiting spools are flagged (W10), though the printer would run the
-  job. The default preamble names the model exactly, so it isn't affected.
+  (`printer_model.cpp:140-198`). Until workstream 3, `model_problem`
+  accepted only the exact name or its MMU3 variant.
+- **Effect**: A custom preamble for another model in the group was
+  refused, and waiting spools were flagged (W10), though the printer would
+  have run the job. The default preamble names the model exactly, so it
+  wasn't affected.
 - **Evidence**: Read in the firmware source. The printer's side is shown
   in the simulator by
   `test_the_preview_takes_a_group_and_asks_in_compatibility_mode` in
   `simulator/tests/test_model.py`: a Core One L runs a Core One job with
   no question.
 - **Scenario rows**: W1, W10.
-- **To reproduce**: Give a Core One L a `gcode_preamble` whose `M862.3`
-  names `COREONE`. `model_problem` refuses it, though the simulator's
-  preview takes the job. No bridge test runs that pairing.
-- **Status**: Open.
+- **To reproduce**: No longer reachable: the bridge has no setting for the
+  preamble.
+- **Status**: Fixed by workstream 3: `gcode_preamble` is gone (D4), and
+  every job starts with `default_preamble`, which names the model itself.
 
 ### BF3. A custom preamble without the input-shaper check makes every sync job wait
 
 - **Printers**: Every model the bridge writes to: MK3.9, MK3.9S, MK4, MK4S,
   Core One, Core One Oak, Core One L.
-- **What happens**: `model_problem` checks a custom `gcode_preamble` for
-  its `M862.3` line only. Every build but the iX requires
+- **What happens**: Every build but the iX requires
   `M862.6 P"Input shaper"`, and under the default setting asks about a
   file without it (F27: the check in
   `src/feature/compatibility_checks/gcode_compatibility.cpp`, the parse in
-  `src/common/gcode/gcode_info.cpp`). So every sync job from such a
-  preamble waits in `ATTENTION` for a tap. README.md, under "Requirements
-  for a write", lists the three lines the default job starts with, but
-  says only that a custom preamble's `M862.3` must name the printer's
-  model. The `gcode_preamble` comment in `config.example.toml` says only
-  that too. Its example has the input-shaper line, and neither text says
-  the line is needed.
-- **Effect**: No write lands without someone at the printer, and an
-  unanswered or declined job goes the way of BF5. Under `abort` (BF4) the
-  job is refused.
-- **Evidence**: Read in the firmware source; shown in the simulator by
-  `test_matching_preamble_for_other_model_writes` in `tests/test_writes.py`
-  and `test_w1_custom_preamble_is_written` in
-  `integration/test_configs.py`, which assert the question and tap
+  `src/common/gcode/gcode_info.cpp`). Until workstream 3, `model_problem`
+  checked a custom `gcode_preamble` for its `M862.3` line only, so every
+  sync job from a preamble without the input-shaper line waited in
+  `ATTENTION` for a tap. README.md, under "Requirements for a write", and
+  the `gcode_preamble` comment in `config.example.toml` said only that a
+  custom preamble's `M862.3` must name the printer's model, and neither
+  said the input-shaper line was needed.
+- **Effect**: No write landed without someone at the printer, and an
+  unanswered or declined job went the way of BF5. Under `abort` (BF4) the
+  job was refused.
+- **Evidence**: Read in the firmware source. Until workstream 3, shown in
+  the simulator by `test_matching_preamble_for_other_model_writes` in
+  `tests/test_writes.py` and `test_w1_custom_preamble_is_written` in
+  `integration/test_configs.py`, which asserted the question and tapped
   through it. The default preamble asks nothing on any model the bridge
   writes to
   (`test_the_bridge_default_job_asks_nothing_on_the_models_it_writes_to`
   in `simulator/tests/test_model.py`).
 - **Scenario rows**: W1, W10.
-- **To reproduce**: Those tests, today.
-- **Status**: Open.
+- **To reproduce**: No longer reachable: the tests went with the setting.
+- **Status**: Fixed by workstream 3: `gcode_preamble` is gone (D4), and
+  every job starts with `default_preamble`, which has the input-shaper
+  line. The tests named under Evidence went with the setting.
 
 ### BF4. The printer's check settings change what a failed check does
 
@@ -174,16 +176,18 @@ written.
   abort. Every failed check shows on one screen, and the worst severity
   decides. A warning waits for a tap; an abort can only be declined
   (`gcode_compatibility.cpp:48-153`,
-  `marlin_print_preview.cpp:921-971`). README.md, under "Requirements for
-  a write", describes only the warning. The INDX lock question (BF1)
+  `marlin_print_preview.cpp:921-971`). Until workstream 3, README.md,
+  under "Requirements for a write", described only the warning. The INDX
+  lock question (BF1)
   always asks. Of the checks of a print's tools, the nozzle checks follow
   a setting and the rest have fixed severities
   (`gcode_compatibility.cpp:155-265`). The sync job, which names no
   filament used, raises none of them (F28).
 - **Effect**: Set to abort, a job that fails a check is refused instead of
   held, and goes the way of BF5. Set to ignore, it runs. The default
-  preamble passes every check on a supported model, so this matters only
-  with BF2, BF3 or another preamble that fails a check.
+  preamble passes every check on a supported model, so this mattered only
+  with BF2, BF3 or another custom preamble that failed a check, until
+  workstream 3 removed the setting.
 - **Evidence**: Read in the firmware source. The simulator models the
   three outcomes for an uploaded file (F27).
 - **Scenario rows**: W1, W5, W10.
@@ -191,10 +195,14 @@ written.
   (`ignore`, `warn` or `abort`, or the `set_checks` action) stands for the
   menu's settings. `test_checks_set_to_ignore_ask_nothing` and
   `test_a_fatal_question_offers_only_abort` in
-  `simulator/tests/test_model.py` show ignore and abort on an upload. A
-  bridge with a preamble that fails a check (BF3) meets the same
-  outcomes. No bridge test sets `checks`.
-- **Status**: Open.
+  `simulator/tests/test_model.py` show ignore and abort on an upload.
+  Until workstream 3, a bridge with a preamble that failed a check (BF3)
+  met the same outcomes. No bridge test sets `checks`.
+- **Status**: Fixed by workstream 3: `gcode_preamble` is gone (D4), and
+  the default preamble passes every check on every model the bridge writes
+  to, so the job raises no question under any of the printer's check
+  settings. Workstream 2 flags a job that still meets one, such as the
+  INDX lock question (BF1) once writes to INDX are on.
 
 ### BF5. A declined or refused sync job uses up a job ID and never finishes
 
@@ -204,25 +212,36 @@ written.
   `/api/v1/status` has the job with its new ID, and `/api/v1/job` answers
   `PAUSED`. Declining goes to `IDLE`, not `STOPPED` or `FINISHED`, with
   the ID used up (`wui_api.cpp:291`, `marlin_print_preview.cpp:414-425`,
-  `marlin_server.cpp:1113-1136, 2300-2331`). The bridge waits while the
-  printer reads `ATTENTION` and knows the job by its file name (W6). After
-  a declined job the printer still differs, so the bridge uploads once
-  more. After two jobs (`MAX_SYNC_ATTEMPTS` in `app.py`) it flags the
-  spool "didn't take" (W5).
-- **Effect**: Each attempt holds the printer at a question until someone
-  answers, and the spool is flagged after the second. No charge changes.
+  `marlin_server.cpp:1113-1136, 2300-2331`). Until workstream 2, the
+  bridge waited while the printer read `ATTENTION`, knowing the job by its
+  file name (W6). After a declined job the printer still differed, so the
+  bridge uploaded once more, and after two jobs (`MAX_SYNC_ATTEMPTS` in
+  `app.py`) it flagged the spool "didn't take" (W5).
+- **Effect**: Each attempt held the printer at a question until someone
+  answered, and the spool was flagged only after the second. No charge
+  changed.
 - **Evidence**: Read in the firmware source. The simulator models the
   printer's side (F27; `test_the_preview_counts_the_job_then_asks` and
   `test_abort_at_the_preview_ends_idle_with_the_id_used` in
-  `simulator/tests/test_model.py`). The bridge's side is inferred from
-  `app.py`: no test declines a sync job.
+  `simulator/tests/test_model.py`). The bridge's side is shown by
+  `tests/test_sync_question.py` and `test_w5_declined_sync_job_is_flagged`
+  in `integration/test_writes.py`, which decline a sync job.
 - **Scenario rows**: W2, W5, W6.
-- **To reproduce**: Raise the question as
-  `test_w1_custom_preamble_is_written` does, with a preamble that has no
-  input-shaper line, then answer it with `cancel` instead of
+- **To reproduce**: `tests/test_sync_question.py` and
+  `test_w5_declined_sync_job_is_flagged` patch
+  `printer_sync.default_preamble` to leave out the input-shaper line, so
+  the question is raised, then answer it with `cancel` instead of
   `tap_through`, polling between. With `checks` set to `abort`, `cancel`
-  is the only answer.
-- **Status**: Open.
+  is the only answer. They now show the fix.
+- **Status**: Fixed by workstream 2. `PrinterStatus.sync_job` tells the
+  bridge's job at a question apart from no job. While it waits, the spool
+  is flagged (`WriteAsked`). If it's then gone with the printer still
+  different, the spool is flagged at once with that cause
+  (`WriteDidntTake` with `asked`), and no second job is uploaded until a
+  new spool, an unload or an edit in Spoolman. A job declined between two
+  polls, with no poll seeing the question, is still retried once. Shown by
+  `tests/test_sync_question.py` and `test_w5_declined_sync_job_is_flagged`
+  in `integration/test_writes.py`.
 
 ### BF6. A failed `M865` is silent
 
@@ -270,7 +289,10 @@ written.
 - **To reproduce**: Can't be shown. The simulator's preview doesn't model
   an uncalibrated nozzle cleaner (`simulator/README.md`), and the bridge
   uploads nothing to an INDX while it refuses multi-tool writes (BF14).
-- **Status**: Open.
+- **Status**: Open; workstream 7 owns it. Workstream 2 flags the outcome:
+  the refused job is flagged while it waits at the question and once it's
+  gone, after one job, telling the user to check the printer's screen and
+  its check settings. The flag still can't name the cause.
 
 ### BF8. INDX presets differ from the bridge's table
 
@@ -876,22 +898,25 @@ panic (F38 to F46). The MMU's scenario rows are T12 to T17.
   (`marlin_print_preview.cpp:228-257, 698-728`). A finished sync job
   neither unloads nor auto-retracts with the MMU Active, so the next job
   asks again; a stopped one unloads while reading `PRINTING` (F42,
-  `marlin_server.cpp:1067-1075`). The bridge uploads once and waits while
-  the printer reads `ATTENTION`.
+  `marlin_server.cpp:1067-1075`). The bridge uploads once, and while the
+  printer reads `ATTENTION` it flags the spool (W5).
 - **Effect**: Each write after Load To Nozzle holds the printer at a
-  question until someone answers, with no flag and no time-out: the bridge
-  never uploads again and never tells the user. Answering Yes unloads the
-  filament for a job that moves none. A stop at the question goes the way
-  of BF5.
+  question until someone answers, with no time-out. The bridge never
+  uploads again, and the flag tells the user to answer the question.
+  Answering Yes unloads the filament for a job that moves none. A stop at
+  the question is flagged after one job (BF5).
 - **Evidence**: Read in the firmware source; shown in the simulator by
   `test_a_sync_job_on_a_loaded_mmu_waits_on_the_unload_question` in
   `tests/test_mmu.py`.
 - **Scenario rows**: T16, W1, W5.
 - **To reproduce**: That test: after Load To Nozzle on slot 0, a color
   write uploads one job, which waits at the question through 20 minutes
-  of polls with no second upload and no flag. No then runs it, the color
-  lands, and slot 0's filament stays in the extruder.
-- **Status**: Open.
+  of polls with no second upload, with the spool flagged. No then runs
+  it, the color lands, and slot 0's filament stays in the extruder.
+- **Status**: Open; workstream 9 owns it. Workstream 2 flags the outcome:
+  the job waiting at the unload question flags its spool, which
+  `test_a_sync_job_on_a_loaded_mmu_waits_on_the_unload_question` now
+  asserts, and a job stopped there is flagged after one job.
 
 ### BF19. MMU: slots 1 to 4 keep no UUIDs
 
