@@ -77,7 +77,7 @@ elsewhere names it under "Also touches".
 | 7 | [Writes to toolchangers](#7-writes-to-toolchangers) | BF14, BF1, BF8, BF7 | BF26 | 2 | Medium | D4, D10; workstreams 2 and 3 | Not started |
 | 8 | [Toolchanger swaps](#8-toolchanger-swaps) | BF12, BF13 | | 2 | Small | D11, D12 | Not started |
 | 9 | [MMU printers](#9-mmu-printers) | BF20, BF15 to BF19, BF28, BF29 | | 4 | Medium | D8 | Not started |
-| 10 | [Housekeeping](#10-housekeeping) | BF6, BF11, BF21, BF22 | | 5 | Small | D11; F12 trace for BF11 | Not started |
+| 10 | [Housekeeping](#10-housekeeping) | BF6, BF11, BF21, BF22 | | 5 | Small | D11; F12 trace for BF11 | In progress: BF21 is fixed; BF6, BF11 and BF22 wait on D11 |
 
 The sizes rest on reading the code each workstream changes and counting
 the pins it flips: small is one function or a default and its tests,
