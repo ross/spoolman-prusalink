@@ -272,7 +272,10 @@ written.
 - **To reproduce**: A sync job in the simulator with a refused name, such
   as `N"P L A"`, or a preset the build lacks. No bridge test drives a
   failing `M865`.
-- **Status**: Open.
+- **Status**: Accepted (D11 in bridge-fixes.md). Nothing the bridge reads
+  says an `M865` failed. The bridge writes only names inside the
+  firmware's rules and preset names that `script/firmware-check`
+  compares, and W5's flag catches the rest.
 
 ### BF7. An INDX with an uncalibrated nozzle cleaner refuses every print
 
@@ -466,8 +469,11 @@ written.
   `tests/test_power_panic.py`. A second cut during the resume charges a
   second feed back, which leaves the nozzle, since that cut doesn't
   retract: `test_a_second_cut_during_the_resume` there.
-- **Status**: Open. A candidate for Accepted: printer-behaviors.md, under
-  "Bridge follow-ups found here", calls both parts fine.
+- **Status**: Open. Under D11 in bridge-fixes.md it becomes Accepted once
+  the F12 trace confirms the 8 mm on the Core One L. The lost usage needs
+  counters the firmware doesn't keep across a power cut, and the feed
+  back leaves the nozzle, so its charge is right. printer-behaviors.md,
+  under "Bridge follow-ups found here", calls both parts fine.
 
 ### BF23. A print declined after the preview's load can count as started
 
@@ -749,7 +755,9 @@ written.
   in `tests/test_toolchanger_prints.py`.
 - **Scenario rows**: T9, P2, P3, P4, M5a, T2.
 - **To reproduce**: That test, today.
-- **Status**: Open.
+- **Status**: Open. D11 in bridge-fixes.md leaves it open: its effect
+  isn't settled, and it's decided with workstream 8, once a spool join
+  can be seen on an INDX.
 
 ### BF14. Writes are refused on multi-tool models
 
@@ -1070,4 +1078,6 @@ panic (F38 to F46). The MMU's scenario rows are T12 to T17.
 - **Evidence**: Read in `tests/harness.py` and those two test files.
 - **Scenario rows**: P8.
 - **To reproduce**: `tests/harness.py`, today.
-- **Status**: Open. A candidate for Accepted.
+- **Status**: Accepted (D11 in bridge-fixes.md). Changing the harness's
+  default would move many unrelated tests. A test that needs the ram
+  turns the auto-retract on itself.
