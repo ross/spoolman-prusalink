@@ -8,9 +8,10 @@ so they could be planned as a whole. The plan groups them into ten
 workstreams that sessions can take up one at a time, each from a cold
 start with only the repository.
 
-Draft, 2026-11-14. No workstream has started. Every approach below is a
-proposal, read from the code but not built: the session that takes a
-workstream checks it against the code before building on it.
+Draft, 2026-11-14. The [Status](#status) table says which workstreams
+have started. Every approach below is a proposal, read from the code but
+not built: the session that takes a workstream checks it against the
+code before building on it.
 
 bridge-findings.md stays the record of each finding: what happens, the
 evidence, and its status. This plan is the record of the work. It points
@@ -77,7 +78,7 @@ elsewhere names it under "Also touches".
 | 7 | [Writes to toolchangers](#7-writes-to-toolchangers) | BF14, BF1, BF8, BF7 | BF26 | 2 | Medium | D4, D10; workstreams 2 and 3 | Not started |
 | 8 | [Toolchanger swaps](#8-toolchanger-swaps) | BF12, BF13 | | 2 | Small | D11, D12 | Not started |
 | 9 | [MMU printers](#9-mmu-printers) | BF20, BF15 to BF19, BF28, BF29 | | 4 | Medium | D8 | Not started |
-| 10 | [Housekeeping](#10-housekeeping) | BF6, BF11, BF21, BF22 | | 5 | Small | D11; F12 trace for BF11 | Not started |
+| 10 | [Housekeeping](#10-housekeeping) | BF6, BF11, BF21, BF22 | | 5 | Small | D11; F12 trace for BF11 | In progress: BF21 is fixed; BF6, BF11 and BF22 wait on D11 |
 
 The sizes rest on reading the code each workstream changes and counting
 the pins it flips: small is one function or a default and its tests,
