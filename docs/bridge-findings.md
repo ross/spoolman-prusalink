@@ -223,14 +223,16 @@ written.
 - **Evidence**: Read in the firmware source. The simulator models the
   printer's side (F27; `test_the_preview_counts_the_job_then_asks` and
   `test_abort_at_the_preview_ends_idle_with_the_id_used` in
-  `simulator/tests/test_model.py`). The bridge's side was inferred from
-  `app.py`: until workstream 2, no test declined a sync job.
+  `simulator/tests/test_model.py`). The bridge's side is shown by
+  `tests/test_sync_question.py` and `test_w5_declined_sync_job_is_flagged`
+  in `integration/test_writes.py`, which decline a sync job.
 - **Scenario rows**: W2, W5, W6.
-- **To reproduce**: Until workstream 2: raise the question with a
-  preamble that has no input-shaper line, then answer it with `cancel`
-  instead of `tap_through`, polling between. With `checks` set to
-  `abort`, `cancel` is the only answer. The tests under Status do this
-  and now show the fix.
+- **To reproduce**: `tests/test_sync_question.py` and
+  `test_w5_declined_sync_job_is_flagged` patch
+  `printer_sync.default_preamble` to leave out the input-shaper line, so
+  the question is raised, then answer it with `cancel` instead of
+  `tap_through`, polling between. With `checks` set to `abort`, `cancel`
+  is the only answer. They now show the fix.
 - **Status**: Fixed by workstream 2. `PrinterStatus.sync_job` tells the
   bridge's job at a question apart from no job. While it waits, the spool
   is flagged (`WriteAsked`). If it's then gone with the printer still
@@ -887,21 +889,21 @@ panic (F38 to F46). The MMU's scenario rows are T12 to T17.
   (`marlin_print_preview.cpp:228-257, 698-728`). A finished sync job
   neither unloads nor auto-retracts with the MMU Active, so the next job
   asks again; a stopped one unloads while reading `PRINTING` (F42,
-  `marlin_server.cpp:1067-1075`). The bridge uploads once and waits while
-  the printer reads `ATTENTION`.
+  `marlin_server.cpp:1067-1075`). The bridge uploads once, and while the
+  printer reads `ATTENTION` it flags the spool (W5).
 - **Effect**: Each write after Load To Nozzle holds the printer at a
-  question until someone answers, with no flag and no time-out: the bridge
-  never uploads again and never tells the user. Answering Yes unloads the
-  filament for a job that moves none. A stop at the question goes the way
-  of BF5.
+  question until someone answers, with no time-out. The bridge never
+  uploads again, and the flag tells the user to answer the question.
+  Answering Yes unloads the filament for a job that moves none. A stop at
+  the question is flagged after one job (BF5).
 - **Evidence**: Read in the firmware source; shown in the simulator by
   `test_a_sync_job_on_a_loaded_mmu_waits_on_the_unload_question` in
   `tests/test_mmu.py`.
 - **Scenario rows**: T16, W1, W5.
 - **To reproduce**: That test: after Load To Nozzle on slot 0, a color
   write uploads one job, which waits at the question through 20 minutes
-  of polls with no second upload and no flag. No then runs it, the color
-  lands, and slot 0's filament stays in the extruder.
+  of polls with no second upload, with the spool flagged. No then runs
+  it, the color lands, and slot 0's filament stays in the extruder.
 - **Status**: Open; workstream 9 owns it. Workstream 2 flags the outcome:
   the job waiting at the unload question flags its spool, which
   `test_a_sync_job_on_a_loaded_mmu_waits_on_the_unload_question` now

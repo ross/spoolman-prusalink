@@ -355,8 +355,8 @@ When a job doesn't change the printer, the bridge stops and flags the spool:
   job ran but changed nothing. The flag lists the differences.
 - **The printer is asking about the sync job.** The printer stopped the job
   at a question on its screen, such as a failed compatibility check, and
-  waits there until someone answers. Answer it on the printer: Print runs
-  the job and clears the flag. The job's own checks pass under the
+  waits there until someone answers. Answer it on the printer: Print, or
+  No on an MMU's unload question, runs the job and clears the flag. The job's own checks pass under the
   printer's default check settings, so this shouldn't happen on a supported
   single-tool printer, but a printer with an MMU asks when filament is
   loaded past its selector.
