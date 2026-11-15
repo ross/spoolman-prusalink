@@ -15,13 +15,14 @@ COLOR_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
 
 # A command as the print preview's scan matches it: the word, then a space or the end.
 _WORD = re.compile(r"^([GMT]\d+(?:\.\d+)?)(?=\s|$)")
-# A command as a running job reads it. Marlin skips a leading line number and its spaces,
-# then takes an uppercase G, M or T and its number, with no space needed before the first
-# parameter (`GCodeParser::parse` in `lib/Marlin/Marlin/src/gcode/parser.cpp:91-155`).
-# `M865`'s own parser does the same (`GCodeBasicParser::parse`,
-# `gcode_basic_parser.cpp:29-69`). Any other line is an unknown command.
-_RUN_LINE_NUMBER = re.compile(r"^N-?\d+ *")
-_COMMAND = re.compile(r"^([GMT]\d+(?:\.\d+)?)")
+# A command as a running job reads it (`GCodeParser::parse` in
+# `lib/Marlin/Marlin/src/gcode/parser.cpp:91-156`). Marlin skips a line number: `N`, one
+# digit, `-` or `+`, more digits, and spaces. Then it takes an uppercase G, M or T, any
+# spaces, and the number, with no space needed before the first parameter. Any other line
+# is an unknown command. `M865`'s own parser starts past the line number
+# (`gcode_basic_parser.cpp:16-18`), but fails on a space before the number (`:51-55`).
+_RUN_LINE_NUMBER = re.compile(r"^N[-+\d]\d* *")
+_COMMAND = re.compile(r"^([GMT])( *)(\d+(?:\.\d+)?)")
 
 # The M865 parameters kept, by letter, with the range `store_option_if_present` reads them
 # in: the type of their `FilamentTypeParameters` field. A value outside it is skipped.
@@ -250,7 +251,9 @@ def _command(line: str, raw: str) -> Command:
     m = _COMMAND.match(line)
     if m is None:
         return Ignored(line)
-    word, rest = m.group(1), line[m.end() :]
+    word, rest = m.group(1) + m.group(3), line[m.end() :]
+    if word in ("M865", "M865.1") and m.group(2):
+        return Rejected(line, "a space before the command's number")
     if word == "M117":
         return Message(rest.strip())
     if word in ("M862.3", "M862.5", "M862.6"):

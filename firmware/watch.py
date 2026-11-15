@@ -1153,7 +1153,8 @@ WATCHED = (
         "src/common/gcode/gcode_basic_parser.cpp",
         "function",
         "GCodeBasicParser::parse",
-        "the body _set_filament cuts at ; or * in simulator/gcode.py",
+        "the body _set_filament cuts at ; or *, and the space before the number that"
+        " _command rejects for M865, in simulator/gcode.py",
         "abb8647555a4f328",
         UPSTREAM_7D8BF685,
     ),
@@ -1219,7 +1220,8 @@ WATCHED = (
         "lib/Marlin/Marlin/src/gcode/parser.cpp",
         "function",
         "GCodeParser::parse",
-        "_WORD in simulator/gcode.py: an uppercase G, M or T only",
+        "_RUN_LINE_NUMBER and _COMMAND in simulator/gcode.py: the line number skipped, and an"
+        " uppercase G, M or T, spaces, then the number",
         "c0186090b4461db6",
         UPSTREAM_7D8BF685,
     ),

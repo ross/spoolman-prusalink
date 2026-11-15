@@ -69,14 +69,39 @@ def test_quotes_comments_and_blank_lines():
     assert commands == [ModelCheck("A;B"), Message("hello")]
 
 
-def test_a_line_number_and_a_parameter_after_the_number_run():
-    """Marlin and `M865`'s parser skip a leading line number, and need no space between the
-    command and its first parameter (`parser.cpp:91-155`, `gcode_basic_parser.cpp:29-69`)."""
-    assert parse('N12 M865 X R N"PLA" L0\nN-3M117 hi\nM865X L1\nM865.1I0 C""') == [
-        SetFilament(adhoc=True, reset=True, name="PLA", load=0),
+@pytest.mark.parametrize("number", ["N12 ", "N-3", "N+5 ", "N- ", "N-", "N+", "N7  "])
+def test_marlin_skips_a_line_number(number):
+    """`N`, one digit, `-` or `+`, more digits and spaces (`parser.cpp:91-102`). `M865`'s
+    own parser starts past it, at `command_ptr` (`gcode_basic_parser.cpp:16-18`)."""
+    assert parse(f"{number}M865 X L0\n{number}M117 hi") == [
+        SetFilament(adhoc=True, load=0),
         Message("hi"),
+    ]
+
+
+def test_a_parameter_needs_no_space_after_the_number():
+    """`parser.cpp:142-156`, `gcode_basic_parser.cpp:51-69`."""
+    assert parse('M865X L1\nM865.1I0 C""') == [
         SetFilament(adhoc=True, load=1),
         SetFilament(1, slot=0, uuids={"instance": None}),
+    ]
+
+
+def test_marlin_takes_spaces_before_the_number():
+    """Marlin skips them (`parser.cpp:121-122`), but `M865`'s parser fails on them
+    (`gcode_basic_parser.cpp:51-55`): `M 865` runs and stores nothing."""
+    assert parse('M 117 hi\nG  28 O\nM 865 X L0\nM 865.1 I0 C""') == [
+        Message("hi"),
+        Home(),
+        Rejected("M 865 X L0", "a space before the command's number"),
+        Rejected('M 865.1 I0 C""', "a space before the command's number"),
+    ]
+
+
+def test_a_line_that_is_not_a_line_number_is_unknown():
+    assert parse("N M865 X L0\nNA M865 X L0") == [
+        Ignored("N M865 X L0"),
+        Ignored("NA M865 X L0"),
     ]
 
 

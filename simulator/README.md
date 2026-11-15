@@ -327,8 +327,10 @@ that trace. The points that matter for the bridge, in short:
   read, such as a name longer than 7 bytes or an `L` past the build's
   tools, is skipped and the rest of the line runs. A refused name, a preset
   the build lacks or no type picked stores nothing. A line that doesn't
-  parse, such as one with unterminated quotes or a lowercase parameter
-  letter, and an unknown command do nothing. The event log names each.
+  parse, such as one with unterminated quotes, a lowercase parameter
+  letter, or `M 865` with a space before the number, and an unknown command
+  do nothing. A leading line number is skipped, as Marlin skips it. The
+  event log names each.
   The job is counted at once and reads `PRINTING` while the file is
   scanned. Then the print preview checks the `M862` lines in the file's
   first 200 G-code lines: the model by compatibility group (`M862.3`), the
