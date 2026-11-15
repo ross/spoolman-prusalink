@@ -29,6 +29,12 @@ so point it at a test Spoolman first if you want to try it safely.
 
   On firmware without the endpoint or its counters, the bridge logs an error
   once and charges nothing, then resumes on its own if they appear.
+
+  The endpoint's `sensors_enabled` field, the filament sensors setting, is
+  optional. Builds of the fork that include its commit `2ef028181` serve
+  it, and with it the bridge warns while the sensors are off (see
+  [How usage is attributed](#how-usage-is-attributed)). Older builds work
+  as before, without that warning.
 - Each printer's PrusaLink API key.
 - One Spoolman, reachable from the bridge over HTTP. A bridge serves one
   Spoolman and any number of printers.
@@ -279,16 +285,25 @@ Other rules:
   If the filament is really in the tool but the printer reports none, the
   usage is reported lost, not charged: for example, when a sensor fault
   cleared the type and the print then ran with the sensors off.
+- While the printer's filament sensors are off, the bridge logs a warning,
+  once when it first reads them off and once when they're back on. If you
+  turned the sensors off to start a print, turn them back on after it. The
+  printer keeps the setting, and while the sensors are off it reports no
+  runout and no unload, even for filament you pull out by hand, so the bridge
+  misses every swap and keeps charging the old spool. The warning is the
+  printer's, so it flags no spool. It needs firmware that reports the
+  setting (see [Requirements](#requirements)); on older firmware the bridge
+  can't read it and logs nothing.
 - While a print loses usage on an empty tool, the bridge also logs a warning
   that the tool is printing with no filament reported, once when it starts
   and once when the print ends or the filament comes back. Usage first seen
-  after the print raises no warning. If you turned the
-  filament sensors off to start that print, turn them back on after it. The
-  printer keeps the setting, and while the sensors are off it reports no
-  runout and no unload, even for filament you pull out by hand, so the bridge
-  misses every swap and keeps charging the old spool. The bridge can't read
-  the setting, so the same warning also follows a power cut that left the
-  filament out of the tool.
+  after the print raises no warning. The warning says what the sensors
+  setting was when the usage was lost, even if the setting has changed
+  since. With the sensors off then, it says the printer reported no runout
+  and no unload while they were off. With them on, it says a power cut
+  probably caused it: the filament was out of the tool, or a runout was
+  waiting for its reload, when the power failed. On firmware that doesn't report the setting, it says the sensors
+  may be off and allows for a power cut too.
 - On a toolchanger, the INDX or the XL, filament pulled out by hand from a
   docked or parked tool counts no unload, because the printer checks only the
   picked tool's sensor. The bridge misses the swap and keeps charging the old

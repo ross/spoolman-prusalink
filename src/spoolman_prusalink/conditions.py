@@ -1,4 +1,4 @@
-"""What's wrong with a tool right now, as typed records.
+"""What's wrong with a tool or a printer right now, as typed records.
 
 A condition lasts from the poll that first finds it to the poll that no longer does.
 Each kind is a frozen dataclass whose fields are the facts, and its log line and its
@@ -143,12 +143,9 @@ class Lasting(Logged, name="lasting"):
 
 
 @dataclass(frozen=True)
-class PrintingEmpty(Logged, name="printing_empty"):
-    """A user's print counts usage on a tool with no filament reported (C7, BF25).
-
-    The bridge can't tell why. The filament sensors may be off, or a power cut may have
-    left the filament out or a runout waiting for its reload.
-    """
+class SensorsOff(Logged, name="sensors_off"):
+    """The printer's filament sensors setting is off (BF25, F47). It's the printer's, not
+    a tool's: `PrinterBridge` keeps it apart from the tools' conditions."""
 
     @property
     def key(self) -> Hashable:
@@ -156,16 +153,58 @@ class PrintingEmpty(Logged, name="printing_empty"):
 
     def log(self, ctx: Context) -> str:
         return (
-            "printing with no filament reported; that usage is charged to no spool. "
-            "If the filament sensors were turned off for this print, turn them back on "
-            "after it: while they're off, the printer reports no runout and no unload, "
-            "so the bridge misses spool swaps. A power cut with the filament out does "
-            "this too"
+            "filament sensors are off, so the printer reports no runout and no unload: "
+            "filament pulled out or swapped by hand goes unnoticed, and the old spool keeps "
+            "being charged. Turn them back on in the printer's settings"
+        )
+
+
+@dataclass(frozen=True)
+class PrintingEmpty(Logged, name="printing_empty"):
+    """A user's print counts usage on a tool with no filament reported (C7, BF25).
+
+    The filament sensors may be off, or a power cut may have left the filament out or a
+    runout waiting for its reload. Firmware that reports the sensors setting tells the
+    first apart from the others.
+    """
+
+    # The sensors setting when the usage was lost, or None when the firmware doesn't
+    # report it. It stays as it was while the condition stands, and through a restart, so
+    # the text gives the setting as it was then, not as it is now.
+    sensors: bool | None = None
+
+    @property
+    def key(self) -> Hashable:
+        return self.name
+
+    def log(self, ctx: Context) -> str:
+        lost = "printing with no filament reported; that usage is charged to no spool. "
+        if self.sensors is None:
+            return lost + (
+                "If the filament sensors were turned off for this print, turn them back on "
+                "after it: while they're off, the printer reports no runout and no unload, "
+                "so the bridge misses spool swaps. A power cut with the filament out does "
+                "this too"
+            )
+        if self.sensors:
+            return lost + (
+                "The filament sensors were on when that usage was lost, so a power cut "
+                "probably did this: the filament was out of the tool, or a runout was "
+                "waiting for its reload, when the power failed"
+            )
+        return lost + (
+            "The filament sensors were off when that usage was lost: while they were off, "
+            "the printer reported no runout and no unload"
         )
 
 
 def printing_empty(
-    lost: bool, still_empty: bool, last: Iterable[Condition], *, level: int
+    lost: bool,
+    still_empty: bool,
+    last: Iterable[Condition],
+    *,
+    sensors: bool | None = None,
+    level: int,
 ) -> PrintingEmpty | None:
     """Return the condition for a tool that's printing with no filament, or None.
 
@@ -174,13 +213,17 @@ def printing_empty(
     (`ToolState.printed_empty`). Usage lost while that holds raises it, and it stands
     while the print goes on with the tool empty, through polls with no new usage. The
     print's tail, first seen once the job is gone, only ends one.
+
+    `sensors` is the printer's sensors setting at this poll. It's recorded when the
+    condition is raised, and a change while it stands doesn't change it, so its text is
+    logged once.
     """
     if not still_empty:
         return None
     stood = next((c for c in last if isinstance(c, PrintingEmpty)), None)
     if stood is not None:
         return stood
-    return PrintingEmpty(level=level) if lost else None
+    return PrintingEmpty(sensors, level=level) if lost else None
 
 
 # From the tool's saved state. Flag only: the event that led to each was logged once.
@@ -467,12 +510,17 @@ def standing(
 LoggedTexts = dict[Hashable, tuple[int, str]]
 
 
-def log_changes(last: LoggedTexts, conditions: Iterable[Condition], ctx: Context) -> LoggedTexts:
+def log_changes(
+    last: LoggedTexts, conditions: Iterable[Condition], ctx: Context, *, where: str | None = None
+) -> LoggedTexts:
     """Log each condition that's new or changed since `last`, and each that's gone.
 
     Each is logged at its own level, and its end at the level its text was last logged
     at. Returns what to pass as `last` at the next poll.
+
+    Each line starts with `where`, or with the location in brackets when it's None.
     """
+    where = f"[{ctx.location}]" if where is None else where
     now: LoggedTexts = {}
     for c in conditions:
         text = c.log(ctx)
@@ -483,10 +531,10 @@ def log_changes(last: LoggedTexts, conditions: Iterable[Condition], ctx: Context
         now[c.key] = logged if logged is not None and logged[1] == text else (c.level, text)
     for key, (level, text) in last.items():
         if key not in now:
-            log.log(level, "[%s] no longer: %s", ctx.location, text)
+            log.log(level, "%s no longer: %s", where, text)
     for key, (level, text) in now.items():
         if key not in last or last[key][1] != text:
-            log.log(level, "[%s] %s", ctx.location, text)
+            log.log(level, "%s %s", where, text)
     return now
 
 

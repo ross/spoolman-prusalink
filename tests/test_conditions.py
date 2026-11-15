@@ -15,6 +15,7 @@ from spoolman_prusalink.conditions import (
     PrinterUnwritable,
     PrintingEmpty,
     ProvisionalCharge,
+    SensorsOff,
     SpoolUnwritable,
     StagedNotLoaded,
     ToolNotReported,
@@ -68,6 +69,28 @@ KINDS = [
         "filament sensors were turned off for this print, turn them back on after it: "
         "while they're off, the printer reports no runout and no unload, so the bridge "
         "misses spool swaps. A power cut with the filament out does this too",
+        None,
+    ),
+    (
+        PrintingEmpty(True, level=W),
+        "printing with no filament reported; that usage is charged to no spool. The "
+        "filament sensors were on when that usage was lost, so a power cut probably did "
+        "this: the filament was out of the tool, or a runout was waiting for its reload, "
+        "when the power failed",
+        None,
+    ),
+    (
+        PrintingEmpty(False, level=W),
+        "printing with no filament reported; that usage is charged to no spool. The "
+        "filament sensors were off when that usage was lost: while they were off, the "
+        "printer reported no runout and no unload",
+        None,
+    ),
+    (
+        SensorsOff(level=W),
+        "filament sensors are off, so the printer reports no runout and no unload: "
+        "filament pulled out or swapped by hand goes unnoticed, and the old spool keeps "
+        "being charged. Turn them back on in the printer's settings",
         None,
     ),
     (
@@ -174,6 +197,12 @@ def test_a_didnt_take_saved_before_asked_loads():
     assert Condition.from_json(saved) == WriteDidntTake(7, 2, DIFFS, level=W)
 
 
+def test_a_printing_empty_saved_before_sensors_loads():
+    saved = PrintingEmpty(level=W).to_json()
+    del saved["sensors"]
+    assert Condition.from_json(saved) == PrintingEmpty(level=W)
+
+
 def test_flag_texts_that_depend_on_the_settings():
     assert Drift(7, DIFFS, level=W).flag(replace(CTX, flag_drift=True)) == (
         f"printer filament differs: {DETAIL}"
@@ -255,6 +284,21 @@ def test_printing_empty_starts_with_lost_usage_and_stands_while_the_tool_prints_
     assert printing_empty(True, False, [ArchivedLoaded(7)], level=W) is None
 
 
+def test_printing_empty_keeps_the_sensors_setting_it_was_raised_with(caplog):
+    off = printing_empty(True, True, [], sensors=False, level=W)
+    assert off == PrintingEmpty(False, level=W)
+    # The sensors turned back on mid-print, or the setting unknown after a firmware
+    # change, don't change it, so its text isn't logged again.
+    assert printing_empty(True, True, [off], sensors=True, level=W) is off
+    assert printing_empty(False, True, [off], sensors=None, level=W) is off
+    logged = log_changes({}, [off], CTX)
+    caplog.clear()
+    for sensors in (True, None, False, True):
+        kept = printing_empty(True, True, [off], sensors=sensors, level=W)
+        logged = log_changes(logged, [kept], CTX)
+    assert caplog.records == []
+
+
 def test_compared_conditions_stand_while_a_poll_cant_compare():
     drift = Drift(7, DIFFS, level=W)
     last = [UnloadUnconfirmed(7), drift, UuidConflict(8, TAG, OTHER, level=W)]
@@ -303,6 +347,15 @@ def test_changes_are_logged_once_at_the_conditions_level(caplog):
             "[Core] no longer: printer will be set to spool 7 when idle: "
             "name printer='PETG' spoolman='PLA'",
         )
+    ]
+
+
+def test_a_printers_condition_is_logged_with_the_printer(caplog):
+    logged = log_changes({}, [SensorsOff(level=W)], CTX, where="printer:")
+    log_changes(logged, [], CTX, where="printer:")
+    assert [r.getMessage().split(",")[0] for r in caplog.records] == [
+        "printer: filament sensors are off",
+        "printer: no longer: filament sensors are off",
     ]
 
 

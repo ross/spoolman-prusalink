@@ -127,6 +127,22 @@ async def test_filament_without_unload_count_is_unsupported():
     await client.aclose()
 
 
+@pytest.mark.parametrize("value", [True, False])
+def test_parse_filament_reads_the_sensors_setting(value):
+    assert parse_filament({**FILAMENT, "sensors_enabled": value}).sensors_enabled is value
+
+
+def test_parse_filament_without_the_sensors_setting_doesnt_know_it():
+    assert "sensors_enabled" not in FILAMENT
+    assert parse_filament(FILAMENT).sensors_enabled is None
+
+
+@pytest.mark.parametrize("value", [None, 1, "false"])
+def test_parse_filament_refuses_a_sensors_setting_that_isnt_a_bool(value):
+    with pytest.raises(TypeError, match="sensors_enabled"):
+        parse_filament({**FILAMENT, "sensors_enabled": value})
+
+
 def test_parse_filament_requires_temperatures():
     tool = {"index": 0, "extruded": 0, "material": {"name": "PLA"}}
     with pytest.raises(KeyError):

@@ -27,6 +27,7 @@ from .conditions import (
     LoadedWhileStaged,
     LoggedTexts,
     PrinterUnwritable,
+    SensorsOff,
     SpoolUnwritable,
     StagedNotLoaded,
     ToolNotReported,
@@ -253,6 +254,9 @@ class PrinterBridge:
     # What's been logged about each tool's conditions. It starts empty, so the conditions
     # standing at a restart are logged again.
     _logged: dict[int, LoggedTexts] = field(default_factory=dict)
+    # What's been logged about the printer's own conditions, which aren't a tool's. They
+    # come from each read and aren't saved: a restart logs those still standing again.
+    _printer_logged: LoggedTexts = field(default_factory=dict)
     # Spools that can't be looked up, with the last error logged for each.
     _lookup_failing: dict[int, str] = field(default_factory=dict)
     # The sync job: waiting out the idle delay, the busy state or "409" it's waiting on,
@@ -364,6 +368,10 @@ class PrinterBridge:
         if self._unsupported:
             self._unsupported = False
             log.error("%s now reports filament; resuming", self.label)
+        found = [SensorsOff(level=logging.WARNING)] if reading.sensors_enabled is False else []
+        self._printer_logged = conditions.log_changes(
+            self._printer_logged, found, self._context(self.label, {}), where=f"{self.label}:"
+        )
         if self._model_boot != reading.boot_id:
             await self._check_model(reading.boot_id)
         sync_job = status.job_id is not None and job_id is None
@@ -655,6 +663,7 @@ class PrinterBridge:
                 any(isinstance(ev, LostEmpty) for ev in result.events),
                 result.state.printed_empty,
                 self.conditions.get(tool, ()),
+                sensors=reading.sensors_enabled,
                 level=logging.WARNING,
             )
             if empty is not None:
