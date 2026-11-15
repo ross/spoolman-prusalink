@@ -1060,6 +1060,39 @@ WATCHED = (
         "50948269e679c31f",
         UPSTREAM_7D8BF685,
     ),
+    # When PrusaLink shows a job: in PRINTING and PAUSED, and in ATTENTION only with the
+    # print's or the preview's screen open, so never in BUSY. The status renderer and the
+    # `/api/v1/job` handler both ask it. The handler's `if` has an `else`, so the whole
+    # `/api/v1/` handler is watched, and it also trips on unrelated changes.
+    Watched(
+        "the job check",
+        "src/state/printer_state.cpp",
+        "function",
+        "has_job",
+        "JOB_STATES and SimPrinter.job_visible in simulator/model.py: no job in BUSY, as in the"
+        " power-panic resume's RECOVER",
+        "8104ed3d38c6f21a",
+        UPSTREAM_7D8BF685,
+    ),
+    Watched(
+        "the status job",
+        "lib/WUI/nhttp/status_renderer.cpp",
+        "statement",
+        "if (printer_state::has_job())",
+        "status in simulator/prusalink.py, which writes the job only when"
+        " SimPrinter.job_visible is true",
+        "6abc56885c76ed8e",
+        UPSTREAM_7D8BF685,
+    ),
+    Watched(
+        "the job endpoint",
+        "lib/WUI/link_content/prusa_link_api_v1.cpp",
+        "function",
+        "PrusaLinkApiV1::accept",
+        "job and _job_answer in simulator/prusalink.py: 204 when SimPrinter.job_visible is false",
+        "67baa91f2a9b19cc",
+        UPSTREAM_7D8BF685,
+    ),
     # `M865` and what it calls: the type a line picks, the values it reads and skips, the
     # name it refuses, and the load. No line stops the job.
     Watched(

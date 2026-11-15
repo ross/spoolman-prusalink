@@ -146,7 +146,7 @@ class JobPhase(StrEnum):
     HOLD = "HOLD"  # ATTENTION until the user taps through or clears a jam
     RUN = "RUN"  # a sync job applying its G-code
     PARKING = "PARKING"
-    RECOVER = "RECOVER"  # BUSY while a power-panic resume heats and homes
+    RECOVER = "RECOVER"  # BUSY with no job while a power-panic resume heats and homes
     AWAIT_RESUME = "AWAIT_RESUME"  # ATTENTION: the bed went cold during the outage
     UNPARK = "UNPARK"  # PAUSED briefly while the head unparks after a power-panic resume
     PREVIEW_LOAD = "PREVIEW_LOAD"  # BUSY with no job: the preview's filament-not-inserted load
@@ -155,6 +155,10 @@ class JobPhase(StrEnum):
 
 
 IDLE_STATES = (State.IDLE, State.FINISHED, State.STOPPED)
+# The states in which PrusaLink shows a job, as `printer_state::has_job()` decides
+# (`src/state/printer_state.cpp:611-623`). It shows `ATTENTION`'s only while the `Printing` or
+# `PrintPreview` screen is open, and every job phase that reads `ATTENTION` has one of them.
+JOB_STATES = (State.PRINTING, State.PAUSED, State.ATTENTION)
 # The state each job phase reads as. Without a job the state is BUSY while a tool loads or
 # unloads, else the idle screen the printer stores.
 PHASE_STATES = {
@@ -1301,9 +1305,11 @@ class SimPrinter:
     # Job state rules.
 
     def job_visible(self) -> bool:
-        job = self.job
-        hidden = (JobPhase.BLIP, JobPhase.PREVIEW_LOAD, JobPhase.PREVIEW_UNLOAD)
-        return job is not None and job.phase not in hidden
+        """Whether `/api/v1/status` carries the job and `/api/v1/job` answers 200. The firmware
+        asks `has_job()` for both (`status_renderer.cpp:36`, `prusa_link_api_v1.cpp:155-161`),
+        so the job is hidden in the start's `IDLE` blip and in every phase that reads `BUSY`:
+        the power-panic resume's `RECOVER` and the preview's load and unload."""
+        return self.job is not None and self.state in JOB_STATES
 
     def can_print(self) -> bool:
         # The firmware's rule is state-only: IDLE, READY, STOPPED or FINISHED. A print asked

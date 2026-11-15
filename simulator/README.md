@@ -463,10 +463,12 @@ that trace. The points that matter for the bridge, in short:
   `IDLE` with no job for `panic_idle_seconds`, as the firmware does until
   its autostart resumes the print, and the idle sensor clear runs then on
   the picked tool, if one is. The resume picks the print's tool before
-  anything moves, then goes through `BUSY`, then a short
-  `PAUSED`, then `PRINTING`. A menu load or unload still running when the
-  wait ends delays the resume by another `panic_idle_seconds`, until the
-  printer is idle. A print started in the wait, an upload too, drops the
+  anything moves, then goes through `BUSY`, still with no job, then a
+  short `PAUSED`, where the job is back with its ID, then `PRINTING`. The
+  firmware shows a job only in `PRINTING`, `PAUSED`, and `ATTENTION` on a
+  print's or a preview's screen (`has_job()`), so never in `BUSY`. A menu
+  load or unload still running when the wait ends delays the resume by
+  another `panic_idle_seconds`, until the printer is idle. A print started in the wait, an upload too, drops the
   resume, and the event log says "resume dropped". A plain reboot drops it
   too, and another power cut leaves it waiting. A power cut during the
   resume, in `BUSY`, the short `PAUSED` or a cold bed's wait, keeps the

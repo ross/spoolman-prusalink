@@ -171,7 +171,10 @@ read again at each firmware update.
   that window on the picked tool, if one is. The firmware's autostart tries every
   1.5 s and gives up after 100 s (`print_utils.cpp:67-82`); the simulator
   resumes at the first try, delays the resume while a menu load or unload
-  runs, and drops it when a print starts in the window. A cold bed
+  runs, and drops it when a print starts in the window. The resume then
+  reads `BUSY`, still with no job, because the firmware shows a job only
+  when `has_job()` is true (`printer_state.cpp:611-623`), and the job is
+  back with its ID at the brief `PAUSED` that follows. A cold bed
   reads `ATTENTION` as soon as the window ends, and a paused print reads
   `BUSY`, then `PAUSED`, after the cold bed's wait if there is one. A cut
   during a filament change dialog isn't a cut while paused: the print
