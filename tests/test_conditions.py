@@ -13,6 +13,7 @@ from spoolman_prusalink.conditions import (
     Lasting,
     LoadedWhileStaged,
     PrinterUnwritable,
+    PrintingEmpty,
     ProvisionalCharge,
     SpoolUnwritable,
     StagedNotLoaded,
@@ -26,6 +27,7 @@ from spoolman_prusalink.conditions import (
     WriteWaitsForLoad,
     flags,
     log_changes,
+    printing_empty,
     provisional,
     standing,
 )
@@ -60,6 +62,14 @@ KINDS = [
         None,
     ),
     (Lasting(HoldEmpty(), level=W), "holding usage until filament is reported", None),
+    (
+        PrintingEmpty(level=W),
+        "printing with no filament reported; that usage is charged to no spool. If the "
+        "filament sensors were turned off for this print, turn them back on after it: "
+        "while they're off, the printer reports no runout and no unload, so the bridge "
+        "misses spool swaps. A power cut with the filament out does this too",
+        None,
+    ),
     (
         HeldForDeleted(7, 4),
         None,
@@ -229,6 +239,20 @@ def test_provisional_amount_stands_during_a_print():
     assert provisional(7, 250, 11, [ArchivedLoaded(7)], printing=True) == (
         ProvisionalCharge(7, 250, 11)
     )
+
+
+def test_printing_empty_starts_with_lost_usage_and_stands_while_the_tool_prints_empty():
+    shown = PrintingEmpty(level=W)
+    # An empty tool in a print, with no usage lost on it, as a toolchanger's idle tool.
+    assert printing_empty(False, True, [], level=W) is None
+    assert printing_empty(True, True, [], level=W) == shown
+    # It stands through a poll with no new usage, as it was.
+    assert printing_empty(False, True, [shown], level=W) is shown
+    # The print's end, or the material's return, ends it, even with the print's tail lost.
+    assert printing_empty(True, False, [shown], level=W) is None
+    assert printing_empty(False, False, [shown], level=W) is None
+    # A tail lost with nothing standing raises it: the tool printed empty.
+    assert printing_empty(True, False, [ArchivedLoaded(7)], level=W) == shown
 
 
 def test_compared_conditions_stand_while_a_poll_cant_compare():

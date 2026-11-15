@@ -370,8 +370,12 @@ async def test_c7_tool_reports_no_filament(world: World):
     assert w.printer.state is State.IDLE
 
 
-async def test_c7_print_through_an_empty_tool_is_reported_lost(world: World):
-    """Print through an empty tool: its usage reported lost, the next load charged alone."""
+async def test_c7_print_through_an_empty_tool_is_reported_lost(
+    world: World, caplog: pytest.LogCaptureFixture
+):
+    """Print through an empty tool: its usage reported lost, a warning about the filament
+    sensors logged once, and the next load charged alone."""
+    caplog.set_level(logging.INFO, logger="spoolman_prusalink")
     w = world
     a = w.spools["A"]
     await baseline(w)
@@ -398,6 +402,10 @@ async def test_c7_print_through_an_empty_tool_is_reported_lost(world: World):
     assert {e["event"] for e in events(records)} == {"lost_empty"}
     assert sum(e["mm"] for e in events(records, "lost_empty")) == printed
     assert charges(records) == []
+    # BF25: the warning starts with the lost usage and ends with the print, once each.
+    hint = "printing with no filament reported; that usage is charged to no spool"
+    assert logged_once(caplog, logging.WARNING, f"[{w.tool_location}] {hint}")
+    assert logged_once(caplog, logging.WARNING, f"no longer: {hint}")
 
     # The next load is charged its own count only, to A, which the open swap keeps.
     mark = w.mark()

@@ -19,6 +19,7 @@ from simulator.model import MODELS, Join, PrintSpec, Reason, Segment, SimTool, S
 
 INDX = "8.10.0"
 SHELF = "shelf"
+HINT = "printing with no filament reported"
 
 
 def indx(tmp_path, tools):
@@ -102,6 +103,11 @@ async def test_a_print_through_an_empty_tool_reports_its_usage_lost(tmp_path, ca
     assert [(event, tool) for event, tool, _ in lost] == [("lost_empty", 1)] * 2
     assert sum(mm for _, _, mm in lost) == 584 - 500
     assert fake.flag(1) is None and fake.flag(2) is None
+    # BF25: T1 alone warns, once, and the poll that sees the print over ends it. The idle
+    # empty tools, T2 to T7, print nothing and raise nothing.
+    hints = [r.getMessage().split(HINT)[0] for r in caplog.records if HINT in r.getMessage()]
+    t1 = tool_locations(LOC, 8)[1]
+    assert hints == [f"[{t1}] ", f"[{t1}] no longer: "]
 
     # BF24: the 84 mm never left a spool, so T1's next load is charged its own count.
     await station.swap_cycle(tool=1, source="preset", name="PLA")
@@ -111,10 +117,11 @@ async def test_a_print_through_an_empty_tool_reports_its_usage_lost(tmp_path, ca
     await bridge.aclose()
 
 
-async def test_an_idle_empty_tool_keeps_its_held_usage_through_a_print_on_another(tmp_path):
+async def test_an_idle_empty_tool_keeps_its_held_usage_through_a_print_on_another(tmp_path, caplog):
     """T1 holds usage with no material, as a menu load stopped before the type does. A print
     on T0 alone doesn't move T1's counter, so T1's usage stays held through the print and
-    goes to its spool at the next load (C7)."""
+    goes to its spool at the next load (C7). No usage is lost, so no tool warns (BF25)."""
+    caplog.set_level(logging.WARNING, logger="spoolman_prusalink")
     tools = [SimTool.loaded_with(0, PLA, extruded=1000.0), SimTool(1, extruded=500.0)]
     bridge, fake, station = indx(tmp_path, tools)
     printer = station.printer
@@ -130,6 +137,7 @@ async def test_an_idle_empty_tool_keeps_its_held_usage_through_a_print_on_anothe
     assert station.counter_at(1) == 520 and station.material(1) == (None, None, None)
     assert [r for r in ledger(tmp_path)[mark:] if "event" in r] == []
     assert set(totals(fake)) == {1}
+    assert levels(caplog, HINT) == []
 
     await station.swap_cycle(tool=1, source="preset", name="PLA")
     await bridge.poll()
