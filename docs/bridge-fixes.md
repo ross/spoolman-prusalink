@@ -8,9 +8,10 @@ so they could be planned as a whole. The plan groups them into ten
 workstreams that sessions can take up one at a time, each from a cold
 start with only the repository.
 
-Draft, 2026-11-14. No workstream has started. Every approach below is a
-proposal, read from the code but not built: the session that takes a
-workstream checks it against the code before building on it.
+Draft, 2026-11-14. The [Status](#status) table says which workstreams
+have started. Every approach below is a proposal, read from the code but
+not built: the session that takes a workstream checks it against the
+code before building on it.
 
 bridge-findings.md stays the record of each finding: what happens, the
 evidence, and its status. This plan is the record of the work. It points

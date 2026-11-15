@@ -994,7 +994,7 @@ panic (F38 to F46). The MMU's scenario rows are T12 to T17.
 - **Printers**: All.
 - **What happens**: Only Prusa Connect is told `READY`. PrusaLink reports
   the state underneath (`status_renderer.cpp:30`). `IDLE_STATES` in
-  `prusalink.py` lists it.
+  `prusalink.py` listed it until workstream 10.
 - **Effect**: None. The entry is never matched.
 - **Evidence**: Read in the firmware source.
 - **Scenario rows**: None directly. W2 and W3 rely on `IDLE_STATES`.
