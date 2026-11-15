@@ -100,6 +100,7 @@ async def test_spool_list_that_cant_be_parsed_is_a_bad_answer(body):
         ("status", '{"job": {"id": "x"}}', "the printer's status"),
         ("filament", '{"boot_id": 1, "tools": [{"index": 0}]}', None),
         ("filament", '{"boot_id": "x", "tools": []}', "the printer's filament"),
+        ("filament", '{"boot_id": 1, "sensors_enabled": 0, "tools": []}', "sensors_enabled"),
         ("filament", "not json", "the printer's filament"),
         ("printer_type", "[]", "the printer's version"),
         ("job_display_name", '{"file": "x"}', "the printer's job"),

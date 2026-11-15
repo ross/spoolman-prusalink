@@ -53,7 +53,11 @@ def parse_filament(data: dict) -> FilamentReading:
             unload_count=int(raw["unload_count"]),
             extruded_at_unload=raw.get("extruded_at_unload"),
         )
-    return FilamentReading(boot_id=int(data["boot_id"]), tools=tools)
+    # Older builds of the fork don't serve `sensors_enabled`, so a missing key is unknown.
+    sensors = data.get("sensors_enabled")
+    if "sensors_enabled" in data and not isinstance(sensors, bool):
+        raise TypeError(f"sensors_enabled is {sensors!r}, not a bool")
+    return FilamentReading(boot_id=int(data["boot_id"]), tools=tools, sensors_enabled=sensors)
 
 
 class NoFilamentEndpoint(Exception):

@@ -117,6 +117,45 @@ async def test_a_print_through_an_empty_tool_reports_its_usage_lost(tmp_path, ca
     await bridge.aclose()
 
 
+async def test_the_tools_mapping_screens_sensors_off_warns_before_any_usage_is_lost(
+    tmp_path, caplog
+):
+    """BF25: the tools-mapping screen's answer turns the sensors off (F29). The first poll
+    that reads the setting off warns, once for the printer, before T1 loses anything. The
+    setting stays off after the print, and so does the warning."""
+    caplog.set_level(logging.WARNING, logger="spoolman_prusalink")
+    off = "printer: filament sensors are off"
+    tools = [SimTool.loaded_with(0, PLA, extruded=1000.0), SimTool(1, extruded=500.0)]
+    bridge, fake, station = indx(tmp_path, tools)
+    printer = station.printer
+    await bridge.poll()  # the baseline
+    mark = len(ledger(tmp_path))
+
+    station.begin_print(PrintSpec([Segment(0, 100), Segment(1, 50)], duration_s=2))
+    printer.tap_through()  # Print
+    printer.tap_through()  # turn the filament sensors off
+    assert not printer.sensors and station.counter_at(1) == 500
+    await bridge.poll()
+    assert levels(caplog, off) == ["WARNING"]
+    assert levels(caplog, HINT) == []
+    assert [r for r in ledger(tmp_path)[mark:] if "event" in r] == []
+
+    await station.run_until(lambda: printer.job is None, poll_every=0.3)
+    await bridge.poll()
+    assert [r["event"] for r in ledger(tmp_path)[mark:] if "event" in r][0] == "lost_empty"
+    t1 = tool_locations(LOC, 8)[1]
+    assert [r.getMessage() for r in caplog.records if HINT in r.getMessage()][0] == (
+        f"[{t1}] printing with no filament reported; that usage is charged to no spool. The "
+        "filament sensors are off: see the warning about them"
+    )
+    assert levels(caplog, off) == ["WARNING"]
+
+    printer.set_sensors(True)
+    await bridge.poll()
+    assert levels(caplog, "printer: no longer: filament sensors are off") == ["WARNING"]
+    await bridge.aclose()
+
+
 async def test_an_idle_empty_tool_keeps_its_held_usage_through_a_print_on_another(tmp_path, caplog):
     """T1 holds usage with no material, as a menu load stopped before the type does. A print
     on T0 alone doesn't move T1's counter, so T1's usage stays held through the print and

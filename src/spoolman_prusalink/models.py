@@ -45,6 +45,8 @@ class FilamentReading:
 
     boot_id: int
     tools: dict[int, ToolReading] = field(default_factory=dict)
+    # The printer's filament sensors setting, or None when the firmware doesn't report it.
+    sensors_enabled: bool | None = None
 
 
 @dataclass(frozen=True)

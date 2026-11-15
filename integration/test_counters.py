@@ -375,7 +375,8 @@ async def test_c7_print_through_an_empty_tool_is_reported_lost(
 ):
     """Print through an empty tool: its usage reported lost and a warning logged once.
 
-    The warning says the filament sensors may be off, and the next load is charged alone.
+    The filament sensors are on, so the warning names a power cut, and the next load is
+    charged alone.
     """
     caplog.set_level(logging.INFO, logger="spoolman_prusalink")
     w = world
@@ -408,6 +409,8 @@ async def test_c7_print_through_an_empty_tool_is_reported_lost(
     hint = "printing with no filament reported; that usage is charged to no spool"
     assert logged_once(caplog, logging.WARNING, f"[{w.tool_location}] {hint}")
     assert logged_once(caplog, logging.WARNING, f"no longer: {hint}")
+    on = "The filament sensors are on, so a power cut"
+    assert logged_once(caplog, logging.WARNING, f"[{w.tool_location}] {hint}. {on}")
 
     # The next load is charged its own count only, to A, which the open swap keeps.
     mark = w.mark()
@@ -417,6 +420,30 @@ async def test_c7_print_through_an_empty_tool_is_reported_lost(
         (a, w.counter - printed)
     ]
     assert w.bridge.printers[0].tools[0].job_id == job
+
+
+async def test_c7_sensors_off_warned_once(world: World, caplog: pytest.LogCaptureFixture):
+    """Filament sensors turned off: a warning logged once, and its end once when they're on.
+
+    The warning is the printer's, so it flags no spool in Spoolman.
+    """
+    caplog.set_level(logging.INFO, logger="spoolman_prusalink")
+    w = world
+    off = "filament sensors are off, so the printer reports no runout and no unload"
+    await baseline(w)
+    w.printer.set_sensors(False)
+    for _ in range(3):
+        await w.poll()
+    assert logged_once(caplog, logging.WARNING, f"printer: {off}")
+    assert not logged(caplog, logging.WARNING, "no longer")
+    assert w.bridge.printers[0].conditions == {}
+    assert await w.flag("A") is None
+
+    w.printer.set_sensors(True)
+    await w.poll()
+    await w.poll()
+    assert logged_once(caplog, logging.WARNING, f"printer: no longer: {off}")
+    assert logged_once(caplog, logging.WARNING, f"printer: {off}")
 
 
 async def test_c8_firmware_update(world: World, caplog: pytest.LogCaptureFixture):
