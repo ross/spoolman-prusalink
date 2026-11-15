@@ -53,7 +53,8 @@ simulator's defaults. A material `seed` has no filament for gets one from a fixe
 cycle instead. On tool 0 of a model that holds UUIDs, a tool with no material
 gets a new UUID. It never deletes or moves anything, and running it again
 changes nothing, so a Spoolman seeded earlier keeps its old spools and UUIDs.
-`bridge-config` prints the bridge's `[[printers]]` list with the same locations. Add `[spoolman]`
+`bridge-config` prints the bridge's `[[printers]]` list with the same locations, and
+a `sync_delay` of 3 s in place of the bridge's 30, to match the short polls. Add `[spoolman]`
 and `[bridge]` tables to it, with short poll intervals, and run the bridge:
 
 ```toml

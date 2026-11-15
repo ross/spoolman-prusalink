@@ -1393,6 +1393,26 @@ async def test_sync_delay_waits_for_the_printer_to_stay_idle(tmp_path, caplog):
     await bridge.aclose()
 
 
+async def test_sync_delay_starts_over_at_a_boot_and_waits_one_idle_poll(tmp_path):
+    # A boot can open a power-panic window, so the idle clock starts over at each new
+    # boot ID (P12). It starts again at that same poll, so with polls `poll_idle` apart
+    # the write runs at the next one.
+    bridge, fake, station = make(tmp_path, [spool(19)], uuid_field="instance_uuid", sync_delay=30)
+    now = [1000.0]
+    bridge.clock = lambda: now[0]
+    await swap_to_spool_20(bridge, fake, station)  # Idle since the first poll.
+    assert jobs(station) == []
+    station.printer.set_power("off")
+    station.printer.set_power("on")
+    now[0] += bridge.config.poll_idle
+    await bridge.poll()  # The first poll after the boot: the clock starts here.
+    assert jobs(station) == []
+    now[0] += bridge.config.poll_idle
+    await bridge.poll()
+    assert len(jobs(station)) == 1
+    await bridge.aclose()
+
+
 async def test_sync_delay_logs_a_fractional_delay(tmp_path, caplog):
     caplog.set_level("INFO")
     bridge, fake, station = make(tmp_path, [spool(19)], uuid_field="instance_uuid", sync_delay=2.5)

@@ -346,7 +346,8 @@ def test_bridge_config_is_valid_toml_with_the_right_shape():
     assert core["url"] == "http://127.0.0.1:8001"
     assert core["api_key"] == "sim-core-one-l"
     assert core["tools"] == [{"index": 0, "location": "core-one-l"}]
-    assert set(mk4s) == {"name", "url", "api_key", "tools"}
+    assert set(mk4s) == {"name", "url", "api_key", "sync_delay", "tools"}
+    assert mk4s["sync_delay"] == 3
     assert indx["tools"][3] == {"index": 3, "location": "indx T4"}
 
 
@@ -359,6 +360,7 @@ def test_bridge_config_loads_in_the_bridge(tmp_path):
     bridge = bridge_load(path, env={})
     assert [p.name for p in bridge.printers] == ["core-one-l", "mk4s", "indx"]
     assert bridge.printers[0].url == "http://127.0.0.1:8001"
+    assert [p.sync_delay for p in bridge.printers] == [3, 3, 3]
     assert bridge.printers[2].tools == {
         0: "indx T1",
         1: "indx T2",

@@ -312,7 +312,7 @@ written.
   `sync_delay` holds the job at the first idle poll after the boot. The
   job then runs at the first later poll after the printer has been idle
   that long, so whether it misses the window depends on when that poll
-  comes. `sync_delay` is 0 by default. With an MMU3, the sync job waits
+  comes. `sync_delay` was 0 by default. With an MMU3, the sync job waits
   at the preview's question to unload the MMU's filament first and reads
   `ATTENTION` until someone answers (F43, BF18): while the MMU still
   connects after the boot, whatever FINDA sees, and once it's Active
@@ -322,9 +322,7 @@ written.
 - **Effect**: The user's print is lost: it never resumes, and the printer
   ends the sync job `FINISHED`. If the autostart resumes anyway, the two
   jobs collide in a way the source doesn't define.
-- **Evidence**: Read in the firmware source. Shown in the simulator by
-  `test_a_sync_job_in_the_window_drops_the_resume` in
-  `tests/test_power_panic.py`, which pins it on a Core One L, and on an
+- **Evidence**: Read in the firmware source. Shown in the simulator on an
   MMU by `test_a_sync_job_in_the_window_on_a_connecting_mmu_waits_on_the_question`
   in `tests/test_mmu.py` and the window tests in
   `simulator/tests/test_mmu_power_panic.py`. To be
@@ -332,8 +330,16 @@ written.
   autostart's first try. The F12 trace shows the window, and has to be
   taken before the INDX upgrade.
 - **Scenario rows**: P12, W2, W14.
-- **To reproduce**: That test, today.
-- **Status**: Open.
+- **To reproduce**: Set `sync_delay = 0`, as the MMU test does.
+- **Status**: Fixed (workstream 1). `sync_delay` is 30 s by default, and the
+  idle clock starts over at each new `boot_id`, so the first idle poll after
+  a boot, a second cut's included, only starts it.
+  `test_a_write_waits_out_the_window_and_the_print_resumes` and
+  `test_a_second_cut_after_an_idle_poll_in_the_first_window` in
+  `tests/test_power_panic.py` show the print resume, and
+  `test_w2_write_waits_out_the_power_panic_window` runs it end to end.
+  `sync_delay = 0` still runs a write in the window, and the MMU test stays
+  pinned at 0 until workstream 9.
 
 ## Charging
 
