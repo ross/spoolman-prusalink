@@ -290,6 +290,7 @@ end Status.
 | C4 | `test_counters.py::test_c4_counter_goes_backward` | Counter goes backward within one boot: an anomaly, no charge, and later use charged. |
 | C5 | `test_counters.py::test_c5_extruded_at_unload_out_of_range` | `extruded_at_unload` past the counter: clamped to it, an anomaly, the unload charged. |
 | C6 | `test_counters.py::test_c6_manual_extrude_and_retract` | Extrude and retract from the menu: extrusion charged, a retraction charges nothing. |
+| C7 | `test_counters.py::test_c7_print_through_an_empty_tool_is_reported_lost` | Print through an empty tool: its usage reported lost, the next load charged alone. |
 | C7 | `test_counters.py::test_c7_tool_reports_no_filament` | Tool reports no filament after a sensor fault: usage held until filament is back. |
 | C8 | `test_configs.py::test_c8_firmware_without_usage_counters` | Firmware with no usage counters: logged once, nothing charged, resumes when they're back. |
 | C8 | `test_counters.py::test_c8_firmware_update` | Firmware update: a reboot, the model checked again, an unsupported version logged once. |

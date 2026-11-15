@@ -44,7 +44,14 @@ from .events import Report, Unload
 from .fields import SpoolFields
 from .flags import Flags, FlagSync, SharedSpools
 from .models import FilamentReading, Spool
-from .prusalink import BUSY_STATES, IDLE_STATES, NoFilamentEndpoint, PrinterStatus, PrusaLink
+from .prusalink import (
+    BUSY_STATES,
+    IDLE_STATES,
+    PRINTING_STATES,
+    NoFilamentEndpoint,
+    PrinterStatus,
+    PrusaLink,
+)
 from .records import ChargeRecord, EventRecord
 from .spoolman import Spoolman
 from .state import PrinterState, Runout, State
@@ -569,6 +576,8 @@ class PrinterBridge:
                 job_id=status.job_id,
                 matches=matches,
                 claim=claim,
+                # `read()` hides the sync job's ID, so the bridge's own job holds.
+                printing=status.job_id is not None and status.state in PRINTING_STATES,
             )
             # A skipped tool's state changes only to record the counter and any reboot.
             if result.resync:

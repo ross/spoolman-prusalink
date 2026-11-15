@@ -483,16 +483,18 @@ don't leave the printer before step 7.
    on it growing with no `material`. After a minute of printing, cancel.
    Expect `PRINTING` while it parks, then `STOPPED` with no `job` (F7).
    Note what `extruded` does while it parks: F29 infers that the end's
-   auto-retract counts on an empty tool too. The bridge holds what the
-   print counted, since the tool reports no material (C7).
+   auto-retract counts on an empty tool too. A bridge with BF24's fix
+   reports what the print counted lost, since the tool reports no
+   material during a print (C7); an older one holds it.
 5. **F29, a load with the sensor off.** This step explores: the source
    doesn't say whether a menu load works as usual with the sensor
    disabled. Try loading the PLA spool from the menu, mark it, and record
    what happens. If the printer refuses or behaves oddly, mark that, stop
    the load, and go to step 7. Otherwise expect what F3 says: `extruded`
    grows with no `material`, then `material` appears, then the purge and
-   the auto-retract count. BF24 predicts the bridge then charges the held
-   count with the load to the assigned spool. The bridge may write the
+   the auto-retract count. A bridge with BF24's fix charges the load alone
+   to the assigned spool; an older one adds the held count. The bridge may
+   write the
    assigned spool after the load; let its job finish.
 6. **F29, a hand pull with the sensor off.** Let the nozzle cool: as F14
    says, the pull needs a cold extruder. With the printer idle, pull the
@@ -507,10 +509,10 @@ don't leave the printer before step 7.
    Then load the spool from the menu, to leave the printer as you found
    it.
 
-The assigned spool is charged whatever the counter counts. Expect
-Spoolman to show the loads, and in step 5 the empty print's count on top
-(BF24), though that filament never left the spool. Move that count back
-afterwards, as the rules for anything live say.
+Expect Spoolman to show the loads. A bridge without BF24's fix also
+charges the empty print's count in step 5, though that filament never
+left the spool: move that count back afterwards, as the rules for
+anything live say.
 
 **When they happen.** F14 (pull filament from a cold extruder while off,
 then boot), F16 (a stuck-filament dialog, a pull during a load), the next

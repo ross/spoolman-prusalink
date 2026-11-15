@@ -12,7 +12,6 @@ from integration.conftest import (
     World,
     baseline,
     charges,
-    count,
     event_fields,
     events,
     logged,
@@ -145,16 +144,18 @@ async def test_c1_usage_held_over_a_reboot_joins_the_provisional_charge(
     tool = w.bridge.printers[0].tools[0]
     assert tool.provisional is not None and tool.provisional.spool_id == a
 
-    # The sensor fails mid-print: the tool reports no filament, which isn't an unload
-    # while printing, so the usage is held. Then the printer reboots, dropping the print.
-    # The load above held its usage for a poll too, so count from here.
-    hold = f"[{w.tool_location}] holding usage until filament is reported"
-    hold_ended = f"[{w.tool_location}] no longer: holding usage until filament is reported"
-    holds, ends = count(caplog, logging.WARNING, hold), count(caplog, logging.WARNING, hold_ended)
-    w.printer.set_sensor_fault(0, True)
+    # B and C go into the tool's location mid-print, so it's ambiguous: the bridge skips
+    # the tool and holds its usage. Then the printer reboots, dropping the print. The hold
+    # isn't a sensor fault's: usage on a tool with no filament during a print is reported
+    # lost, not held (C7).
+    ids = ", ".join(str(i) for i in sorted((a, w.spools["B"], w.spools["C"])))
+    skipping = f"[{w.tool_location}] location holds spools {ids}; skipping until it's clear"
+    cleared = f"[{w.tool_location}] no longer: location holds spools {ids}"
+    await w.move("B", w.tool_location)
+    await w.move("C", w.tool_location)
     w.advance(0.5)
     records = await w.poll()
-    assert charges(records) == [] and events(records, "unload") == []
+    assert charges(records) == [] and events(records) == []
     w.advance(0.5)
     records = await w.poll()
     assert charges(records) == []
@@ -162,14 +163,19 @@ async def test_c1_usage_held_over_a_reboot_joins_the_provisional_charge(
     held = w.counter - tool.charged
     assert held > 0
     before_reboot = w.counter
-    assert count(caplog, logging.WARNING, hold) == holds + 1
+    assert logged_once(caplog, logging.WARNING, skipping)
 
-    w.printer.set_sensor_fault(0, False)
     w.printer.reboot()
     records = await w.poll()
     reboots = events(records, "reboot")
     assert len(reboots) == 1
     assert reboots[0]["kept_mm"] == held
+    assert charges(records) == []
+
+    # B and C leave: A, never unloaded, takes the held usage, which joins the charge.
+    await w.move("B", w.shelf)
+    await w.move("C", w.shelf)
+    records = await w.poll()
     assert event_fields(records, "held_charged") == [
         {"spool": a, "mm": held, "deleted_spool": None}
     ]
@@ -181,8 +187,8 @@ async def test_c1_usage_held_over_a_reboot_joins_the_provisional_charge(
     assert tool.held_mm == 0
     flag = await w.flag("A")
     assert flag is not None and f" {provisional} mm (≈ " in flag
-    assert count(caplog, logging.WARNING, hold) == holds + 1
-    assert count(caplog, logging.WARNING, hold_ended) == ends + 1
+    assert logged_once(caplog, logging.WARNING, skipping)
+    assert logged_once(caplog, logging.WARNING, cleared)
 
     # The next unload keeps all of it on A, held part included; B was never involved. The
     # print fed back the load's retraction, so the boot left no gap: the 10 mm and the
@@ -362,6 +368,45 @@ async def test_c7_tool_reports_no_filament(world: World):
     # load: 1133.95.
     assert [(r["spool_id"], r["use_length"]) for r in charges(records)] == [(a, 133)]
     assert w.printer.state is State.IDLE
+
+
+async def test_c7_print_through_an_empty_tool_is_reported_lost(world: World):
+    """Print through an empty tool: its usage reported lost, the next load charged alone."""
+    w = world
+    a = w.spools["A"]
+    await baseline(w)
+    await w.start_print(print_spec())
+    job = w.printer.job.id
+
+    # The filament is pulled out while the power is off. In the window before the resume
+    # the idle sensor clear counts the unload, and the resumed print goes on through the
+    # empty tool, since a runout needs the sensor to see the filament go (F12, F29).
+    w.printer.set_power("off")
+    w.printer.unload(0)
+    w.printer.set_power("on", resume=True)
+    records = await w.poll()
+    assert [e["event"] for e in events(records)] == ["reboot", "unload", "swap_unconfirmed"]
+
+    assert w.printer.job is None  # the window
+    mark = w.mark()
+    await w.run_until(lambda: w.printer.state is State.PRINTING, poll_every=0.5)
+    assert w.printer.job.id == job
+    await w.run_until(lambda: w.printer.job is None, poll_every=0.5)
+    printed = w.counter
+    records = w.since(mark) + await w.poll()
+    assert w.printer.job is None and w.material() == (None, None, None) and printed > 0
+    assert {e["event"] for e in events(records)} == {"lost_empty"}
+    assert sum(e["mm"] for e in events(records, "lost_empty")) == printed
+    assert charges(records) == []
+
+    # The next load is charged its own count only, to A, which the open swap keeps.
+    mark = w.mark()
+    await w.swap_cycle(source="preset", name=PLA[0])
+    records = w.since(mark) + await w.poll()
+    assert [(r["spool_id"], r["use_length"]) for r in charges(records)] == [
+        (a, w.counter - printed)
+    ]
+    assert w.bridge.printers[0].tools[0].job_id == job
 
 
 async def test_c8_firmware_update(world: World, caplog: pytest.LogCaptureFixture):

@@ -74,10 +74,10 @@ async def test_a_print_waiting_on_the_tools_mapping_screen(tmp_path):
     await bridge.aclose()
 
 
-async def test_a_print_through_an_empty_tool_holds_its_usage(tmp_path, caplog):
+async def test_a_print_through_an_empty_tool_reports_its_usage_lost(tmp_path, caplog):
     """The print goes on through a tool with no filament once the sensors are off, and that
-    tool's counter counts with no material: the bridge holds its usage (C7) and charges the
-    other tool's spool as usual."""
+    tool's counter counts with no material: the bridge reports its usage lost (C7), charges
+    the other tool's spool as usual, and charges the next load its own count only."""
     caplog.set_level(logging.WARNING, logger="spoolman_prusalink")
     tools = [SimTool.loaded_with(0, PLA, extruded=1000.0), SimTool(1, extruded=500.0)]
     bridge, fake, station = indx(tmp_path, tools)
@@ -89,23 +89,25 @@ async def test_a_print_through_an_empty_tool_holds_its_usage(tmp_path, caplog):
     assert str(printer.job.attention) == "tools mapping: T1 has no filament"
     printer.tap_through()  # Print
     printer.tap_through()  # turn the filament sensors off
-    await station.run_until(lambda: printer.job is None, poll_every=0.3)
-    await bridge.poll()
+    await station.run_until(lambda: station.counter_at(1) > 500)
+    await bridge.poll()  # printing on T1
+    await station.run_until(lambda: printer.job is None)
+    await bridge.poll()  # the rest of the print, first seen with no job
     # T0 133.77. T1 counts 84.75 with no material.
     assert station.counter_at(1) == 584 and station.material(1) == (None, None, None)
     assert totals(fake) == {1: 133}
-    assert levels(caplog, "holding usage until filament is reported") == ["WARNING"]
+    assert levels(caplog, "holding usage until filament is reported") == []
     records = ledger(tmp_path)[mark:]
-    assert [r for r in records if "event" in r] == []
+    lost = [(r["event"], r["tool"], r["mm"]) for r in records if "event" in r]
+    assert [(event, tool) for event, tool, _ in lost] == [("lost_empty", 1)] * 2
+    assert sum(mm for _, _, mm in lost) == 584 - 500
     assert fake.flag(1) is None and fake.flag(2) is None
 
-    # A known fault, BF24 in docs/bridge-findings.md: the held 84 mm never left a spool,
-    # yet the bridge charges it to the next spool reported in T1, with the load's own
-    # count, once T1 is loaded. A fix changes this line.
+    # BF24: the 84 mm never left a spool, so T1's next load is charged its own count.
     await station.swap_cycle(tool=1, source="preset", name="PLA")
     await bridge.poll()
     load = station.counter_at(1) - 584
-    assert totals(fake)[2] == 584 - 500 + load
+    assert totals(fake)[2] == load
     await bridge.aclose()
 
 
