@@ -670,22 +670,23 @@ written.
   `integration/test_tools.py` does, and poll: no unload counts, where T4
   counts one, and the bridge warns that the sensors are off. No bridge
   test covers the missed swap.
-- **Status**: Fixed on firmware that serves `sensors_enabled`, from the
-  fork's `2ef028181` (F47 in printer-behaviors.md; D12 in
-  bridge-fixes.md). While the setting reads false, the bridge logs a
-  warning for the printer, `SensorsOff` in `conditions.py`: the filament
-  sensors are off, so the printer reports no runout and no unload, and a
-  hand swap goes unnoticed. It's logged once when the bridge first reads
-  the setting off, again after a restart while it's still off, and once
-  when it's back on. It flags no spool. The fix is the warning: the bridge
-  still can't see the swaps the setting hides. When a print loses usage on
-  an empty tool (BF24), the bridge also logs `PrintingEmpty`, worded by
-  the setting: with the sensors off it points at the sensors warning, and
-  with them on it names a power cut. On firmware without the field, the
-  hint stays as it was: `PrintingEmpty` says the filament sensors may be
-  off and should be turned back on after the print, and that a power cut
-  with the filament out does the same. The README, under "How usage is
-  attributed", says the same.
+- **Status**: Open (D12 in bridge-fixes.md). The bridge warns about the
+  setting, but a hand swap made while the sensors are off still opens no
+  swap. On firmware that serves `sensors_enabled`, from the fork's
+  `2ef028181` (F47 in printer-behaviors.md), the bridge logs a warning for
+  the printer while the setting reads false, `SensorsOff` in
+  `conditions.py`: the filament sensors are off, so the printer reports no
+  runout and no unload, and a hand swap goes unnoticed. It's logged once
+  when the bridge first reads the setting off, again after a restart while
+  it's still off, and once when it's back on. It flags no spool. When a
+  print loses usage on an empty tool (BF24), the bridge also logs
+  `PrintingEmpty`, which says whether the sensors were on or off when the
+  usage was lost. On firmware without the field, `PrintingEmpty` is the
+  only hint: it says the filament sensors may be off and should be turned
+  back on after the print, and that a power cut with the filament out does
+  the same. The README, under "How usage is attributed", says the same.
+  Only seeing the swap itself would fix it, and nothing the bridge reads
+  shows a hand swap while the sensors are off.
 
 ### BF27. A filament change before a tool's first extrusion in a print looks like its print start
 
