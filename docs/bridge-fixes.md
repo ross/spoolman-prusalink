@@ -72,7 +72,7 @@ elsewhere names it under "Also touches".
 | 1 | [The power-panic window](#1-the-power-panic-window) | BF26 | | 1 | Small | D3 | Merged, 9df89c8 |
 | 2 | [A sync job at a question](#2-a-sync-job-at-a-question) | BF5 | BF4, BF7, BF18 | 1 | Medium | Nothing | Merged, 064d892 |
 | 3 | [The custom preamble](#3-the-custom-preamble) | BF2, BF3, BF4 | | 1 | Small | D4 | Merged, 064d892 |
-| 4 | [Print start](#4-print-start) | BF10, BF23, BF27 | | 1 | Medium | Sitting D confirms | In progress |
+| 4 | [Print start](#4-print-start) | BF10, BF23, BF27 | | 1 | Medium | Sitting D confirms | Merged, a212288 |
 | 5 | [Usage on an empty tool](#5-usage-on-an-empty-tool) | BF24, BF25 | | 1 | Medium | Sittings C and D confirm | BF24 merged, 90eaf2c, before workstream 4, which builds on it; BF25's hint and BF12's README text merged, 02d8f8b |
 | 6 | [The auto-retract](#6-the-auto-retract) | BF9 | | 1 | Small | D7; sittings A and B | Not started |
 | 7 | [Writes to toolchangers](#7-writes-to-toolchangers) | BF14, BF1, BF8, BF7 | BF26 | 2 | Medium | D10; workstreams 2 and 3 | Not started |
