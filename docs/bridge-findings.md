@@ -201,7 +201,7 @@ written.
 - **Status**: Fixed by workstream 3: `gcode_preamble` is gone (D4), and
   the default preamble passes every check on every model the bridge writes
   to, so the job raises no question under any of the printer's check
-  settings. Workstream 2 will flag a job that still meets one, such as the
+  settings. Workstream 2 flags a job that still meets one, such as the
   INDX lock question (BF1) once writes to INDX are on.
 
 ### BF5. A declined or refused sync job uses up a job ID and never finishes
@@ -212,24 +212,25 @@ written.
   `/api/v1/status` has the job with its new ID, and `/api/v1/job` answers
   `PAUSED`. Declining goes to `IDLE`, not `STOPPED` or `FINISHED`, with
   the ID used up (`wui_api.cpp:291`, `marlin_print_preview.cpp:414-425`,
-  `marlin_server.cpp:1113-1136, 2300-2331`). The bridge waits while the
-  printer reads `ATTENTION` and knows the job by its file name (W6). After
-  a declined job the printer still differs, so the bridge uploads once
-  more. After two jobs (`MAX_SYNC_ATTEMPTS` in `app.py`) it flags the
-  spool "didn't take" (W5).
-- **Effect**: Each attempt holds the printer at a question until someone
-  answers, and the spool is flagged after the second. No charge changes.
+  `marlin_server.cpp:1113-1136, 2300-2331`). Until workstream 2, the
+  bridge waited while the printer read `ATTENTION`, knowing the job by its
+  file name (W6). After a declined job the printer still differed, so the
+  bridge uploaded once more, and after two jobs (`MAX_SYNC_ATTEMPTS` in
+  `app.py`) it flagged the spool "didn't take" (W5).
+- **Effect**: Each attempt held the printer at a question until someone
+  answered, and the spool was flagged only after the second. No charge
+  changed.
 - **Evidence**: Read in the firmware source. The simulator models the
   printer's side (F27; `test_the_preview_counts_the_job_then_asks` and
   `test_abort_at_the_preview_ends_idle_with_the_id_used` in
-  `simulator/tests/test_model.py`). The bridge's side is inferred from
-  `app.py`: no test declines a sync job.
+  `simulator/tests/test_model.py`). The bridge's side was inferred from
+  `app.py`: until workstream 2, no test declined a sync job.
 - **Scenario rows**: W2, W5, W6.
-- **To reproduce**: Raise the question as
-  `test_w1_custom_preamble_is_written` does, with a preamble that has no
-  input-shaper line, then answer it with `cancel` instead of
-  `tap_through`, polling between. With `checks` set to `abort`, `cancel`
-  is the only answer.
+- **To reproduce**: Until workstream 2: raise the question with a
+  preamble that has no input-shaper line, then answer it with `cancel`
+  instead of `tap_through`, polling between. With `checks` set to
+  `abort`, `cancel` is the only answer. The tests under Status do this
+  and now show the fix.
 - **Status**: Fixed by workstream 2. `PrinterStatus.sync_job` tells the
   bridge's job at a question apart from no job. While it waits, the spool
   is flagged (`WriteAsked`). If it's then gone with the printer still

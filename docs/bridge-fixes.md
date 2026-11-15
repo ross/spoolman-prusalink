@@ -151,20 +151,25 @@ medium is a new input or condition through `account()` or
 
 - **Findings**: owns BF5, stage 1. Also gives BF4's, BF7's and BF18's
   outcome a flag, but workstreams 3, 7 and 9 close those findings.
-- **Problem**: When the printer asks about a sync job, the bridge waits in
-  `ATTENTION` with no flag and no limit. A declined job ends `IDLE`, the
-  printer still differs, and the bridge uploads again, holding the printer
-  at a second question.
-- **Approach (proposal)**: The bridge already knows its own job by name
-  (`_user_job_id`), so a read of `ATTENTION` with the sync job is "the sync
-  job waits at a question". Raise a condition on the spools being written
+- **Problem**: When the printer asked about a sync job, the bridge waited
+  in `ATTENTION` with no flag and no limit. A declined job ended `IDLE`,
+  the printer still differed, and the bridge uploaded again, holding the
+  printer at a second question.
+- **Approach**: `PrinterBridge.read()` knows the bridge's own job by
+  name (`_user_job_id`) and marks it in `PrinterStatus.sync_job`, so a
+  read of `ATTENTION` with the sync job is "the sync job waits at a
+  question". The spools being written get the `WriteAsked` condition
   (logged once, flagged), saying the printer is asking about the bridge's
-  job. If that job then ends with the printer still different, flag the
-  spool at once with that cause, and don't upload again until the spool,
-  the printer's filament or the write changes. `WriteDidntTake` in
-  `conditions.py` and `WriteState.attempts` in `printer_sync.py` may carry
-  this with a field each; check before adding new ones. The bridge can't
-  read why the printer asked: the flag says to check the printer.
+  job. `WriteState.asked` records that the latest job was seen at the
+  question. If that job then ends with the printer still different, the
+  spool is flagged at once with that cause (`WriteDidntTake` with
+  `asked`), and nothing more is uploaded until a new spool, an unload, or
+  a change to the spool in Spoolman since the last write; the same edit
+  also restarts a write given up after two jobs. A change on the printer
+  alone doesn't restart it. The bridge can't read why the printer asked,
+  and a job refused under `abort` also waits for Abort, so a declined job
+  and a refused one end the same way: the flag says to check the
+  printer's screen and its check settings.
 - **Needs**: Nothing. Merge it before workstream 7, which makes BF1 and
   BF7 reachable.
 - **Why it still matters after workstream 3**: once `gcode_preamble` is
@@ -174,18 +179,23 @@ medium is a new input or condition through `account()` or
   refuses every job (BF7) and the lock line has to be right (BF1), and
   any check a later firmware adds.
 - **User and saved state**: README, under "Writing to the printer", says
-  what the flag means. `WriteState` is saved in the database: change it in
-  place.
-- **Tests**: no test declines a sync job today. With `gcode_preamble`
-  gone (D4), patch `printer_sync.default_preamble` in the test to leave
-  out the `M862.6 P"Input shaper"` line: the simulator's preview then asks
-  under the default `checks` and refuses under `abort` (F27, as the
-  input-shaper case of `test_each_check` in
-  `simulator/tests/test_preview.py` shows). Answer with `cancel` and
-  poll. W5 and W6 change, and
-  W5 gains a `test_w5_...` integration test for a declined job. BF18's
-  pin, `test_a_sync_job_on_a_loaded_mmu_waits_on_the_unload_question`,
-  gains the flag, unless workstream 9 turns MMU writes off first.
+  what each flag means and what clears it. `WriteState.asked` is saved in
+  a new `writes.asked` column, changed in place. A deployed bridge needs
+  `ALTER TABLE writes ADD COLUMN asked INTEGER NOT NULL DEFAULT 0`, or a
+  new database.
+- **Tests**: `tests/test_sync_question.py` patches
+  `printer_sync.default_preamble` to leave out the
+  `M862.6 P"Input shaper"` line, since `gcode_preamble` is gone (D4): the
+  simulator's preview then asks under the default `checks` and refuses
+  under `abort` (F27, as the input-shaper case of `test_each_check` in
+  `simulator/tests/test_preview.py` shows). It covers the flag while the
+  job waits, a decline under `warn` and under `abort`, Print at the
+  question, and the retries after an edit or an unload. The integration
+  test `test_w5_declined_sync_job_is_flagged` declines a job end to end.
+  BF18's pin, `test_a_sync_job_on_a_loaded_mmu_waits_on_the_unload_question`
+  in `tests/test_mmu.py`, and
+  `test_a_sync_job_in_the_window_on_a_connecting_mmu_waits_on_the_question`
+  now assert the flag. W5 and W6 changed.
 - **Done when**: a declined or refused sync job flags its spool with the
   cause after one job, and a job waiting at a question is flagged while it
   waits.
