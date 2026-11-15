@@ -562,14 +562,20 @@ written.
   the production bridge: sitting D in printer-behaviors.md, under "Capture
   plan".
 - **Status**: Fixed (D6 in bridge-fixes.md). Usage counted on a tool with
-  no material while a user's print runs, in `PRINTING`, `PAUSED` or `BUSY`
-  with a job that isn't the sync job, is reported lost (`lost_empty`) and
+  no material while a user's print runs, in `PRINTING` or `PAUSED` with a
+  job that isn't the sync job, is reported lost (`lost_empty`) and
   charged to no spool, and so is the print's last stretch, first seen at
   the poll after it ends. The tests above now charge the next load its own
   count only, and `test_c7_print_through_an_empty_tool_is_reported_lost`
   in `integration/test_counters.py` shows it end to end. A load's feed,
   and a filament change's reload in `ATTENTION`, are still held for the
-  spool loaded (C7). The F29 trace still confirms the single-tool path.
+  spool loaded (C7), and so is usage in `BUSY`, which the printer never
+  reports with a job. A power-panic resume's feed back on an empty tool
+  counts in `BUSY`, so it's held, and the next `PRINTING` poll that sees
+  the tool count reports it lost with the print's usage. A remaining
+  limit: if a second cut lands during the resume, the reboot keeps that
+  held feed back, about 8 mm, and charges it to the active spool. The F29
+  trace still confirms the single-tool path.
 
 ### BF25. Printing past an empty tool leaves the filament sensors off
 

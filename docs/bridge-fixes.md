@@ -282,10 +282,16 @@ medium is a new input or condition through `account()` or
   tools-mapping screen.
 - **Approach**: Built for BF24. `account()` takes `printing`, which
   `PrinterBridge.process` sets for a job the bridge didn't start in
-  `PRINTING`, `PAUSED` or `BUSY` (`PRINTING_STATES` in `prusalink.py`).
-  In `usage()`, usage counted with no material while printing is reported
-  lost, as a `LostEmpty` event, and `charged` moves past it; otherwise it
-  stays held, as before. `ATTENTION` holds: a filament change's reload
+  `PRINTING` or `PAUSED` (`PRINTING_STATES` in `prusalink.py`). `BUSY` is
+  left out: the firmware's status writes no job while it's busy
+  (`status_renderer.cpp:36`, `printer_state.cpp:611-623`), so a resume's
+  feed back there is held until the print counts on, and a second cut
+  during the resume charges it, about 8 mm, to the active spool. In
+  `usage()`, usage the tool counted since the last poll with no material
+  while printing is reported lost, as a `LostEmpty` event, and `charged`
+  moves past it; otherwise it stays held, as before. Only the tool's own
+  count matters, since `printing` is the printer's: an idle empty tool on
+  a toolchanger keeps its held usage through a print on another tool. `ATTENTION` holds: a filament change's reload
   counts its feed before the type comes back (F3, F36), so the rule keeps
   that feed. Usage counted between a print's last poll and its end is
   first seen at a poll with no job, so a saved flag,

@@ -64,9 +64,10 @@ async def test_an_unload_in_the_window_then_the_resumed_print_is_lost(tmp_path, 
     assert printer.job.id == job and station.material() == (None, None, None)
     assert station.counter > 0
 
-    # BF11, a known fault: the resume's 8 mm feed back counts on the empty tool. That
-    # filament came from no spool, so the bridge reports it lost with the print's usage
-    # there (C7, BF24) and charges nothing.
+    # BF11, a known fault: the resume's 8 mm feed back counts on the empty tool, in
+    # `BUSY`, which holds. That filament came from no spool, so once the print counts on,
+    # the bridge reports it lost with the print's usage there (C7, BF24) and charges
+    # nothing.
     after = events(ledger(tmp_path)[mark:])
     assert after[:3] == ["reboot", "unload", "swap_unconfirmed"]
     assert set(after[3:]) == {"lost_empty"}
@@ -111,9 +112,9 @@ async def test_a_cut_while_a_runout_waits_loses_the_resumed_print(tmp_path, capl
     assert printer.job.id == job and station.material() == (None, None, None)
     assert station.counter > 0
 
-    # The empty tool's usage, the resume's 8 mm feed back included (BF11), came from no
-    # spool, so the bridge reports it lost (C7, BF24). The swap the runout opened stays
-    # open.
+    # The empty tool's usage came from no spool, so the bridge reports it lost (C7, BF24),
+    # with the resume's 8 mm feed back (BF11), held in `BUSY` until the print counted on.
+    # The swap the runout opened stays open.
     after = events(ledger(tmp_path)[mark:])
     assert after[0] == "reboot" and set(after[1:]) == {"lost_empty"}
     assert charged(fake, 19) == before
