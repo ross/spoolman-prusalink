@@ -101,9 +101,16 @@ def test_the_window_reads_idle_with_no_job_then_the_job_comes_back(model):
     sim.tick(WINDOW - 0.01)
     assert in_window(p)
     sim.tick(0.01)
+    # `BUSY` has no job: `has_job()` is false there (`printer_state.cpp:400, 611-623`).
     assert p.state is State.BUSY and p.job.phase is JobPhase.RECOVER
-    assert prusalink.job(p)["id"] == job and p.job_counter == job
+    assert prusalink.job(p) is None and "job" not in prusalink.status(p)
+    assert p.job_counter == job
     assert job_log(sim)[-1] == f"job {job} resumes after the power panic"
+    sim.tick(p.settings.recover_seconds)
+    assert p.state is State.PAUSED and prusalink.job(p)["id"] == job
+    assert prusalink.status(p)["job"]["id"] == job
+    sim.tick(p.settings.unpark_seconds)
+    assert p.state is State.PRINTING and prusalink.job(p)["id"] == job
 
 
 @pytest.mark.parametrize(

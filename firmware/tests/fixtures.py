@@ -2767,8 +2767,21 @@ PLANNER_CPP = """\
 #endif
 """  # noqa: E501 (verbatim firmware lines)
 
-# Part of the status renderer's printer object.
+# Part of the status renderer: the job object, and the printer object.
 STATUS_RENDERER_CPP = """\
+    if (printer_state::has_job()) {
+        JSON_FIELD_OBJ("job");
+            JSON_FIELD_INT("id", marlin_vars().job_id) JSON_COMMA;
+            JSON_FIELD_FFIXED("progress", ((float)marlin_vars().sd_percent_done), 2) JSON_COMMA;
+            if (time_to_end != TIME_TO_END_INVALID) {
+                JSON_FIELD_INT("time_remaining", time_to_end) JSON_COMMA;
+            }
+            if (time_to_pause != TIME_TO_END_INVALID) {
+                JSON_FIELD_INT("filament_change_in", time_to_pause) JSON_COMMA;
+            }
+            JSON_FIELD_INT("time_printing", marlin_vars().print_duration);
+        JSON_OBJ_END JSON_COMMA;
+    }
             // XYZE, mm
             JSON_FIELD_FFIXED("axis_z", marlin_vars().logical_curr_pos[2], 1) JSON_COMMA;
             if (!marlin_client::is_printing()) {
@@ -4971,6 +4984,149 @@ void FSensorMMU::cycle() {
 }
 """  # noqa: E501 (verbatim firmware lines)
 
+# `PrusaLinkApiV1::accept`, the `/api/v1/` handler.
+PRUSA_LINK_API_V1_CPP = """\
+Selector::Accepted PrusaLinkApiV1::accept(const RequestParser &parser, handler::Step &out) const {
+    // This is a little bit of a hack (similar one is in Connect). We want to
+    // watch as often as possible if the USB is plugged in or not, to
+    // invalidate dir listing caches in the browser. As we don't really have a
+    // better place, we place it here.
+    ChangedPath::instance.media_inserted(wui_media_inserted());
+
+    const string_view uri = parser.uri();
+
+    // Claim the whole /api/v1 prefix.
+    const auto suffix_opt = remove_prefix(uri, "/api/v1/");
+    if (!suffix_opt.has_value()) {
+        return Accepted::NextSelector;
+    }
+
+    const auto suffix = *suffix_opt;
+
+    if (!parser.check_auth(out)) {
+        return Accepted::Accepted;
+    }
+
+    if (suffix == "storage") {
+        get_only(SendJson(EmptyRenderer(get_storage), parser.can_keep_alive()), parser, out);
+        return Accepted::Accepted;
+    } else if (suffix == "info") {
+        get_only(SendJson(EmptyRenderer(get_info), parser.can_keep_alive()), parser, out);
+        return Accepted::Accepted;
+    } else if (auto job_suffix_opt = remove_prefix(suffix, "job/"); job_suffix_opt.has_value()) {
+        auto job_suffix = *job_suffix_opt;
+        auto id = get_job_id(job_suffix);
+        if (!id.has_value()) {
+            out.next = StatusPage(Status::BadRequest, parser);
+            return Accepted::Accepted;
+        }
+        if (id.value() != marlin_vars().job_id) {
+            out.next = StatusPage(Status::NotFound, parser);
+            return Accepted::Accepted;
+        }
+        switch (parser.method) {
+        case Method::Put: {
+            auto slash = job_suffix.find('/');
+            if (slash == string_view::npos) {
+                out.next = StatusPage(Status::BadRequest, parser);
+            } else {
+                auto command_view = string_view(job_suffix.begin() + job_suffix.find('/') + 1, job_suffix.end());
+                handle_command(command_view, parser, out);
+            }
+            return Accepted::Accepted;
+        }
+        case Method::Delete:
+            stop_print(parser, out);
+            return Accepted::Accepted;
+        default:
+            out.next = StatusPage(Status::MethodNotAllowed, parser);
+            return Accepted::Accepted;
+        }
+    } else if (suffix == "job") {
+        if (printer_state::has_job()) {
+            get_only(SendJson(EmptyRenderer(get_job_v1), parser.can_keep_alive()), parser, out);
+            return Accepted::Accepted;
+        } else {
+            out.next = StatusPage(Status::NoContent, parser);
+            return Accepted::Accepted;
+        }
+    } else if (suffix == "status") {
+        auto status = Monitor::instance.status();
+        optional<TransferId> id;
+        if (status.has_value()) {
+            id = status->id;
+        } else {
+            id = nullopt;
+        }
+        get_only(SendJson(StatusRenderer(id), parser.can_keep_alive()), parser, out);
+        return Accepted::Accepted;
+    } else if (suffix == "transfer") {
+        if (auto status = Monitor::instance.status(); status.has_value()) {
+            get_only(SendJson(TransferRenderer(status->id, http::APIVersion::v1), parser.can_keep_alive()), parser, out);
+            return Accepted::Accepted;
+        } else {
+            out.next = StatusPage(Status::NoContent, parser);
+            return Accepted::Accepted;
+        }
+    } else if (remove_prefix(suffix, "files").has_value()) {
+        static const auto prefix = "/api/v1/files";
+        static const size_t prefix_len = strlen(prefix);
+        // We need both one SFN + one LFN in case of upload of a file.
+        char filename[filename_defs::path_buffer_size + filename_defs::filename_buffer_size + prefix_len];
+        if (!parse_file_url(parser, prefix_len, filename, sizeof(filename), RemapPolicy::NoRemap, out)) {
+            return Accepted::Accepted;
+        }
+        uint32_t etag = ChangedPath::instance.change_chain_hash(filename);
+        if (etag == parser.if_none_match && etag != 0 /* 0 is special */ && (parser.method == Method::Get || parser.method == Method::Head)) {
+            out.next = StatusPage(Status::NotModified, parser.status_page_handling(), parser.accepts_json, etag);
+            return Accepted::Accepted;
+        }
+        switch (parser.method) {
+        case Method::Put: {
+            if (parser.create_folder) {
+                out.next = create_folder(filename, parser);
+                return Accepted::Accepted;
+            } else {
+                GcodeUpload::PutParams putParams;
+                putParams.overwrite = parser.overwrite_file;
+                putParams.print_after_upload = parser.print_after_upload;
+                if (strlen(filename) + 1 > sizeof(putParams.filepath)) {
+                    out.next = StatusPage(Status::UriTooLong, parser);
+                    return Accepted::Accepted;
+                }
+                strlcpy(putParams.filepath.data(), filename, sizeof(putParams.filepath));
+                auto upload = GcodeUpload::start(parser, wui_uploaded_gcode, parser.accepts_json, std::move(putParams));
+                std::visit([&](auto upload) { out.next = std::move(upload); }, std::move(upload));
+                return Accepted::Accepted;
+            }
+        }
+        case Method::Get: {
+            out.next = FileInfo(filename, parser.can_keep_alive(), parser.accepts_json, false, FileInfo::ReqMethod::Get, FileInfo::APIVersion::v1, etag);
+            return Accepted::Accepted;
+        }
+        case Method::Head: {
+            out.next = FileInfo(filename, parser.can_keep_alive(), parser.accepts_json, false, FileInfo::ReqMethod::Head, FileInfo::APIVersion::v1, etag);
+            return Accepted::Accepted;
+        }
+        case Method::Delete: {
+            out.next = delete_file(filename, parser);
+            return Accepted::Accepted;
+        }
+        case Method::Post: {
+            out.next = print_file(std::span(filename), parser);
+            return Accepted::Accepted;
+        }
+        default:
+            out.next = StatusPage(Status::MethodNotAllowed, StatusPage::CloseHandling::ErrorClose, parser.accepts_json);
+            return Accepted::Accepted;
+        }
+    } else {
+        out.next = StatusPage(Status::NotFound, parser);
+        return Accepted::Accepted;
+    }
+}
+"""  # noqa: E501 (verbatim firmware lines)
+
 PRINTER_STATE_CPP = """\
 optional<ErrCode> load_unload_attention_while_printing([[maybe_unused]] const fsm::BaseData &data) {
 #if HAS_MMU2()
@@ -5013,7 +5169,21 @@ optional<ErrCode> load_unload_attention_while_printing([[maybe_unused]] const fs
         return ErrCode::CONNECT_FILAMENT_RUNOUT;
     }
 }
-"""
+
+bool has_job() {
+    switch (get_state(false)) {
+    case DeviceState::Printing:
+    case DeviceState::Paused:
+        return true;
+    case DeviceState::Attention: {
+        // Attention while printing or one of these questions before print(eg. wrong filament)
+        return marlin_vars().peek_fsm_states([](const auto &states) { return states[ClientFSM::Printing] || states[ClientFSM::PrintPreview]; });
+    }
+    default:
+        return false;
+    }
+}
+"""  # noqa: E501 (verbatim firmware lines)
 
 # `queue.cpp`, excerpt.
 GCODE_QUEUE_CPP = """\
@@ -6254,6 +6424,7 @@ FILES = {
     "lib/Marlin/Marlin/src/module/planner.cpp": PLANNER_CPP,
     "lib/WUI/nhttp/status_renderer.cpp": STATUS_RENDERER_CPP,
     "lib/WUI/link_content/basic_gets.cpp": BASIC_GETS_CPP,
+    "lib/WUI/link_content/prusa_link_api_v1.cpp": PRUSA_LINK_API_V1_CPP,
     read.MMU_CONFIG_FILE: MMU2_CONFIG_H,
     read.MMU_FILE: MMU2_MK4_CPP,
     read.MMU_HEADER_FILE: MMU2_MK4_H,
