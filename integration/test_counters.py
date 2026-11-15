@@ -373,8 +373,10 @@ async def test_c7_tool_reports_no_filament(world: World):
 async def test_c7_print_through_an_empty_tool_is_reported_lost(
     world: World, caplog: pytest.LogCaptureFixture
 ):
-    """Print through an empty tool: its usage reported lost, a warning about the filament
-    sensors logged once, and the next load charged alone."""
+    """Print through an empty tool: its usage reported lost and a warning logged once.
+
+    The warning says the filament sensors may be off, and the next load is charged alone.
+    """
     caplog.set_level(logging.INFO, logger="spoolman_prusalink")
     w = world
     a = w.spools["A"]

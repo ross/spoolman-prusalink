@@ -440,7 +440,7 @@ medium is a new input or condition through `account()` or
 - **Needs**: BF13's decision.
 - **User and saved state**: README only.
 - **Tests**: BF12's pin in `tests/test_toolchanger_prints.py` stays, and
-  T8's status changed from Gap with the README text. BF13's pin and T9 follow
+  T8 stays Gap, with the README text named in its status. BF13's pin and T9 follow
   its decision: if BF13 is Accepted, the pin's comment changes from "a
   known fault" to the accepted behavior and T9 leaves Gap; if it's fixed,
   the pin flips with the fix.
