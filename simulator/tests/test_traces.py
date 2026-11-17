@@ -18,6 +18,7 @@ import pytest
 
 from simulator import prusalink, trace
 from simulator.model import (
+    JobPhase,
     Material,
     Power,
     PrintSpec,
@@ -65,11 +66,15 @@ SETTINGS = dict(
     color_seconds=2.0,
     load_rate_mm_s=5.0,
     blip_seconds=0.3,
-    park_seconds=1.0,
+    park_seconds=4.0,
     sync_job_seconds=2.0,
     home_seconds=3.0,
     preheat_seconds=2.0,
     print_rate_mm_s=20.0,
+    change_park_seconds=3.0,
+    change_unload_seconds=3.0,
+    change_return_seconds=8.0,
+    end_park_seconds=5.0,
 )
 
 
@@ -199,49 +204,62 @@ def f5_print(rec: Recorder) -> None:
     rec.advance(2.0)
 
 
+def _mid_print(rec: Recorder) -> None:
+    """Start the recording partway through a print, as a trace that begins `PRINTING` does,
+    so the replay leaves the print's start out. The print feeds about 1 mm/s, slowly
+    enough that polls see the counter both still and moving, as the printer's did."""
+    _print(rec, 2000.0, duration_s=2000.0)
+    rec.until(lambda: rec.printer.job.phase is JobPhase.PRINTING, limit=120.0)
+    _printing(rec, 3.0)
+    rec.reset()
+    _printing(rec, 40.0)
+    rec.advance(0.5)  # between two of the counter's steps
+
+
 def f6_pause_resume(rec: Recorder) -> None:
-    rec.advance(LEAD)
-    _print(rec)
-    _printing(rec)
+    """A pause and a resume from the screen, from `PRINTING` to `PRINTING`."""
+    _mid_print(rec)
     rec.printer.pause()
-    rec.advance(3.0)
+    rec.advance(15.0)
     rec.printer.resume()
-    rec.ended()
-    rec.advance(2.0)
+    _printing(rec, 15.0)
 
 
 def f7_cancel(rec: Recorder) -> None:
-    rec.advance(LEAD)
-    _print(rec)
-    _printing(rec)
+    """Stop from the screen, then the stopped screen dismissed."""
+    _mid_print(rec)
     rec.printer.cancel()
     rec.ended()
+    rec.advance(2.0)
+    rec.printer.dismiss()
     rec.advance(2.0)
 
 
 def _change_filament(rec: Recorder) -> None:
-    """A filament change during a print: the tool runs out or the user asks for one."""
-    rec.until(lambda: rec.printer.state is State.ATTENTION)
-    rec.advance(3.0)
+    """A filament change during a print, from its dialog to `PRINTING`: the unload leaves
+    the filament in the sensor, the user pulls it out and answers that it came out, and
+    reloads the same spool; the print goes on by itself after the color question."""
+    rec.until(lambda: rec.printer.tools[0].path.at_sensor)  # unloaded, still in the sensor
+    rec.advance(2.0)
+    rec.printer.pull(0)
+    rec.advance(5.0)
     rec.printer.load(0)  # The reload keeps the type the printer had.
-    rec.until(lambda: rec.printer.state is State.PAUSED)
-    rec.advance(2.0)
-    rec.printer.resume()
-    rec.ended()
-    rec.advance(2.0)
+    rec.until(lambda: rec.printer.state is State.PRINTING)
+    _printing(rec, 15.0)
 
 
 def f8_change_filament(rec: Recorder) -> None:
-    rec.advance(LEAD)
-    _print(rec)
-    _printing(rec)
-    rec.printer.runout(0)
+    """Tune > Change filament, `M600 P`, on the print's tool."""
+    _mid_print(rec)
+    rec.printer.change_filament(0)
     _change_filament(rec)
 
 
 def f9_m600(rec: Recorder) -> None:
+    """A color change in the file. The trace begins idle, so the replay runs the start."""
     rec.advance(LEAD)
-    _print(rec, color_changes_mm=[60.0])
+    _print(rec, 2000.0, duration_s=2000.0, color_changes_mm=[60.0])
+    rec.until(lambda: rec.printer.state is State.ATTENTION, limit=120.0)
     _change_filament(rec)
 
 

@@ -26,6 +26,7 @@ from __future__ import annotations
 import pytest
 
 from simulator.model import JobPhase, Material, PrintSpec, Reason, Segment, SimTool, State
+from simulator.tests.test_model import reload_ends
 from simulator.tests.util import make, sliced
 
 INDX_RATIO = 550 / 576
@@ -205,10 +206,10 @@ def test_the_unload_moves_over_its_duration_and_records_at_the_end():
 # The filament change during a print.
 
 
-def printing(model: str):
+def printing(model: str, **settings):
     """An idle-loaded tool 0 printing 10 mm, past the first move's deretract. INDX's start
     G-code leaves no distance stored."""
-    sim, p = idle_loaded(model)
+    sim, p = idle_loaded(model, **settings)
     p.start_print(PrintSpec([Segment(0, 100)], preheat_s=0))
     sim.tick(0.8 + 2)
     assert tracker(p) == (0, True, None if model == "8.10.0" else 0)
@@ -240,7 +241,7 @@ def test_a_runout_in_the_preheat_unloads_an_auto_retracted_nextruder_cold():
     sim, p = idle_loaded("8.1.0")
     p.start_print(PrintSpec([Segment(0, 100)], preheat_s=5))
     sim.tick(0.8 + 1)
-    assert p.job.phase is JobPhase.PREHEAT
+    assert p.job.phase is not JobPhase.RETURN and p.job.restore is None
     # 55 stored is past the park's 8, so the park doesn't move; 55 is fully retracted, so
     # the unload is cold: nothing counts, and the tracker's invalid gap records as 0.
     assert counted(p, lambda: p.runout(0)) == 0
@@ -249,7 +250,13 @@ def test_a_runout_in_the_preheat_unloads_an_auto_retracted_nextruder_cold():
 
 @pytest.mark.parametrize("lost", ["retract", "boot"])
 def test_a_change_with_the_tracker_lost_resumes_at_gap_0(lost):
-    sim, p = make("1.4.1", [SimTool.loaded_with(0, Material("PLA", adhoc=False))])
+    # The change's end restores the gap after the head returns; hold the return open to see
+    # the reload's gap before it.
+    sim, p = make(
+        "1.4.1",
+        [SimTool.loaded_with(0, Material("PLA", adhoc=False))],
+        change_return_seconds=10,
+    )
     if lost == "retract":
         p.retract(0, 50)  # gap 40: the limit, so the tracker no longer trusts it
     else:
@@ -258,15 +265,17 @@ def test_a_change_with_the_tracker_lost_resumes_at_gap_0(lost):
         p.retract(0, 10)  # gap 10, still not valid
     p.start_print(PrintSpec([Segment(0, 100)], preheat_s=5))
     sim.tick(0.8 + 1)
-    assert p.job.phase is JobPhase.PREHEAT
+    assert p.job.phase is not JobPhase.RETURN and p.job.restore is None
     p.runout(0)
     assert p.job.restore == (0, 0)  # `get_retracted_distance(...).value_or(0)`
     p.load(0)
-    sim.advance(100)
+    reload_ends(sim, p)
+    assert p.job.phase is JobPhase.RETURN
     # MK4S reload from gap 40: 30 slow (gap 10), 50 fast (gap 0), the 27 mm purge, the
     # 8 mm retract (gap 8), the 4 mm prime (gap 4) and the 8 mm retract: gap 12.
     assert p.tools[0].path.gap == pytest.approx(12)
-    p.resume()  # back to gap 0: 12 fed, nothing counts
+    sim.advance(10)  # the change's end: back to gap 0, 12 fed, nothing counts
+    assert p.job.phase is not JobPhase.RETURN and p.job.restore is None
     assert tracker(p) == (0, True, None)
 
 
@@ -279,24 +288,26 @@ def test_an_indx_change_in_the_preheat_resumes_at_its_8_mm():
     assert counted(p, lambda: p.runout(0)) == pytest.approx(2 + 17)
     assert p.job.restore == (0, 8)
     p.load(0)
-    sim.advance(100)
-    assert tracker(p) == (8, True, None)
-    p.resume()  # already at the 8 mm the change began with: nothing moves
+    reload_ends(sim, p)
+    # The change's end: already at the 8 mm it began with, nothing moves.
+    assert p.job.phase is JobPhase.PREHEAT and p.job.restore is None
     assert tracker(p) == (8, True, None)
 
 
 def test_an_indx_reload_auto_retracts_after_its_purge_and_the_prime_deretracts():
-    sim, p = printing("8.10.0")
+    sim, p = printing("8.10.0", change_return_seconds=10)
     p.runout(0)  # gap 27, invalid
     before = p.tools[0].extruded
     p.load(0)
-    sim.advance(100)
+    reload_ends(sim, p)
+    assert p.job.phase is JobPhase.RETURN
     # 15 slow from gap 27: gap 12; 25 fast: 13 count (gap 0); the 25 mm purge; the
     # cleaner's auto-retract counts 8 (gap 8, 8 stored); the prime deretracts 8 (gap 0)
     # and counts 4; the retract opens 8.
     assert (p.tools[0].extruded - before) / INDX_RATIO == pytest.approx(13 + 25 + 8 + 4)
     assert tracker(p) == (8, True, None)
-    p.resume()  # back to the runout's gap 0: 8 fed, nothing counts
+    sim.advance(10)  # the change's end: back to the runout's gap 0, 8 fed, nothing counts
+    assert p.job.phase is JobPhase.PRINTING
     assert tracker(p) == (0, True, None)
 
 

@@ -11,7 +11,7 @@ counts and the gap stays where it was.
 - The reload, once the filament is in the MMU: the feed, 189.9 + 7 + 50 with no slot
   selected, counts nothing and leaves the gap at 40; the slot is selected; the load to the
   nozzle's 17 fills 17 (gap 23) and its 30 fills the 23 and counts 7; the prime +4 counts 4;
-  the retract -8 (gap 8). So 11. The resume feeds the 8 back to the change's gap 0,
+  the retract -8 (gap 8). So 11. The change's end feeds the 8 back to the change's gap 0,
   counting nothing.
 - A join from a at gap 0 to b: the ramming's +20 counts 20 on a, and the gap ends at 40;
   the change to b from no slot counts nothing; the load to the nozzle counts 7 on b.
@@ -23,6 +23,7 @@ import pytest
 
 from simulator.model import Busy, Invalid, JobPhase, Join, Reason, Simulation, State
 from simulator.tests.test_mmu_prints import FEED, PARK_OUT, START, booted, counts, spec, start
+from simulator.tests.test_model import reload_ends
 from simulator.tests.test_model_edges import messages
 from simulator.tests.util import PLA
 
@@ -79,16 +80,18 @@ def test_a_runout_reloads_the_same_slot_through_the_mmu():
     # The feed counts nothing, and the slot isn't selected until it ends.
     assert counts(p)[0] == pytest.approx(START + fed + RAM_AFTER_PARK)
     assert p.selected_tool is None and p.mmu.path.gap == 40
-    sim.advance(36)
-    assert p.state is State.PAUSED
-    assert counts(p)[0] == pytest.approx(START + fed + RAM_AFTER_PARK + RELOAD)
+    reload_ends(sim, p, 0)
+    # The change ends by itself, with the print's tool picked and the gap back at the
+    # change's 0; there is no pause to resume. The tick that ends it prints a little.
+    assert p.state is State.PRINTING and p.job.phase is JobPhase.PRINTING
+    ran = p.job.fed_mm - fed
+    assert counts(p)[0] == pytest.approx(START + fed + RAM_AFTER_PARK + RELOAD + ran)
     assert p.selected_tool == 0 and p.mmu.fed == 0 and p.mmu.path.loaded
-    assert p.mmu.path.gap == 8
+    assert p.mmu.path.gap == 0 and p.job.restore is None
     unchanged(p)
+    with pytest.raises(Busy, match="nothing to resume"):
+        p.resume()
 
-    p.resume()
-    assert p.state is State.PRINTING and p.mmu.path.gap == 0
-    assert counts(p)[0] == pytest.approx(START + fed + RAM_AFTER_PARK + RELOAD)
     sim.advance(100)
     assert p.state is State.FINISHED
     # Slot 0 prints the rest of its 40, then the change to slot 1; slot 1 as in any print.
@@ -170,8 +173,8 @@ def test_a_join_that_maps_no_gcode_tool_changes_the_filament():
     p.runout(1)
     assert p.job.waits_for(Reason.RUNOUT) and p.job.wait_tool == 1 and p.job.mapped == {}
     p.load(1)
-    sim.advance(60)
-    p.resume()
+    reload_ends(sim, p, 1)
+    # The change ends by itself, back in the preheat.
     assert p.job.phase is JobPhase.PREHEAT and p.selected_tool == 1
     sim.advance(100)
     assert p.state is State.FINISHED and counts(p)[2] == 0
@@ -210,8 +213,8 @@ def test_change_filament_on_the_selected_slot_runs_the_mmus_m600():
     p.change_filament(0)
     assert str(p.job.attention) == "color change tool 0"
     p.load(0)
-    sim.advance(60)
-    p.resume()
+    reload_ends(sim, p, 0)
+    assert p.state is State.PRINTING and p.job.phase is JobPhase.PRINTING
     sim.advance(100)
     assert p.state is State.FINISHED
     assert counts(p)[0] == pytest.approx(START + 40 + RAM_AFTER_PARK + RELOAD + 19.3)
@@ -236,9 +239,8 @@ def test_a_color_change_in_the_file_runs_the_mmus_m600():
     assert str(p.job.attention) == "color change tool 0"
     assert counts(p)[0] == pytest.approx(START + 10 + RAM_AFTER_PARK)
     p.load(0)
-    sim.advance(60)
-    p.resume()
-    assert p.job.pending_color_changes == []
+    reload_ends(sim, p, 0)
+    assert p.state is State.PRINTING and p.job.pending_color_changes == []
     sim.advance(100)
     assert p.state is State.FINISHED
     assert counts(p)[0] == pytest.approx(START + 40 + RAM_AFTER_PARK + RELOAD + 19.3)
@@ -313,8 +315,8 @@ def test_a_snapshot_while_waiting_for_the_reload_goes_on_as_the_print_does():
     assert q.job.waits_for(Reason.RUNOUT) and q.job.restore == (0, 0)
     assert q.selected_tool is None and q.mmu.path.gap == 40
     q.load(0)
-    other.advance(60)
-    q.resume()
+    reload_ends(other, q, 0)
+    assert q.state is State.PRINTING and q.job.phase is JobPhase.PRINTING
     other.advance(100)
     assert q.state is State.FINISHED
     assert counts(q) == pytest.approx(

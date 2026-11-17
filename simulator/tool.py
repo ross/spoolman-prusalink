@@ -339,11 +339,13 @@ class LoadProcess:
 
 @dataclass
 class UnloadProcess:
-    """A menu unload: its steps, spread evenly over its duration. It ends when the time is
-    up, with every step run."""
+    """An unload: its steps, spread evenly over its duration, after `wait` seconds with
+    nothing moving. It ends when the time is up, with every step run. A menu unload has no
+    wait; a filament change's waits while the head finishes its moves and parks."""
 
     steps: list[LoadStep]
     remaining: float  # seconds
+    wait: float = 0.0  # seconds before the moves begin
     kind: str = "unload"
 
     @property

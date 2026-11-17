@@ -43,6 +43,16 @@ def shown(printer, index=0):
     raise AssertionError(f"tool {index} not in the filament endpoint")
 
 
+def reload_ends(sim: Simulation, p, tool: int = 0) -> None:
+    """Tick on, 0.1 s at a time, until the reload on `tool` ends. A filament change ends with
+    its reload, and the print goes on from the tick that ends it."""
+    for _ in range(10_000):
+        if p.tools[tool].process is None:
+            return
+        sim.tick(0.1)
+    raise AssertionError("the reload didn't end")
+
+
 def one_segment(mm=100.0, **kw):
     return PrintSpec([Segment(0, mm)], **kw)
 
@@ -360,9 +370,11 @@ def test_runout_keeps_previous_and_reload_restores_it():
     sim.tick(4 + 3.6 + 0.1)
     assert shown(p)["instance_uuid"] == PLA.instance_uuid
     assert p.state is State.ATTENTION
-    sim.tick(10)
-    assert p.state is State.PAUSED and tool0(p).path.loaded
-    p.resume()
+    reload_ends(sim, p)
+    # The change ends by itself: the print goes on and there is nothing to resume.
+    assert p.state is State.PRINTING and tool0(p).path.loaded
+    with pytest.raises(Busy, match="nothing to resume"):
+        p.resume()
     sim.tick(100)
     assert p.state is State.FINISHED
 
@@ -373,13 +385,15 @@ def test_jam_adds_an_extra_purge_on_reload():
     sim.tick(0.8 + 1)
     p.jam(0)
     assert str(p.job.attention) == "jam tool 0"
-    before = tool0(p).extruded
+    before, fed = tool0(p).extruded, p.job.fed_mm
     p.load(0)
-    sim.tick(100)
+    reload_ends(sim, p)
     # Past the 40 mm gap: the 20 mm fast load, the 40 mm purge and the 60 mm jam purge,
-    # times 0.95. The retract, prime and retract that follow only move within the gap.
-    assert tool0(p).extruded == pytest.approx(before + (20 + 40 + 60) * 0.95)
-    assert p.state is State.PAUSED
+    # times 0.95. The retract, prime and retract that follow only move within the gap. The
+    # change ends with its reload, and the tick that ends it prints a little.
+    assert p.state is State.PRINTING
+    ran = p.job.fed_mm - fed
+    assert tool0(p).extruded == pytest.approx(before + (20 + 40 + 60 + ran) * 0.95)
 
 
 def test_jam_cleared_without_unloading_counts_nothing():
@@ -405,8 +419,8 @@ def test_color_change_in_one_large_tick():
     # 40 mm printed, then the runout ramming's 7 mm feed: 47 * 0.95 = 44.65.
     assert tool0(p).unload_count == 1 and tool0(p).extruded_at_unload == 44
     p.load(0)
-    sim.tick(100)
-    p.resume()
+    reload_ends(sim, p)
+    assert p.state is State.PRINTING and 40 not in p.job.pending_color_changes
     sim.tick(1000)
     assert p.state is State.FINISHED
 
@@ -930,8 +944,8 @@ def test_snapshot_round_trip_mid_print_and_mid_load():
     assert copy.job == p.job and copy.tools == p.tools and copy.high_flow
     assert copy.tools[0].process.steps == p.tools[0].process.steps  # the load in progress
     for s in (sim, other):
-        s.tick(100)
-        s.printers["p"].resume()
+        reload_ends(s, s.printers["p"])
+        assert s.printers["p"].state is State.PRINTING
         s.tick(1000)
     assert copy.to_json() == p.to_json()
     assert copy.state is State.ATTENTION  # the color change at 80 mm

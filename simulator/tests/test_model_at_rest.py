@@ -23,6 +23,7 @@ from __future__ import annotations
 import pytest
 
 from simulator.model import MODELS, Invalid, JobPhase, PrintSpec, Segment, SimTool, State
+from simulator.tests.test_model import reload_ends
 from simulator.tests.util import loaded, make, sliced
 
 XL, INDX = "3.1.0", "8.10.0"
@@ -183,19 +184,24 @@ def test_a_cancel_from_an_indx_pause_finds_no_tool_and_moves_nothing():
     assert p.state is State.STOPPED
 
 
-def test_the_resume_after_an_indx_runout_restores_the_gap_with_no_purge():
-    sim, p = make(INDX, [loaded(0)])
+def test_the_end_of_an_indx_runout_restores_the_gap_with_no_purge():
+    # The reload's end restores the gap after the head returns; hold the return open to see
+    # the state before it.
+    sim, p = make(INDX, [loaded(0)], change_return_seconds=10)
     p.start_print(print_spec((0, 100)))
     sim.advance(2)
     p.runout(0)
     assert p.selected_tool == 0 and p.job.restore == (0, 0)
     p.load(0)  # keep
-    sim.advance(60)
-    before = counts(p)
-    p.resume()
+    reload_ends(sim, p)
+    assert p.job.phase is JobPhase.RETURN and p.job.restore == (0, 0)
+    before, fed = counts(p), p.job.fed_mm
+    sim.advance(10)
+    assert p.state is State.PRINTING and p.job.phase is JobPhase.PRINTING
     assert p.job.restore is None and p.selected_tool == 0
     assert "T0 purged 25 mm at the resume" not in [e.text for e in sim.events]
-    assert counts(p) == before
+    # No purge: only the print's own feed since the return ended counts.
+    assert counts(p)[0] == pytest.approx(before[0] + (p.job.fed_mm - fed))
 
 
 def test_a_snapshot_keeps_a_filament_change_s_restore():

@@ -22,7 +22,7 @@ from simulator.model import (
     State,
     SyncJob,
 )
-from simulator.tests.test_model import one_segment, run_sync, tool0
+from simulator.tests.test_model import one_segment, reload_ends, run_sync, tool0
 from simulator.tests.util import PLA, loaded, make, run
 
 TAG = "8b6a3e3e-3f6c-4d7b-9a43-6c1f0e7d2a11"
@@ -460,8 +460,9 @@ def test_leaving_a_wait_clears_its_reason():
     p.runout(0)
     assert p.job.wait_tool == 0
     p.load(0)
-    run(sim, 20)
-    assert p.job.phase is JobPhase.PAUSED and p.job.attention is None
+    reload_ends(sim, p)
+    # The reload ends the change, and the print goes on.
+    assert p.job.phase is JobPhase.PRINTING and p.job.attention is None
     assert p.job.wait_tool is None
 
 

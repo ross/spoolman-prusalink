@@ -521,8 +521,7 @@ async def test_m5a_runout_with_plenty_left_is_flagged(world: World, used: float,
 
     # The same spool reloaded with no Spoolman change, and the print finished: kept.
     w.printer.load(0)
-    await w.run_until(lambda: w.printer.state is State.PAUSED, poll_every=1.0)
-    w.printer.resume()
+    await w.run_until(lambda: w.printer.state is State.PRINTING, poll_every=1.0)
     records = await w.run_until(lambda: w.printer.job is None, poll_every=1.0)
     records += await w.poll()
     assert w.charged(records, "A") > 0
@@ -834,8 +833,7 @@ async def test_m5a_weight_edited_before_a_charge(world: World, caplog: pytest.Lo
     mid_print = f"{w.tool_location}: unloaded mid-print with"
     await runout_flagged(w)
     w.printer.load(0)
-    await w.run_until(lambda: w.printer.state is State.PAUSED, poll_every=1.0)
-    w.printer.resume()
+    await w.run_until(lambda: w.printer.state is State.PRINTING, poll_every=1.0)
 
     # The user corrects A's weight just before the bridge's next charge to A lands.
     edited: list[bool] = []
@@ -872,7 +870,7 @@ async def test_m5a_runout_spool_archived_before_its_refund(world: World):
 
     # B goes in by the menu during the pause, charged to A as the open swap's usage.
     w.printer.load(0, source="preset", name=PETG[0])
-    await w.run_until(lambda: w.printer.state is State.PAUSED, poll_every=1.0)
+    await w.run_until(lambda: w.printer.state is State.PRINTING, poll_every=1.0)
     swap_mm = w.bridge.printers[0].tools[0].swap.mm
     assert swap_mm > 0
     used = await w.used("A")
@@ -906,7 +904,7 @@ async def test_m5a_refund_past_the_used_weight_is_not_an_edit(
 
     # B goes in by the menu during the pause, charged to A as the open swap's usage.
     w.printer.load(0, source="preset", name=PETG[0])
-    await w.run_until(lambda: w.printer.state is State.PAUSED, poll_every=1.0)
+    await w.run_until(lambda: w.printer.state is State.PRINTING, poll_every=1.0)
     swap_mm = w.bridge.printers[0].tools[0].swap.mm
     assert swap_mm > 0
     used = await w.used("A")

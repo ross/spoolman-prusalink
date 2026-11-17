@@ -62,9 +62,8 @@ async def test_p2_runout_with_spoolman_updated_during_pause(world: World):
     # The reload keeps the old type, as the firmware does: the printer shows A again.
     mark = w.mark()
     w.printer.load(0)
-    await w.run_until(lambda: w.printer.state is State.PAUSED, poll_every=1.0)
+    await w.run_until(lambda: w.printer.state is State.PRINTING, poll_every=1.0)
     assert w.material() == ("PLA", "#73737b", w.uuids["A"])
-    w.printer.resume()
     await w.run_until(
         lambda: w.printer.state is State.FINISHED and w.printer.job is None, poll_every=1.0
     )
@@ -127,10 +126,9 @@ async def test_p2_runout_reload_keeps_the_old_tag(
         await w.restart()
 
     w.printer.load(0)
-    await w.run_until(lambda: w.printer.state is State.PAUSED, poll_every=1.0)
+    await w.run_until(lambda: w.printer.state is State.PRINTING, poll_every=1.0)
     assert w.material() == ("PLA", "#73737b", w.uuids["A"])
     assert w.tool.material.material_uuid is not None  # The reload kept A's tag.
-    w.printer.resume()
     await w.run_until(
         lambda: w.printer.state is State.FINISHED and w.printer.job is None, poll_every=1.0
     )
@@ -447,15 +445,14 @@ async def to_mid_print(w: World) -> tuple[int, list[dict]]:
     return start, records
 
 
-async def reload_and_resume(w: World) -> list[dict]:
-    """Reload the type the unload left, as a runout's reload does, then resume.
+async def reload_after_runout(w: World) -> list[dict]:
+    """Reload the type the unload left, as a runout's reload does. The print resumes by itself.
 
     Polls every second, as during a real pause, and returns what the polls wrote.
     """
     w.printer.load(0)
-    records = await w.run_until(lambda: w.printer.state is State.PAUSED, poll_every=1.0)
+    records = await w.run_until(lambda: w.tool.process is None, poll_every=1.0)
     assert w.material() == ("PLA", "#73737b", w.uuids["A"])
-    w.printer.resume()
     return records
 
 
@@ -501,7 +498,7 @@ async def test_p3_runout_with_spoolman_updated_after_the_print(world: World):
     # The reload and the rest of the print, with Spoolman left alone: the same job carries
     # on, so it isn't a print start and the swap stays open.
     mark = w.mark()
-    await reload_and_resume(w)
+    await reload_after_runout(w)
     await finish(w)
     records = w.since(mark) + await w.poll()
     assert events(records) == []
@@ -542,7 +539,7 @@ async def test_p4_runout_reloaded_with_no_spoolman_change(
     records = await w.poll()
     assert len(events(records, "swap_unconfirmed")) == 1
     at_runout = w.tool.extruded_at_unload
-    await reload_and_resume(w)
+    await reload_after_runout(w)
     await finish(w)
     await w.poll()
     w.printer.dismiss()
@@ -602,7 +599,7 @@ async def test_p5_planned_color_changes_are_unloads(world: World):
 
     # The second change isn't recorded in Spoolman, and stays open past the print.
     mark = w.mark()
-    await reload_and_resume(w)
+    await reload_after_runout(w)
     await w.run_until(lambda: w.printer.state is State.ATTENTION, poll_every=1.0)
     await w.poll()
     assert len(events(w.since(mark), "unload")) == 1
@@ -610,7 +607,7 @@ async def test_p5_planned_color_changes_are_unloads(world: World):
     second = w.tool.extruded_at_unload
     flag = await w.flag("B")
     assert flag is not None and "mid-print with" in flag
-    await reload_and_resume(w)
+    await reload_after_runout(w)
     await finish(w)
     await w.poll()
 
@@ -653,12 +650,13 @@ async def test_p6_jam_is_an_unconfirmed_swap_and_its_purge_is_charged(world: Wor
 
     # The reload after a jam purges 60 mm more than a load. Past the 40 mm gap: the 20 mm
     # fast load and the 40 + 60 mm purge, (20 + 100) * 0.95 = 114. The retract, prime and
-    # retract after it, and the resume's feed back to the jam's gap 0, move only within the gap.
+    # retract after it move only within the gap. The change then returns by itself, and its
+    # feed back to the jam's gap 0 counts too, 9 mm more.
     mark = w.mark()
-    await reload_and_resume(w)
-    assert w.counter - at_jam == 114
+    await reload_after_runout(w)
+    assert w.counter - at_jam == 123
     records = w.since(mark) + await w.poll()
-    assert w.charged(records, "A") == 114
+    assert w.charged(records, "A") == 123
 
     await finish(w)
     records = w.since(0) + await w.poll()

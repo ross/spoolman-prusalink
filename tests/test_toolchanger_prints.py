@@ -328,8 +328,6 @@ async def test_a_change_on_a_tool_the_print_has_not_used_follows_p2(tmp_path):
     fake.spools[2]["location"], fake.spools[3]["location"] = SHELF, location
     await bridge.poll()
     await station.swap_cycle(tool=1, poll_every=1.0)
-    assert printer.state is State.PAUSED
-    printer.resume()
     await station.run_until(lambda: printer.job is None, poll_every=1.0, limit=60)
     await bridge.poll()
     events = [(r["tool"], r["event"]) for r in ledger(tmp_path)[mark:] if r.get("event") in swaps]
@@ -363,7 +361,6 @@ async def test_a_change_on_a_tool_the_print_has_not_used_follows_p3(tmp_path):
     printer.change_filament(1)
     await bridge.poll()
     await station.swap_cycle(tool=1, poll_every=1.0)
-    printer.resume()
     await station.run_until(lambda: printer.job is None, poll_every=1.0, limit=60)
     await bridge.poll()
     swaps = ("unload", "swap_unconfirmed", "swap_assumed", "swap_staged", "swap_confirmed")

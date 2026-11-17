@@ -156,6 +156,7 @@ class JobPhase(StrEnum):
     PREVIEW_LOAD = "PREVIEW_LOAD"  # BUSY with no job: the preview's filament-not-inserted load
     PREVIEW_UNLOAD = "PREVIEW_UNLOAD"  # BUSY with no job: the preview's unload into the MMU
     JOIN = "JOIN"  # ATTENTION while a spool join unloads the old tool, then back to PRINTING
+    RETURN = "RETURN"  # ATTENTION while a filament change reheats and unparks after its reload
 
 
 IDLE_STATES = (State.IDLE, State.FINISHED, State.STOPPED)
@@ -189,6 +190,9 @@ PHASE_STATES = {
     # The join's unload runs in a `Load_unload` dialog while printing, which reads ATTENTION
     # (`get_state` in `src/state/printer_state.cpp:238-243`).
     JobPhase.JOIN: State.ATTENTION,
+    # The filament change's dialog stays open until the head is back over the print
+    # (`invoke_loop` in `Pause::filament_change`, `pause.cpp`).
+    JobPhase.RETURN: State.ATTENTION,
 }
 TIMED_PHASES = (
     JobPhase.SCANNING,
@@ -199,6 +203,7 @@ TIMED_PHASES = (
     JobPhase.RECOVER,
     JobPhase.UNPARK,
     JobPhase.JOIN,
+    JobPhase.RETURN,
 )
 
 
@@ -560,6 +565,15 @@ class Settings:
     # How long a sync job's `G28` takes when the printer isn't homed, as after a boot.
     home_seconds: float = 0.0
     unload_seconds: float = 3.0
+    # How long a job's end, finished or stopped, parks the head before `pre_finalize_print`
+    # auto-retracts; `park_seconds` then follows. 0 auto-retracts at once.
+    end_park_seconds: float = 0.0
+    # A filament change in a print, outside an MMU: `ATTENTION` while the head finishes its
+    # moves and parks, then while it rams and unloads; after the reload, `ATTENTION` while
+    # it reheats and unparks before printing again. 0 runs each part at once.
+    change_park_seconds: float = 0.0
+    change_unload_seconds: float = 0.0
+    change_return_seconds: float = 0.0
     slow_load_mm: float | None = None
     fast_load_mm: float | None = None
     # The whole purge, not doubled for a high-flow nozzle. At least 1 mm, in 5 mm steps on
@@ -682,6 +696,9 @@ class SimJob:
     remaining: float = 0.0  # seconds left in a timed phase
     time_printing: float = 0.0
     end_state: State = State.FINISHED
+    # PARKING time left when the firmware's end runs `pre_finalize_print`, or None once it
+    # has run.
+    finalize_at: float | None = None
 
     def enter(self, phase: JobPhase, attention: Attention | None = None) -> None:
         """Move to `phase`. A waiting phase needs a reason that fits it; no other phase has one."""
@@ -735,6 +752,9 @@ class UserJob(SimJob):
     resumed_on: int | None = None
     # The tools-mapping screen and the questions its Print asks, set when the screen opens.
     mapping: list[Attention] = field(default_factory=list)
+    # The preheat time a filament change's RETURN holds over, for a change begun in the
+    # preheat.
+    held: float | None = None
 
     def progress(self) -> int:
         return int(100 * self.fed_mm / self.spec.total_mm)
@@ -1411,6 +1431,12 @@ class SimPrinter:
         job = self.job
         waiting = job is not None and job.wait_tool == tool
         self._log("action", f"load T{tool} {what}")
+        if waiting and t.path.at_sensor:
+            # The change waits for the sensor to clear before it loads
+            # (`filament_not_in_fs_process` in `pause.cpp`): the reload stands for the user
+            # pulling the old filament out first.
+            t.path.at_sensor = False
+            self._log("load", f"T{tool}'s old filament pulled out for the reload")
         if purge_mm is not None:
             purge_mm = _positive(purge_mm, "purge_mm")
         extra = self.settings.jam_purge_mm if waiting and job.waits_for(Reason.JAM) else 0.0
@@ -1503,8 +1529,9 @@ class SimPrinter:
         self._show_state()
 
     def pull(self, tool: int) -> None:
-        """Pull a tool's filament out by hand, outside a print: what a menu unload left in
-        the sensor, or loaded filament from a cold extruder. The firmware sees it only
+        """Pull a tool's filament out by hand: what a menu unload or a filament change's
+        unload left in the sensor, or, outside a print, loaded filament from a cold
+        extruder. The firmware sees it only
         through the sensor, so the tracker's gap stays as it was. On the picked tool, with
         the sensors on, the idle sensor clear then counts an unload if a type is stored
         (F14); with them off nothing counts (BF25)."""
@@ -1855,31 +1882,56 @@ class SimPrinter:
             self._recover(job)
             return
         self._log("action", "resume")
-        if job.restore is not None:
-            # The unpark's feed and `restore_retracted_distance` put the filament back at
-            # the gap it had when the change began (`Pause::filament_change` in
-            # `src/marlin_stubs/pause/pause.cpp`).
-            tool, gap = job.restore
-            self._restore_to(self.tools[tool], gap)
-            job.restore = None
-            # A color change in the file ends here, with its `M600`. Until then a power-panic
-            # resume runs it again: the cut saves the file position of the command running,
-            # which is the `M600` itself (`stop_and_save` in `crash_recovery.cpp`,
-            # `get_current_sdpos` in `queue.h`).
-            if job.pending_color_changes and job.pending_color_changes[0] <= job.fed_mm:
-                job.pending_color_changes.pop(0)
-            # A change on another tool changes back to the print's tool after the dialog,
-            # with no E move and no purge (`M600_execute`, `M600.cpp:317-339`).
-            self._pick(self._job_tool(job))
-        elif job.parked:
+        if job.parked:
             self._unpark_prime(job)
         job.parked = False
+        self._carry_on(job)
+
+    def _carry_on(self, job: UserJob) -> None:
+        """Go back to the phase the job left for a pause or a filament change."""
         if job.paused_from is JobPhase.PREHEAT:
             job.enter(JobPhase.PREHEAT)
             self._show_state()
         else:
             self._begin_feeding(job)
         job.paused_from = None
+
+    def _reloaded(self, job: UserJob) -> None:
+        """The filament change's reload is done. The change goes on in its dialog, which
+        reads `ATTENTION`, while it reheats and the head goes back over the print, and then
+        the print goes on by itself: `M600` runs the whole change in `invoke_loop`, with no
+        pause state and no Resume to press (`Pause::filament_change` in
+        `src/marlin_stubs/pause/pause.cpp`). The F8 and F9 traces read `ATTENTION` from
+        the color question to `PRINTING`. On an MMU it goes on at once."""
+        wait = self.settings.change_return_seconds
+        if self.feed is not MMU and wait > EPSILON:
+            job.enter(JobPhase.RETURN)
+            job.held, job.remaining = job.remaining, wait
+            self._show_state()
+        else:
+            self._end_change(job)
+
+    def _end_change(self, job: UserJob) -> None:
+        """End a filament change and print again."""
+        # The unpark's feed and `restore_retracted_distance` put the filament back at the gap
+        # it had when the change began (`Pause::filament_change` in
+        # `src/marlin_stubs/pause/pause.cpp`).
+        tool, gap = job.restore
+        self._restore_to(self.tools[tool], gap)
+        job.restore = None
+        # A color change in the file ends here, with its `M600`. Until then a power-panic
+        # resume runs it again: the cut saves the file position of the command running,
+        # which is the `M600` itself (`stop_and_save` in `crash_recovery.cpp`,
+        # `get_current_sdpos` in `queue.h`).
+        if job.pending_color_changes and job.pending_color_changes[0] <= job.fed_mm:
+            job.pending_color_changes.pop(0)
+        # A change on another tool changes back to the print's tool after the dialog, with
+        # no E move and no purge (`M600_execute`, `M600.cpp:317-339`).
+        self._pick(self._job_tool(job))
+        self._log("job", f"job {job.id}: the filament change is done")
+        if job.held is not None:
+            job.remaining, job.held = job.held, None
+        self._carry_on(job)
 
     def cancel(self) -> None:
         self._check_cancel()
@@ -2141,16 +2193,34 @@ class SimPrinter:
         # `src/marlin_stubs/pause/pause.cpp`).
         job.restore = (t.index, t.path.tracked())
         self._retract_to(t, self.model.extruder.lengths.retract_mm)
+        if loads is not None:
+            # What the reload writes (`filament::set_type_to_load`). The unload's write of
+            # none keeps the stored type here, which is `loads` whenever there is one.
+            t.kept_type = loads
+        job.enter(JobPhase.WAIT_LOAD, Attention(reason, t.index))
+        s = self.settings
         if self.feed is MMU:
             self._run_steps(t, self._mmu_unload_steps())
             self._log("mmu", f"T{t.index} ejected: load it into the MMU")
+        elif s.change_park_seconds > EPSILON or s.change_unload_seconds > EPSILON:
+            # The change parks, then rams and unloads, in its dialog.
+            steps = self._unload_steps(t, "runout")
+            t.process = UnloadProcess(steps, s.change_unload_seconds, s.change_park_seconds)
         else:
             self._run_steps(t, self._unload_steps(t, "runout"))
-            self._physical_unload(t, str(reason))
-        if loads is not None:
-            t.kept_type = loads  # what the reload writes (`filament::set_type_to_load`)
-        job.enter(JobPhase.WAIT_LOAD, Attention(reason, t.index))
+            self._change_unloaded(t, reason)
         self._show_state()
+
+    def _change_unloaded(self, t: SimTool, reason: Reason) -> None:
+        """The filament change's unload is done, and it counts.
+
+        A runout's tail has already left the sensor. Otherwise the change asks whether the
+        filament came out, and on Yes waits for the extruder's sensor to clear, so the
+        filament stays in the sensor until the user pulls it (`pull`): `unload_process`,
+        `unloaded_ask_process` and `filament_not_in_fs_process` in
+        `src/marlin_stubs/pause/pause.cpp`. The F8 and F9 traces read the filament present
+        from the unload's count until the pull."""
+        self._physical_unload(t, str(reason), at_sensor=reason is not Reason.RUNOUT)
 
     def clear_jam(self) -> None:
         self._check_clear_jam()
@@ -2277,6 +2347,7 @@ class SimPrinter:
             JobPhase.HOLD,
             JobPhase.JOIN,
             JobPhase.UNPARK,
+            JobPhase.RETURN,
         )
         # The resume before its end. `resume_print` marks any cut from then on a nested one,
         # until `atomic_reset` clears the mark and erases the saved print at
@@ -2634,7 +2705,8 @@ class SimPrinter:
             raise Invalid(f"T{t.index} has no filament")
         if t.process is not None:
             raise Busy("a load or unload is running")
-        if self.job is not None:
+        # A filament change's unload leaves the filament in the sensor for the user to pull.
+        if self.job is not None and self.job.wait_tool != t.index:
             raise Busy("during a print the sensor sees the filament go: use runout")
 
     def _check_move(self, t: SimTool) -> None:
@@ -2965,6 +3037,12 @@ class SimPrinter:
 
     def _unload_tick(self, t: SimTool, p: UnloadProcess, dt: float) -> None:
         """Move the unload's share of its steps for dt; record the unload when time is up."""
+        if p.wait > EPSILON:
+            used = min(p.wait, dt)
+            p.wait -= used
+            dt -= used
+            if p.wait > EPSILON:
+                return
         left = sum(abs(st.mm) for st in p.steps if st.phase not in MARKERS)
         most = left * min(dt / p.remaining, 1.0) if p.remaining > EPSILON else left
         p.remaining = max(p.remaining - dt, 0.0)
@@ -2975,6 +3053,11 @@ class SimPrinter:
             return
         self._run_steps(t, p.steps)  # what rounding left
         t.process = None
+        job = self.job
+        if job is not None and job.wait_tool == t.index:
+            self._change_unloaded(t, job.attention.reason)
+            self._show_state()
+            return
         self.feed.end_unload(self, t)
         self._process_done()
 
@@ -3007,7 +3090,7 @@ class SimPrinter:
     def _process_done(self) -> None:
         job = self.job
         if job is not None and job.phase is JobPhase.WAIT_LOAD:
-            job.enter(JobPhase.PAUSED)
+            self._reloaded(job)
         elif job is not None and job.phase is JobPhase.PREVIEW_LOAD:
             # The load's result isn't checked and no sensor is read again: the type check
             # follows (`filament_not_inserted_load` in `marlin_print_preview.cpp`).
@@ -3038,6 +3121,12 @@ class SimPrinter:
                 ):
                     job.clean_at = None
                     self._nozzle_clean(job)
+                if (
+                    job.phase is JobPhase.PARKING
+                    and job.finalize_at is not None
+                    and job.remaining <= job.finalize_at + EPSILON
+                ):
+                    self._finalize(job)
                 if job.remaining <= EPSILON:
                     self._end_phase(job)
             else:
@@ -3068,6 +3157,8 @@ class SimPrinter:
             self._begin_feeding(job)
         elif job.phase is JobPhase.JOIN:
             self._finish_join(job)
+        elif job.phase is JobPhase.RETURN:
+            self._end_change(job)
         else:  # PARKING, the last of the timed phases
             self.job, self.screen = None, job.end_state
             self._log("job", f"job {job.id} {job.end_state.lower()}")
@@ -3290,20 +3381,34 @@ class SimPrinter:
         (`pre_finalize_print`). A stopped print and a sync job run no end G-code."""
         if isinstance(job, UserJob) and end is State.FINISHED:
             self.feed.end_moves(self, job, self._slicer(job))
-        self._end_of_print(job, end)
-        self.feed.rest(self)
+        t = self._head_tool()
+        if t is not None:
+            self._retract_to(t, self.model.extruder.lengths.retract_mm)
         job.enter(JobPhase.PARKING)
-        job.remaining, job.end_state = self.settings.park_seconds, end
+        s = self.settings
+        job.remaining, job.end_state = s.end_park_seconds + s.park_seconds, end
+        job.finalize_at = s.park_seconds
         if isinstance(job, UserJob):
             job.paused_from = None
+        if s.end_park_seconds <= EPSILON:
+            self._finalize(job)
         self._show_state()
 
-    def _end_of_print(self, job: UserJob | SyncJob, end: State) -> None:
-        """What a finished or stopped job does to the filament before it parks, a sync job
-        too (`marlin_server.cpp`).
+    def _finalize(self, job: UserJob | SyncJob) -> None:
+        """`pre_finalize_print`, once the head has parked: the F5 and F7 traces count the
+        end's auto-retract after Z reached its park height, and then stay still until the
+        job ends (`Finishing_*` and `Aborting_*` in `_server_print_loop`,
+        `marlin_server.cpp:2764-2830`)."""
+        job.finalize_at = None
+        self._end_of_print(job, job.end_state)
+        self.feed.rest(self)
 
-        It retracts the picked tool to 8 mm (`retract_and_lift`). Then `pre_finalize_print`
-        stores each tool's valid tracker gap as its auto-retracted distance and
+    def _end_of_print(self, job: UserJob | SyncJob, end: State) -> None:
+        """What a finished or stopped job does to the filament as it parks, a sync job too
+        (`marlin_server.cpp`).
+
+        `_park` has retracted the picked tool to 8 mm (`retract_and_lift`). Then
+        `pre_finalize_print` stores each tool's valid tracker gap as its auto-retracted distance and
         auto-retracts the picked tool, which INDX skips: its 8 mm already counts as fully
         retracted.
 
@@ -3323,8 +3428,6 @@ class SimPrinter:
         """
         ex = self.model.extruder
         t = self._head_tool()
-        if t is not None:
-            self._retract_to(t, ex.lengths.retract_mm)
         if ex.auto_retracts:
             for tool in self.tools.values():
                 if tool.path.gap_valid:
