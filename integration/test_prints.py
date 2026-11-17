@@ -649,14 +649,16 @@ async def test_p6_jam_is_an_unconfirmed_swap_and_its_purge_is_charged(world: Wor
     at_jam = w.tool.extruded_at_unload
 
     # The reload after a jam purges 60 mm more than a load. Past the 40 mm gap: the 20 mm
-    # fast load and the 40 + 60 mm purge, (20 + 100) * 0.95 = 114. The retract, prime and
-    # retract after it move only within the gap. The change then returns by itself, and its
-    # feed back to the jam's gap 0 counts too, 9 mm more.
+    # fast load and the 40 + 60 mm purge, times 0.95. The retract, prime and retract after
+    # it move only within the gap. The change ends with its reload, and the print's own
+    # extrusion in the rest of the tick that ends it counts too.
+    fed = w.printer.job.fed_mm
     mark = w.mark()
     await reload_after_runout(w)
-    assert w.counter - at_jam == 123
+    ran = w.printer.job.fed_mm - fed
+    assert w.counter - at_jam == int((120 + ran) * 0.95)
     records = w.since(mark) + await w.poll()
-    assert w.charged(records, "A") == 123
+    assert w.charged(records, "A") == w.counter - at_jam
 
     await finish(w)
     records = w.since(0) + await w.poll()
