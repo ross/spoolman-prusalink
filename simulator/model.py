@@ -314,11 +314,14 @@ class ModelInfo:
     # menu unload waits for the filament sensor to clear (`pause.cpp:1280-1301`).
     human_interactions: bool = True
     # How the build works its chamber vents, or None for a build without HAS_CHAMBER_VENTS
-    # in `ProjectOptions.cmake`. Vent control is a menu setting, and this is the default the
-    # build's base variant sets (`variant_features` in
-    # `src/common/printer_variant/coreone.cpp` and `coreonel.cpp`, which the `WATCHED` rows
-    # "the Core One vent default" and "the Core One L vent default" guard): manual on the
-    # Core One, whose Plus variant is automatic, and automatic on the Core One L.
+    # in `ProjectOptions.cmake`. Vent control is a menu setting. This is the base variant's
+    # default (`variant_features` in `src/common/printer_variant/coreone.cpp` and
+    # `coreonel.cpp`, which the `WATCHED` rows "the Core One vent default" and "the Core One
+    # L vent default" guard): manual on the Core One, automatic on the Core One L. A
+    # Core One that's fresh or factory reset is the Plus gen 2 variant, which is automatic
+    # (`printer_variant_after_factory_reset`, `coreone.hpp:29`), so manual is the upgraded
+    # printer's case (config migration 5, `store_definition.cpp:165-171`) or the "CORE One"
+    # edition picked by hand.
     vents: Vents | None = None
     # Its `compatibility_group` in `printer_model_data.hpp`. The MK3.5, MK4 and XL builds
     # run several models and check a file against the one the printer is set to
