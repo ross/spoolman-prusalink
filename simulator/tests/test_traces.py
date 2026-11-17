@@ -59,10 +59,15 @@ SYNC_JOB = printer_sync.build_job(
 # lines isn't recorded yet, and the comparison lets a poll miss it either way.
 SETTINGS = dict(
     unload_seconds=2.0,
-    load_rate_mm_s=20.0,
+    insert_seconds=2.0,
+    continue_seconds=2.0,
+    purge_park_seconds=1.0,
+    color_seconds=2.0,
+    load_rate_mm_s=5.0,
     blip_seconds=0.3,
     park_seconds=1.0,
     sync_job_seconds=2.0,
+    home_seconds=3.0,
     preheat_seconds=2.0,
     print_rate_mm_s=20.0,
 )
@@ -103,7 +108,7 @@ class Recorder:
 
     def settled(self) -> None:
         """Until no load or unload is running."""
-        self.until(lambda: all(t.process is None for t in self.printer.tools.values()))
+        self.until(lambda: all(t.process is None for t in self.printer.tools.values()), limit=120.0)
 
     def ended(self) -> None:
         """Until the job is over."""
@@ -136,6 +141,9 @@ def check(name: str, rec: Recorder) -> None:
 
 def recorder() -> Recorder:
     sim, printer = make(**SETTINGS)
+    # The traced Core One L has the high-flow nozzle its build sets by default
+    # (`nozzle_is_high_flow` in `defaults.hpp`), which doubles a load's purge.
+    printer.high_flow = True
     return Recorder(sim, printer)
 
 
@@ -315,12 +323,118 @@ def f13_power_panic_cold(rec: Recorder) -> None:
     rec.advance(2.0)
 
 
+def _from_empty(rec: Recorder) -> None:
+    """Start from an empty tool with no type, as a hand pull leaves it."""
+    rec.printer.tools[0].fill(None)
+    rec.reset()
+
+
+def _start_at_screen(rec: Recorder, material: str, **spec) -> None:
+    """Start a print on the empty tool and wait at the preview's warning that it has no
+    filament. The printer reads `IDLE` with no job while its preview is open, which the
+    simulator doesn't model; it shows the scan instead, which the probe can miss."""
+    rec.printer.start_print(PrintSpec([Segment(0, 200, material)], **spec))
+    rec.until(lambda: rec.printer.state is State.ATTENTION)
+    rec.advance(2.0)
+    rec.printer.tap_through()  # Print: on to the filament-not-inserted screen
+    rec.advance(2.0)
+
+
+def f28_warning_abort(rec: Recorder) -> None:
+    """An empty tool, a print started at the printer, and its warning, where the trace
+    stops: the job reads `ATTENTION` with no `PRINTING` sample before it."""
+    _from_empty(rec)
+    rec.advance(LEAD)
+    rec.printer.start_print(PrintSpec([Segment(0, 200, "TESTPET")]))
+    rec.until(lambda: rec.printer.state is State.ATTENTION)
+    rec.advance(3.0)
+
+
+def f28_load_then_decline(rec: Recorder) -> None:
+    """The preview's load on an empty tool, then Abort at the wrong-filament question, then
+    the bridge's sync job. The file's type, `TESTPETG`, is cut to 7 characters, a name the
+    build doesn't know, so the load asks for a type and PETG is picked."""
+    _from_empty(rec)
+    rec.advance(LEAD)
+    _start_at_screen(rec, "TESTPET")
+    rec.printer.load(0, source="preset", name=PETG.name)  # Yes, then PETG
+    rec.until(lambda: rec.printer.state is State.ATTENTION)  # the wrong-filament question
+    rec.advance(2.0)
+    rec.printer.cancel()  # Abort
+    rec.advance(2.0)
+    rec.printer.upload("spoolman-sync.gcode", SYNC_JOB, print_after=True, overwrite=True)
+    rec.ended()
+    rec.advance(2.0)
+
+
+def f29_sensors_off_print(rec: Recorder) -> None:
+    """A menu unload and a pull, a print on the empty tool past Disable FS, a cancel, a menu
+    load and the bridge's sync job with the sensors off, a hand pull nothing sees, and the
+    sensors back on."""
+    tool = rec.printer.tools[0]
+    tool.fill(TAGGED)
+    _auto_retracted(tool)  # as the sync job before the trace left it
+    rec.reset()
+    rec.advance(LEAD)
+    rec.printer.unload(0)
+    rec.settled()
+    rec.advance(2.0)
+    rec.printer.pull(0)  # the menu unload left the filament in the sensor
+    rec.advance(2.0)
+    _start_at_screen(rec, PETG.name, duration_s=400.0, preheat_s=10.0)
+    # The printer read `ATTENTION` with the job for 13 s after Disable FS had turned the
+    # sensors off, which nothing in the source explains, so the replay turns them off first.
+    rec.printer.set_sensors(False)
+    rec.advance(2.0)
+    rec.printer.tap_through()  # Disable FS
+    # Slow enough that polls see the counter both still and moving, as the printer's did.
+    # The menu unload left the tracker's gap at its limit, which the print refills first.
+    rec.until(lambda: rec.printer.tools[0].extruded > 25.0, limit=300.0)
+    rec.printer.cancel()
+    rec.ended()
+    rec.advance(2.0)
+    rec.printer.dismiss()
+    rec.advance(2.0)
+    rec.printer.load(0, source="preset", name=PETG.name)
+    rec.settled()
+    rec.advance(2.0)
+    rec.printer.upload("spoolman-sync.gcode", SYNC_JOB, print_after=True, overwrite=True)
+    rec.ended()
+    rec.advance(2.0)
+    rec.printer.dismiss()
+    rec.advance(2.0)
+    rec.printer.pull(0)  # with the sensors off, nothing reads it
+    rec.advance(2.0)
+    rec.printer.set_sensors(True)
+    rec.advance(2.0)
+
+
 def f47_sensors_setting(rec: Recorder) -> None:
     """The sensors turned off and on from the menu, filament loaded and idle."""
     rec.advance(LEAD)
     rec.printer.set_sensors(False)
     rec.advance(3.0)
     rec.printer.set_sensors(True)
+    rec.advance(2.0)
+
+
+def f48_unload_load(rec: Recorder) -> None:
+    """A menu unload, the filament pulled out of the sensor, then a menu load, as F3."""
+    rec.advance(LEAD)
+    rec.printer.unload(0)
+    rec.settled()
+    rec.advance(2.0)
+    rec.printer.pull(0)
+    rec.advance(2.0)
+    rec.printer.load(0, source="preset", name=PETG.name)
+    rec.settled()
+    rec.advance(2.0)
+
+
+def f48_hand_pull(rec: Recorder) -> None:
+    """Loaded filament pulled out of a cold extruder by hand, idle, with the sensors on."""
+    rec.advance(LEAD)
+    rec.printer.pull(0)
     rec.advance(2.0)
 
 
@@ -340,9 +454,12 @@ REPLAYS: dict[str, Callable[[Recorder], None]] = {
     "F11-manual-extrude": f11_manual_extrude,
     "F12-power-panic": f12_power_panic,
     "F13-power-panic-cold": f13_power_panic_cold,
+    "F28-warning-abort": f28_warning_abort,
+    "F28-load-then-decline": f28_load_then_decline,
+    "F29-sensors-off-print": f29_sensors_off_print,
     "F47-sensors-setting": f47_sensors_setting,
-    # A menu unload, then a menu load, as F3: the sensor's reading through both.
-    "F48-unload-load": f3_load_preset,
+    "F48-unload-load": f48_unload_load,
+    "F48-hand-pull": f48_hand_pull,
 }
 
 
