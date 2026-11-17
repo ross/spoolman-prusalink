@@ -328,7 +328,7 @@ class LoadProcess:
 
     @property
     def remaining(self) -> float:
-        """The mm left in the current step."""
+        """What's left of the current step: mm for a move, seconds for a wait."""
         return abs(self.steps[0].mm)
 
     @property

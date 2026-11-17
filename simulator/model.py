@@ -3525,7 +3525,8 @@ def _tool_json(t: SimTool) -> dict:
     if p is None:
         out["process"] = None
     elif isinstance(p, LoadProcess):
-        out["process"] = {"kind": "load", "phase": p.phase, "remaining_mm": p.remaining}
+        unit = "remaining_s" if p.phase in WAITS else "remaining_mm"
+        out["process"] = {"kind": "load", "phase": p.phase, unit: p.remaining}
     elif isinstance(p, MmuProcess):
         out["process"] = {"kind": "mmu", "phase": p.phase, "remaining_s": p.remaining}
     else:
