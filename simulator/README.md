@@ -187,8 +187,8 @@ that trace. The points that matter for the bridge, in short:
   retract, except on the iX and INDX, whose nozzle cleaners end it. A
   high-flow nozzle doubles the purge, except on INDX, whose cleaner purges a
   fixed 25 mm. An idle load then auto-retracts. A reload during a print
-  primes 4 mm and retracts 8 mm instead, and the resume puts the tool back at
-  the gap it had when the change began. From a full gap, a Core One L load
+  primes 4 mm and retracts 8 mm instead, and the change's end puts the tool
+  back at the gap it had when the change began. From a full gap, a Core One L load
   counts 20 mm before the material shows and 63 mm after, times the feed
   ratio: 40 mm of purge and 23 mm of auto-retract ramming. With the
   high-flow nozzle the Core One and Core One L ship with, the purge is
@@ -308,8 +308,8 @@ that trace. The points that matter for the bridge, in short:
   `ATTENTION` for the filament to be loaded into the MMU. No type is
   written, so no unload counts. `load` with no source then reloads the same
   slot, reading `PRINTING` while it runs: the feed counts nothing, the load to the nozzle counts 7 mm past
-  the 40 mm gap and the prime 4, and the print waits `PAUSED` for the
-  resume, which feeds the 8 mm back. With a spool join from the slot, the
+  the 40 mm gap and the prime 4, and the print goes on by itself, which
+  feeds the 8 mm back. With a spool join from the slot, the
   join unloads the slot into the MMU, changes to the join's slot from no
   slot and loads it to the nozzle, while it reads `PRINTING`, and the print
   goes on with the join's slot; the joins' rules are the toolchangers'.
@@ -446,7 +446,7 @@ that trace. The points that matter for the bridge, in short:
 - `change_filament` is the Tune menu's Change filament, `M600 T<n>`, on any
   enabled tool once a print is printing. On the picked tool it's the
   filament change a runout runs. On another tool it picks that tool, runs
-  the same change there, and the `resume` after the reload changes back to
+  the same change there, and the change's end changes back to
   the print's tool with no purge, so the counts land on that tool only.
   The pick moves nothing and takes no time. The reload writes the type
   the tool had, else the type the file names for it, else the type its

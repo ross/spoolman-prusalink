@@ -1208,7 +1208,7 @@ class SimPrinter:
         retract; the iX purges with no retract, and the INDX cleaner's purge ends with an
         auto-retract (`M1705`), in a print too. A load outside a print then auto-retracts
         (`load_finalize_process`). A reload during a print primes and retracts again
-        instead, and the resume puts the tool back at the gap it had when the change began.
+        instead, and the change's end puts the tool back at the gap it had when the change began.
         The preview's load does neither. Its waits for the user come first and after the
         purge: `insert_seconds`, `continue_seconds`, `purge_park_seconds` and
         `color_seconds`.
@@ -1300,8 +1300,8 @@ class SimPrinter:
         1029-1073`; `MMU2::load_filament_to_nozzle`, `mmu2_mk4.cpp:961-987`).
 
         No type is written: only Purge More's purge writes one, which isn't modeled, and the
-        change never cleared it. The color question isn't modeled: the reload ends `PAUSED`
-        until the resume, as on every printer.
+        change never cleared it. The color question isn't modeled: the change ends with the
+        reload, and the print goes on with nothing to resume.
         """
         lengths = self.model.extruder.lengths
         return [
@@ -3638,7 +3638,7 @@ class SimPrinter:
                     self._log("job", "no slot selected: nothing changes")
                     job.pending_color_changes.pop(0)
                     continue
-                # It stays pending until the change ends (`resume`).
+                # It stays pending until the change ends (`_end_change`).
                 self._filament_change(tool, Reason.COLOR_CHANGE)
                 return 0.0
             if job.segment == len(spec.segments) - 1:
