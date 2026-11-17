@@ -1,7 +1,7 @@
 # Bridge fixes
 
 This is the plan for fixing what [bridge-findings.md](bridge-findings.md)
-records: BF1 to BF29, the places where the simulator work showed the bridge
+records: BF1 to BF30, the places where the simulator work showed the bridge
 charges the wrong amount or the wrong spool, misses a swap, or fails to
 write to the printer. The findings were held until the simulator was done,
 so they could be planned as a whole. The plan groups them into ten

@@ -151,12 +151,12 @@ the middle sees a partial value, as on a real printer.
 | Load | Three phases. Feed: the first `gap` mm fill the gap and don't count, the rest counts with no `material` reported. Then the material is set. Then the purge counts under the new material. A menu load on a Core One L measured 116 mm in total. | `pause.cpp:797`; seen live (S2, the held load usage) |
 | Load from the menu, with a preset | `material` becomes the preset's name with no color and no UUID; `previous` is replaced. "Ask for color" gives the preset's name plus the chosen color and clears the UUID. A plain load, `M701`, and autoload all go through this menu. Any preset, including PPS and PPA (W8). | Follow-up A; README (W8) |
 | Load from a tag (ANFC) | Sets name, color and UUID. Core One, Core One Oak and Core One L only. | Follow-up A; seen live (S1) |
-| Runout, `M600`, jam | During a print: state `ATTENTION` while the dialog waits, `PAUSED` once handled until resumed, then `PRINTING`. The unload counts as above. The reload restores `previous` as `material`, so the printer keeps showing the old spool. A jam adds an extra purge after the reload. A jam cleared without unloading counts nothing. | `printer_state.cpp:238`, `M600.cpp:282`; seen live (P2, P6) |
-| Print start | Job ID incremented at once. `PRINTING` during the file scan, a brief `IDLE` with no `job` object, then `PRINTING`. A configurable preheat delay before the first extrusion, so P8 is possible. | `marlin_server.cpp:2301`, `printer_state.cpp:379` |
+| Runout, `M600`, jam | During a print: state `ATTENTION` throughout, with the `job`, until the reload ends; then `PRINTING` by itself, with no Resume (F8, F9). The unload counts as above, and the filament stays in the sensor until it's pulled. The reload restores `previous` as `material`, so the printer keeps showing the old spool. A jam adds an extra purge after the reload. A jam cleared without unloading counts nothing. | `printer_state.cpp:238`, `M600.cpp:282`; traced (F8, F9); the older P2 and P6 sightings of `PAUSED` are superseded |
+| Print start | Job ID incremented at once. `PRINTING` during the file scan, then `IDLE` with no `job` object: a brief blip, or about 13 s of vent move on a Core One L, which reads `ATTENTION` with the `job` after a preview question (F5). Then `PRINTING`. A configurable preheat delay before the first extrusion, so P8 is possible. | `marlin_server.cpp:2301`, `printer_state.cpp:379` |
 | Pause and resume | `PAUSED` then `PRINTING`; the counter holds, then continues. | P11 |
 | Cancel | `PRINTING` while parking, then `STOPPED`. `job` disappears. | Seen live (P7) |
 | Finish | `PRINTING` while parking, then `FINISHED`. `job` disappears. `FINISHED` and `STOPPED` persist with no timeout until dismissed on the screen, and a new print can start without dismissing. | Answer 5; seen live |
-| Sync job | 409 unless the state allows a print. Assigns a job ID, shows `PRINTING` (with the start blip) for the scan and park time, a few seconds, with `display_name` equal to the file name, applies the G-code, then `FINISHED`. No extrusion. | Answers 5 to 7; seen live (W1, W6) |
+| Sync job | 409 unless the state allows a print. Assigns a job ID, shows `PRINTING` at once (no blip, and no vent step, since it uses no tool: F10) for the homing and the park time, with `display_name` equal to the file name, applies the G-code, then `FINISHED`. No extrusion. | Answers 5 to 7; seen live (W1, W6) |
 | Print preview | The job is counted first. A failed `M862` check, such as an `M862.3` for a model outside the printer's compatibility group, holds the job in `ATTENTION` until tapped through or cancelled on the page. A per-printer `checks` setting ignores, warns or aborts. A print started from the page asks about the tools it uses: one with no filament, a disabled one, or one holding another type than its segment names. | F27, F28 |
 | Power-panic resume | Reboot as above, then the same job ID continues in `PRINTING`. | Decided (P12); the kept ID is from source |
 | Manual extrude and retract | Retract grows `gap` up to the clamp and changes nothing else. Extrude fills `gap` first, then counts. | Answer 2; C6 |
@@ -204,10 +204,10 @@ the bridge miss an unload (Q2, X6).
 | Unload | tool | Counts an unload, keeps `previous` | Swaps, C7 |
 | Extrude / retract | tool, mm | Gap-aware manual moves | C6 |
 | Select tool | tool | Multi-tool; may trigger the idle sensor clear | Multi-tool |
-| Start print | segments of (tool, slicer mm); duration; preheat seconds; color changes (`M600`) at given mm | New job ID, start blip, extrusion at rate | P1 to P11, Q4 |
+| Start print | segments of (tool, slicer mm); duration; preheat seconds; color changes (`M600`) at given mm | New job ID, start blip or vent move, extrusion at rate | P1 to P11, Q4 |
 | Pause / resume / cancel | | State changes | P7, P8, P11 |
 | Dismiss | | `FINISHED` or `STOPPED` to `IDLE` | W2, poll interval |
-| Runout now | tool | `ATTENTION`, unload, waits for a load, then `PAUSED` | P2 to P4, M5a |
+| Runout now | tool | `ATTENTION`, unload, waits for the pull and a load, then `PRINTING` by itself | P2 to P4, M5a |
 | Jam now | tool | As runout, plus extra purge on reload; or clear without unloading | P6 |
 | Reboot | | New boot ID | C1, C3, C8 |
 | Power off / on / hang | | Listener closed, open, or silent | C2, X8 |
@@ -356,9 +356,11 @@ step maps to one or two actions.
   intervals accept any positive number, so test runs set `poll_printing = 2`
   and `poll_idle = 3`. The time scale only shortens prints and outages.
 - **The start blip is on by default.** A real print start shows `IDLE` with
-  no job for a moment. The bridge should survive a poll landing there, so
-  the simulator reproduces it, with a config switch to turn it off when it
-  gets in the way.
+  no job for one server cycle, or for about 13 s while the chamber vents
+  move on a Core One L (F5). The bridge should survive a poll landing
+  there, so the simulator reproduces both: the blip with a config switch to
+  turn it off when it gets in the way, and the move with `vents_seconds`,
+  0 by default.
 - **The print preview warns by default**, as the firmware does. A printer's
   `checks` setting, in config and on the page, ignores or aborts instead.
 - **Counters report the floor** of a float, so a slow print still shows the
@@ -372,11 +374,13 @@ step maps to one or two actions.
 
 These aren't simulator work, but the simulator makes each one testable.
 
-- The start blip: a poll that lands on the brief `IDLE` with no `job` during
-  a print start sees an idle printer with no job and could run a sync job
-  into the start of a user print. The upload would fail with 409 once the
-  print is under way, but if it lands first, the user's print is refused.
-  Worth a scenario once the simulator can produce the blip.
+- The start's `IDLE`: a poll that lands on `IDLE` with no `job` during a
+  print start sees an idle printer with no job and could run a sync job
+  into the start of a user print. It lasts one server cycle for the blip
+  and about 13 s for a vent move (F5). The firmware doesn't refuse the
+  upload there: it answers 2xx and drops it, and the user's print goes on
+  (F15), so the sync job never runs (BF30). The simulator now produces
+  both.
 - `FINISHED` persists, so a printer that finished a print days ago still
   reads as idle, which is what the bridge wants. But `/api/v1/job` returns
   204 then, and the bridge's job-name cache keeps the last ID; nothing

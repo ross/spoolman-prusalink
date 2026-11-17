@@ -11,7 +11,7 @@ finding: a fix sets its Status here.
 
 ## Reading an entry
 
-Each finding has an ID from BF1 to BF29, for "bridge finding". The single
+Each finding has an ID from BF1 to BF30, for "bridge finding". The single
 letters are taken by the scenario rows in [scenarios.md](scenarios.md) and
 the printer behaviors (F) in [printer-behaviors.md](printer-behaviors.md).
 An ID stays with its finding when the finding moves stage or is fixed.
@@ -69,6 +69,7 @@ written.
 | 1 | BF4 | The printer's check settings change what a failed check does |
 | 1 | BF5 | A declined or refused sync job uses up a job ID and never finishes |
 | 1 | BF26 | A sync job in the power-panic window drops the resume |
+| 1 | BF30 | A write during a print start's vent move is dropped |
 | 2 | BF12 | Hand swaps on a toolchanger can be missed |
 | 2 | BF13 | A spool join counts an unload in the middle of a print |
 | 2 | BF14 | Writes are refused on multi-tool models |
@@ -369,6 +370,42 @@ written.
   `sync_delay = 0` still runs a write in the window, and the MMU test stays
   pinned at 0 until workstream 9.
 
+### BF30. A write during a print start's vent move is dropped
+
+- **Printers**: Every model with chamber vents that move on their own that
+  the bridge writes to: the Core One L, and a Core One set to automatic
+  vent control, as its Plus variants are by default. INDX and the XL once
+  BF14 is built.
+- **What happens**: When a print starts with vents that must move, such as
+  a PETG print on a Core One L, whose vents close after every print,
+  `PrintInit` starts the job timer. Then `manage_ventilation_state` and
+  `automatic_chamber_vents::execute_control` block the server loop for
+  about 13 s, and the published state stays stale (F5). After a plain
+  preview the printer reads `IDLE` with no job. The bridge's idle wait
+  (`sync_delay`) and its re-check right before the upload (`sync_printer`
+  in `app.py`) both read `IDLE`. The preview before Print read `IDLE` too,
+  so the idle clock may already be past `sync_delay`. A due write (W2,
+  W14) is uploaded and gets 201, but the firmware drops it, since
+  `print_start` ignores a request from `PrintInit` (F15). W6 then waits
+  for a job that never runs, and W5's "didn't take" catches it only after
+  the attempts are spent (`MAX_SYNC_ATTEMPTS`). After a preview question,
+  the move reads `ATTENTION` with the job, and the upload gets a 409: the
+  bridge waits, as it does at the preview's questions (F28, F29).
+- **Effect**: A due write is delayed by its attempts, and the spool can be
+  flagged "didn't take" with nothing wrong. Charges aren't at risk:
+  nothing extrudes in the window.
+- **Evidence**: Read in the firmware source. The window is from
+  `F5-print` (2026-11-17): `IDLE` with no job for 14 s, then `PRINTING`
+  with `time_printing` 13. The simulator models the move
+  (`Settings.vents_seconds`, `JobPhase.VENTS`). No bridge test keeps it.
+  To be confirmed: what an overwrite upload does in the move on the
+  printer; F15 says 2xx and nothing, from source.
+- **Scenario rows**: W2, W5, W6, W14.
+- **To reproduce**: Set `vents_seconds` on a Core One L simulator, start a
+  user print for PETG from the preview with no question, and let a write
+  come due during the move.
+- **Status**: Open.
+
 ## Charging
 
 ### BF9. The auto-retract charges filament that wasn't used
@@ -408,8 +445,8 @@ written.
   commanded at 0.95) while the job is still visible. Until the fix,
   `accounting.print_start` took the first counter rise in a new job as the
   print's start (Q4), so it took the ramming as one. A cancel during the
-  scan or the start blip moves nothing and ends in `IDLE` (F27), so this
-  took a cancel later in the preheat.
+  scan or the start blip, each one server cycle long (F5), moves nothing and
+  ends in `IDLE` (F27), so this took a cancel later in the preheat.
 - **Effect**: Until the fix, a print cancelled before it extruded counted
   as started. An open unconfirmed swap closed as "assumed same spool" with
   a provisional charge (S4, Q1), and a staged spool was flagged (S9, Q2). A
