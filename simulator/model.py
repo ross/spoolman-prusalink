@@ -77,6 +77,7 @@ from simulator.tool import (
     MK3_5_EXTRUDER,
     MK3_5_PRESETS,
     MK4_EXTRUDER,
+    OPEN_VENT_PRESETS,
     PARK_STEP,
     PRESET_ALIASES,
     RETRACTED_STEP,
@@ -122,6 +123,15 @@ class State(StrEnum):
     ATTENTION = "ATTENTION"
 
 
+class Vents(StrEnum):
+    """How a build with chamber vents works them at a print's start: the menu's Chamber Vent
+    Control (`VentControl` in `src/feature/chamber/chamber_enums.hpp`). `automatic` moves
+    the lever with the head; `manual` asks the user with a warning instead."""
+
+    AUTOMATIC = "automatic"
+    MANUAL = "manual"
+
+
 class Firmware(StrEnum):
     FULL = "full"
     NO_COUNTERS = "no_counters"
@@ -143,6 +153,7 @@ class Fault(StrEnum):
 class JobPhase(StrEnum):
     SCANNING = "SCANNING"
     BLIP = "BLIP"
+    VENTS = "VENTS"  # the automatic vents' move at a print's start, which blocks the server
     PREHEAT = "PREHEAT"
     PRINTING = "PRINTING"
     PAUSED = "PAUSED"
@@ -169,6 +180,9 @@ JOB_STATES = (State.PRINTING, State.PAUSED, State.ATTENTION)
 PHASE_STATES = {
     JobPhase.SCANNING: State.PRINTING,
     JobPhase.BLIP: State.IDLE,  # the firmware's PrintInit reads IDLE for a moment
+    # The vents' move reads as the preview did before it: IDLE with no job, or ATTENTION
+    # with the job after a question (`SimPrinter.state`).
+    JobPhase.VENTS: State.IDLE,
     JobPhase.PREHEAT: State.PRINTING,
     JobPhase.PRINTING: State.PRINTING,
     JobPhase.PAUSED: State.PAUSED,
@@ -197,6 +211,7 @@ PHASE_STATES = {
 TIMED_PHASES = (
     JobPhase.SCANNING,
     JobPhase.BLIP,
+    JobPhase.VENTS,
     JobPhase.PREHEAT,
     JobPhase.RUN,
     JobPhase.PARKING,
@@ -298,6 +313,13 @@ class ModelInfo:
     # Whether the build has HAS_HUMAN_INTERACTIONS in `ProjectOptions.cmake`. Without it, a
     # menu unload waits for the filament sensor to clear (`pause.cpp:1280-1301`).
     human_interactions: bool = True
+    # How the build works its chamber vents, or None for a build without HAS_CHAMBER_VENTS
+    # in `ProjectOptions.cmake`. Vent control is a menu setting, and this is the default the
+    # build's base variant sets (`variant_features` in
+    # `src/common/printer_variant/coreone.cpp` and `coreonel.cpp`, which the `WATCHED` rows
+    # "the Core One vent default" and "the Core One L vent default" guard): manual on the
+    # Core One, whose Plus variant is automatic, and automatic on the Core One L.
+    vents: Vents | None = None
     # Its `compatibility_group` in `printer_model_data.hpp`. The MK3.5, MK4 and XL builds
     # run several models and check a file against the one the printer is set to
     # (`PrinterModelInfo::current`), so each model has its own entry's group.
@@ -485,6 +507,7 @@ MODELS = _models(
         CORE_ONE_PRESETS,
         uuids=True,
         mmu=True,
+        vents=Vents.MANUAL,
         group="coreone",
         checks=CORE_ONE_CHECKS,
         mmu_slicer=CORE_ONE_MMU_SLICER,
@@ -496,6 +519,7 @@ MODELS = _models(
         CORE_ONE_PRESETS,
         uuids=True,
         mmu=True,
+        vents=Vents.MANUAL,
         group="coreone",
         checks=CORE_ONE_CHECKS,
     ),
@@ -506,6 +530,7 @@ MODELS = _models(
         CORE_ONE_PRESETS,
         uuids=True,
         mmu=True,
+        vents=Vents.AUTOMATIC,
         group="coreonel",
         checks=CORE_ONE_CHECKS,
         mmu_slicer=CORE_ONE_MMU_SLICER,
@@ -517,6 +542,7 @@ MODELS = _models(
         INDX_PRESETS,
         gap_mm=27.0,
         max_tools=8,
+        vents=Vents.MANUAL,
         group="coreone_indx",
         checks=INDX_CHECKS,
         feed=Feed.INDX,
@@ -529,6 +555,7 @@ MODELS = _models(
         INDX_PRESETS,
         gap_mm=27.0,
         max_tools=8,
+        vents=Vents.AUTOMATIC,
         group="coreonel_indx",
         checks=INDX_CHECKS,
         feed=Feed.INDX,
@@ -564,6 +591,9 @@ class Settings:
     color_seconds: float = 0.0
     # How long a sync job's `G28` takes when the printer isn't homed, as after a boot.
     home_seconds: float = 0.0
+    # How long the automatic chamber vents' move takes at a print's start: a `G28` when
+    # needed, the lever moves and a park. It took the traced Core One L about 13 s.
+    vents_seconds: float = 0.0
     unload_seconds: float = 3.0
     # How long a job's end, finished or stopped, parks the head before `pre_finalize_print`
     # auto-retracts; `park_seconds` then follows. 0 auto-retracts at once.
@@ -699,6 +729,10 @@ class SimJob:
     # PARKING time left when the firmware's end runs `pre_finalize_print`, or None once it
     # has run.
     finalize_at: float | None = None
+    # Whether the job has waited for the user. Before the print begins that's a preview
+    # question, which leaves the server in `PrintPreviewQuestions`, so the vents' move
+    # reads `ATTENTION`.
+    asked: bool = False
 
     def enter(self, phase: JobPhase, attention: Attention | None = None) -> None:
         """Move to `phase`. A waiting phase needs a reason that fits it; no other phase has one."""
@@ -706,6 +740,7 @@ class SimJob:
         if (attention is None) != (not allowed) or (attention and attention.reason not in allowed):
             raise ValueError(f"{phase} can't wait for {attention!r}")
         self.phase, self.attention = phase, attention
+        self.asked = self.asked or attention is not None
 
     def waits_for(self, reason: Reason) -> bool:
         return self.attention is not None and self.attention.reason is reason
@@ -866,6 +901,9 @@ class SimPrinter:
     selected_tool: int | None = 0
     message: str | None = None
     homed: bool = False
+    # Whether the chamber vents are open, or None while the firmware doesn't know, as after
+    # a boot (`Chamber::vent_state_`). Only a model with `vents` uses it.
+    vents_open: bool | None = None
     # How the print preview treats a failed check that a setting governs: the firmware has
     # one setting per kind of check, but they share one screen and the worst decides.
     checks: Severity = Severity.WARN
@@ -901,6 +939,8 @@ class SimPrinter:
         if self.job is not None:
             if self._mmu_reloading():
                 return State.PRINTING
+            if self.job.phase is JobPhase.VENTS and self.job.asked:
+                return State.ATTENTION
             return PHASE_STATES[self.job.phase]
         if any(t.process is not None for t in self.tools.values()):
             return State.BUSY
@@ -1397,8 +1437,11 @@ class SimPrinter:
     def print_file(self, name: str) -> None:
         """Print a stored file. The job is counted at once, and the preview checks the file
         when the scan ends."""
-        if self.job is not None and self.job.phase is JobPhase.BLIP:
-            # The firmware's state check passes during PrintInit, but print_start ignores
+        job = self.job
+        starting = job is not None and job.phase in (JobPhase.BLIP, JobPhase.VENTS)
+        if starting and self.state in IDLE_STATES:
+            # The firmware's state check passes during PrintInit, and during the vents'
+            # move, which reads IDLE when the preview asked nothing. But print_start ignores
             # the request there, so the upload succeeds and the print that's starting goes
             # on (`marlin_server.cpp:1527-1550` at 2db93db5).
             self._log("job", f"{name}: asked for during the start blip; the firmware drops it")
@@ -2333,7 +2376,7 @@ class SimPrinter:
             t.process = None
             t.path.boot(self.model.gap_mm)
         self.queue = []  # a change all doesn't survive the cut
-        self.homed, self.message = False, None
+        self.homed, self.message, self.vents_open = False, None, None
         self._log("boot", f"boot id {self.boot_id}")
         if self.mmu is not None and self.mmu.on:
             # `app_setup` starts an MMU that's switched on (`appmain.cpp:186-190`). Its
@@ -3190,6 +3233,8 @@ class SimPrinter:
                 self._after_sync_preview(job)
         elif job.phase is JobPhase.BLIP:
             self._after_blip(job)
+        elif job.phase is JobPhase.VENTS:
+            self._preheat(job)
         elif job.phase is JobPhase.PREHEAT:
             self._begin_feeding(job)
         elif job.phase is JobPhase.RUN and job.homing:
@@ -3215,11 +3260,15 @@ class SimPrinter:
             self._show_state()
 
     def _begin(self, job: UserJob | SyncJob) -> None:
-        """Start the job the preview let through: the blip, then the job itself."""
+        """Start the job the preview let through: the blip, or the vents' move, then the
+        job itself. Both are `PrintInit`, and the move blocks the server where the blip
+        would end, so a print whose vents move shows no blip."""
         if isinstance(job, UserJob):
             job.previewing, job.mapping = False, []
             # A print's start G-code homes; a print declined at the preview never ran it.
             self.homed = True
+            if self._move_vents(job):
+                return
         if self.settings.start_blip:
             job.enter(JobPhase.BLIP)
             job.remaining = self.settings.blip_seconds
@@ -3398,6 +3447,62 @@ class SimPrinter:
         if isinstance(job, SyncJob):
             self._run_sync(job)
             return
+        self._preheat(job)
+
+    def _move_vents(self, job: UserJob) -> bool:
+        """Work the chamber vents as `PrintInit` does once the print has begun; return
+        whether the print waits for their move (`marlin_server.cpp:2461-2473`,
+        `Chamber::manage_ventilation_state` in `src/feature/chamber/chamber.cpp`, which the
+        `WATCHED` rows "the print's vent target" and "the vent rule" guard).
+
+        The target is the highest chamber target among the print's tools, each from its
+        type (`vent_opens`). With no target, or the vents already where it puts them,
+        nothing happens. Manual control only shows a warning, which isn't modeled.
+        Automatic control homes if needed, moves the lever and parks
+        (`automatic_chamber_vents::execute_control`), all inside the server's loop: its
+        nested loops publish the screens but not the server's state (`cycle` in
+        `marlin_server.cpp:913-1039`), so PrusaLink reads the state from before the print
+        began, through the `Printing` screen's `get_print_state`. That is `IDLE` with no
+        job when the preview asked nothing, and `ATTENTION` with the job and `PAUSED` in
+        `/api/v1/job` after a question, as `PrintPreviewQuestions` reads. The job's timer
+        started first, so `time_printing` runs.
+        """
+        control = self.model.vents
+        opens = [self.vent_opens(t, m) for t, m in self._uses(job).items()]
+        known = [o for o in opens if o is not None]
+        if control is None or not known:
+            return False
+        target = all(known)  # any closing target is higher than every opening one
+        if target == self.vents_open:
+            return False
+        self.vents_open = target
+        what = "open" if target else "close"
+        if control is Vents.MANUAL:
+            self._log("job", f"job {job.id}: asks the user to {what} the chamber vents")
+            return False
+        self._log("job", f"job {job.id}: the head moves to {what} the chamber vents")
+        wait = self.settings.vents_seconds
+        if wait <= EPSILON:
+            return False
+        job.enter(JobPhase.VENTS)
+        job.remaining = wait
+        self._show_state()
+        return True
+
+    def vent_opens(self, tool: int, file_type: str | None) -> bool | None:
+        """Whether a print on `tool` opens the vents (True) or closes them (False), or None
+        when its filament has no chamber target. The type is the tool's, else the file's
+        for it (`FilamentType::for_tool_heuristic` in `src/common/filament_tools.cpp`). Its
+        last resort, the type the tool last held, isn't modeled. Every preset of a vent
+        build has a target, and a type that isn't a preset has none: a user filament's
+        target defaults to off."""
+        material = self.tools[tool].material
+        name = material.name if material is not None else file_type
+        if name is None or PRESET_ALIASES.get(name, name) not in self.model.presets:
+            return None
+        return PRESET_ALIASES.get(name, name) in OPEN_VENT_PRESETS
+
+    def _preheat(self, job: UserJob) -> None:
         spec = job.spec
         job.enter(JobPhase.PREHEAT)
         job.remaining = self.settings.preheat_seconds if spec.preheat_s is None else spec.preheat_s
@@ -3489,6 +3594,11 @@ class SimPrinter:
                 self._run_steps(t, self._mmu_unload_steps())
         elif ex.auto_retracts and t is not None:
             self._run_steps(t, [LoadStep(AUTO_RETRACT_STEP)])
+        if self.model.vents is Vents.AUTOMATIC and self.vents_open:
+            # `Chamber::close_vents_after_print` (`marlin_server.cpp:1102-1104`, the `WATCHED`
+            # row "the vents after a print"). The move is part of the park.
+            self.vents_open = False
+            self._log("job", f"job {job.id}: the head moves to close the chamber vents")
 
     def _print_step(self, job: UserJob, dt: float) -> float:
         """Feed for dt, stopping at each segment end and color change. Return the time left."""

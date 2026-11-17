@@ -56,6 +56,14 @@ PRESET_ALIASES = {"TPU": "FLEX"}
 # `*_flexible` sequence where it has one. `script/firmware-check` compares them with the
 # firmware source.
 FLEXIBLE_PRESETS = frozenset({"FLEX"})
+# A print's filament opens the chamber vents when its chamber target temperature is at
+# most this, and closes them above it (`temp_limit` in `Chamber::manage_ventilation_state`,
+# `src/feature/chamber/chamber.cpp`, which the `WATCHED` row "the vent rule" guards).
+VENT_LIMIT = 45
+# The presets whose `chamber_target_temperature` is at most `VENT_LIMIT`, so a print with
+# them opens the vents; every other preset closes them. One set for every build with
+# chamber vents: `script/firmware-check` compares it with each one's targets.
+OPEN_VENT_PRESETS = frozenset({"PLA", "PETG", "PVB", "FLEX", "PVA", "BVOH"})
 
 Ramming = tuple[tuple[int, int], ...]  # steps of E in mm and feedrate in mm/min
 

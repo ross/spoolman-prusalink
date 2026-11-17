@@ -91,7 +91,8 @@ that governs a check of a file's `M862` lines. The top-level settings are
 timing and lengths: the time scale, how fast loads and prints move filament,
 the extra purge of a jam, the preheat and
 park times, a load's waits for the user, how long a sync job's `G28` homes
-when the printer isn't (`home_seconds`), the power-panic resume's wait and
+when the printer isn't (`home_seconds`), how long the automatic chamber vents'
+move takes at a print's start (`vents_seconds`), the power-panic resume's wait and
 phases, how long an MMU takes
 to connect (`mmu_connect_seconds`), and whether the start blip is on. The feed ratio and a load's slow, fast and purge
 lengths are overrides: left out, each printer uses its model's value, which
@@ -530,6 +531,17 @@ that trace. The points that matter for the bridge, in short:
 - An upload during the start blip is accepted and dropped: the firmware's
   state check passes while it reads `IDLE`, but the print start ignores it.
   The user's print goes on and the uploaded file never runs.
+- A Core One or Core One L print works the chamber vents as it begins: its
+  tools' types (or, for a tool with none, the file's) open them when every
+  preset's chamber target is at most 45 °C, as PETG's is, and close them
+  otherwise. On the Core One L, whose vent control is automatic, a move
+  takes `vents_seconds`, in place of the start blip. The printer reads as
+  the preview did just before: `IDLE` with no job, or `ATTENTION` with the
+  job after a question, while `time_printing` already counts. An upload
+  then is dropped as in the blip, or refused under `ATTENTION`. A finished
+  or stopped print closes open vents as it parks, and a boot forgets where
+  they are. A sync job uses no tool, so it never moves them. The Core One's
+  manual control only records the state; its warning isn't modeled.
 
 Choices made where the firmware was silent or the plan left it open:
 

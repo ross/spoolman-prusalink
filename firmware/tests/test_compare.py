@@ -24,7 +24,7 @@ from firmware.tests import fixtures
 from simulator import tool
 from simulator.compatibility import GCodeChecks
 from simulator.feed import Feed
-from simulator.model import MODELS, ModelInfo
+from simulator.model import MODELS, ModelInfo, Vents
 from simulator.slicer import MK4S_MMU_SLICER
 from simulator.tool import Extruder, Lengths
 from spoolman_prusalink.printer_sync import Preset, PrinterModel
@@ -541,6 +541,7 @@ def synthetic():
             "HAS_CHAMBER_API",
             "HAS_CHAMBER_FILTRATION_API",
             "HAS_HT_HOTEND",
+            "HAS_CHAMBER_VENTS",
             "HAS_GCODE_COMPATIBILITY",
             "HAS_POWER_PANIC",
             "HAS_HUMAN_INTERACTIONS",
@@ -656,6 +657,7 @@ def synthetic():
                 EXTRUDER,
                 CORE_ONE_PRESETS,
                 uuids=True,
+                vents=Vents.MANUAL,
                 group="coreone",
                 checks=MODE,
             ),
@@ -668,6 +670,8 @@ def synthetic():
             "COREONE": "coreone",
         },
         sim_flexible=frozenset({"FLEX"}),
+        sim_open_vents=frozenset({"PLA", "FLEX"}),
+        vent_limit=45,
         sim_defaults=(215, 170, 60),
         sim_aliases={"TPU": "FLEX"},
         sim_minimal_purge=1.0,
@@ -942,6 +946,26 @@ def test_simulator_flexible_differences():
         Difference(s, "7.1.0", "PLA", "flexible", False, True),
         Difference(s, "7.1.0", "FLEX", "flexible", True, False),
         Difference(s, None, "XYZ", "flexible", MISSING, PRESENT),
+    ]
+
+
+def test_simulator_vent_differences():
+    firmware, copies = synthetic()
+    core = firmware.builds["COREONE"]
+    presets = dict(core.presets)
+    presets["FLEX"] = {**presets["FLEX"], "chamber_target_temperature": None}
+    builds = {**firmware.builds, "COREONE": replace(core, presets=presets)}
+    firmware = replace(firmware, builds=builds)
+    sim = dict(copies.sim_models)
+    sim["1.4.0"] = replace(sim["1.4.0"], vents=Vents.AUTOMATIC)
+    copies = replace(copies, sim_models=sim, sim_open_vents=frozenset({"FLEX", "PPS"}))
+    m, b, s = "simulator MODELS", "bridge PRESETS", "simulator presets"
+    assert compare.compare(firmware, copies) == [
+        Difference(m, "1.4.0", None, "vents", False, True),
+        Difference(b, "7.1.0", "FLEX", "chamber", (None, 15, 40), (25, 15, 40)),
+        Difference(s, "7.1.0", "PLA", "vents", "open", "closed"),
+        Difference(s, "7.1.0", "FLEX", "vents", None, "open"),
+        Difference(s, "7.1.0", "PPS", "vents", "closed", "open"),
     ]
 
 

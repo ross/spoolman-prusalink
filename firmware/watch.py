@@ -48,6 +48,7 @@ class Watched:
 
 # The upstream commit most fingerprints were read at.
 UPSTREAM_7D8BF685 = "7d8bf6858b363c453c0617bceab5e66997d8fc25"
+UPSTREAM_B1043D68 = "b1043d68be188ad27ea72a14e160140e30e589f0"
 
 # The regions the copies come from. Each row's commit is the one its region was last read
 # at, not the last one checked: a region whose text is the same at a newer commit stays as
@@ -1040,7 +1041,7 @@ WATCHED = (
         "src/common/filament_tools.cpp",
         "function",
         "FilamentType::for_tool_heuristic",
-        "SimPrinter._type_to_load and _flexible in simulator/model.py",
+        "SimPrinter._type_to_load, _flexible and vent_opens in simulator/model.py",
         "3de732fdc5d2fc6c",
         UPSTREAM_7D8BF685,
     ),
@@ -1339,6 +1340,67 @@ WATCHED = (
         "the Ignored lines in apply in simulator/sync.py: the job goes on",
         "b191705b6db6d965",
         UPSTREAM_7D8BF685,
+    ),
+    # The chamber vents at a print's start and end. `PrintInit` takes the highest chamber
+    # target among the print's used tools, each by the type heuristic ("the filament
+    # change's type" watches it), and hands it to the vent rule. The automatic move homes
+    # if needed, moves the lever and parks, inside the server's loop. The stale state
+    # PrusaLink reads meanwhile comes from `cycle` in `marlin_server.cpp`, which is too
+    # broad to watch.
+    Watched(
+        "the print's vent target",
+        "src/common/marlin_server.cpp",
+        "statement",
+        "GCodeInfo::getInstance().for_each_used_extruder(",
+        "SimPrinter._move_vents in simulator/model.py: the print's tools, a sync job none",
+        "64cf0af2eb433f69",
+        UPSTREAM_B1043D68,
+    ),
+    Watched(
+        "the vent rule",
+        "src/feature/chamber/chamber.cpp",
+        "function",
+        "Chamber::manage_ventilation_state",
+        "VENT_LIMIT in simulator/tool.py, and SimPrinter._move_vents in simulator/model.py:"
+        " a move only when the vents must change, a warning under manual control",
+        "58b37a6e76562172",
+        UPSTREAM_B1043D68,
+    ),
+    Watched(
+        "the vent move",
+        "src/marlin_stubs/feature/automatic_chamber_vents/automatic_chamber_vents.cpp",
+        "function",
+        "execute_control",
+        "the VENTS phase in simulator/model.py: a G28 if needed, the lever and a park",
+        "b8ad6819adc28843",
+        UPSTREAM_B1043D68,
+    ),
+    Watched(
+        "the vents after a print",
+        "src/feature/chamber/chamber.cpp",
+        "function",
+        "Chamber::close_vents_after_print",
+        "SimPrinter._end_of_print in simulator/model.py: automatic control closes open vents",
+        "3054cd415cb3b2f9",
+        UPSTREAM_B1043D68,
+    ),
+    Watched(
+        "the Core One vent default",
+        "src/common/printer_variant/coreone.cpp",
+        "statement",
+        "constexpr EnumArray<PrinterVariant, Features, PrinterVariant::_cnt> variant_features",
+        "ModelInfo.vents in simulator/model.py: manual on the Core One builds",
+        "b701f20dca60e125",
+        UPSTREAM_B1043D68,
+    ),
+    Watched(
+        "the Core One L vent default",
+        "src/common/printer_variant/coreonel.cpp",
+        "statement",
+        "constexpr EnumArray<PrinterVariant, Features, PrinterVariant::_cnt> variant_features",
+        "ModelInfo.vents in simulator/model.py: automatic on the Core One L builds",
+        "59a94c1eb0a8994a",
+        UPSTREAM_B1043D68,
     ),
 )
 
