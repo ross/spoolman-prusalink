@@ -386,14 +386,20 @@ written.
   in `app.py`) both read `IDLE`. The preview before Print read `IDLE` too,
   so the idle clock may already be past `sync_delay`. A due write (W2,
   W14) is uploaded and gets 201, but the firmware drops it, since
-  `print_start` ignores a request from `PrintInit` (F15). W6 then waits
-  for a job that never runs, and W5's "didn't take" catches it only after
-  the attempts are spent (`MAX_SYNC_ATTEMPTS`). After a preview question,
-  the move reads `ATTENTION` with the job, and the upload gets a 409: the
-  bridge waits, as it does at the preview's questions (F28, F29).
-- **Effect**: A due write is delayed by its attempts, and the spool can be
-  flagged "didn't take" with nothing wrong. Charges aren't at risk:
-  nothing extrudes in the window.
+  `print_start` ignores a request from `PrintInit` (F15). The sync job
+  uses one of its `MAX_SYNC_ATTEMPTS`, which is 2. W6 then waits for a job
+  that never runs. Through the user's print, `_check_asked` doesn't give up,
+  because the job isn't there to ask, and `sync_printer` doesn't upload,
+  because the poll reads no idle state. After the print, once the printer
+  has been idle for `sync_delay`, the bridge writes again. That job has no
+  vent move (F10), so it takes. W5's "didn't take" flags the spool only if
+  the retry is dropped too, for example in the next print's vent move.
+  After a preview question, the move reads `ATTENTION` with the job, which
+  isn't in `IDLE_STATES`, so `sync_printer` doesn't upload. There's no 409:
+  the bridge waits, as it does at the preview's questions (F28, F29).
+- **Effect**: A due write waits until the user's print ends. One dropped
+  job doesn't flag the spool. Charges aren't at risk: nothing extrudes in
+  the window.
 - **Evidence**: Read in the firmware source. The window is from
   `F5-print` (2026-11-17): `IDLE` with no job for 14 s, then `PRINTING`
   with `time_printing` 13. The simulator models the move
