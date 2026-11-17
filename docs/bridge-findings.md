@@ -374,7 +374,7 @@ written.
 
 - **Printers**: Every model with chamber vents that move on their own that
   the bridge writes to: the Core One L, and a Core One set to automatic
-  vent control, as its Plus variants are by default. INDX and the XL once
+  vent control, as its Plus variants are by default. The INDX builds once
   BF14 is built.
 - **What happens**: When a print starts with vents that must move, such as
   a PETG print on a Core One L, whose vents close after every print,
