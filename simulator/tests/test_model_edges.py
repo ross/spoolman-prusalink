@@ -344,6 +344,7 @@ TOOL_KEYS = {
     "gap_valid",
     "auto_retracted",
     "sensor_fault",
+    "at_sensor",
     "stuck_write",
     "process",
 }

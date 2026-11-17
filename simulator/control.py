@@ -37,6 +37,7 @@ ACTIONS = frozenset(
     {
         "load",
         "unload",
+        "pull",
         "load_to_nozzle",
         "eject",
         "cut",

@@ -450,3 +450,47 @@ async def test_the_preview_of_a_print_over_http(client):
     assert await read(c) == ("IDLE", None, 204, None)  # the start blip
     sim.tick(0.3)
     assert await read(c) == ("PRINTING", 1, 200, "PRINTING")
+
+
+def test_disable_fs_at_the_filament_not_inserted_screen_prints_with_the_sensors_off():
+    """A single-tool printer's Disable FS: the sensors go off and the print starts, with no
+    type check, though the file names one the empty tool doesn't hold (F29)."""
+    sim, p = make(tools=[empty()])
+    p.start_print(PrintSpec([Segment(0, 10, "PETG")], preheat_s=0))
+    sim.tick(0.5)
+    p.tap_through()  # Print at the warning
+    assert p.job.waits_for(Reason.NO_FILAMENT) and p.actions_json()["tap_through"] is None
+    p.tap_through()  # Disable FS
+    assert not p.sensors and p.job.phase is JobPhase.BLIP and not p.job.previewing
+
+
+def test_the_preview_s_load_waits_for_the_filament_then_continue_then_the_color():
+    """The waits the F28 trace shows: no filament at the sensor while the nozzle heats, the
+    filament at the sensor until Continue, the head's move to the purge, and the color
+    question after the purge."""
+    sim, p = make(
+        tools=[empty()],
+        insert_seconds=1.0,
+        continue_seconds=1.0,
+        purge_park_seconds=1.0,
+        color_seconds=1.0,
+    )
+    p.start_print(PrintSpec([Segment(0, 10, "PLA")], preheat_s=0))
+    sim.tick(0.5)
+    p.tap_through()
+    p.load(0, source="preset", name="PLA")
+    sim.tick(0.5)
+    assert p.filament_present(p.tools[0]) is False and p.tools[0].process.phase == "INSERT"
+    sim.tick(1.0)
+    assert p.filament_present(p.tools[0]) is True and p.tools[0].process.phase == "ASK"
+    assert p.tools[0].extruded == 0
+    sim.tick(1.0)
+    assert p.tools[0].process.phase == "SLOW"
+    while p.tools[0].process.phase != "PARK":
+        sim.tick(0.1)
+    assert p.tools[0].material is None
+    while p.tools[0].process.phase != "ASK":
+        sim.tick(0.1)
+    assert p.tools[0].material is not None and p.job.phase is JobPhase.PREVIEW_LOAD
+    sim.tick(1.0)
+    assert p.tools[0].process is None and not p.job.previewing
