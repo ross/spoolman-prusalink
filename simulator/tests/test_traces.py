@@ -266,6 +266,7 @@ def f10b_sync_job_rewrite(rec: Recorder) -> None:
     tool.fill(TAGGED)
     _auto_retracted(tool)
     rec.printer.screen = State.FINISHED
+    rec.printer.homed = True  # the earlier sync job homed it
     rec.reset()
     rec.advance(LEAD)
     rec.printer.upload("spoolman-sync.gcode", SYNC_JOB, print_after=True, overwrite=True)
