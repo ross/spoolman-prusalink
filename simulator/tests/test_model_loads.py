@@ -448,7 +448,6 @@ def test_a_pick_that_clears_the_type_leaves_nothing_to_purge():
     assert p.state is State.IDLE
 
 
-
 def test_the_jobs_timer_is_paused_through_a_changes_return():
     sim, p = printing_runout("1.4.1", change_return_seconds=10)
     p.load(0)

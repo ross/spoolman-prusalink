@@ -6545,6 +6545,15 @@ FilamentType CurrentStore::set_filament_type(VirtualToolIndex virtual_tool, Fila
 
     return value;
 }
+
+#if PRINTER_IS_PRUSA_COREONE()
+    if (should_migrate<5>()) {
+        // Printers that are upgraded are most likely CoreOne without vent grille lever
+        // Those have to keep the manual open/close mechanism.
+        // On new CoreOne+ printers, this will be checked in HW config
+        auto_chamber_vent_enabled.set(false);
+    }
+#endif
 """
 
 # `filament_sensor.cpp`, excerpt: what a sensor reads once it's disabled.
@@ -6691,6 +6700,12 @@ constexpr EnumArray<PrinterVariant, Features, PrinterVariant::_cnt> variant_feat
 };
 """  # noqa: E501 (verbatim firmware lines)
 
+# `coreone.hpp`, excerpt: the edition a fresh or factory-reset Core One ships as.
+COREONE_VARIANT_HPP = """\
+/// Edition a factory-fresh unit currently ships as; applied on the first run and after a factory reset.
+static constexpr PrinterVariant printer_variant_after_factory_reset = PrinterVariant::plus_gen2;
+"""  # noqa: E501 (verbatim firmware lines)
+
 # The Core One L variants' vent control defaults.
 COREONEL_VARIANT_CPP = """\
 constexpr EnumArray<PrinterVariant, Features, PrinterVariant::_cnt> variant_features {
@@ -6779,6 +6794,7 @@ FILES = {
         AUTOMATIC_CHAMBER_VENTS_CPP
     ),
     "src/common/printer_variant/coreone.cpp": COREONE_VARIANT_CPP,
+    "src/common/printer_variant/coreone.hpp": COREONE_VARIANT_HPP,
     "src/common/printer_variant/coreonel.cpp": COREONEL_VARIANT_CPP,
     "src/common/marlin_print_preview.cpp": MARLIN_PRINT_PREVIEW_CPP,
     "src/gui/MItem_mmu.cpp": MITEM_MMU_CPP,
