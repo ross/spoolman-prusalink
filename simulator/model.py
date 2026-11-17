@@ -1170,25 +1170,37 @@ class SimPrinter:
         purge: `insert_seconds`, `continue_seconds`, `purge_park_seconds` and
         `color_seconds`.
         """
-        s, lengths = self.settings, self.model.extruder.lengths
-        slow, fast, model_purge = self._load_lengths()
+        s = self.settings
+        slow, fast, _purge = self._load_lengths()
         slow = slow if s.slow_load_mm is None else s.slow_load_mm
         fast = fast if s.fast_load_mm is None else s.fast_load_mm
-        ex = self.model.extruder
+        return [
+            LoadStep(INSERT_STEP, s.insert_seconds),
+            LoadStep(ASK_STEP, s.continue_seconds),
+            LoadStep("SLOW", slow),
+            LoadStep("FAST", fast),
+            *self._purge_steps(purge, extra, printing, auto_retract=auto_retract),
+        ]
+
+    def _purge_steps(
+        self, purge: float | None, extra: float, printing: bool, *, auto_retract: bool
+    ) -> list[LoadStep]:
+        """A load's steps from its park on: the type, the purge and what follows it, as
+        `_load_steps` describes, with its overrides. The type is written once the moves
+        before it have run, just before the purge is planned (`planner.synchronize` and
+        `mark_filament_as_loaded` in `purge_process`, `pause.cpp:789-797`)."""
+        s, ex = self.settings, self.model.extruder
+        lengths = ex.lengths
         if ex.cleaner_purge_mm:
             purge = ex.cleaner_purge_mm
         else:
             if purge is None:
-                purge = model_purge if s.purge_mm is None else s.purge_mm
+                purge = self._load_lengths()[2] if s.purge_mm is None else s.purge_mm
             purge = max(purge, MINIMAL_PURGE_MM)
         purge += extra
         if ex.cleaner_purge_mm == 0:  # the iX
             purge = math.ceil(purge / IX_PURGE_STEP_MM - EPSILON) * IX_PURGE_STEP_MM
         steps = [
-            LoadStep(INSERT_STEP, s.insert_seconds),
-            LoadStep(ASK_STEP, s.continue_seconds),
-            LoadStep("SLOW", slow),
-            LoadStep("FAST", fast),
             LoadStep(PARK_STEP, s.purge_park_seconds),
             LoadStep(TYPE_STEP),
             LoadStep("PURGE", purge),
@@ -1541,6 +1553,30 @@ class SimPrinter:
         t.path.loaded, t.path.at_sensor = False, False
         if self.power is not Power.OFF:
             self._idle_clear_selected()
+        self._show_state()
+
+    def purge(self, tool: int) -> None:
+        """Filament > Purge Filament: `M701 L0 W2` (`MI_PURGE::click`,
+        `src/gui/MItem_filament.cpp:159-169`), a load that only purges (`do_purge_only` in
+        `M701_load`, `M701_2.cpp:71, 118`).
+
+        The menu offers it while a type is stored (`tool_has_filament`,
+        `MItem_filament.cpp:21-27`), and the preheat takes that type without asking
+        (`determine_filament_for_operation`, `M70X_preheat.cpp:80-98`). The load then goes
+        straight to the purge (`load_start_process`, `pause.cpp:506-507`), which writes
+        the same type back, so the type doesn't change. The purge has the length of a load's,
+        doubled for a high-flow nozzle, then asks whether the color is correct, and Yes
+        auto-retracts as after any idle load (`purge_process` and
+        `color_correct_ask_process`, `pause.cpp:789-815, 903-924`). Filament the sensor
+        doesn't see would turn the purge into a load, which isn't modeled.
+        """
+        t = self._tool(tool)
+        self._check_purge(t)
+        self._log("action", f"purge T{tool}")
+        self._menu_pick(t)
+        steps = self._purge_steps(None, 0.0, False, auto_retract=True)
+        self._start_load(t, steps, replace(t.material))
+        self.screen = State.IDLE  # using the menu dismisses a finished or stopped screen
         self._show_state()
 
     def _start_load(self, t: SimTool, steps: list[LoadStep], material: Material | None) -> None:
@@ -2727,6 +2763,19 @@ class SimPrinter:
         if not t.path.loaded:
             raise Invalid(f"T{t.index} has no filament")
 
+    def _check_purge(self, t: SimTool) -> None:
+        self._need_power()
+        if self.feed is MMU:
+            raise Invalid("Purge Filament with the MMU isn't modeled")
+        if t.material is None:
+            raise Invalid(f"T{t.index} has no type stored")
+        if not t.path.loaded:
+            raise Invalid(f"T{t.index} has no filament")
+        if t.process is not None or self.state is State.BUSY:
+            raise Busy("a load or unload is already running")
+        if self.job is not None or self.state not in IDLE_STATES:
+            raise Busy(f"can't purge while {self.state}")
+
     def _check_select(self) -> None:
         if self.feed is MMU:
             raise Invalid("an MMU selects a slot only by loading it")
@@ -2958,6 +3007,7 @@ class SimPrinter:
             "load": lambda: self._check_load(t, keep=False),
             "keep": lambda: self._check_load(t, keep=True),
             "unload": lambda: self._check_unload(t),
+            "purge": lambda: self._check_purge(t),
             "pull": lambda: self._check_pull(t),
             "extrude": lambda: self._check_move(t),
             "retract": lambda: self._check_move(t),

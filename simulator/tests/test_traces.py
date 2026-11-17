@@ -163,22 +163,53 @@ def f1_reboot(rec: Recorder) -> None:
     rec.advance(2.0)
 
 
-def f2_unload(rec: Recorder) -> None:
-    rec.advance(LEAD)
+def _auto_retracted_with(rec: Recorder, material: Material) -> None:
+    """Start from `material` loaded and auto-retracted, as a menu load or Purge Filament
+    leaves the tool."""
+    tool = rec.printer.tools[0]
+    tool.fill(material)
+    _auto_retracted(tool)
+    rec.reset()
+
+
+def _menu_unload(rec: Recorder) -> None:
+    """A menu unload, then the filament pulled out of the sensor, where the unload left it."""
     rec.printer.unload(0)
     rec.settled()
     rec.advance(2.0)
+    rec.printer.pull(0)
+    rec.advance(2.0)
+
+
+def f2_unload(rec: Recorder) -> None:
+    """A menu unload of the tool Purge Filament (F11) left auto-retracted, so it unloads cold
+    and counts nothing, then the pull."""
+    _auto_retracted_with(rec, TAGGED)
+    rec.advance(LEAD)
+    _menu_unload(rec)
+
+
+def _unloaded(rec: Recorder) -> None:
+    """Start from an empty tool with no type, as a menu unload and a pull leave it: the
+    tracker's gap at its limit and not trusted."""
+    tool = rec.printer.tools[0]
+    tool.fill(None)
+    tool.path.empty(rec.printer.model.gap_mm)
+    rec.reset()
 
 
 def f3_load_preset(rec: Recorder) -> None:
-    f2_unload(rec)
+    """A menu load of the PETG preset into the tool F2 left empty."""
+    _unloaded(rec)
+    rec.advance(LEAD)
     rec.printer.load(0, source="preset", name=PETG.name)
     rec.settled()
     rec.advance(2.0)
 
 
 def f4_load_tag(rec: Recorder) -> None:
-    f2_unload(rec)
+    _unloaded(rec)
+    rec.advance(LEAD)
     m = TAGGED
     rec.printer.load(0, source="tag", name=m.name, color=m.color, uuid=m.instance_uuid)
     rec.settled()
@@ -307,12 +338,22 @@ def f10c_sync_job_rewrite_idle(rec: Recorder) -> None:
 
 
 def f11_manual_extrude(rec: Recorder) -> None:
+    """Move E +20, -10 and +20, which counts only the 10 past the gap, then Purge Filament.
+    Move E plans its moves while the knob turns (`ScreenMenuMove::plan_moves`), so each
+    +20 moved over two polls on the printer, and the replay feeds it in two parts."""
     rec.advance(LEAD)
-    rec.printer.extrude(0, 50)
+    rec.printer.extrude(0, 5)
+    rec.advance(1.0)
+    rec.printer.extrude(0, 15)
     rec.advance(2.0)
     rec.printer.retract(0, 10)
     rec.advance(2.0)
-    rec.printer.extrude(0, 50)
+    rec.printer.extrude(0, 14)  # 10 refill the gap
+    rec.advance(1.0)
+    rec.printer.extrude(0, 6)
+    rec.advance(2.0)
+    rec.printer.purge(0)
+    rec.settled()
     rec.advance(2.0)
 
 
@@ -438,13 +479,11 @@ def f47_sensors_setting(rec: Recorder) -> None:
 
 
 def f48_unload_load(rec: Recorder) -> None:
-    """A menu unload, the filament pulled out of the sensor, then a menu load, as F3."""
+    """A menu unload of the preset F3 loaded, which left it auto-retracted, the filament
+    pulled out of the sensor, then a menu load, as F3."""
+    _auto_retracted_with(rec, PETG)
     rec.advance(LEAD)
-    rec.printer.unload(0)
-    rec.settled()
-    rec.advance(2.0)
-    rec.printer.pull(0)
-    rec.advance(2.0)
+    _menu_unload(rec)
     rec.printer.load(0, source="preset", name=PETG.name)
     rec.settled()
     rec.advance(2.0)

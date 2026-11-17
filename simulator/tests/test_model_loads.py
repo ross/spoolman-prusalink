@@ -9,9 +9,18 @@ from __future__ import annotations
 
 import pytest
 
-from simulator.model import JobPhase, Material, PrintSpec, Segment, SimTool, State
+from simulator.model import (
+    Busy,
+    Invalid,
+    JobPhase,
+    Material,
+    PrintSpec,
+    Segment,
+    SimTool,
+    State,
+)
 from simulator.tests.test_model import reload_ends
-from simulator.tests.util import loaded, make
+from simulator.tests.util import loaded, make, make_mmu
 
 INDX_RATIO = 550 / 576
 PLA = Material("PLA", adhoc=False)
@@ -194,6 +203,59 @@ def test_manual_moves_count_past_the_gap_and_retracts_stop_at_its_limit():
     p.extrude(0, 30)  # 27 refill it, 3 count
     assert p.tools[0].path.gap == 0
     assert p.tools[0].extruded == pytest.approx(3 * INDX_RATIO)
+
+
+def test_purge_filament_purges_and_auto_retracts_with_the_type_kept():
+    # F11: the high-flow Core One L's 80 mm purge from gap 0 counts in full; the 8 mm
+    # retract, which the auto-retract feeds back first, then its 23.
+    sim, p = make("8.1.0", [loaded(0, PLA)])
+    p.high_flow = True
+    p.purge(0)
+    assert p.state is State.BUSY
+    sim.advance(100)
+    t = p.tools[0]
+    assert t.extruded == pytest.approx((80 + 23) * 0.95)
+    assert (t.material, t.unload_count, t.path.loaded) == (PLA, 0, True)
+    assert t.path.auto_retracted == 55 and p.state is State.IDLE
+
+
+def test_purge_filament_feeds_an_auto_retract_back_first():
+    # Auto-retracted, as a load leaves it: the purge's feed-back of 55 into the 40 mm gap
+    # counts 15, then the 40 mm purge and the auto-retract's 23.
+    sim, p = make("8.1.0", [loaded(0, PLA)])
+    t = p.tools[0]
+    t.path.auto_retracted, t.path.gap, t.path.gap_valid = 55.0, 40.0, False
+    p.purge(0)
+    sim.advance(100)
+    assert t.extruded == pytest.approx((15 + 40 + 23) * 0.95)
+
+
+def test_purge_filament_needs_a_stored_type_and_filament():
+    sim, p = make("8.1.0", [SimTool(0)])
+    with pytest.raises(Invalid, match="no type"):
+        p.purge(0)
+    p.tools[0].fill(PLA)
+    p.set_sensors(False)
+    p.pull(0)  # nothing reads it, so the type stays
+    with pytest.raises(Invalid, match="no filament"):
+        p.purge(0)
+
+
+def test_purge_filament_waits_for_an_idle_printer():
+    sim, p = make("8.1.0", [loaded(0, PLA)])
+    p.purge(0)
+    with pytest.raises(Busy):
+        p.purge(0)
+    sim.advance(100)
+    p.start_print(PrintSpec([Segment(0, 100)], preheat_s=0))
+    with pytest.raises(Busy, match="can't purge"):
+        p.purge(0)
+
+
+def test_purge_filament_isnt_modeled_with_an_mmu():
+    sim, p = make_mmu(slot=0)
+    with pytest.raises(Invalid, match="MMU"):
+        p.purge(0)
 
 
 def printing_runout(model: str, **settings):

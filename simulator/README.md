@@ -114,7 +114,7 @@ curl -X POST -H 'Content-Type: application/json' \
   http://127.0.0.1:8000/api/printers/core-one-l/load
 ```
 
-Actions: `load`, `unload`, `pull`, `load_to_nozzle`, `eject`, `cut`, `extrude`, `retract`,
+Actions: `load`, `unload`, `pull`, `purge`, `load_to_nozzle`, `eject`, `cut`, `extrude`, `retract`,
 `select_tool`, `park_tool`, `change_all`, `preload_all`, `start_print`, `pause`, `resume`, `cancel`, `dismiss`, `home`, `runout`, `jam`,
 `change_filament`, `clear_jam`, `reboot`, `set_power`, `set_fault`, `set_firmware`,
 `set_sensor_fault`, `set_stuck_write`, `set_tool_enabled`,
@@ -221,6 +221,11 @@ that trace. The points that matter for the bridge, in short:
   the simulator empties the path with the unload. `pull` is a hand pull outside a
   print: on the picked tool with the sensors on, the idle sensor clear then
   counts an unload if a type is stored.
+- `purge` is Filament > Purge Filament, `M701 L0 W2`: a load with no
+  insertion and no slow or fast load. It parks, writes the stored type back,
+  purges a load's purge length, asks the color question, and auto-retracts,
+  so the type doesn't change and no unload counts. It needs a stored type
+  and filament in the path, and isn't modeled with an MMU.
 - A print started from the page stands for the user pressing Print on the
   file's preview: the job is counted at once and reads `PRINTING` while the
   file is scanned. Then the preview checks the tools the print's segments
