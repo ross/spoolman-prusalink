@@ -354,8 +354,8 @@ medium is a new input or condition through `account()` or
   records the setting when it's raised and gives it in the past tense; a
   change while it stands, or a restart, doesn't change it. Each tool's `filament_present` (F48) isn't
   used: BF12 waits on workstream 8.
-- **Needs**: Sitting D's F29 trace confirms the single-tool path and F12
-  the power-cut path.
+- **Needs**: F12 confirms the power-cut path. Sitting D's F29 trace
+  confirmed the single-tool path on 2026-11-16.
 - **User and saved state**: README, "How usage is attributed", changes the
   held-usage rule, explains the warning, and has BF12's text. One new
   `ToolState` field, `printed_empty`, saved in place and read as false
