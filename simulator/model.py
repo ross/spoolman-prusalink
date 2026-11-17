@@ -1617,6 +1617,13 @@ class SimPrinter:
         self._check_purge(t)
         self._log("action", f"purge T{tool}")
         self._menu_pick(t)
+        if t.material is None:
+            # The pick's idle sensor clear counted an unload and cleared the type, so the
+            # menu has nothing left to purge.
+            self._log("action", f"purge T{tool} stopped: the pick cleared the type")
+            self.screen = State.IDLE
+            self._show_state()
+            return
         steps = self._purge_steps(None, 0.0, False, auto_retract=True)
         self._start_load(t, steps, replace(t.material))
         self.screen = State.IDLE  # using the menu dismisses a finished or stopped screen

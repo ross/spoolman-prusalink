@@ -438,3 +438,12 @@ def test_a_change_in_the_preheat_keeps_the_preheat_left_over_its_return():
         sim.tick(0.1)
     assert p.job.phase is JobPhase.PREHEAT
     assert p.job.remaining == pytest.approx(left - 0.1, abs=0.11)
+
+
+def test_a_pick_that_clears_the_type_leaves_nothing_to_purge():
+    sim, p = make("3.1.0", [loaded(0, PLA), loaded(1, PLA)])
+    p.set_sensor_fault(1, True)
+    p.purge(1)  # the pick's idle sensor clear counts an unload and clears T1's type
+    assert p.tools[1].material is None and p.tools[1].process is None
+    assert p.state is State.IDLE
+
