@@ -440,7 +440,7 @@ def test_a_change_in_the_preheat_keeps_the_preheat_left_over_its_return():
     assert p.job.remaining == pytest.approx(left - 0.1, abs=0.11)
 
 
-def test_a_pick_that_clears_the_type_leaves_nothing_to_purge():
+def test_a_purge_stops_when_the_pick_clears_the_type():
     sim, p = make("3.1.0", [loaded(0, PLA), loaded(1, PLA)])
     p.set_sensor_fault(1, True)
     p.purge(1)  # the pick's idle sensor clear counts an unload and clears T1's type

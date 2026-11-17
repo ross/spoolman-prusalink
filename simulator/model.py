@@ -1621,9 +1621,15 @@ class SimPrinter:
         self._log("action", f"purge T{tool}")
         self._menu_pick(t)
         if t.material is None:
-            # The pick's idle sensor clear counted an unload and cleared the type, so the
-            # menu has nothing left to purge.
-            self._log("action", f"purge T{tool} stopped: the pick cleared the type")
+            # The pick's idle sensor clear counted an unload and cleared the type. The
+            # firmware's preheat then asks for a type (`BUSY`) and, with the sensor empty,
+            # waits for filament as a load. The simulator stops instead, which leaves the
+            # same type and count.
+            self._log(
+                "action",
+                f"purge T{tool} stopped: the pick cleared the type; "
+                "the preheat's type question isn't modeled",
+            )
             self.screen = State.IDLE
             self._show_state()
             return

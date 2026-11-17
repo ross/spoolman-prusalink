@@ -145,7 +145,7 @@ read again at each firmware update.
   the tools not yet reached.
 - Tune > Change filament (`change_filament`) runs the filament change on
   any tool during a print: on another tool it picks that tool, and the
-  resume changes back with no purge. The counts land on that tool only. A
+  change's end changes back with no purge. The counts land on that tool only. A
   runout and a color change on INDX follow the firmware's INDX flow, and a
   load or unload in a print reads `ATTENTION` in every phase.
 - A print can carry spool joins (`PrintSpec.spool_join`). A runout on a
@@ -715,7 +715,8 @@ Left to the work:
   the firmware reads the selector's slot as if the MMU were up
   (`marlin_print_preview.cpp:709-711`). The simulator refuses Yes then.
 - The color question after an MMU reload, `IsColor` in `ATTENTION`, with
-  its Retry and Purge More. The simulator's reload goes on to `PAUSED`.
+  its Retry and Purge More. The simulator's change ends with the reload,
+  and the print goes on.
 - MMU errors, the automatic retries and the error screens, which the
   simulator doesn't model, and a `jam` with the MMU on, which it refuses:
   the MMU's own jam handling isn't read.
