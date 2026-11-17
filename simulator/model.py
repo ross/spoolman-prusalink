@@ -3394,8 +3394,8 @@ class SimPrinter:
 
     def _run_sync(self, job: SyncJob) -> None:
         """Run the job's commands. A `G28` with the printer not homed takes `home_seconds`
-        first, which the F10c and F28 traces show as most of the job: the commands after it
-        wait for it."""
+        first, which the F10c and F28 traces show taking up to a minute or more: the commands
+        after it wait for it."""
         commands = gcode.parse(job.gcode)
         wait = self.settings.home_seconds
         if not self.homed and wait > EPSILON and any(isinstance(c, gcode.Home) for c in commands):
