@@ -216,7 +216,9 @@ that trace. The points that matter for the bridge, in short:
   and counts nothing. An unload of a tool that fed since its auto-retract
   counts 23 mm times the feed ratio; a Nextruder runout counts 7 mm. A menu
   unload ends without waiting for the sensor to clear, so its filament stays
-  in the sensor until `pull` takes it out. `pull` is a hand pull outside a
+  in the sensor until `pull` takes it out. The iX and the dev kit have no
+  human interactions, so their unloads wait for the sensor to clear, and
+  the simulator empties the path with the unload. `pull` is a hand pull outside a
   print: on the picked tool with the sensors on, the idle sensor clear then
   counts an unload if a type is stored.
 - A print started from the page stands for the user pressing Print on the
@@ -259,15 +261,15 @@ that trace. The points that matter for the bridge, in short:
   with counters or without: `sensors_enabled` is the `sensors` switch
   (F47), and each tool's `filament_present` is what its sensor sees (F48).
   The reading follows the path: `true` while filament is in it, from the
-  end of a load's `insert_seconds`, and after a menu unload until `pull`.
-  It's left out on
+  end of a load's `insert_seconds`, and after a menu unload until `pull`,
+  except on the iX and the dev kit. It's left out on
   every tool while the sensors are off, and on each MMU slot but the one
   the extruder's sensor reads for: slot 0 until the MMU is Active, then
   the selected slot, or none. A toolchanger's docked tools read their own
   sensors, so a tool emptied by hand while docked reads `false` with its
   type kept. INDX's sensor is a side sensor on the xBuddy Extension, which
-  reads the filament a menu unload leaves until it's pulled, as on every
-  model. `set_sensor_fault` reads `false`.
+  reads the filament a menu unload leaves until it's pulled, as on the other
+  models with human interactions. `set_sensor_fault` reads `false`.
 - An MMU3's slots share one filament path, sensor and gap (F38, F39).
   `set_mmu` is the menu's switch, which a print or any operation blocks.
   With it on, `/api/v1/info` reports `mmu` as true and `/api/v1/filament`

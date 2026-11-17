@@ -290,6 +290,9 @@ class ModelInfo:
     # Whether the build resumes a print after a power cut: HAS_POWER_PANIC in
     # `ProjectOptions.cmake`. Without it, a cut loses the print.
     power_panic: bool = True
+    # Whether the build has HAS_HUMAN_INTERACTIONS in `ProjectOptions.cmake`. Without it, a
+    # menu unload waits for the filament sensor to clear (`pause.cpp:1280-1301`).
+    human_interactions: bool = True
     # Its `compatibility_group` in `printer_model_data.hpp`. The MK3.5, MK4 and XL builds
     # run several models and check a file against the one the printer is set to
     # (`PrinterModelInfo::current`), so each model has its own entry's group.
@@ -455,12 +458,21 @@ MODELS = _models(
         max_tools=5,
         counters=False,
         power_panic=False,
+        human_interactions=False,
         group="xl",
         checks=PLAIN_CHECKS,
         feed=Feed.XL,
         slicer=XL_SLICER,
     ),
-    ModelInfo("4.1.0", "iX", IX_EXTRUDER, LOAD_CELL_PRESETS, group="ix", checks=IX_CHECKS),
+    ModelInfo(
+        "4.1.0",
+        "iX",
+        IX_EXTRUDER,
+        LOAD_CELL_PRESETS,
+        human_interactions=False,
+        group="ix",
+        checks=IX_CHECKS,
+    ),
     ModelInfo(
         "7.1.0",
         "COREONE",

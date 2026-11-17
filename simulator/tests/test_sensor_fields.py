@@ -90,6 +90,18 @@ def test_a_menu_unload_reads_filament_until_the_user_pulls_it():
     assert present(p) == {0: False} and p.tools[0].unload_count == 1
 
 
+@pytest.mark.parametrize("model", ["4.1.0", "5.1.0"])
+def test_a_menu_unload_without_human_interactions_ends_with_the_sensor_clear(model):
+    # With no HAS_HUMAN_INTERACTIONS, an unload waits for the sensor to clear
+    # (`pause.cpp:1291-1301, 1371-1391`), so it can't end with the filament in it.
+    sim, p = make(model)
+    p.unload(0)
+    sim.advance(120)
+    assert p.tools[0].process is None and p.tools[0].material is None
+    assert present(p) == {0: False}
+    assert not p.tools[0].path.at_sensor
+
+
 def test_a_hand_pull_with_the_sensors_on_clears_the_type():
     sim, p = make()
     p.pull(0)

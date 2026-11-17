@@ -695,6 +695,16 @@ WATCHED = (
         UPSTREAM_7D8BF685,
     ),
     Watched(
+        "the unload's end",
+        "src/marlin_stubs/pause/pause.cpp",
+        "function",
+        "Pause::unload_process",
+        "FeedSystem.end_unload in simulator/feed.py: a menu unload leaves the filament in"
+        " the sensor on a build with human interactions, and waits for it to clear on others",
+        "1aa1a60757ac6494",
+        UPSTREAM_7D8BF685,
+    ),
+    Watched(
         "the MMU eject",
         "lib/Marlin/Marlin/src/feature/prusa/MMU2/mmu2_mk4.cpp",
         "function",

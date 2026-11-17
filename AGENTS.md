@@ -184,7 +184,7 @@ table for every model. Each simulator model keeps its build's presets and extrud
 numbers: steps per mm, filament change lengths, ramming sequences, the nozzle cleaner's
 purge, the auto-retract's fully-retracted threshold, whether it can unload cold, the
 purge before an unload, and the power-panic resume's purge. It also keeps its G-code compatibility group, whether its build
-has a compatibility mode, whether its build has power panic, its feed system (direct, XL or INDX), and the `M862.6` feature names its build knows. The simulator
+has a compatibility mode, whether its build has power panic, whether its build has human interactions, its feed system (direct, XL or INDX), and the `M862.6` feature names its build knows. The simulator
 also lists the flexible presets, every G-code model name with its group, the shortest
 purge a load runs, and the MMU's slot count, which the check compares with an MMU build's
 `EXTRUDERS`. The simulator also keeps the MMU3's tool-change and load lengths and its

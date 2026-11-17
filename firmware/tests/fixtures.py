@@ -229,6 +229,17 @@ set_feature_for_printers_master_board(
   "COREONEL"
   "COREONEL_INDX"
   )
+set_feature_for_printers(
+  HAS_HUMAN_INTERACTIONS
+  "MINI"
+  "MK4"
+  "MK3.5"
+  "XL"
+  "COREONE"
+  "COREONE_INDX"
+  "COREONEL"
+  "COREONEL_INDX"
+  )
 set_feature_for_printers(HAS_MMU2 "MK4" "MK3.5" "COREONE" "COREONEL")
 set_feature_for_printers(HAS_GCODE_COMPATIBILITY "MK3.5" "MK4" "COREONE" "COREONEL" "XL")
 set_feature_for_printers(
@@ -1869,6 +1880,59 @@ void Pause::mmu_unload_start_process([[maybe_unused]] Response response) {
     }
 
     return;
+}
+
+void Pause::unload_process([[maybe_unused]] Response response) {
+    auto physical_tool =\
+ stdext::get_optional<PhysicalToolIndex>(PhysicalToolIndex::currently_selected());
+    if (!physical_tool.has_value()) {
+        bsod("unloading notool");
+    }
+
+    setPhase(is_unstoppable() ? PhasesLoadUnload::Unloading_unstoppable :\
+ PhasesLoadUnload::Unloading_stoppable);
+#if HAS_NOZZLE_CLEANER()
+    bool needs_cleaning = true; // Assume we need to clean the nozzle
+    #if HAS_AUTO_RETRACT()
+    needs_cleaning = !auto_retract().can_cold_unload(settings.physical_tool()); // If we are\
+ retracted, we don't need to clean the nozzle
+    #endif
+#endif
+    unload_filament();
+
+    config_store().set_filament_type(settings.virtual_tool(), FilamentType::none);
+
+    switch (load_type) {
+    case LoadType::unload:
+#if HAS_SPOOL_JOIN() && HAS_TOOLCHANGER()
+    case LoadType::unload_spool_join:
+#endif
+        if constexpr (option::has_human_interactions) {
+            set(LoadState::unload_finish_or_change);
+            break;
+        }
+
+    case LoadType::unload_confirm:
+    case LoadType::filament_change:
+    case LoadType::filament_stuck:
+#if HAS_NOZZLE_CLEANER()
+        if (needs_cleaning) {
+            set(LoadState::unload_nozzle_clean);
+            return;
+        }
+#endif
+
+        if constexpr (!option::has_human_interactions) {
+            runout_timer_ms = ticks_ms();
+            set(LoadState::filament_not_in_fs);
+        } else {
+            set(LoadState::unloaded_ask);
+        }
+        break;
+
+    default:
+        break;
+    }
 }
 
 void Pause::mmu_load_process([[maybe_unused]] Response response) {
