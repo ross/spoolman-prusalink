@@ -66,9 +66,21 @@ class FeedSystem:
         the type clears. The picked tool then goes to rest, unless a change all goes on with
         a load of `t`: `M702` docks after every unload on INDX (`M701_2.cpp:194-197`), and
         `M1600` docks only after its load, so a change all's unload keeps the tool for the
-        load that follows."""
-        p._physical_unload(t, "unload")
-        if not (p.queue and p.queue[0].tool == t.index):
+        load that follows.
+
+        On a build with human interactions, a menu unload, `M702 W2`, ends with no question
+        and no wait for the sensor, so the filament stays in the sensor until the user pulls
+        it (`pull`): only `M702 I` asks (`M701_2_parse.cpp:131`, `M701_2.cpp:189`,
+        `unload_process` in `pause.cpp:1280-1287`). A change all's `M1600` asks whether the
+        filament came out and then waits for the sensor to clear (`M701_2.cpp:294`,
+        `pause.cpp:1313-1335, 1365-1386`). On the iX and the dev kit, which have no human
+        interactions, every unload waits for the sensor to clear without asking
+        (`pause.cpp:1291-1301, 1371-1391`). Wherever it waits, the path empties with the
+        unload, standing in for the user pulling the filament during the wait."""
+        changing = bool(p.queue and p.queue[0].tool == t.index)
+        at_sensor = p.model.human_interactions and not changing
+        p._physical_unload(t, "unload", at_sensor=at_sensor)
+        if not changing:
             self.rest(p)
 
     def tool_change(
@@ -192,13 +204,14 @@ class IndxToolchanger(Toolchanger):
     """INDX: tools picked from docks onto one head (`toolchanger_indx.cpp`).
 
     INDX has no extruder sensor: each tool's filament sensor is a side sensor on the
-    xBuddy Extension (`filament_sensors_handler_INDX.cpp:5-23`). Its unload doesn't wait
-    for that sensor to clear; it asks the user to confirm that the filament is out, since
-    some users push the next filament in before confirming (`unloaded_ask_process`,
-    `pause.cpp:1313-1335`). The simulator's unload empties the path, as when the user
-    pulls the filament at that question, so the tool's `filament_present` reads false. A
-    user who pushes the next filament in first would read true, which isn't modeled
-    (F48).
+    xBuddy Extension (`filament_sensors_handler_INDX.cpp:5-23`). A menu unload leaves the
+    filament at it until the user pulls it, as on every build with human interactions
+    (`FeedSystem.end_unload`).
+    An unload that asks whether the filament is out doesn't wait for that sensor to clear
+    either, since some users push the next filament in before confirming
+    (`unloaded_ask_process`, `pause.cpp:1313-1335`): the simulator's change all empties the
+    path there, as when the user pulls the filament at that question. A user who pushes
+    the next filament in first would read true, which isn't modeled (F48).
     """
 
     docks = True

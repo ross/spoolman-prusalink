@@ -330,3 +330,14 @@ def test_the_process_shows_the_step_and_what_is_left():
         "phase": "FAST",
         "remaining_mm": pytest.approx(15),
     }
+
+
+def test_a_load_s_wait_shows_the_seconds_left():
+    sim, p = unloaded("8.1.0", insert_seconds=3.0)
+    p.load(0, source="preset", name="PETG")
+    sim.tick(1.0)
+    assert p.to_json()["tools"][0]["process"] == {
+        "kind": "load",
+        "phase": "INSERT",
+        "remaining_s": pytest.approx(2),
+    }

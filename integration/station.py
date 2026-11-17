@@ -140,9 +140,13 @@ class Station:
                 since_poll = 0.0
 
     async def unload(self, tool: int = 0) -> None:
-        """Unload a tool and tick until the unload is done."""
+        """Unload a tool from the menu, tick until the unload is done, and pull the filament
+        out of the sensor, as a user who changes spools does: the menu unload leaves it
+        there (F48)."""
         self.printer.unload(tool)
         await self.run_until(lambda: self.tool_at(tool).process is None)
+        if self.tool_at(tool).path.at_sensor:
+            self.printer.pull(tool)
 
     async def swap_cycle(self, poll_every: float | None = None, *, tool: int = 0, **load) -> None:
         """Load a tool and tick until the load is done; `load` goes to `SimPrinter.load`."""

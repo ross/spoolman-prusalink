@@ -649,7 +649,8 @@ purge volume (`multimaterial_purging`) or the wiping-volume matrix.
 
 Once the printer is an INDX, these can't be recorded again. Sittings A to
 D in printer-behaviors.md cover F1 to F13, F24, F28 and F29. The first
-six below are what this plan adds; the last two are sitting D's:
+six below are what this plan adds; the last two are sitting D's, recorded
+on 2026-11-16:
 
 - **The load's split.** F3 at `--interval 0.5`: how much counts before the
   type appears, and whether about 23 mm counts at the end of the load
@@ -670,10 +671,11 @@ six below are what this plan adds; the last two are sitting D's:
 - **Everything with a tag**: F4 and F24's tag rows. The INDX has no tag
   reader until the firmware adds one.
 - **A load at the preview, then Abort.** `F28-load-then-decline`, steps 1
-  and 2 of sitting D: whether BF23's print start shows on the printer.
+  and 2 of sitting D: whether BF23's print start shows on the printer. A
+  poll landed in the load, so it didn't.
 - **A print with the sensor off.** `F29-sensors-off-print`, steps 3 to 7
   of sitting D: the single-tool path to BF24 and BF25, which the
-  simulator doesn't model.
+  simulator now models through Disable FS.
 
 ## Bridge findings
 

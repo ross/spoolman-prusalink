@@ -90,7 +90,9 @@ default) or `abort`, and it stands for every setting in the printer's menu
 that governs a check of a file's `M862` lines. The top-level settings are
 timing and lengths: the time scale, how fast loads and prints move filament,
 the extra purge of a jam, the preheat and
-park times, the power-panic resume's wait and phases, how long an MMU takes
+park times, a load's waits for the user, how long a sync job's `G28` homes
+when the printer isn't (`home_seconds`), the power-panic resume's wait and
+phases, how long an MMU takes
 to connect (`mmu_connect_seconds`), and whether the start blip is on. The feed ratio and a load's slow, fast and purge
 lengths are overrides: left out, each printer uses its model's value, which
 the page shows on the printer's card. On the page or through
@@ -112,7 +114,7 @@ curl -X POST -H 'Content-Type: application/json' \
   http://127.0.0.1:8000/api/printers/core-one-l/load
 ```
 
-Actions: `load`, `unload`, `load_to_nozzle`, `eject`, `cut`, `extrude`, `retract`,
+Actions: `load`, `unload`, `pull`, `load_to_nozzle`, `eject`, `cut`, `extrude`, `retract`,
 `select_tool`, `park_tool`, `change_all`, `preload_all`, `start_print`, `pause`, `resume`, `cancel`, `dismiss`, `home`, `runout`, `jam`,
 `change_filament`, `clear_jam`, `reboot`, `set_power`, `set_fault`, `set_firmware`,
 `set_sensor_fault`, `set_stuck_write`, `set_tool_enabled`,
@@ -187,7 +189,13 @@ that trace. The points that matter for the bridge, in short:
   primes 4 mm and retracts 8 mm instead, and the resume puts the tool back at
   the gap it had when the change began. From a full gap, a Core One L load
   counts 20 mm before the material shows and 63 mm after, times the feed
-  ratio: 40 mm of purge and 23 mm of auto-retract ramming.
+  ratio: 40 mm of purge and 23 mm of auto-retract ramming. With the
+  high-flow nozzle the Core One and Core One L ship with, the purge is
+  80 mm. A load's waits for the user are settings that default to 0:
+  `insert_seconds` before the filament reaches the sensor, which reads none
+  until then, `continue_seconds` at the sensor, `purge_park_seconds` for the
+  head's move to the purge, and `color_seconds` at the color question after
+  the purge.
 - An auto-retract runs the model's `auto_retract` ramming sequence and stores
   how far it left the filament retracted: 55 mm on a Nextruder, 8 mm on INDX.
   It runs at the end of an idle load, after the INDX cleaner purge, and at a
@@ -206,7 +214,13 @@ that trace. The points that matter for the bridge, in short:
   then retracts what's left of the unload length. INDX purges 2 mm first.
   A menu unload of a Nextruder tool that auto-retracted skips the ramming
   and counts nothing. An unload of a tool that fed since its auto-retract
-  counts 23 mm times the feed ratio; a Nextruder runout counts 7 mm.
+  counts 23 mm times the feed ratio; a Nextruder runout counts 7 mm. A menu
+  unload ends without waiting for the sensor to clear, so its filament stays
+  in the sensor until `pull` takes it out. The iX and the dev kit have no
+  human interactions, so their unloads wait for the sensor to clear, and
+  the simulator empties the path with the unload. `pull` is a hand pull outside a
+  print: on the picked tool with the sensors on, the idle sensor clear then
+  counts an unload if a type is stored.
 - A print started from the page stands for the user pressing Print on the
   file's preview: the job is counted at once and reads `PRINTING` while the
   file is scanned. Then the preview checks the tools the print's segments
@@ -215,8 +229,9 @@ that trace. The points that matter for the bridge, in short:
   tool mapping, the first screen lists more used tools than enabled ones
   (a warning), a disabled used tool (Abort only) and a used tool with no
   filament (a warning). Then, for an empty tool, the job waits for a
-  `load` of that tool, which answers Yes. The load reads `BUSY` with no
-  job. It neither primes nor runs an idle load's final auto-retract, but
+  `load` of that tool, which answers Yes, or `tap_through`, which answers
+  Disable FS: the sensors go off and the print starts with no type check.
+  The load reads `BUSY` with no job. It neither primes nor runs an idle load's final auto-retract, but
   the INDX cleaner's purge still ends with its own. A power cut while the
   preview waits leaves nothing to resume. Then a used tool whose
   stored type isn't the segment's `material`, compared exactly, asks
@@ -245,18 +260,16 @@ that trace. The points that matter for the bridge, in short:
 - `/api/v1/filament` serves the sensors as firmware from `2ef028181` does,
   with counters or without: `sensors_enabled` is the `sensors` switch
   (F47), and each tool's `filament_present` is what its sensor sees (F48).
-  The reading follows the path: `true` while filament is in it, from a
-  load's start, and through an unload until it ends. It's left out on
+  The reading follows the path: `true` while filament is in it, from the
+  end of a load's `insert_seconds`, and after a menu unload until `pull`,
+  except on the iX and the dev kit. It's left out on
   every tool while the sensors are off, and on each MMU slot but the one
   the extruder's sensor reads for: slot 0 until the MMU is Active, then
   the selected slot, or none. A toolchanger's docked tools read their own
   sensors, so a tool emptied by hand while docked reads `false` with its
-  type kept. INDX's sensor is a side sensor on the xBuddy Extension. Its
-  unload asks the user to confirm the filament is out instead of waiting
-  for the sensor, and the simulator reads `false` after it, as when the
-  user pulls the filament at that question; a user who pushes the next
-  filament in first would read `true`, which isn't modeled.
-  `set_sensor_fault` reads `false`.
+  type kept. INDX's sensor is a side sensor on the xBuddy Extension, which
+  reads the filament a menu unload leaves until it's pulled, as on the other
+  models with human interactions. `set_sensor_fault` reads `false`.
 - An MMU3's slots share one filament path, sensor and gap (F38, F39).
   `set_mmu` is the menu's switch, which a print or any operation blocks.
   With it on, `/api/v1/info` reports `mmu` as true and `/api/v1/filament`

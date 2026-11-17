@@ -125,6 +125,7 @@ FEATURES = (
     "HAS_MMU2",
     "HAS_GCODE_COMPATIBILITY",
     "HAS_POWER_PANIC",
+    "HAS_HUMAN_INTERACTIONS",
 )
 
 Ramming = tuple[read.Step, ...]
@@ -680,6 +681,8 @@ def _compare_sim_models(
             differ(table, code, None, "EXTRUDERS", build.extruders, model.m865_tools + 1)
         panic = "HAS_POWER_PANIC" in build.features
         differ(table, code, None, "power_panic", panic, model.power_panic)
+        humans = "HAS_HUMAN_INTERACTIONS" in build.features
+        differ(table, code, None, "human_interactions", humans, model.human_interactions)
         # The model's own group, as `PrinterModelInfo::current` picks it on every build.
         differ(table, code, None, "group", models[code].group, model.group)
         mode = "HAS_GCODE_COMPATIBILITY" in build.features

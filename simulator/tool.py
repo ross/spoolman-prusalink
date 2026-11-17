@@ -290,6 +290,13 @@ RETRACTED_STEP = "RETRACTED"  # stores `mm` as the auto-retracted distance
 # the extruder empty, as the end of an MMU unload does (`mmu2_mk4.cpp:674, 869-871`).
 SELECT_STEP = "SELECT"
 DESELECT_STEP = "DESELECT"
+# Steps that move no filament for `mm` seconds. INSERT waits for the filament to reach the
+# sensor, which reads none until it ends; ASK waits at a question with the filament in; PARK
+# moves the head to where the load purges.
+INSERT_STEP = "INSERT"
+ASK_STEP = "ASK"
+PARK_STEP = "PARK"
+WAITS = frozenset({INSERT_STEP, ASK_STEP, PARK_STEP})
 MARKERS = frozenset(
     {TYPE_STEP, AUTO_RETRACT_STEP, DERETRACT_STEP, RETRACTED_STEP, SELECT_STEP, DESELECT_STEP}
 )
@@ -301,9 +308,10 @@ class LoadStep:
 
     # A move's phase is SLOW, FAST, PURGE, PRIME, RETRACT, RAM or UNLOAD, or on an MMU FEED,
     # the firmware's tool-change feed, or LOAD, its load to the nozzle; a marker's is one of
-    # MARKERS.
+    # MARKERS, and a wait's one of WAITS.
     phase: str
-    mm: float = 0.0  # what's left of the move: positive feeds, negative retracts
+    # What's left of the move: positive feeds, negative retracts. For a wait, its seconds.
+    mm: float = 0.0
 
 
 @dataclass
@@ -320,7 +328,7 @@ class LoadProcess:
 
     @property
     def remaining(self) -> float:
-        """The mm left in the current step."""
+        """What's left of the current step: mm for a move, seconds for a wait."""
         return abs(self.steps[0].mm)
 
     @property
@@ -381,6 +389,9 @@ class FilamentPath:
     # known not to be retracted (`auto_retract.cpp`).
     auto_retracted: float | None = None
     sensor_fault: bool = False
+    # Filament a menu unload left in the extruder's sensor, out of the gears, for the user
+    # to pull out: the unload doesn't wait for the sensor to clear.
+    at_sensor: bool = False
 
     def move(self, mm: float, limit: float) -> float:
         """Track a move as the firmware's filament tracker does, and return the commanded
@@ -398,6 +409,11 @@ class FilamentPath:
         elif self.gap >= limit - EPSILON:
             self.gap, self.gap_valid = limit, False
         return max(-unclamped, 0.0)
+
+    @property
+    def sensed(self) -> bool:
+        """Whether the sensor sees filament: filament in the path, or left at the sensor."""
+        return self.loaded or self.at_sensor
 
     def tracked(self) -> float:
         """The tracker's gap when it's valid, else 0 (`get_retracted_distance`)."""
@@ -418,16 +434,16 @@ class FilamentPath:
         self.gap = min(max(stored, 0.0), limit)
         self.gap_valid = self.gap != limit
 
-    def empty(self, limit: float) -> None:
+    def empty(self, limit: float, *, at_sensor: bool = False) -> None:
         """Leave the path as an unload leaves it: no filament, the gap at `limit` and not
-        trusted, and no auto-retract stored."""
-        self.loaded = False
+        trusted, and no auto-retract stored. `at_sensor` leaves the filament in the sensor."""
+        self.loaded, self.at_sensor = False, at_sensor
         self.gap, self.gap_valid, self.auto_retracted = limit, False, None
 
     def fill(self, loaded: bool) -> None:
         """Set whether filament is in the path, at gap 0 and valid, with no auto-retract
         stored."""
-        self.loaded = loaded
+        self.loaded, self.at_sensor = loaded, False
         self.gap, self.gap_valid, self.auto_retracted = 0.0, True, None
 
 

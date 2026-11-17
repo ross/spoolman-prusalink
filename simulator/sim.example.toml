@@ -13,6 +13,10 @@
 # feed_ratio = 0.95                 # counted mm per mm moved; default: the model's
 # print_rate_mm_s = 5.0             # slicer mm per second for a print with no duration
 # load_rate_mm_s = 10.0             # feed and purge speed during a load
+# insert_seconds = 0.0              # a load's wait for heat and the filament, before it feeds
+# continue_seconds = 0.0            # a load's wait at the sensor for Continue
+# purge_park_seconds = 0.0          # a load's move to where it purges, before the purge
+# color_seconds = 0.0               # a load's wait at the color question after its purge
 # unload_seconds = 3.0
 # slow_load_mm = 40.0               # default: the model's
 # fast_load_mm = 20.0               # default: the model's
@@ -24,6 +28,7 @@
 # blip_seconds = 0.3
 # park_seconds = 1.0
 # sync_job_seconds = 3.0            # how long a sync job holds PRINTING after the blip
+# home_seconds = 0.0                # a sync job's G28 when not homed, before its writes
 # panic_idle_seconds = 1.5          # IDLE with no job after a power-panic boot, until
 #                                   # the resume starts; a menu load or unload delays it
 # recover_seconds = 2.0             # BUSY while a power-panic resume heats and homes

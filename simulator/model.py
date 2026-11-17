@@ -58,6 +58,7 @@ from simulator.slicer import (
     Slicer,
 )
 from simulator.tool import (
+    ASK_STEP,
     AUTO_RETRACT_STEP,
     CORE_ONE_EXTRUDER,
     CORE_ONE_PRESETS,
@@ -67,6 +68,7 @@ from simulator.tool import (
     EPSILON,
     INDX_EXTRUDER,
     INDX_PRESETS,
+    INSERT_STEP,
     IX_EXTRUDER,
     LOAD_CELL_PRESETS,
     MARKERS,
@@ -75,10 +77,12 @@ from simulator.tool import (
     MK3_5_EXTRUDER,
     MK3_5_PRESETS,
     MK4_EXTRUDER,
+    PARK_STEP,
     PRESET_ALIASES,
     RETRACTED_STEP,
     SELECT_STEP,
     TYPE_STEP,
+    WAITS,
     XL_DEV_KIT_EXTRUDER,
     XL_EXTRUDER,
     Extruder,
@@ -286,6 +290,9 @@ class ModelInfo:
     # Whether the build resumes a print after a power cut: HAS_POWER_PANIC in
     # `ProjectOptions.cmake`. Without it, a cut loses the print.
     power_panic: bool = True
+    # Whether the build has HAS_HUMAN_INTERACTIONS in `ProjectOptions.cmake`. Without it, a
+    # menu unload waits for the filament sensor to clear (`pause.cpp:1280-1301`).
+    human_interactions: bool = True
     # Its `compatibility_group` in `printer_model_data.hpp`. The MK3.5, MK4 and XL builds
     # run several models and check a file against the one the printer is set to
     # (`PrinterModelInfo::current`), so each model has its own entry's group.
@@ -451,12 +458,21 @@ MODELS = _models(
         max_tools=5,
         counters=False,
         power_panic=False,
+        human_interactions=False,
         group="xl",
         checks=PLAIN_CHECKS,
         feed=Feed.XL,
         slicer=XL_SLICER,
     ),
-    ModelInfo("4.1.0", "iX", IX_EXTRUDER, LOAD_CELL_PRESETS, group="ix", checks=IX_CHECKS),
+    ModelInfo(
+        "4.1.0",
+        "iX",
+        IX_EXTRUDER,
+        LOAD_CELL_PRESETS,
+        human_interactions=False,
+        group="ix",
+        checks=IX_CHECKS,
+    ),
     ModelInfo(
         "7.1.0",
         "COREONE",
@@ -533,6 +549,16 @@ class Settings:
     feed_ratio: float | None = None
     print_rate_mm_s: float = 5.0
     load_rate_mm_s: float = 10.0
+    # A load's waits, outside an MMU: before the filament reaches the sensor, which reads
+    # none until then, as the nozzle heats and the user pushes it in; at the sensor until
+    # the user presses Continue; the head's move to where it purges; and the color question
+    # after the purge.
+    insert_seconds: float = 0.0
+    continue_seconds: float = 0.0
+    purge_park_seconds: float = 0.0
+    color_seconds: float = 0.0
+    # How long a sync job's `G28` takes when the printer isn't homed, as after a boot.
+    home_seconds: float = 0.0
     unload_seconds: float = 3.0
     slow_load_mm: float | None = None
     fast_load_mm: float | None = None
@@ -721,6 +747,7 @@ class SyncJob(SimJob):
     kind: ClassVar[str] = "sync"
     gcode: str
     run_seconds: float = 0.0  # the length of the RUN phase
+    homing: bool = False  # in RUN for `home_seconds` before its commands run
 
     def progress(self) -> int:
         if self.phase is JobPhase.RUN and self.run_seconds > 0:
@@ -1119,7 +1146,9 @@ class SimPrinter:
         auto-retract (`M1705`), in a print too. A load outside a print then auto-retracts
         (`load_finalize_process`). A reload during a print primes and retracts again
         instead, and the resume puts the tool back at the gap it had when the change began.
-        The preview's load does neither.
+        The preview's load does neither. Its waits for the user come first and after the
+        purge: `insert_seconds`, `continue_seconds`, `purge_park_seconds` and
+        `color_seconds`.
         """
         s, lengths = self.settings, self.model.extruder.lengths
         slow, fast, model_purge = self._load_lengths()
@@ -1136,8 +1165,11 @@ class SimPrinter:
         if ex.cleaner_purge_mm == 0:  # the iX
             purge = math.ceil(purge / IX_PURGE_STEP_MM - EPSILON) * IX_PURGE_STEP_MM
         steps = [
+            LoadStep(INSERT_STEP, s.insert_seconds),
+            LoadStep(ASK_STEP, s.continue_seconds),
             LoadStep("SLOW", slow),
             LoadStep("FAST", fast),
+            LoadStep(PARK_STEP, s.purge_park_seconds),
             LoadStep(TYPE_STEP),
             LoadStep("PURGE", purge),
         ]
@@ -1145,6 +1177,7 @@ class SimPrinter:
             steps.append(LoadStep("RETRACT", -lengths.retract_mm))
         if ex.cleaner_auto_retract:
             steps.append(LoadStep(AUTO_RETRACT_STEP))
+        steps.append(LoadStep(ASK_STEP, s.color_seconds))
         if printing:
             steps += [LoadStep("PRIME", lengths.prime_mm), LoadStep("RETRACT", -lengths.retract_mm)]
         elif auto_retract:
@@ -1288,9 +1321,9 @@ class SimPrinter:
             f"T{tool.index} {why}: unload_count {tool.unload_count} at {tool.extruded_at_unload}",
         )
 
-    def _physical_unload(self, tool: SimTool, why: str) -> None:
+    def _physical_unload(self, tool: SimTool, why: str, *, at_sensor: bool = False) -> None:
         self._count_unload(tool, why)
-        tool.path.empty(self.model.gap_mm)
+        tool.path.empty(self.model.gap_mm, at_sensor=at_sensor)
         # The filament left the path, so no slot's filament is past the MMU's selector.
         if self.mmu is not None:
             self.mmu.fed = None
@@ -1298,7 +1331,7 @@ class SimPrinter:
     def _idle_sensor_clear(self, tool: SimTool, *, sensor_fault_counts: bool) -> None:
         if not self.sensors:
             return
-        empty = not tool.path.loaded or (sensor_fault_counts and tool.path.sensor_fault)
+        empty = not tool.path.sensed or (sensor_fault_counts and tool.path.sensor_fault)
         if tool.material is not None and empty:
             self._count_unload(tool, "idle sensor clear")
 
@@ -1456,7 +1489,7 @@ class SimPrinter:
         self._check_unload(t)
         if self.power is Power.OFF:
             self._log("action", f"unload T{tool} by hand while off")
-            t.path.loaded, t.path.gap = False, self.model.gap_mm
+            t.path.loaded, t.path.at_sensor, t.path.gap = False, False, self.model.gap_mm
             return
         self._log("action", f"unload T{tool}")
         if self.feed is MMU:
@@ -1467,6 +1500,20 @@ class SimPrinter:
             self._menu_pick(t)
             self._start_unload(t, self._unload_steps(t, "unload"))
         self.screen = State.IDLE  # using the menu dismisses a finished or stopped screen
+        self._show_state()
+
+    def pull(self, tool: int) -> None:
+        """Pull a tool's filament out by hand, outside a print: what a menu unload left in
+        the sensor, or loaded filament from a cold extruder. The firmware sees it only
+        through the sensor, so the tracker's gap stays as it was. On the picked tool, with
+        the sensors on, the idle sensor clear then counts an unload if a type is stored
+        (F14); with them off nothing counts (BF25)."""
+        t = self._tool(tool)
+        self._check_pull(t)
+        self._log("action", f"pull T{tool}'s filament out by hand")
+        t.path.loaded, t.path.at_sensor = False, False
+        if self.power is not Power.OFF:
+            self._idle_clear_selected()
         self._show_state()
 
     def _start_load(self, t: SimTool, steps: list[LoadStep], material: Material | None) -> None:
@@ -1772,7 +1819,6 @@ class SimPrinter:
             # (`print_utils_loop` in `src/common/print_utils.cpp`).
             self._log("job", f"job {self.resuming.id}: resume dropped by the new job")
             self.resuming = None
-        self.homed = True  # a print starts by homing
         self.job_counter += 1
         job.id = self.job_counter
         job.enter(JobPhase.SCANNING)
@@ -2115,11 +2161,16 @@ class SimPrinter:
 
     def tap_through(self) -> None:
         """Answer the screen's question: Print or Ok at the preview, or No at the MMU's unload
-        question, which prints with the filament where it is."""
+        question, which prints with the filament where it is. At the filament-not-inserted
+        screen it answers Disable FS: the sensors go off and stay off, and the print starts
+        with no type check (`FS_disable` in `marlin_print_preview.cpp:669-672`)."""
         self._check_tap_through()
         job = self.job
         self._log("action", f"tap through: {job.attention}")
-        if isinstance(job, UserJob) and job.waits_for(Reason.PREVIEW):
+        if job.waits_for(Reason.NO_FILAMENT):
+            self.set_sensors(False)
+            self._begin(job)
+        elif isinstance(job, UserJob) and job.waits_for(Reason.PREVIEW):
             self._after_incompatible(job)
         elif job.waits_for(Reason.PREVIEW):
             self._after_sync_preview(job)
@@ -2417,10 +2468,11 @@ class SimPrinter:
         isn't Active, else the selected slot, or none. A toolchanger's tools read their own
         sensors, picked or docked: every enabled sensor is evaluated on every loop
         (`filament_sensors_handler.cpp:142-150`). The simulator's sensor fault reads no
-        filament, as the idle sensor clear takes it. A load reads filament from its start:
-        the filament is at the sensor before the feed begins (`pause.cpp:560-592`). After
-        an unload the path is empty, so the tool reads no filament, on INDX too
-        (`IndxToolchanger`). The per-sensor enable bits and the states before a sensor is
+        filament, as the idle sensor clear takes it. A load reads filament once its
+        INSERT wait is over: the filament is at the sensor before the feed begins
+        (`pause.cpp:560-592`), and the F28 trace reads none while the nozzle heats. A menu
+        unload leaves the filament in the sensor until `pull` takes it out, on INDX too
+        (`FeedSystem.end_unload`). The per-sensor enable bits and the states before a sensor is
         ready aren't modeled.
         """
         if not self.sensors:
@@ -2430,8 +2482,8 @@ class SimPrinter:
         if t.path.sensor_fault:
             return False
         if isinstance(t.process, LoadProcess) and self.feed is not MMU:
-            return True
-        return t.path.loaded
+            return t.process.phase != INSERT_STEP or t.path.sensed
+        return t.path.sensed
 
     def _sensing_slot(self) -> SimTool | None:
         """The slot the extruder's sensor reads for (`currently_selected_virtual_tool`)."""
@@ -2573,6 +2625,17 @@ class SimPrinter:
             raise Busy("can't unload during a print; use runout")
         if self.state not in IDLE_STATES:
             raise Busy(f"can't unload while {self.state}")
+
+    def _check_pull(self, t: SimTool) -> None:
+        # The MMU's filament runs back to the unit, which the simulator doesn't model by hand.
+        if self.feed is MMU:
+            raise Invalid("pulling filament by hand isn't modeled with an MMU")
+        if not t.path.sensed:
+            raise Invalid(f"T{t.index} has no filament")
+        if t.process is not None:
+            raise Busy("a load or unload is running")
+        if self.job is not None:
+            raise Busy("during a print the sensor sees the filament go: use runout")
 
     def _check_move(self, t: SimTool) -> None:
         self._need_power()
@@ -2790,6 +2853,8 @@ class SimPrinter:
     def _check_tap_through(self) -> None:
         self._need_power()
         job = self.job
+        if job is not None and job.waits_for(Reason.NO_FILAMENT):
+            return  # Disable FS at the filament-not-inserted screen
         if job is None or job.phase is not JobPhase.HOLD or job.waits_for(Reason.JAM):
             raise Busy("nothing to tap through")
         if job.attention.fatal:
@@ -2821,6 +2886,7 @@ class SimPrinter:
             "load": lambda: self._check_load(t, keep=False),
             "keep": lambda: self._check_load(t, keep=True),
             "unload": lambda: self._check_unload(t),
+            "pull": lambda: self._check_pull(t),
             "extrude": lambda: self._check_move(t),
             "retract": lambda: self._check_move(t),
             "runout": lambda: self._check_sensor_runout(t),
@@ -2889,7 +2955,12 @@ class SimPrinter:
             if isinstance(p, MmuProcess):
                 self._mmu_tick(t, p, dt)
                 return
-            dt -= self._move(t, p.steps, rate * dt) / rate
+            if p.phase in WAITS:
+                used = min(p.steps[0].mm, dt)
+                p.steps[0].mm -= used
+                dt -= used
+            else:
+                dt -= self._move(t, p.steps, rate * dt) / rate
             self._next_load_step(t, p)
 
     def _unload_tick(self, t: SimTool, p: UnloadProcess, dt: float) -> None:
@@ -2982,6 +3053,9 @@ class SimPrinter:
             self._after_blip(job)
         elif job.phase is JobPhase.PREHEAT:
             self._begin_feeding(job)
+        elif job.phase is JobPhase.RUN and job.homing:
+            job.homing = False
+            self._apply_sync(job)
         elif job.phase is JobPhase.RUN:
             self._park(job, State.FINISHED)
         elif job.phase is JobPhase.RECOVER:
@@ -3003,6 +3077,8 @@ class SimPrinter:
         """Start the job the preview let through: the blip, then the job itself."""
         if isinstance(job, UserJob):
             job.previewing, job.mapping = False, []
+            # A print's start G-code homes; a print declined at the preview never ran it.
+            self.homed = True
         if self.settings.start_blip:
             job.enter(JobPhase.BLIP)
             job.remaining = self.settings.blip_seconds
@@ -3031,7 +3107,7 @@ class SimPrinter:
 
     def _tool_views(self) -> dict[int, ToolView]:
         # A sensor that's off reads neither filament nor none, so no check fails on it.
-        seen = {i: t.path.loaded or not self.sensors for i, t in self.tools.items()}
+        seen = {i: t.path.sensed or not self.sensors for i, t in self.tools.items()}
         return {
             i: ToolView(self.listed(t), seen[i], t.material.name if t.material else None)
             for i, t in self.tools.items()
@@ -3317,6 +3393,20 @@ class SimPrinter:
     # The sync job.
 
     def _run_sync(self, job: SyncJob) -> None:
+        """Run the job's commands. A `G28` with the printer not homed takes `home_seconds`
+        first, which the F10c and F28 traces show taking up to a minute or more: the commands
+        after it wait for it."""
+        commands = gcode.parse(job.gcode)
+        wait = self.settings.home_seconds
+        if not self.homed and wait > EPSILON and any(isinstance(c, gcode.Home) for c in commands):
+            job.enter(JobPhase.RUN)
+            job.remaining = job.run_seconds = wait
+            job.homing = True
+            self._show_state()
+            return
+        self._apply_sync(job)
+
+    def _apply_sync(self, job: SyncJob) -> None:
         # No line stops the job: one the firmware can't run does nothing (`sync.py`).
         sync.apply(self, gcode.parse(job.gcode))
         job.enter(JobPhase.RUN)
@@ -3435,7 +3525,8 @@ def _tool_json(t: SimTool) -> dict:
     if p is None:
         out["process"] = None
     elif isinstance(p, LoadProcess):
-        out["process"] = {"kind": "load", "phase": p.phase, "remaining_mm": p.remaining}
+        unit = "remaining_s" if p.phase in WAITS else "remaining_mm"
+        out["process"] = {"kind": "load", "phase": p.phase, unit: p.remaining}
     elif isinstance(p, MmuProcess):
         out["process"] = {"kind": "mmu", "phase": p.phase, "remaining_s": p.remaining}
     else:

@@ -493,8 +493,9 @@ written.
   `M701_2.cpp:66-98`). Only when the file's type is a name the build
   doesn't know does the load ask for a type. No pick can match that name,
   so the wrong-filament question follows, and the user can decline there.
-  The load counts while the printer reads `BUSY` with no job: 57 mm on a
-  Core One L, (20 + 40) × 0.95. Until the fix, `accounting.print_start`
+  The load counts while the printer reads `BUSY` with no job: 95 mm on a
+  Core One L with the high-flow nozzle its build sets by default,
+  (20 + 80) × 0.95, or 57 mm with a standard nozzle's 40 mm purge. Until the fix, `accounting.print_start`
   took a new job as started when a later poll of the same job saw the
   counter past where the first poll saw it. With one poll at the
   preview's first question and none during the load, the next poll of the
@@ -511,12 +512,13 @@ written.
   in BF10. It took a print started on an empty tool, no poll during the
   load, and then a cancel in the preheat or a declined file whose type the
   build doesn't know. The simulator's load is 108 mm at 10 mm/s, about
-  11 s. A Core One L moves 40 mm at 6 mm/s, 20 mm at 25 mm/s and a 40 mm
-  purge at 3 mm/s, then retracts 8 mm: about 21 s
-  (`standard_feedrates_nextruder.cpp:12-18`). It also reads `BUSY` while
-  it heats to the load temperature and waits for the filament to go in,
-  so a 30 s `poll_printing` lands in the load far more often than in the
-  simulator. That poll avoided this finding's load path, but with
+  11 s, with its waits for the user off by default. A Core One L moves
+  40 mm at 6 mm/s, 20 mm at 25 mm/s and the purge at 3 mm/s, then retracts
+  8 mm (`standard_feedrates_nextruder.cpp:12-18`). It also reads `BUSY`
+  while it heats to the load temperature, waits for the filament to go in
+  and for Continue, and asks whether the color is right: the live load
+  read `BUSY` for 156 s. So a 30 s `poll_printing` lands in the load far
+  more often than in the simulator. That poll avoided this finding's load path, but with
   auto-retract on, a cancel in that preheat still counted as started
   through BF10.
 - **Evidence**: The preview's load is read in the firmware source.
@@ -544,14 +546,19 @@ written.
   question, then `cancel`. For the cancel, load the segment's type, poll
   in the preheat, then `cancel`. Either way the ledger showed
   `swap_assumed` for the job. On the Core One L, the live check
-  `F28-load-then-decline` confirms it with the production bridge: sitting
+  `F28-load-then-decline` checks it with the production bridge: sitting
   D in printer-behaviors.md, under "Capture plan".
 - **Status**: Fixed (D5 in bridge-fixes.md). The bridge saves whether the
   tool reported no material at the pending job's last poll
   (`ToolState.pending_empty`). While it reports none, each poll takes the
   job's starting counter again, and the first poll with a material takes
   it once more without starting, so the load's count is charged but isn't
-  the print's start (Q4). The F28 trace still confirms the printer's side.
+  the print's start (Q4). The live check ran on 2026-11-16, with the bridge
+  at `4fa81f9`: the trace `F28-load-then-decline` shows the printer's side
+  as this finding reads it, job 188 declined at the wrong-filament
+  question after a 95 mm load. A poll landed in the load, so the no-poll
+  case didn't arise: the bridge charged the 95 mm to spool 10 as ordinary
+  extrusion and recorded no assumed swap.
 
 ### BF24. Usage counted on an empty tool lands on the next spool
 
@@ -593,8 +600,11 @@ written.
   `test_a_print_through_an_empty_tool_reports_its_usage_lost` in
   `tests/test_toolchanger_prints.py`, which pinned the charge before the
   fix: the held 84 mm plus the load's 70. On a single-tool
-  printer, read in the firmware source (F29): the simulator doesn't model
-  that path. After a power cut, shown in the simulator on a Core One L by
+  printer, the trace `F29-sensors-off-print` (2026-11-16) shows the
+  printer's side on a Core One L: after Disable FS, job 190 counted 66 mm
+  with no material while printing, and its cancel's park counted 22 mm
+  more on the empty tool. The simulator models that path now, with
+  `tap_through` at the filament-not-inserted screen. After a power cut, shown in the simulator on a Core One L by
   the test now named
   `test_an_unload_in_the_window_then_the_resumed_print_is_lost` in
   `tests/test_power_panic.py`: the bridge records the unload and
@@ -633,8 +643,12 @@ written.
   counts in `BUSY`, so it's held, and the next `PRINTING` poll that sees
   the tool count reports it lost with the print's usage. A remaining
   limit: if a second cut lands during the resume, the reboot keeps that
-  held feed back, about 8 mm, and charges it to the active spool. The F29
-  trace still confirms the single-tool path.
+  held feed back, about 8 mm, and charges it to the active spool. The live
+  check on 2026-11-16, with the bridge at `4fa81f9`, shows the fix on the
+  single-tool path: the bridge logged 47, 19 and 22 mm of job 190, 88 mm,
+  as printed with no filament reported and charged to no spool, which is
+  the printer's 66 mm and 22 mm. Nothing had to be moved back in
+  Spoolman.
 
 ### BF25. Printing past an empty tool leaves the filament sensors off
 
@@ -651,15 +665,22 @@ written.
   charged for the new one until a claim moves it. A spool that runs out
   isn't noticed, and the print goes on through the empty tool, which is
   BF24 again.
-- **Evidence**: Read in the firmware source (F29). The printer's side is
-  shown in the simulator on a toolchanger, by
+- **Evidence**: The trace `F29-sensors-off-print` (2026-11-16) shows the
+  printer's side on a Core One L: Disable FS at the filament-not-inserted
+  screen turned the setting off, a hand pull with it off changed nothing
+  the API reports, and turning it back on cleared the type at once, with
+  `material` gone, `unload_count` up by one and `filament_present`
+  `false`. The simulator shows it on a toolchanger, by
   `test_with_the_sensors_off_nothing_reads_them` in
-  `simulator/tests/test_model.py`. The simulator doesn't model the
-  single-tool path to the setting. The bridge's side is inferred. The
+  `simulator/tests/test_model.py`, and on the single-tool path through
+  the F29 replay. The bridge's side is inferred. The
   warning is shown by `tests/test_sensors_off.py`, by
   `test_the_tools_mapping_screens_sensors_off_warns_before_any_usage_is_lost`
   in `tests/test_toolchanger_prints.py`, and end to end by
-  `test_c7_sensors_off_warned_once` in `integration/test_counters.py`.
+  `test_c7_sensors_off_warned_once` in `integration/test_counters.py`. In
+  the 2026-11-16 live check, with the bridge at `4fa81f9`, the warning
+  started when Disable FS turned the sensors off and ended when they came
+  back on.
 - **Scenario rows**: P2, S2, T4, C7, T2.
 - **To reproduce**: On the Core One L, the live check
   `F29-sensors-off-print` shows the printer's side: sitting D in

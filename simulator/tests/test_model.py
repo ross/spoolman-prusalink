@@ -1046,9 +1046,35 @@ def test_home_sets_the_flag_only_when_idle():
     p.reboot()
     assert not p.homed
     p.start_print(PrintSpec([Segment(0, 10)], duration_s=1))
-    assert p.homed  # a print starts by homing
+    sim.tick(0.5)
+    assert p.homed  # a print starts by homing, once past the preview
     with pytest.raises(Busy):
         p.home()
+
+
+def test_a_print_declined_at_the_preview_leaves_the_printer_unhomed():
+    sim, p = make(tools=[SimTool(0)])
+    p.start_print(PrintSpec([Segment(0, 10)]))
+    sim.tick(0.5)
+    p.cancel()  # Abort at the warning that T0 has no filament
+    assert p.job is None and not p.homed
+
+
+def test_a_sync_job_homes_before_its_writes_when_not_homed():
+    sim, p = make(home_seconds=5.0)
+    run_sync(sim, p)
+    assert p.job.phase is JobPhase.RUN and p.job.homing and tool0(p).material == PLA
+    sim.tick(5.0)
+    assert not p.job.homing and p.homed and tool0(p).material.name == "PETG"
+    sim.tick(10)
+    assert p.state is State.FINISHED
+
+
+def test_a_homed_printer_s_sync_job_writes_at_once():
+    sim, p = make(home_seconds=5.0)
+    p.home()
+    run_sync(sim, p)
+    assert not p.job.homing and tool0(p).material.name == "PETG"
 
 
 def test_power_loss_with_a_cold_bed_waits_for_the_user():

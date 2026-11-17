@@ -76,14 +76,49 @@ def test_a_load_reads_filament_before_its_type_is_stored():
     assert p.tools[0].material.name == "PETG" and present(p) == {0: True}
 
 
-def test_a_menu_unload_reads_filament_until_it_ends():
+def test_a_menu_unload_reads_filament_until_the_user_pulls_it():
     sim, p = make()
     p.unload(0)
     run(sim, 0.5)
     assert p.tools[0].process is not None and present(p) == {0: True}
     sim.advance(60)
-    # The unload ends once the extruder sensor no longer sees filament (`pause.cpp`).
-    assert p.tools[0].process is None and present(p) == {0: False}
+    # A menu unload ends without waiting for the sensor to clear (`pause.cpp:1280-1287`): the
+    # filament stays in the sensor until the user pulls it, as the F29 trace shows.
+    assert p.tools[0].process is None and p.tools[0].material is None
+    assert present(p) == {0: True}
+    p.pull(0)
+    assert present(p) == {0: False} and p.tools[0].unload_count == 1
+
+
+@pytest.mark.parametrize("model", ["4.1.0", "5.1.0"])
+def test_a_menu_unload_without_human_interactions_ends_with_the_sensor_clear(model):
+    # With no HAS_HUMAN_INTERACTIONS, an unload waits for the sensor to clear
+    # (`pause.cpp:1291-1301, 1371-1391`), so it can't end with the filament in it.
+    sim, p = make(model)
+    p.unload(0)
+    sim.advance(120)
+    assert p.tools[0].process is None and p.tools[0].material is None
+    assert present(p) == {0: False}
+    assert not p.tools[0].path.at_sensor
+
+
+def test_a_hand_pull_with_the_sensors_on_clears_the_type():
+    sim, p = make()
+    p.pull(0)
+    assert present(p) == {0: False}
+    assert p.tools[0].material is None and p.tools[0].unload_count == 1
+
+
+def test_a_hand_pull_with_the_sensors_off_counts_nothing_until_they_are_on():
+    sim, p = make()
+    p.set_sensors(False)
+    p.pull(0)
+    run(sim, 1)
+    assert p.tools[0].material is not None and p.tools[0].unload_count == 0
+    p.set_sensors(True)
+    run(sim, 0.1)
+    assert present(p) == {0: False}
+    assert p.tools[0].material is None and p.tools[0].unload_count == 1
 
 
 def test_a_runout_waiting_for_its_reload_reads_no_filament():
@@ -118,13 +153,14 @@ def test_a_docked_tool_emptied_by_hand_reads_no_filament_with_its_type_kept(mode
 
 
 @pytest.mark.parametrize("model", [XL, INDX])
-def test_a_toolchanger_unload_reads_no_filament_after_it_and_a_load_reads_it_again(model):
-    """INDX's unload asks the user to confirm the filament is out rather than waiting for
-    its side sensor; the simulator reads it as pulled at that question (F48)."""
+def test_a_toolchanger_unload_reads_filament_until_pulled_and_a_load_reads_it_again(model):
+    """A menu unload leaves the filament at the tool's sensor until the user pulls it (F48)."""
     sim, p = make(model, [loaded(0), loaded(1)])
     p.unload(1)
     sim.advance(60)
-    assert p.tools[1].material is None and present(p) == {0: True, 1: False}
+    assert p.tools[1].material is None and present(p) == {0: True, 1: True}
+    p.pull(1)
+    assert present(p) == {0: True, 1: False}
     p.load(1, source="preset", name="PETG")
     assert present(p)[1] is True
     sim.advance(60)
