@@ -49,7 +49,6 @@ class Watched:
 # The upstream commit most fingerprints were read at.
 UPSTREAM_7D8BF685 = "7d8bf6858b363c453c0617bceab5e66997d8fc25"
 UPSTREAM_B1043D68 = "b1043d68be188ad27ea72a14e160140e30e589f0"
-UPSTREAM_CAC41852 = "cac418526b33135fd44c5de2e54df4baa07fafbe"
 
 # The regions the copies come from. Each row's commit is the one its region was last read
 # at, not the last one checked: a region whose text is the same at a newer commit stays as
@@ -1401,7 +1400,7 @@ WATCHED = (
         "static constexpr PrinterVariant printer_variant_after_factory_reset",
         "ModelInfo.vents in simulator/model.py: a fresh or reset Core One is plus_gen2, automatic",
         "13cf67c760ed02fe",
-        UPSTREAM_CAC41852,
+        UPSTREAM_B1043D68,
     ),
     Watched(
         "the Core One vent migration",
@@ -1410,7 +1409,7 @@ WATCHED = (
         "if (should_migrate<5>())",
         "ModelInfo.vents in simulator/model.py: an upgraded Core One is manual",
         "7abe963364177aa3",
-        UPSTREAM_CAC41852,
+        UPSTREAM_B1043D68,
     ),
     Watched(
         "the Core One L vent default",
