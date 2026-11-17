@@ -3212,7 +3212,7 @@ class SimPrinter:
                 used = min(job.remaining, dt)
                 job.remaining -= used
                 dt -= used
-                if job.phase is not JobPhase.BLIP:
+                if job.phase not in (JobPhase.BLIP, JobPhase.RETURN):
                     job.time_printing += used
                 if (
                     job.phase is JobPhase.RECOVER

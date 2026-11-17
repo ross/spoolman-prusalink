@@ -447,3 +447,14 @@ def test_a_pick_that_clears_the_type_leaves_nothing_to_purge():
     assert p.tools[1].material is None and p.tools[1].process is None
     assert p.state is State.IDLE
 
+
+
+def test_the_jobs_timer_is_paused_through_a_changes_return():
+    sim, p = printing_runout("1.4.1", change_return_seconds=10)
+    p.load(0)
+    reload_ends(sim, p)
+    assert p.job.phase is JobPhase.RETURN
+    before = p.job.time_printing
+    sim.advance(5)
+    assert p.job.phase is JobPhase.RETURN
+    assert p.job.time_printing == before
