@@ -232,7 +232,6 @@ async def test_a_runout_in_the_preheat_follows_p2(tmp_path):
     before = station.counter
     printer.load(0)
     await station.run_until(lambda: station.tool.process is None, poll_every=1.0)
-    printer.resume()
     await station.run_until(lambda: printer.job is None, poll_every=1.0, limit=60)
     await bridge.poll()
     assert swap_events(tmp_path, mark) == ["swap_confirmed"]
@@ -288,7 +287,6 @@ async def test_a_runout_before_any_poll_saw_the_job_is_a_swap_before_the_print(
     assert tool.job_id is None and tool.pending_job == printer.job.id
     assert swap_events(tmp_path, mark) == ["unload", "swap_unconfirmed"]
 
-    printer.resume()
     await station.run_until(lambda: printer.job is None, poll_every=1.0, limit=60)
     await bridge.poll()
     assert swap_events(tmp_path, mark) == ["unload", "swap_unconfirmed", "swap_assumed"]

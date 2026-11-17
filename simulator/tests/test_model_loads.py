@@ -9,8 +9,18 @@ from __future__ import annotations
 
 import pytest
 
-from simulator.model import JobPhase, Material, PrintSpec, Segment, SimTool, State
-from simulator.tests.util import loaded, make
+from simulator.model import (
+    Busy,
+    Invalid,
+    JobPhase,
+    Material,
+    PrintSpec,
+    Segment,
+    SimTool,
+    State,
+)
+from simulator.tests.test_model import reload_ends
+from simulator.tests.util import loaded, make, make_mmu
 
 INDX_RATIO = 550 / 576
 PLA = Material("PLA", adhoc=False)
@@ -160,13 +170,15 @@ def test_a_jam_reload_purges_its_extra_on_top_of_the_minimum():
     p.start_print(PrintSpec([Segment(0, 100)], preheat_s=0))
     sim.tick(0.8 + 1)
     p.jam(0)
-    before = p.tools[0].extruded
+    before, fed = p.tools[0].extruded, p.job.fed_mm
     p.load(0)
-    sim.advance(100)
+    reload_ends(sim, p)
     # The jam left the gap full and 40 slow refills it. The purge of 0 is raised to 1, and
     # the jam adds its 60: 61 counted. The prime of 4 and retract of 8 only move the gap.
-    assert p.job.phase is JobPhase.PAUSED
-    assert p.tools[0].extruded - before == pytest.approx(61 * 0.95)
+    # The reload ends the change, and the tick that ends it prints a little.
+    assert p.job.phase is JobPhase.PRINTING
+    ran = p.job.fed_mm - fed
+    assert p.tools[0].extruded - before == pytest.approx((61 + ran) * 0.95)
 
 
 def test_the_load_purge_override_wins_over_the_setting():
@@ -193,9 +205,62 @@ def test_manual_moves_count_past_the_gap_and_retracts_stop_at_its_limit():
     assert p.tools[0].extruded == pytest.approx(3 * INDX_RATIO)
 
 
-def printing_runout(model: str):
+def test_purge_filament_purges_and_auto_retracts_with_the_type_kept():
+    # F11: the high-flow Core One L's 80 mm purge from gap 0 counts in full; the 8 mm
+    # retract, which the auto-retract feeds back first, then its 23.
+    sim, p = make("8.1.0", [loaded(0, PLA)])
+    p.high_flow = True
+    p.purge(0)
+    assert p.state is State.BUSY
+    sim.advance(100)
+    t = p.tools[0]
+    assert t.extruded == pytest.approx((80 + 23) * 0.95)
+    assert (t.material, t.unload_count, t.path.loaded) == (PLA, 0, True)
+    assert t.path.auto_retracted == 55 and p.state is State.IDLE
+
+
+def test_purge_filament_feeds_an_auto_retract_back_first():
+    # Auto-retracted, as a load leaves it: the purge's feed-back of 55 into the 40 mm gap
+    # counts 15, then the 40 mm purge and the auto-retract's 23.
+    sim, p = make("8.1.0", [loaded(0, PLA)])
+    t = p.tools[0]
+    t.path.auto_retracted, t.path.gap, t.path.gap_valid = 55.0, 40.0, False
+    p.purge(0)
+    sim.advance(100)
+    assert t.extruded == pytest.approx((15 + 40 + 23) * 0.95)
+
+
+def test_purge_filament_needs_a_stored_type_and_filament():
+    sim, p = make("8.1.0", [SimTool(0)])
+    with pytest.raises(Invalid, match="no type"):
+        p.purge(0)
+    p.tools[0].fill(PLA)
+    p.set_sensors(False)
+    p.pull(0)  # nothing reads it, so the type stays
+    with pytest.raises(Invalid, match="no filament"):
+        p.purge(0)
+
+
+def test_purge_filament_waits_for_an_idle_printer():
+    sim, p = make("8.1.0", [loaded(0, PLA)])
+    p.purge(0)
+    with pytest.raises(Busy):
+        p.purge(0)
+    sim.advance(100)
+    p.start_print(PrintSpec([Segment(0, 100)], preheat_s=0))
+    with pytest.raises(Busy, match="can't purge"):
+        p.purge(0)
+
+
+def test_purge_filament_isnt_modeled_with_an_mmu():
+    sim, p = make_mmu(slot=0)
+    with pytest.raises(Invalid, match="MMU"):
+        p.purge(0)
+
+
+def printing_runout(model: str, **settings):
     """A print that ran 5 mm on a tool with no gap, then ran out."""
-    sim, p = make(model, [loaded(0, PLA)])
+    sim, p = make(model, [loaded(0, PLA)], **settings)
     p.start_print(PrintSpec([Segment(0, 100)], preheat_s=0))
     sim.tick(0.8 + 1)
     assert p.tools[0].extruded == pytest.approx(5 * 0.95)
@@ -205,40 +270,49 @@ def printing_runout(model: str):
 
 
 def test_a_reload_during_a_print_on_the_mk4():
-    sim, p = printing_runout("1.4.1")
+    # The change ends after the head returns; hold the return open to see the reload's end.
+    sim, p = printing_runout("1.4.1", change_return_seconds=10)
     before = p.tools[0].extruded
     p.load(0)
-    sim.advance(100)
-    assert p.job.phase is JobPhase.PAUSED
+    reload_ends(sim, p)
+    assert p.job.phase is JobPhase.RETURN
     # Gap 40. Slow 30: gap 10. Fast 50: 10 refill it, 40 count. Purge 27: counts. The
     # purge's retract 8: gap 8. The prime 4: gap 4, nothing counts. The retract 8: gap 12.
     assert p.tools[0].extruded - before == pytest.approx((40 + 27) * 0.95)
     assert p.tools[0].path.gap == pytest.approx(12)
-    p.resume()  # back to the gap 0 the runout found: 12 fed, all refill the gap
-    assert p.tools[0].extruded - before == pytest.approx((40 + 27) * 0.95)
-    assert p.tools[0].path.gap == 0
+    fed = p.job.fed_mm
+    sim.advance(10)  # the change's end: back to the gap 0 the runout found, 12 fed
+    assert p.job.phase is JobPhase.PRINTING and p.tools[0].path.gap == 0
+    # The 12 fed all refill the gap; only the print since the return ended counts.
+    ran = p.job.fed_mm - fed
+    assert p.tools[0].extruded - before == pytest.approx((40 + 27 + ran) * 0.95)
     sim.tick(1)  # 5 mm printed, all counted
-    assert p.tools[0].extruded - before == pytest.approx((40 + 27 + 5) * 0.95)
+    assert p.tools[0].extruded - before == pytest.approx((40 + 27 + ran + 5) * 0.95)
 
 
 def test_a_reload_during_a_print_on_the_ix():
-    sim, p = printing_runout("4.1.0")
+    sim, p = printing_runout("4.1.0", change_return_seconds=10)
     before = p.tools[0].extruded
     p.load(0)
-    sim.advance(100)
+    reload_ends(sim, p)
+    assert p.job.phase is JobPhase.RETURN
     # Gap 40. Slow 40: gap 0. Fast 45: counts. Purge 40: counts, and no retract after it.
     # The prime 4: counts. The retract 8: gap 8.
     assert p.tools[0].extruded - before == pytest.approx((45 + 40 + 4) * 0.95)
     assert p.tools[0].path.gap == pytest.approx(8)
-    p.resume()  # back to the gap 0 the runout found: 8 fed, all refill the gap
-    assert p.tools[0].extruded - before == pytest.approx((45 + 40 + 4) * 0.95)
-    assert p.tools[0].path.gap == 0
+    fed = p.job.fed_mm
+    sim.advance(10)  # the change's end: back to the gap 0 the runout found, 8 fed
+    assert p.job.phase is JobPhase.PRINTING and p.tools[0].path.gap == 0
+    # The 8 fed all refill the gap; only the print since the return ended counts.
+    ran = p.job.fed_mm - fed
+    assert p.tools[0].extruded - before == pytest.approx((45 + 40 + 4 + ran) * 0.95)
     sim.tick(1)  # 5 mm printed, all counted
-    assert p.tools[0].extruded - before == pytest.approx((45 + 40 + 4 + 5) * 0.95)
+    assert p.tools[0].extruded - before == pytest.approx((45 + 40 + 4 + ran + 5) * 0.95)
 
 
 def test_a_reload_resumes_at_the_gap_the_runout_found():
-    sim, p = make("1.4.1", [loaded(0, PLA)])
+    # The change ends after the head returns; hold the return open to see the reload's end.
+    sim, p = make("1.4.1", [loaded(0, PLA)], change_return_seconds=10)
     p.retract(0, 10)
     p.start_print(PrintSpec([Segment(0, 100)], preheat_s=0))
     sim.tick(0.8 + 1)  # 5 mm printed into the 10 mm gap: gap 5, nothing counts
@@ -247,17 +321,23 @@ def test_a_reload_resumes_at_the_gap_the_runout_found():
     p.runout(0)
     assert p.tools[0].extruded == pytest.approx(7 * 0.95)
     p.load(0)
-    sim.advance(100)
+    reload_ends(sim, p)
+    assert p.job.phase is JobPhase.RETURN
     # As on the MK4 above: (40 + 27) counted, gap 12.
     assert p.tools[0].extruded == pytest.approx((7 + 40 + 27) * 0.95)
     assert p.tools[0].path.gap == pytest.approx(12)
-    p.resume()  # 12 - 5 = 7 fed: gap 5, nothing counts
-    assert p.tools[0].path.gap == pytest.approx(5)
+    fed = p.job.fed_mm
+    sim.advance(10)  # the change's end: 12 - 5 = 7 fed, gap 5, nothing counts
+    assert p.job.phase is JobPhase.PRINTING
+    # The tick that ends the change prints a little of the gap's 5 away.
+    ran = p.job.fed_mm - fed
+    assert p.tools[0].path.gap == pytest.approx(5 - ran)
     assert p.tools[0].extruded == pytest.approx((7 + 40 + 27) * 0.95)
-    sim.tick(1)  # 5 mm printed refill the gap
-    assert p.tools[0].extruded == pytest.approx((7 + 40 + 27) * 0.95)
+    sim.tick(1)  # 5 mm printed refill the rest of the gap and count what is over
+    assert p.tools[0].path.gap == 0
+    assert p.tools[0].extruded == pytest.approx((7 + 40 + 27 + ran) * 0.95)
     sim.tick(1)  # 5 mm printed, all counted
-    assert p.tools[0].extruded == pytest.approx((7 + 40 + 27 + 5) * 0.95)
+    assert p.tools[0].extruded == pytest.approx((7 + 40 + 27 + ran + 5) * 0.95)
 
 
 def test_a_reload_in_the_preheat_resumes_at_its_gap():
@@ -270,22 +350,23 @@ def test_a_reload_in_the_preheat_resumes_at_its_gap():
     # the runout ramming feeds the 10 back and counts its 7.
     p.runout(0)
     p.load(0)
-    sim.advance(100)
-    assert p.tools[0].path.gap == pytest.approx(12)
-    p.resume()  # 12 - 10 = 2 fed: gap 10, back to the preheat
+    reload_ends(sim, p)
+    # The change's end: 12 - 10 = 2 fed, gap 10, back to the preheat.
     assert p.job.phase is JobPhase.PREHEAT
     assert p.tools[0].path.gap == pytest.approx(10)
     assert p.tools[0].extruded == pytest.approx((7 + 40 + 27) * 0.95)
 
 
 def test_a_power_loss_after_a_reload_drops_the_restore():
-    sim, p = make("1.4.1", [loaded(0, PLA)])
+    # The cut comes while the head is still returning, before the change's end restores.
+    sim, p = make("1.4.1", [loaded(0, PLA)], change_return_seconds=10)
     p.retract(0, 10)
     p.start_print(PrintSpec([Segment(0, 100)], preheat_s=0))
     sim.tick(0.8 + 1)
     p.runout(0)  # at gap 5
     p.load(0)
-    sim.advance(100)
+    reload_ends(sim, p)
+    assert p.job.phase is JobPhase.RETURN and p.job.restore == (0, 5)
     p.reboot(keep_job=True)  # the counters and gaps restart at 0
     sim.advance(p.settings.panic_idle_seconds + p.settings.recover_seconds + 0.01)
     # The dialog isn't a pause, so the print resumes on its own, and the filament change
@@ -341,3 +422,38 @@ def test_a_load_s_wait_shows_the_seconds_left():
         "phase": "INSERT",
         "remaining_s": pytest.approx(2),
     }
+
+
+def test_a_change_in_the_preheat_keeps_the_preheat_left_over_its_return():
+    sim, p = make(change_return_seconds=2.0)
+    p.start_print(PrintSpec([Segment(0, 100)], preheat_s=5))
+    sim.tick(0.8 + 1)
+    assert p.job.phase is JobPhase.PREHEAT
+    left = p.job.remaining
+    p.runout(0)
+    p.load(0)
+    while p.job.phase is not JobPhase.RETURN:
+        sim.tick(0.1)
+    while p.job.phase is JobPhase.RETURN:
+        sim.tick(0.1)
+    assert p.job.phase is JobPhase.PREHEAT
+    assert p.job.remaining == pytest.approx(left - 0.1, abs=0.11)
+
+
+def test_a_purge_stops_when_the_pick_clears_the_type():
+    sim, p = make("3.1.0", [loaded(0, PLA), loaded(1, PLA)])
+    p.set_sensor_fault(1, True)
+    p.purge(1)  # the pick's idle sensor clear counts an unload and clears T1's type
+    assert p.tools[1].material is None and p.tools[1].process is None
+    assert p.state is State.IDLE
+
+
+def test_the_jobs_timer_is_paused_through_a_changes_return():
+    sim, p = printing_runout("1.4.1", change_return_seconds=10)
+    p.load(0)
+    reload_ends(sim, p)
+    assert p.job.phase is JobPhase.RETURN
+    before = p.job.time_printing
+    sim.advance(5)
+    assert p.job.phase is JobPhase.RETURN
+    assert p.job.time_printing == before

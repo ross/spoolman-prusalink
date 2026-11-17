@@ -215,6 +215,7 @@ function renderTool(p, t) {
     btn('Load', 'load_form', Object.assign({ tool: i, cls: isOpen(p, 'load' + i) ? 'on' : '' }, loadGate)) +
     btn('Unload', 'unload', gate(a, 'unload', { tool: i })) +
     (p.mmu ? '' : btn('Pull', 'pull', gate(a, 'pull', { tool: i, title: 'pull the filament out by hand' }))) +
+    (p.mmu ? '' : btn('Purge', 'purge', gate(a, 'purge', { tool: i, title: 'Filament > Purge Filament: M701 L0 W2' }))) +
     (p.mmu
       ? btn('Load to nozzle', 'load_to_nozzle', gate(a, 'load_to_nozzle', { tool: i })) +
         btn('Eject', 'eject', gate(a, 'eject', { tool: i })) +
@@ -543,7 +544,7 @@ function onClick(e) {
           () => { pst(name).open.preloadall = false; renderCard(name); });
       case 'load_submit':
         return go('load', loadBody(name, tool), () => { pst(name).open['load' + tool] = false; renderCard(name); });
-      case 'unload': case 'pull': case 'runout': case 'select_tool': case 'change_filament':
+      case 'unload': case 'pull': case 'purge': case 'runout': case 'select_tool': case 'change_filament':
       case 'load_to_nozzle': case 'eject': case 'cut':
         return go(act, { tool });
       case 'extrude': case 'retract': {

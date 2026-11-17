@@ -126,6 +126,7 @@ FEATURES = (
     "HAS_GCODE_COMPATIBILITY",
     "HAS_POWER_PANIC",
     "HAS_HUMAN_INTERACTIONS",
+    "HAS_CHAMBER_VENTS",
 )
 
 Ramming = tuple[read.Step, ...]
@@ -440,6 +441,8 @@ class Copies:
     sim_models: Mapping[str, Any]  # simulator.model.ModelInfo
     sim_groups: Mapping[str, str]
     sim_flexible: frozenset[str]
+    sim_open_vents: frozenset[str]
+    vent_limit: int
     sim_defaults: tuple[int, int, int]
     sim_aliases: Mapping[str, str]
     sim_minimal_purge: float
@@ -465,6 +468,8 @@ class Copies:
             sim_models=model.MODELS,
             sim_groups=compatibility.GROUPS,
             sim_flexible=tool.FLEXIBLE_PRESETS,
+            sim_open_vents=tool.OPEN_VENT_PRESETS,
+            vent_limit=tool.VENT_LIMIT,
             sim_defaults=tool.DEFAULT_TEMPERATURES,
             sim_aliases=tool.PRESET_ALIASES,
             sim_minimal_purge=model.MINIMAL_PURGE_MM,
@@ -683,6 +688,10 @@ def _compare_sim_models(
         differ(table, code, None, "power_panic", panic, model.power_panic)
         humans = "HAS_HUMAN_INTERACTIONS" in build.features
         differ(table, code, None, "human_interactions", humans, model.human_interactions)
+        # Whether vent control is automatic or manual by default isn't a build flag: a
+        # `WATCHED` row guards each build's variant table.
+        vents = "HAS_CHAMBER_VENTS" in build.features
+        differ(table, code, None, "vents", vents, model.vents is not None)
         # The model's own group, as `PrinterModelInfo::current` picks it on every build.
         differ(table, code, None, "group", models[code].group, model.group)
         mode = "HAS_GCODE_COMPATIBILITY" in build.features
@@ -786,8 +795,19 @@ def _compare_sim_presets(code: str, build: Build, copies: Copies, differ: Differ
         # `FLEXIBLE_PRESETS` is one set for every model, compared with each build's.
         flexible = material in copies.sim_flexible
         differ(table, code, material, "flexible", fw["is_flexible"], flexible)
+        if "HAS_CHAMBER_VENTS" in build.features:
+            # `OPEN_VENT_PRESETS` is one set for every build with vents. A preset with no
+            # chamber target leaves the vents as they are.
+            target = fw.get("chamber_target_temperature")
+            want = None if target is None else _vents(target <= copies.vent_limit)
+            have = _vents(material in copies.sim_open_vents)
+            differ(table, code, material, "vents", want, have)
     for material in sorted(presets.keys() - build.presets.keys()):
         differ(table, code, material, "material", MISSING, PRESENT)
+
+
+def _vents(opens: bool) -> str:
+    return "open" if opens else "closed"
 
 
 @dataclass(frozen=True)

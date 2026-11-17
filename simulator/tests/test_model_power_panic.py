@@ -28,6 +28,7 @@ from simulator.model import (
     Simulation,
     State,
 )
+from simulator.tests.test_model import reload_ends
 from simulator.tests.util import loaded, make, sliced
 
 NEXTRUDER_RATIO = 380 / 400
@@ -506,8 +507,9 @@ def test_a_cut_during_a_color_change_in_the_file_runs_it_again():
     assert p.job.fed_mm == 20 and t.unload_count == 0
     assert t.extruded == pytest.approx(FED_BACK + 7 * 0.95)
     p.load(0)
-    sim.tick(30)
-    p.resume()
+    reload_ends(sim, p)
+    # The change ends with its reload, and the print goes on.
+    assert p.state is State.PRINTING and p.job.pending_color_changes == []
     sim.tick(60)
     assert p.state is State.FINISHED
     assert [e.text for e in sim.events].count("color change at 20 mm") == 2

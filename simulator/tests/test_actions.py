@@ -44,6 +44,7 @@ TOOL_CALLS: dict[str, Callable[[SimPrinter, int], None]] = {
     "keep": lambda p, i: p.load(i),
     "unload": lambda p, i: p.unload(i),
     "pull": lambda p, i: p.pull(i),
+    "purge": lambda p, i: p.purge(i),
     "extrude": lambda p, i: p.extrude(i, 1),
     "retract": lambda p, i: p.retract(i, 1),
     "runout": lambda p, i: p.runout(i),

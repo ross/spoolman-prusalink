@@ -42,8 +42,7 @@ async def test_a_runout_s_reload_in_attention_is_charged_to_the_spool(tmp_path, 
 
     mark = len(ledger(tmp_path))
     printer.load(0)
-    await station.run_until(lambda: printer.state is State.PAUSED, poll_every=0.1)
-    printer.resume()
+    await station.run_until(lambda: printer.state is State.PRINTING, poll_every=0.1)
     await station.run_until(lambda: printer.job is None, poll_every=1.0, limit=60)
     await bridge.poll()
     # A poll saw the feed with no type: the hold starts, then ends with the type.

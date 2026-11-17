@@ -91,7 +91,8 @@ that governs a check of a file's `M862` lines. The top-level settings are
 timing and lengths: the time scale, how fast loads and prints move filament,
 the extra purge of a jam, the preheat and
 park times, a load's waits for the user, how long a sync job's `G28` homes
-when the printer isn't (`home_seconds`), the power-panic resume's wait and
+when the printer isn't (`home_seconds`), how long the automatic chamber vents'
+move takes at a print's start (`vents_seconds`), the power-panic resume's wait and
 phases, how long an MMU takes
 to connect (`mmu_connect_seconds`), and whether the start blip is on. The feed ratio and a load's slow, fast and purge
 lengths are overrides: left out, each printer uses its model's value, which
@@ -114,7 +115,7 @@ curl -X POST -H 'Content-Type: application/json' \
   http://127.0.0.1:8000/api/printers/core-one-l/load
 ```
 
-Actions: `load`, `unload`, `pull`, `load_to_nozzle`, `eject`, `cut`, `extrude`, `retract`,
+Actions: `load`, `unload`, `pull`, `purge`, `load_to_nozzle`, `eject`, `cut`, `extrude`, `retract`,
 `select_tool`, `park_tool`, `change_all`, `preload_all`, `start_print`, `pause`, `resume`, `cancel`, `dismiss`, `home`, `runout`, `jam`,
 `change_filament`, `clear_jam`, `reboot`, `set_power`, `set_fault`, `set_firmware`,
 `set_sensor_fault`, `set_stuck_write`, `set_tool_enabled`,
@@ -186,8 +187,8 @@ that trace. The points that matter for the bridge, in short:
   retract, except on the iX and INDX, whose nozzle cleaners end it. A
   high-flow nozzle doubles the purge, except on INDX, whose cleaner purges a
   fixed 25 mm. An idle load then auto-retracts. A reload during a print
-  primes 4 mm and retracts 8 mm instead, and the resume puts the tool back at
-  the gap it had when the change began. From a full gap, a Core One L load
+  primes 4 mm and retracts 8 mm instead, and the change's end puts the tool
+  back at the gap it had when the change began. From a full gap, a Core One L load
   counts 20 mm before the material shows and 63 mm after, times the feed
   ratio: 40 mm of purge and 23 mm of auto-retract ramming. With the
   high-flow nozzle the Core One and Core One L ship with, the purge is
@@ -221,6 +222,11 @@ that trace. The points that matter for the bridge, in short:
   the simulator empties the path with the unload. `pull` is a hand pull outside a
   print: on the picked tool with the sensors on, the idle sensor clear then
   counts an unload if a type is stored.
+- `purge` is Filament > Purge Filament, `M701 L0 W2`: a load with no
+  insertion and no slow or fast load. It parks, writes the stored type back,
+  purges a load's purge length, asks the color question, and auto-retracts,
+  so the type doesn't change and no unload counts. It needs a stored type
+  and filament in the path, and isn't modeled with an MMU.
 - A print started from the page stands for the user pressing Print on the
   file's preview: the job is counted at once and reads `PRINTING` while the
   file is scanned. Then the preview checks the tools the print's segments
@@ -302,8 +308,8 @@ that trace. The points that matter for the bridge, in short:
   `ATTENTION` for the filament to be loaded into the MMU. No type is
   written, so no unload counts. `load` with no source then reloads the same
   slot, reading `PRINTING` while it runs: the feed counts nothing, the load to the nozzle counts 7 mm past
-  the 40 mm gap and the prime 4, and the print waits `PAUSED` for the
-  resume, which feeds the 8 mm back. With a spool join from the slot, the
+  the 40 mm gap and the prime 4, and the print goes on by itself, which
+  feeds the 8 mm back. With a spool join from the slot, the
   join unloads the slot into the MMU, changes to the join's slot from no
   slot and loads it to the nozzle, while it reads `PRINTING`, and the print
   goes on with the join's slot; the joins' rules are the toolchangers'.
@@ -440,7 +446,7 @@ that trace. The points that matter for the bridge, in short:
 - `change_filament` is the Tune menu's Change filament, `M600 T<n>`, on any
   enabled tool once a print is printing. On the picked tool it's the
   filament change a runout runs. On another tool it picks that tool, runs
-  the same change there, and the `resume` after the reload changes back to
+  the same change there, and the change's end changes back to
   the print's tool with no purge, so the counts land on that tool only.
   The pick moves nothing and takes no time. The reload writes the type
   the tool had, else the type the file names for it, else the type its
@@ -525,6 +531,17 @@ that trace. The points that matter for the bridge, in short:
 - An upload during the start blip is accepted and dropped: the firmware's
   state check passes while it reads `IDLE`, but the print start ignores it.
   The user's print goes on and the uploaded file never runs.
+- A Core One or Core One L print works the chamber vents as it begins: its
+  tools' types (or, for a tool with none, the file's) open them when every
+  preset's chamber target is at most 45 °C, as PETG's is, and close them
+  otherwise. On the Core One L, whose vent control is automatic, a move
+  takes `vents_seconds`, in place of the start blip. The printer reads as
+  the preview did just before: `IDLE` with no job, or `ATTENTION` with the
+  job after a question, while `time_printing` already counts. An upload
+  then is dropped as in the blip, or refused under `ATTENTION`. A finished
+  or stopped print closes open vents as it parks, and a boot forgets where
+  they are. A sync job uses no tool, so it never moves them. The Core One's
+  manual control only records the state; its warning isn't modeled.
 
 Choices made where the firmware was silent or the plan left it open:
 

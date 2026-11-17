@@ -18,6 +18,7 @@ import pytest
 
 from simulator import prusalink, trace
 from simulator.model import (
+    JobPhase,
     Material,
     Power,
     PrintSpec,
@@ -55,8 +56,11 @@ SYNC_JOB = printer_sync.build_job(
 # samples, as it does on the printer. Each replay starts with `LEAD` seconds at rest,
 # longer than any probe interval the plumbing tests try, so a trace polled from any
 # offset begins at rest, as docs/printer-behaviors.md asks of a recording. The scan
-# keeps the model's default: how long the printer takes to scan the sync job's four
-# lines isn't recorded yet, and the comparison lets a poll miss it either way.
+# takes no time. A print started at the printer is scanned while its preview's image is up,
+# which reads `IDLE` with no job, before Print takes the ID, and the replays start a print
+# at Print. What the simulator's scan reads, `PRINTING` with the job, is the preview's
+# `PrintPreviewConfirmed`, which lasts one server cycle: no trace has shown it, for a print
+# or a sync job.
 SETTINGS = dict(
     unload_seconds=2.0,
     insert_seconds=2.0,
@@ -64,12 +68,18 @@ SETTINGS = dict(
     purge_park_seconds=1.0,
     color_seconds=2.0,
     load_rate_mm_s=5.0,
+    scan_seconds=0.0,
     blip_seconds=0.3,
-    park_seconds=1.0,
+    park_seconds=4.0,
     sync_job_seconds=2.0,
     home_seconds=3.0,
+    vents_seconds=3.0,
     preheat_seconds=2.0,
     print_rate_mm_s=20.0,
+    change_park_seconds=3.0,
+    change_unload_seconds=3.0,
+    change_return_seconds=8.0,
+    end_park_seconds=5.0,
 )
 
 
@@ -158,22 +168,53 @@ def f1_reboot(rec: Recorder) -> None:
     rec.advance(2.0)
 
 
-def f2_unload(rec: Recorder) -> None:
-    rec.advance(LEAD)
+def _auto_retracted_with(rec: Recorder, material: Material) -> None:
+    """Start from `material` loaded and auto-retracted, as a menu load or Purge Filament
+    leaves the tool."""
+    tool = rec.printer.tools[0]
+    tool.fill(material)
+    _auto_retracted(tool)
+    rec.reset()
+
+
+def _menu_unload(rec: Recorder) -> None:
+    """A menu unload, then the filament pulled out of the sensor, where the unload left it."""
     rec.printer.unload(0)
     rec.settled()
     rec.advance(2.0)
+    rec.printer.pull(0)
+    rec.advance(2.0)
+
+
+def f2_unload(rec: Recorder) -> None:
+    """A menu unload of the tool Purge Filament (F11) left auto-retracted, so it unloads cold
+    and counts nothing, then the pull."""
+    _auto_retracted_with(rec, TAGGED)
+    rec.advance(LEAD)
+    _menu_unload(rec)
+
+
+def _unloaded(rec: Recorder) -> None:
+    """Start from an empty tool with no type, as a menu unload and a pull leave it: the
+    tracker's gap at its limit and not trusted."""
+    tool = rec.printer.tools[0]
+    tool.fill(None)
+    tool.path.empty(rec.printer.model.gap_mm)
+    rec.reset()
 
 
 def f3_load_preset(rec: Recorder) -> None:
-    f2_unload(rec)
+    """A menu load of the PETG preset into the tool F2 left empty."""
+    _unloaded(rec)
+    rec.advance(LEAD)
     rec.printer.load(0, source="preset", name=PETG.name)
     rec.settled()
     rec.advance(2.0)
 
 
 def f4_load_tag(rec: Recorder) -> None:
-    f2_unload(rec)
+    _unloaded(rec)
+    rec.advance(LEAD)
     m = TAGGED
     rec.printer.load(0, source="tag", name=m.name, color=m.color, uuid=m.instance_uuid)
     rec.settled()
@@ -191,64 +232,103 @@ def _printing(rec: Recorder, mm: float = 20.0) -> None:
 
 
 def f5_print(rec: Recorder) -> None:
+    """A print started at the printer, from the FINISHED screen of a sync job, dismissed
+    first. The preview asks nothing, so while the head opens the chamber vents for PETG the
+    printer reads `IDLE` with no job, as before Print was pressed."""
+    rec.printer.tools[0].fill(TAGGED)
+    rec.printer.screen = State.FINISHED
+    rec.printer.homed = True  # the sync job homed it
+    rec.reset()
     rec.advance(LEAD)
-    _print(rec)
+    rec.printer.dismiss()
+    rec.advance(2.0)
+    # The traced print's 674 mm, slow enough that polls see the counter both still and
+    # moving, as the printer's did: the trace's long run of polls needs as many samples.
+    seconds = 600.0
+    _print(rec, 674.0, duration_s=seconds, preheat_s=5.0)
+    rec.until(lambda: rec.printer.job is None, limit=seconds + 60.0)
+    rec.advance(2.0)
+    rec.printer.dismiss()
+    rec.advance(2.0)
+
+
+def _mid_print(rec: Recorder) -> None:
+    """Start the recording partway through a print, as a trace that begins `PRINTING` does,
+    so the replay leaves the print's start out. The print feeds about 1 mm/s, slowly
+    enough that polls see the counter both still and moving, as the printer's did."""
+    _print(rec, 2000.0, duration_s=2000.0)
+    rec.until(lambda: rec.printer.job.phase is JobPhase.PRINTING, limit=120.0)
+    _printing(rec, 3.0)
+    rec.reset()
+    _printing(rec, 40.0)
+    rec.advance(0.5)  # between two of the counter's steps
+
+
+def f6_pause_resume(rec: Recorder) -> None:
+    """A pause and a resume from the screen, from `PRINTING` to `PRINTING`."""
+    _mid_print(rec)
+    rec.printer.pause()
+    rec.advance(15.0)
+    rec.printer.resume()
+    _printing(rec, 15.0)
+
+
+def f7_cancel(rec: Recorder) -> None:
+    """Stop from the screen, then the stopped screen dismissed."""
+    _mid_print(rec)
+    rec.printer.cancel()
     rec.ended()
     rec.advance(2.0)
     rec.printer.dismiss()
     rec.advance(2.0)
 
 
-def f6_pause_resume(rec: Recorder) -> None:
-    rec.advance(LEAD)
-    _print(rec)
-    _printing(rec)
-    rec.printer.pause()
-    rec.advance(3.0)
-    rec.printer.resume()
-    rec.ended()
-    rec.advance(2.0)
-
-
-def f7_cancel(rec: Recorder) -> None:
-    rec.advance(LEAD)
-    _print(rec)
-    _printing(rec)
-    rec.printer.cancel()
-    rec.ended()
-    rec.advance(2.0)
-
-
 def _change_filament(rec: Recorder) -> None:
-    """A filament change during a print: the tool runs out or the user asks for one."""
-    rec.until(lambda: rec.printer.state is State.ATTENTION)
-    rec.advance(3.0)
+    """A filament change during a print, from its dialog to `PRINTING`: the unload leaves
+    the filament in the sensor, the user pulls it out and answers that it came out, and
+    reloads the same spool; the print goes on by itself after the color question."""
+    rec.until(lambda: rec.printer.tools[0].path.at_sensor)  # unloaded, still in the sensor
+    rec.advance(2.0)
+    rec.printer.pull(0)
+    rec.advance(5.0)
     rec.printer.load(0)  # The reload keeps the type the printer had.
-    rec.until(lambda: rec.printer.state is State.PAUSED)
-    rec.advance(2.0)
-    rec.printer.resume()
-    rec.ended()
-    rec.advance(2.0)
+    rec.until(lambda: rec.printer.state is State.PRINTING)
+    _printing(rec, 15.0)
 
 
 def f8_change_filament(rec: Recorder) -> None:
-    rec.advance(LEAD)
-    _print(rec)
-    _printing(rec)
-    rec.printer.runout(0)
+    """Tune > Change filament, `M600 P`, on the print's tool."""
+    _mid_print(rec)
+    rec.printer.change_filament(0)
     _change_filament(rec)
 
 
 def f9_m600(rec: Recorder) -> None:
+    """A color change in the file. The trace begins idle, so the replay runs the start."""
     rec.advance(LEAD)
-    _print(rec, color_changes_mm=[60.0])
+    # The printer counted 332 mm before the file's M600. Its 5 min preheat is many still
+    # polls, which need as many samples, and the print is slow enough that polls see the
+    # counter both still and moving.
+    _print(rec, 2000.0, duration_s=1000.0, preheat_s=5.0, color_changes_mm=[332.0])
+    rec.until(lambda: rec.printer.state is State.ATTENTION, limit=900.0)
     _change_filament(rec)
+    rec.advance(0.2)  # the trace stops on still polls, before the print's next mm
 
 
 def f10_sync_job(rec: Recorder) -> None:
+    """The bridge's job writing the tagged spool over a PETG preset with no UUIDs, the first
+    job since a boot: `G28 O` homes before the write. The job uses no tool, so it moves no
+    vents."""
+    tool = rec.printer.tools[0]
+    tool.fill(PETG)
+    _auto_retracted(tool)
+    rec.printer.homed = False
+    rec.reset()
     rec.advance(LEAD)
     rec.printer.upload("spoolman-sync.gcode", SYNC_JOB, print_after=True, overwrite=True)
     rec.ended()
+    rec.advance(2.0)
+    rec.printer.dismiss()
     rec.advance(2.0)
 
 
@@ -289,12 +369,22 @@ def f10c_sync_job_rewrite_idle(rec: Recorder) -> None:
 
 
 def f11_manual_extrude(rec: Recorder) -> None:
+    """Move E +20, -10 and +20, which counts only the 10 past the gap, then Purge Filament.
+    Move E plans its moves while the knob turns (`ScreenMenuMove::plan_moves`), so each
+    +20 moved over two polls on the printer, and the replay feeds it in two parts."""
     rec.advance(LEAD)
-    rec.printer.extrude(0, 50)
+    rec.printer.extrude(0, 5)
+    rec.advance(1.0)
+    rec.printer.extrude(0, 15)
     rec.advance(2.0)
     rec.printer.retract(0, 10)
     rec.advance(2.0)
-    rec.printer.extrude(0, 50)
+    rec.printer.extrude(0, 14)  # 10 refill the gap
+    rec.advance(1.0)
+    rec.printer.extrude(0, 6)
+    rec.advance(2.0)
+    rec.printer.purge(0)
+    rec.settled()
     rec.advance(2.0)
 
 
@@ -332,8 +422,8 @@ def _from_empty(rec: Recorder) -> None:
 
 def _start_at_screen(rec: Recorder, material: str, **spec) -> None:
     """Start a print on the empty tool and wait at the preview's warning that it has no
-    filament. The printer reads `IDLE` with no job while its preview is open, which the
-    simulator doesn't model; it shows the scan instead, which the probe can miss."""
+    filament. The replay starts the print at the preview's Print: before it the printer
+    reads `IDLE` with no job, as at rest."""
     rec.printer.start_print(PrintSpec([Segment(0, 200, material)], **spec))
     rec.until(lambda: rec.printer.state is State.ATTENTION)
     rec.advance(2.0)
@@ -383,10 +473,8 @@ def f29_sensors_off_print(rec: Recorder) -> None:
     rec.printer.pull(0)  # the menu unload left the filament in the sensor
     rec.advance(2.0)
     _start_at_screen(rec, PETG.name, duration_s=400.0, preheat_s=10.0)
-    # The printer read `ATTENTION` with the job for 13 s after Disable FS had turned the
-    # sensors off, which nothing in the source explains, so the replay turns them off first.
-    rec.printer.set_sensors(False)
-    rec.advance(2.0)
+    # The sensors go off, and the printer reads `ATTENTION` with the job for 13 s after,
+    # while the head opens the chamber vents for PETG (F29-disable-fs).
     rec.printer.tap_through()  # Disable FS
     # Slow enough that polls see the counter both still and moving, as the printer's did.
     # The menu unload left the tracker's gap at its limit, which the print refills first.
@@ -399,6 +487,10 @@ def f29_sensors_off_print(rec: Recorder) -> None:
     rec.printer.load(0, source="preset", name=PETG.name)
     rec.settled()
     rec.advance(2.0)
+    # The job read `PRINTING` with the old type for about 5 s before its write, though the
+    # print had homed the printer. Nothing in the simulator says why, so the replay leaves
+    # it unhomed, and `G28 O` stands in for that wait.
+    rec.printer.homed = False
     rec.printer.upload("spoolman-sync.gcode", SYNC_JOB, print_after=True, overwrite=True)
     rec.ended()
     rec.advance(2.0)
@@ -407,6 +499,19 @@ def f29_sensors_off_print(rec: Recorder) -> None:
     rec.printer.pull(0)  # with the sensors off, nothing reads it
     rec.advance(2.0)
     rec.printer.set_sensors(True)
+    rec.advance(2.0)
+
+
+def f29_disable_fs(rec: Recorder) -> None:
+    """A print on the empty tool past Disable FS. The sensors go off at once, and the
+    printer reads `ATTENTION` with the job, the preview's last question, while the head
+    opens the chamber vents for PETG; then `PRINTING`. The trace stops before the cancel
+    shows."""
+    _from_empty(rec)
+    rec.advance(LEAD)
+    _start_at_screen(rec, PETG.name, duration_s=400.0, preheat_s=10.0)
+    rec.printer.tap_through()  # Disable FS
+    rec.until(lambda: rec.printer.state is State.PRINTING)
     rec.advance(2.0)
 
 
@@ -420,13 +525,11 @@ def f47_sensors_setting(rec: Recorder) -> None:
 
 
 def f48_unload_load(rec: Recorder) -> None:
-    """A menu unload, the filament pulled out of the sensor, then a menu load, as F3."""
+    """A menu unload of the preset F3 loaded, which left it auto-retracted, the filament
+    pulled out of the sensor, then a menu load, as F3."""
+    _auto_retracted_with(rec, PETG)
     rec.advance(LEAD)
-    rec.printer.unload(0)
-    rec.settled()
-    rec.advance(2.0)
-    rec.printer.pull(0)
-    rec.advance(2.0)
+    _menu_unload(rec)
     rec.printer.load(0, source="preset", name=PETG.name)
     rec.settled()
     rec.advance(2.0)
@@ -458,6 +561,7 @@ REPLAYS: dict[str, Callable[[Recorder], None]] = {
     "F28-warning-abort": f28_warning_abort,
     "F28-load-then-decline": f28_load_then_decline,
     "F29-sensors-off-print": f29_sensors_off_print,
+    "F29-disable-fs": f29_disable_fs,
     "F47-sensors-setting": f47_sensors_setting,
     "F48-unload-load": f48_unload_load,
     "F48-hand-pull": f48_hand_pull,

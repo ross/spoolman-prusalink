@@ -10,6 +10,8 @@ slow and fast lengths, purges, primes 4 and retracts 8; the resume puts the gap 
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 
 from simulator import prusalink
@@ -24,6 +26,7 @@ from simulator.model import (
     SimTool,
     State,
 )
+from simulator.tests.test_model import reload_ends
 from simulator.tests.util import PLA, loaded, make
 
 XL, INDX = "3.1.0", "8.10.0"
@@ -55,7 +58,8 @@ def status(p) -> str:
 
 @pytest.mark.parametrize("high_flow", [False, True])
 def test_a_change_on_another_xl_tool_counts_on_that_tool_and_changes_back(high_flow):
-    sim, p = make(XL, [loaded(0), loaded(1, PETG)])
+    # The change ends after the head returns; hold the return open to see the reload's end.
+    sim, p = make(XL, [loaded(0), loaded(1, PETG)], change_return_seconds=10)
     p.high_flow = high_flow
     start(sim, p, Segment(0, 100))
     sim.advance(1)
@@ -72,20 +76,21 @@ def test_a_change_on_another_xl_tool_counts_on_that_tool_and_changes_back(high_f
     assert p.job.restore == (1, 0)
 
     p.load(1)  # the reload keeps the type
-    sim.advance(60)
+    reload_ends(sim, p, 1)
+    assert p.state is State.ATTENTION and p.job.phase is JobPhase.RETURN
     # From gap 40: 30 slow (gap 10); 50 fast, 40 count (gap 0); the 27 mm purge, doubled
     # on a high-flow nozzle; -8 (gap 8); the prime +4 (gap 4); -8 (gap 12).
     purge = 54 if high_flow else 27
     assert counts(p) == pytest.approx([before, 7 + 40 + purge])
-    assert p.state is State.PAUSED and p.tools[1].path.gap == pytest.approx(12)
+    assert p.tools[1].path.gap == pytest.approx(12)
     assert p.tools[1].material.name == "PETG" and p.tools[1].material.color == "#00ff00"
 
-    p.resume()
-    # T1 back to the change's gap 0: 12 fed, nothing counts. Then the change back to T0,
-    # with no purge.
+    sim.advance(10)
+    # The change's end: T1 back to the change's gap 0, 12 fed, nothing counts. Then the
+    # change back to T0, with no purge.
     assert p.tools[1].path.gap == 0 and p.selected_tool == 0
     assert [e.text for e in sim.events if e.text.startswith("pick")][-2:] == ["pick T1", "pick T0"]
-    assert counts(p) == pytest.approx([before, 7 + 40 + purge])
+    assert counts(p)[1] == pytest.approx(7 + 40 + purge)
     assert p.state is State.PRINTING
     sim.advance(60)
     # T0 also counts 37 of the start's priming: -2 for the cleanup (gap 2), then 39 refill
@@ -96,7 +101,8 @@ def test_a_change_on_another_xl_tool_counts_on_that_tool_and_changes_back(high_f
 
 
 def test_a_change_on_another_indx_tool_counts_on_that_tool_with_no_resume_purge():
-    sim, p = make(INDX, [loaded(0), loaded(1, PETG)])
+    # The change ends after the head returns; hold the return open to see the reload's end.
+    sim, p = make(INDX, [loaded(0), loaded(1, PETG)], change_return_seconds=10)
     start(sim, p, Segment(0, 100))
     sim.advance(1)
     before = counts(p)[0]
@@ -108,18 +114,19 @@ def test_a_change_on_another_indx_tool_counts_on_that_tool_with_no_resume_purge(
     assert counts(p) == pytest.approx([before, 17])
 
     p.load(1)
-    sim.advance(60)
+    reload_ends(sim, p, 1)
+    assert p.job.phase is JobPhase.RETURN
     # From gap 27: 15 slow (gap 12); 25 fast, 13 count; the cleaner's 25; its
     # auto-retract +8 -8 +1 -1 counts 8 and stores 8 (gap 8); the prime feeds the 8 back
     # (gap 0) and counts 4; -8 (gap 8). The reload doesn't dock.
     assert counts(p) == pytest.approx([before, 17 + 13 + 25 + 8 + 4])
     assert p.selected_tool == 1 and p.tools[1].path.gap == pytest.approx(8)
 
-    p.resume()
-    # The restore feeds T1's 8 back (gap 0), counting nothing. The change back to T0
+    sim.advance(10)
+    # The change's end feeds T1's 8 back (gap 0), counting nothing. The change back to T0
     # isn't a pause's resume, so T0 gets no cleaner purge.
     assert p.selected_tool == 0 and p.tools[1].path.gap == 0
-    assert counts(p) == pytest.approx([before, 67])
+    assert counts(p)[1] == pytest.approx(67)
     assert not any("purged 25 mm at the resume" in e.text for e in sim.events)
     sim.advance(60)
     # T0 also counts the start's priming: G427's cleaner purge, 25 then the auto-retract's
@@ -142,7 +149,9 @@ def test_a_change_on_the_picked_tool_is_the_runout_s_change():
     assert change.job.attention.reason is Reason.COLOR_CHANGE
     for attr in ("extruded", "unload_count", "material", "kept_type"):
         assert getattr(change.tools[0], attr) == getattr(runout.tools[0], attr), attr
-    assert change.tools[0].path == runout.tools[0].path
+    # A color change's unload leaves the filament in the sensor; a runout's empties it.
+    assert change.tools[0].path.at_sensor and not runout.tools[0].path.at_sensor
+    assert replace(change.tools[0].path, at_sensor=False) == runout.tools[0].path
     assert change.job.restore == runout.job.restore
 
 
@@ -349,9 +358,10 @@ def test_a_load_or_unload_reads_attention_in_a_print_and_busy_while_idle():
     reload = phases(sim, p)
     assert {phase for phase, _ in reload} == {"SLOW", "FAST", "PURGE", "RAM", "PRIME", "RETRACT"}
     assert {state for _, state in reload} == {"ATTENTION"}
-    assert status(p) == "PAUSED"
-    p.resume()
+    # The change ends by itself with its reload: there is no pause to resume.
     assert status(p) == "PRINTING"
+    with pytest.raises(Busy, match="nothing to resume"):
+        p.resume()
     p.cancel()
     sim.advance(5)
     p.dismiss()

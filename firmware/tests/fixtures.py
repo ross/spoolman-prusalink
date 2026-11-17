@@ -241,6 +241,9 @@ set_feature_for_printers(
   "COREONEL_INDX"
   )
 set_feature_for_printers(HAS_MMU2 "MK4" "MK3.5" "COREONE" "COREONEL")
+set_feature_for_printers_master_board(
+  HAS_CHAMBER_VENTS "COREONE" "COREONE_INDX" "COREONEL" "COREONEL_INDX"
+  )
 set_feature_for_printers(HAS_GCODE_COMPATIBILITY "MK3.5" "MK4" "COREONE" "COREONEL" "XL")
 set_feature_for_printers(
   HAS_AUTO_RETRACT
@@ -327,6 +330,11 @@ constexpr PresetFilamentParametersT<PresetFilamentParameters> preset_filament_pa
                 .nozzle_temperature = 275,
                 .nozzle_preheat_temperature = HAS_LOADCELL() ? (HAS_INDX() ? 230 : 275 - 25) : 170,
                 .heatbed_temperature = 100,
+#if HAS_CHAMBER_API()
+                .chamber_min_temperature = 40,
+                .chamber_max_temperature = 80,
+                .chamber_target_temperature = 75,
+#endif
 #if HAS_CHAMBER_FILTRATION_API()
                 .requires_filtration = true,
 #endif
@@ -6537,6 +6545,15 @@ FilamentType CurrentStore::set_filament_type(VirtualToolIndex virtual_tool, Fila
 
     return value;
 }
+
+#if PRINTER_IS_PRUSA_COREONE()
+    if (should_migrate<5>()) {
+        // Printers that are upgraded are most likely CoreOne without vent grille lever
+        // Those have to keep the manual open/close mechanism.
+        // On new CoreOne+ printers, this will be checked in HW config
+        auto_chamber_vent_enabled.set(false);
+    }
+#endif
 """
 
 # `filament_sensor.cpp`, excerpt: what a sensor reads once it's disabled.
@@ -6558,6 +6575,167 @@ IFSensor *GetExtruderFSensor([[maybe_unused]] PhysicalToolIndex index) {
 IFSensor *GetSideFSensor(PhysicalToolIndex index) {
     return getSideFSensor(index);
 """
+
+# The vent rule and the vents' close after a print.
+CHAMBER_CPP = """\
+void Chamber::manage_ventilation_state(std::optional<Temperature> fil_target) {
+    if (!fil_target.has_value()) {
+        // We don't know whether we should close or open, leave as is
+        return;
+    }
+
+    constexpr uint8_t temp_limit = 45; // Limit for closed grills is chamber max temperature of PETG
+    const auto target_state = (fil_target.value() > temp_limit) ? VentState::closed : VentState::open;
+
+    if (vent_state_ == target_state) {
+        // Vents at the correct position
+        return;
+    }
+
+    switch (config_store().get_vent_control()) {
+
+    case VentControl::off:
+        return;
+
+    case VentControl::automatic:
+        automatic_chamber_vents::execute_control(target_state);
+        break;
+
+    case VentControl::manual:
+        marlin_server::set_warning(target_state == VentState::open ? WarningType::OpenChamberVents : WarningType::CloseChamberVents);
+        vent_state_ = target_state;
+        break;
+    }
+}
+
+void Chamber::close_vents_after_print() {
+    if (vent_state_ != VentState::open) {
+        return;
+    }
+
+    if (config_store().get_vent_control() != VentControl::automatic) {
+        return;
+    }
+
+    automatic_chamber_vents::execute_control(VentState::closed);
+}
+"""  # noqa: E501 (verbatim firmware lines)
+
+# The automatic vents' move.
+AUTOMATIC_CHAMBER_VENTS_CPP = """\
+bool execute_control(VentState target_state) {
+    const bool open = (target_state == VentState::open);
+
+    PrintStatusMessageGuard psm_guard;
+    if (open) {
+        psm_guard.update<PrintStatusMessage::Type::opening_chamber_vents>({});
+    } else {
+        psm_guard.update<PrintStatusMessage::Type::closing_chamber_vents>({});
+    }
+    marlin_server::FSM_Holder fsm_holder { PhaseWait::print_status_message };
+
+    // On INDX, vent control holds specific tool, for that we need pickup (that needs precise homing), this precise homing avoids double homing on the next pickup
+    if (!GcodeSuite::G28_no_parser(true, true, false, { .only_if_needed = true, .precise = HAS_INDX() })) {
+        return false;
+    }
+
+#if HAS_INDX()
+    const auto previous_tool = PhysicalToolIndex::currently_selected();
+    auto restore_tool_now = [&]() -> bool {
+        return prusa_toolchanger.tool_change(previous_tool, tool_return_t::no_return, {}, tool_change_lift_t::full_lift, false);
+    };
+    // Best-effort tool restore on the failure paths (already returns false).
+    ScopeGuard restore_tool([&] { restore_tool_now(); });
+
+    if (!execute_indx_vent_lever(open)) {
+        return false;
+    }
+#else
+    // Move to a safe Y-axis position to avoid the lever.
+    plan_to_y(Y_SAFE, approach_feedrate);
+    // Move to a horizontal position (left or right) of the lever.
+    plan_to_x(open ? X_OPEN_START_POS : X_CLOSE_START_POS, approach_feedrate);
+    // Move into the lever's Y-axis line.
+    plan_to_y(Y_LEVER, approach_feedrate);
+    // Move horizontally to engage the lever and switch it.
+    plan_to_x(open ? X_OPEN_END_POS : X_CLOSE_END_POS, lever_move_feedrate);
+    // Move horizontally to release the lever tension
+    plan_to_x(open ? X_OPEN_END_POS + X_LEVER_MOVE_AWAY : X_CLOSE_END_POS - X_LEVER_MOVE_AWAY, lever_move_feedrate);
+    // Back out to the safe Y-axis position to avoid a collision on future moves.
+    plan_to_y(Y_SAFE, approach_feedrate);
+
+    // Return to the home position after the vent operation.
+    mapi::park(mapi::get_parking_position(mapi::ParkPosition::park).without_z_move());
+#endif
+
+    // Wait for all planned moves to complete
+    planner.synchronize();
+
+    buddy::chamber().set_vent_state(target_state);
+
+#if HAS_INDX()
+    restore_tool.disarm();
+    if (!restore_tool_now()) {
+        return false;
+    }
+#endif
+
+    return true;
+}
+"""  # noqa: E501 (verbatim firmware lines)
+
+# The Core One variants' vent control defaults.
+COREONE_VARIANT_CPP = """\
+constexpr EnumArray<PrinterVariant, Features, PrinterVariant::_cnt> variant_features {
+    { PrinterVariant::base, {} },
+    { PrinterVariant::plus, { .auto_vent = true } },
+    { PrinterVariant::plus_gen2, {
+                                     .ejg2 = true,
+                                     .belts_15gt = true,
+                                     .auto_vent = true,
+#if HAS_NOZZLE_CLEANER_LITE()
+                                     .nozzle_cleaner_lite = true,
+#endif
+                                 } },
+};
+"""  # noqa: E501 (verbatim firmware lines)
+
+# `coreone.hpp`, excerpt: the edition a fresh or factory-reset Core One ships as.
+COREONE_VARIANT_HPP = """\
+/// Edition a factory-fresh unit currently ships as; applied on the first run and after a factory reset.
+static constexpr PrinterVariant printer_variant_after_factory_reset = PrinterVariant::plus_gen2;
+"""  # noqa: E501 (verbatim firmware lines)
+
+# The Core One L variants' vent control defaults.
+COREONEL_VARIANT_CPP = """\
+constexpr EnumArray<PrinterVariant, Features, PrinterVariant::_cnt> variant_features {
+    { PrinterVariant::base, { .auto_vent = true } },
+    { PrinterVariant::plus, {
+                                .belts_15gt = true,
+                                .auto_vent = true,
+#if HAS_NOZZLE_CLEANER_LITE()
+                                .nozzle_cleaner_lite = true,
+#endif
+                            } },
+};
+"""  # noqa: E501 (verbatim firmware lines)
+
+# PrintInit's vent target.
+MARLIN_SERVER_VENTS = """\
+#if HAS_CHAMBER_VENTS()
+        {
+            // Find the highest chamber target temperature across the filaments used by the print
+            std::optional<uint8_t> max_chamber_target_temp;
+            GCodeInfo::getInstance().for_each_used_extruder([&]([[maybe_unused]] GcodeToolIndex, VirtualToolIndex virtual_tool, const GCodeInfo::ExtruderInfo &) {
+                const auto target = FilamentType::for_tool_heuristic(virtual_tool).parameters().chamber_target_temperature;
+                if (target.has_value() && (!max_chamber_target_temp.has_value() || *target > *max_chamber_target_temp)) {
+                    max_chamber_target_temp = target;
+                }
+            });
+            buddy::chamber().manage_ventilation_state(max_chamber_target_temp);
+        }
+#endif
+"""  # noqa: E501 (verbatim firmware lines)
 
 FILES = {
     read.MODELS_FILE: MODELS_HPP,
@@ -6610,7 +6788,14 @@ FILES = {
     "src/gui/screen_menu_filament_mmu.cpp": FILAMENT_MMU_CPP,
     "src/common/appmain.cpp": APPMAIN_CPP,
     "src/feature/filament_sensor/filament_sensors_handler.cpp": FILAMENT_SENSORS_HANDLER_CPP,
-    "src/common/marlin_server.cpp": MARLIN_SERVER_CPP,
+    "src/common/marlin_server.cpp": MARLIN_SERVER_CPP + MARLIN_SERVER_VENTS,
+    "src/feature/chamber/chamber.cpp": CHAMBER_CPP,
+    "src/marlin_stubs/feature/automatic_chamber_vents/automatic_chamber_vents.cpp": (
+        AUTOMATIC_CHAMBER_VENTS_CPP
+    ),
+    "src/common/printer_variant/coreone.cpp": COREONE_VARIANT_CPP,
+    "src/common/printer_variant/coreone.hpp": COREONE_VARIANT_HPP,
+    "src/common/printer_variant/coreonel.cpp": COREONEL_VARIANT_CPP,
     "src/common/marlin_print_preview.cpp": MARLIN_PRINT_PREVIEW_CPP,
     "src/gui/MItem_mmu.cpp": MITEM_MMU_CPP,
     "src/feature/openprinttag/request_manager.cpp": REQUEST_MANAGER_CPP,

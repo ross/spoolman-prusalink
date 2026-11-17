@@ -7,6 +7,7 @@ from __future__ import annotations
 import pytest
 
 from simulator.model import Busy, Invalid, JobPhase, PrintSpec, Segment, SimTool
+from simulator.tests.test_model import reload_ends
 from simulator.tests.util import PLA, loaded, make, run
 
 XL, INDX = "3.1.0", "8.10.0"
@@ -97,8 +98,9 @@ def test_a_reload_in_a_print_neither_picks_nor_docks():
     sim.advance(3)
     p.runout(0)
     p.load(0)  # keep: the reload the runout waits for
-    sim.advance(60)
-    assert p.job.phase is JobPhase.PAUSED and p.selected_tool == 0
+    reload_ends(sim, p)
+    # The change ends with its reload, and the print goes on with T0 picked.
+    assert p.job.phase is JobPhase.PRINTING and p.selected_tool == 0
     assert picks(sim) == []
 
 

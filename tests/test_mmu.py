@@ -215,7 +215,6 @@ async def test_an_mmu_runout_swap_counts_no_unload(tmp_path):
     p.load(0)
     await run(station, lambda: p.tools[0].process is None)
     await bridge.poll()
-    p.resume()
     await run(station, lambda: p.job is None)
     await bridge.poll()
     assert p.tools[0].unload_count == 0 and station.material(0)[0] == "PLA"

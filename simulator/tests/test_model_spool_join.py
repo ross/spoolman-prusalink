@@ -35,6 +35,7 @@ from simulator.model import (
     SimTool,
     State,
 )
+from simulator.tests.test_model import reload_ends
 from simulator.tests.util import loaded, make
 
 XL, INDX = "3.1.0", "8.10.0"
@@ -190,9 +191,9 @@ def test_a_runout_at_the_chain_s_end_is_a_filament_change(model):
     assert str(p.job.attention) == "runout tool 1" and p.job.mapped == {0: 1}
     assert p.tools[1].unload_count == 1 and p.tools[1].material is None
     p.load(1)
-    sim.advance(60)
-    assert p.state is State.PAUSED and p.tools[1].material == loaded(1).material
-    p.resume()
+    reload_ends(sim, p, 1)
+    # The change ends with its reload, and the print goes on with T1 picked.
+    assert p.state is State.PRINTING and p.tools[1].material == loaded(1).material
     assert p.selected_tool == 1
     sim.advance(100)
     assert p.state is State.FINISHED

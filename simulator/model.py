@@ -77,6 +77,7 @@ from simulator.tool import (
     MK3_5_EXTRUDER,
     MK3_5_PRESETS,
     MK4_EXTRUDER,
+    OPEN_VENT_PRESETS,
     PARK_STEP,
     PRESET_ALIASES,
     RETRACTED_STEP,
@@ -122,6 +123,15 @@ class State(StrEnum):
     ATTENTION = "ATTENTION"
 
 
+class Vents(StrEnum):
+    """How a build with chamber vents works them at a print's start: the menu's Chamber Vent
+    Control (`VentControl` in `src/feature/chamber/chamber_enums.hpp`). `automatic` moves
+    the lever with the head; `manual` asks the user with a warning instead."""
+
+    AUTOMATIC = "automatic"
+    MANUAL = "manual"
+
+
 class Firmware(StrEnum):
     FULL = "full"
     NO_COUNTERS = "no_counters"
@@ -143,6 +153,7 @@ class Fault(StrEnum):
 class JobPhase(StrEnum):
     SCANNING = "SCANNING"
     BLIP = "BLIP"
+    VENTS = "VENTS"  # the automatic vents' move at a print's start, which blocks the server
     PREHEAT = "PREHEAT"
     PRINTING = "PRINTING"
     PAUSED = "PAUSED"
@@ -156,6 +167,7 @@ class JobPhase(StrEnum):
     PREVIEW_LOAD = "PREVIEW_LOAD"  # BUSY with no job: the preview's filament-not-inserted load
     PREVIEW_UNLOAD = "PREVIEW_UNLOAD"  # BUSY with no job: the preview's unload into the MMU
     JOIN = "JOIN"  # ATTENTION while a spool join unloads the old tool, then back to PRINTING
+    RETURN = "RETURN"  # ATTENTION while a filament change reheats and unparks after its reload
 
 
 IDLE_STATES = (State.IDLE, State.FINISHED, State.STOPPED)
@@ -168,6 +180,9 @@ JOB_STATES = (State.PRINTING, State.PAUSED, State.ATTENTION)
 PHASE_STATES = {
     JobPhase.SCANNING: State.PRINTING,
     JobPhase.BLIP: State.IDLE,  # the firmware's PrintInit reads IDLE for a moment
+    # The vents' move reads as the preview did before it: IDLE with no job, or ATTENTION
+    # with the job after a question (`SimPrinter.state`).
+    JobPhase.VENTS: State.IDLE,
     JobPhase.PREHEAT: State.PRINTING,
     JobPhase.PRINTING: State.PRINTING,
     JobPhase.PAUSED: State.PAUSED,
@@ -189,16 +204,21 @@ PHASE_STATES = {
     # The join's unload runs in a `Load_unload` dialog while printing, which reads ATTENTION
     # (`get_state` in `src/state/printer_state.cpp:238-243`).
     JobPhase.JOIN: State.ATTENTION,
+    # The filament change's dialog stays open until the head is back over the print
+    # (`invoke_loop` in `Pause::filament_change`, `pause.cpp`).
+    JobPhase.RETURN: State.ATTENTION,
 }
 TIMED_PHASES = (
     JobPhase.SCANNING,
     JobPhase.BLIP,
+    JobPhase.VENTS,
     JobPhase.PREHEAT,
     JobPhase.RUN,
     JobPhase.PARKING,
     JobPhase.RECOVER,
     JobPhase.UNPARK,
     JobPhase.JOIN,
+    JobPhase.RETURN,
 )
 
 
@@ -293,6 +313,16 @@ class ModelInfo:
     # Whether the build has HAS_HUMAN_INTERACTIONS in `ProjectOptions.cmake`. Without it, a
     # menu unload waits for the filament sensor to clear (`pause.cpp:1280-1301`).
     human_interactions: bool = True
+    # How the build works its chamber vents, or None for a build without HAS_CHAMBER_VENTS
+    # in `ProjectOptions.cmake`. Vent control is a menu setting. This is the base variant's
+    # default (`variant_features` in `src/common/printer_variant/coreone.cpp` and
+    # `coreonel.cpp`, which the `WATCHED` rows "the Core One vent default" and "the Core One
+    # L vent default" guard): manual on the Core One, automatic on the Core One L. A
+    # Core One that's fresh or factory reset is the Plus gen 2 variant, which is automatic
+    # (`printer_variant_after_factory_reset`, `coreone.hpp:29`), so manual is the upgraded
+    # printer's case (config migration 5, `store_definition.cpp:168-175`) or the "CORE One"
+    # edition picked by hand.
+    vents: Vents | None = None
     # Its `compatibility_group` in `printer_model_data.hpp`. The MK3.5, MK4 and XL builds
     # run several models and check a file against the one the printer is set to
     # (`PrinterModelInfo::current`), so each model has its own entry's group.
@@ -480,6 +510,7 @@ MODELS = _models(
         CORE_ONE_PRESETS,
         uuids=True,
         mmu=True,
+        vents=Vents.MANUAL,
         group="coreone",
         checks=CORE_ONE_CHECKS,
         mmu_slicer=CORE_ONE_MMU_SLICER,
@@ -491,6 +522,7 @@ MODELS = _models(
         CORE_ONE_PRESETS,
         uuids=True,
         mmu=True,
+        vents=Vents.MANUAL,
         group="coreone",
         checks=CORE_ONE_CHECKS,
     ),
@@ -501,6 +533,7 @@ MODELS = _models(
         CORE_ONE_PRESETS,
         uuids=True,
         mmu=True,
+        vents=Vents.AUTOMATIC,
         group="coreonel",
         checks=CORE_ONE_CHECKS,
         mmu_slicer=CORE_ONE_MMU_SLICER,
@@ -512,6 +545,7 @@ MODELS = _models(
         INDX_PRESETS,
         gap_mm=27.0,
         max_tools=8,
+        vents=Vents.MANUAL,
         group="coreone_indx",
         checks=INDX_CHECKS,
         feed=Feed.INDX,
@@ -524,6 +558,7 @@ MODELS = _models(
         INDX_PRESETS,
         gap_mm=27.0,
         max_tools=8,
+        vents=Vents.AUTOMATIC,
         group="coreonel_indx",
         checks=INDX_CHECKS,
         feed=Feed.INDX,
@@ -559,7 +594,19 @@ class Settings:
     color_seconds: float = 0.0
     # How long a sync job's `G28` takes when the printer isn't homed, as after a boot.
     home_seconds: float = 0.0
+    # How long the automatic chamber vents' move takes at a print's start: a `G28` when
+    # needed, the lever moves and a park. It took the traced Core One L about 13 s.
+    vents_seconds: float = 0.0
     unload_seconds: float = 3.0
+    # How long a job's end, finished or stopped, parks the head before `pre_finalize_print`
+    # auto-retracts; `park_seconds` then follows. 0 auto-retracts at once.
+    end_park_seconds: float = 0.0
+    # A filament change in a print, outside an MMU: `ATTENTION` while the head finishes its
+    # moves and parks, then while it rams and unloads; after the reload, `ATTENTION` while
+    # it reheats and unparks before printing again. 0 runs each part at once.
+    change_park_seconds: float = 0.0
+    change_unload_seconds: float = 0.0
+    change_return_seconds: float = 0.0
     slow_load_mm: float | None = None
     fast_load_mm: float | None = None
     # The whole purge, not doubled for a high-flow nozzle. At least 1 mm, in 5 mm steps on
@@ -682,6 +729,13 @@ class SimJob:
     remaining: float = 0.0  # seconds left in a timed phase
     time_printing: float = 0.0
     end_state: State = State.FINISHED
+    # PARKING time left when the firmware's end runs `pre_finalize_print`, or None once it
+    # has run.
+    finalize_at: float | None = None
+    # Whether the job has waited for the user. Before the print begins that's a preview
+    # question, which leaves the server in `PrintPreviewQuestions`, so the vents' move
+    # reads `ATTENTION`.
+    asked: bool = False
 
     def enter(self, phase: JobPhase, attention: Attention | None = None) -> None:
         """Move to `phase`. A waiting phase needs a reason that fits it; no other phase has one."""
@@ -689,6 +743,7 @@ class SimJob:
         if (attention is None) != (not allowed) or (attention and attention.reason not in allowed):
             raise ValueError(f"{phase} can't wait for {attention!r}")
         self.phase, self.attention = phase, attention
+        self.asked = self.asked or attention is not None
 
     def waits_for(self, reason: Reason) -> bool:
         return self.attention is not None and self.attention.reason is reason
@@ -735,6 +790,9 @@ class UserJob(SimJob):
     resumed_on: int | None = None
     # The tools-mapping screen and the questions its Print asks, set when the screen opens.
     mapping: list[Attention] = field(default_factory=list)
+    # The preheat time a filament change's RETURN holds over, for a change begun in the
+    # preheat.
+    held: float | None = None
 
     def progress(self) -> int:
         return int(100 * self.fed_mm / self.spec.total_mm)
@@ -846,6 +904,9 @@ class SimPrinter:
     selected_tool: int | None = 0
     message: str | None = None
     homed: bool = False
+    # Whether the chamber vents are open, or None while the firmware doesn't know, as after
+    # a boot (`Chamber::vent_state_`). Only a model with `vents` uses it.
+    vents_open: bool | None = None
     # How the print preview treats a failed check that a setting governs: the firmware has
     # one setting per kind of check, but they share one screen and the worst decides.
     checks: Severity = Severity.WARN
@@ -881,6 +942,8 @@ class SimPrinter:
         if self.job is not None:
             if self._mmu_reloading():
                 return State.PRINTING
+            if self.job.phase is JobPhase.VENTS and self.job.asked:
+                return State.ATTENTION
             return PHASE_STATES[self.job.phase]
         if any(t.process is not None for t in self.tools.values()):
             return State.BUSY
@@ -1145,30 +1208,42 @@ class SimPrinter:
         retract; the iX purges with no retract, and the INDX cleaner's purge ends with an
         auto-retract (`M1705`), in a print too. A load outside a print then auto-retracts
         (`load_finalize_process`). A reload during a print primes and retracts again
-        instead, and the resume puts the tool back at the gap it had when the change began.
+        instead, and the change's end puts the tool back at the gap it had when the change began.
         The preview's load does neither. Its waits for the user come first and after the
         purge: `insert_seconds`, `continue_seconds`, `purge_park_seconds` and
         `color_seconds`.
         """
-        s, lengths = self.settings, self.model.extruder.lengths
-        slow, fast, model_purge = self._load_lengths()
+        s = self.settings
+        slow, fast, _purge = self._load_lengths()
         slow = slow if s.slow_load_mm is None else s.slow_load_mm
         fast = fast if s.fast_load_mm is None else s.fast_load_mm
-        ex = self.model.extruder
+        return [
+            LoadStep(INSERT_STEP, s.insert_seconds),
+            LoadStep(ASK_STEP, s.continue_seconds),
+            LoadStep("SLOW", slow),
+            LoadStep("FAST", fast),
+            *self._purge_steps(purge, extra, printing, auto_retract=auto_retract),
+        ]
+
+    def _purge_steps(
+        self, purge: float | None, extra: float, printing: bool, *, auto_retract: bool
+    ) -> list[LoadStep]:
+        """A load's steps from its park on: the type, the purge and what follows it, as
+        `_load_steps` describes, with its overrides. The type is written once the moves
+        before it have run, just before the purge is planned (`planner.synchronize` and
+        `mark_filament_as_loaded` in `purge_process`, `pause.cpp:789-797`)."""
+        s, ex = self.settings, self.model.extruder
+        lengths = ex.lengths
         if ex.cleaner_purge_mm:
             purge = ex.cleaner_purge_mm
         else:
             if purge is None:
-                purge = model_purge if s.purge_mm is None else s.purge_mm
+                purge = self._load_lengths()[2] if s.purge_mm is None else s.purge_mm
             purge = max(purge, MINIMAL_PURGE_MM)
         purge += extra
         if ex.cleaner_purge_mm == 0:  # the iX
             purge = math.ceil(purge / IX_PURGE_STEP_MM - EPSILON) * IX_PURGE_STEP_MM
         steps = [
-            LoadStep(INSERT_STEP, s.insert_seconds),
-            LoadStep(ASK_STEP, s.continue_seconds),
-            LoadStep("SLOW", slow),
-            LoadStep("FAST", fast),
             LoadStep(PARK_STEP, s.purge_park_seconds),
             LoadStep(TYPE_STEP),
             LoadStep("PURGE", purge),
@@ -1225,8 +1300,8 @@ class SimPrinter:
         1029-1073`; `MMU2::load_filament_to_nozzle`, `mmu2_mk4.cpp:961-987`).
 
         No type is written: only Purge More's purge writes one, which isn't modeled, and the
-        change never cleared it. The color question isn't modeled: the reload ends `PAUSED`
-        until the resume, as on every printer.
+        change never cleared it. The color question isn't modeled: the change ends with the
+        reload, and the print goes on with nothing to resume.
         """
         lengths = self.model.extruder.lengths
         return [
@@ -1365,8 +1440,11 @@ class SimPrinter:
     def print_file(self, name: str) -> None:
         """Print a stored file. The job is counted at once, and the preview checks the file
         when the scan ends."""
-        if self.job is not None and self.job.phase is JobPhase.BLIP:
-            # The firmware's state check passes during PrintInit, but print_start ignores
+        job = self.job
+        starting = job is not None and job.phase in (JobPhase.BLIP, JobPhase.VENTS)
+        if starting and self.state in IDLE_STATES:
+            # The firmware's state check passes during PrintInit, and during the vents'
+            # move, which reads IDLE when the preview asked nothing. But print_start ignores
             # the request there, so the upload succeeds and the print that's starting goes
             # on (`marlin_server.cpp:1527-1550` at 2db93db5).
             self._log("job", f"{name}: asked for during the start blip; the firmware drops it")
@@ -1411,6 +1489,12 @@ class SimPrinter:
         job = self.job
         waiting = job is not None and job.wait_tool == tool
         self._log("action", f"load T{tool} {what}")
+        if waiting and t.path.at_sensor:
+            # The change waits for the sensor to clear before it loads
+            # (`filament_not_in_fs_process` in `pause.cpp`): the reload stands for the user
+            # pulling the old filament out first.
+            t.path.at_sensor = False
+            self._log("load", f"T{tool}'s old filament pulled out for the reload")
         if purge_mm is not None:
             purge_mm = _positive(purge_mm, "purge_mm")
         extra = self.settings.jam_purge_mm if waiting and job.waits_for(Reason.JAM) else 0.0
@@ -1503,8 +1587,9 @@ class SimPrinter:
         self._show_state()
 
     def pull(self, tool: int) -> None:
-        """Pull a tool's filament out by hand, outside a print: what a menu unload left in
-        the sensor, or loaded filament from a cold extruder. The firmware sees it only
+        """Pull a tool's filament out by hand: what a menu unload or a filament change's
+        unload left in the sensor, or, outside a print, loaded filament from a cold
+        extruder. The firmware sees it only
         through the sensor, so the tracker's gap stays as it was. On the picked tool, with
         the sensors on, the idle sensor clear then counts an unload if a type is stored
         (F14); with them off nothing counts (BF25)."""
@@ -1514,6 +1599,43 @@ class SimPrinter:
         t.path.loaded, t.path.at_sensor = False, False
         if self.power is not Power.OFF:
             self._idle_clear_selected()
+        self._show_state()
+
+    def purge(self, tool: int) -> None:
+        """Filament > Purge Filament: `M701 L0 W2` (`MI_PURGE::click`,
+        `src/gui/MItem_filament.cpp:159-169`), a load that only purges (`do_purge_only` in
+        `M701_load`, `M701_2.cpp:71, 118`).
+
+        The menu offers it while a type is stored (`tool_has_filament`,
+        `MItem_filament.cpp:21-27`), and the preheat takes that type without asking
+        (`determine_filament_for_operation`, `M70X_preheat.cpp:80-98`). The load then goes
+        straight to the purge (`load_start_process`, `pause.cpp:506-507`), which writes
+        the same type back, so the type doesn't change. The purge has the length of a load's,
+        doubled for a high-flow nozzle, then asks whether the color is correct, and Yes
+        auto-retracts as after any idle load (`purge_process` and
+        `color_correct_ask_process`, `pause.cpp:789-815, 903-924`). Filament the sensor
+        doesn't see would turn the purge into a load, which isn't modeled.
+        """
+        t = self._tool(tool)
+        self._check_purge(t)
+        self._log("action", f"purge T{tool}")
+        self._menu_pick(t)
+        if t.material is None:
+            # The pick's idle sensor clear counted an unload and cleared the type. The
+            # firmware's preheat then asks for a type (`BUSY`) and, with the sensor empty,
+            # waits for filament as a load. The simulator stops instead, which leaves the
+            # same type and count.
+            self._log(
+                "action",
+                f"purge T{tool} stopped: the pick cleared the type; "
+                "the preheat's type question isn't modeled",
+            )
+            self.screen = State.IDLE
+            self._show_state()
+            return
+        steps = self._purge_steps(None, 0.0, False, auto_retract=True)
+        self._start_load(t, steps, replace(t.material))
+        self.screen = State.IDLE  # using the menu dismisses a finished or stopped screen
         self._show_state()
 
     def _start_load(self, t: SimTool, steps: list[LoadStep], material: Material | None) -> None:
@@ -1855,31 +1977,56 @@ class SimPrinter:
             self._recover(job)
             return
         self._log("action", "resume")
-        if job.restore is not None:
-            # The unpark's feed and `restore_retracted_distance` put the filament back at
-            # the gap it had when the change began (`Pause::filament_change` in
-            # `src/marlin_stubs/pause/pause.cpp`).
-            tool, gap = job.restore
-            self._restore_to(self.tools[tool], gap)
-            job.restore = None
-            # A color change in the file ends here, with its `M600`. Until then a power-panic
-            # resume runs it again: the cut saves the file position of the command running,
-            # which is the `M600` itself (`stop_and_save` in `crash_recovery.cpp`,
-            # `get_current_sdpos` in `queue.h`).
-            if job.pending_color_changes and job.pending_color_changes[0] <= job.fed_mm:
-                job.pending_color_changes.pop(0)
-            # A change on another tool changes back to the print's tool after the dialog,
-            # with no E move and no purge (`M600_execute`, `M600.cpp:317-339`).
-            self._pick(self._job_tool(job))
-        elif job.parked:
+        if job.parked:
             self._unpark_prime(job)
         job.parked = False
+        self._carry_on(job)
+
+    def _carry_on(self, job: UserJob) -> None:
+        """Go back to the phase the job left for a pause or a filament change."""
         if job.paused_from is JobPhase.PREHEAT:
             job.enter(JobPhase.PREHEAT)
             self._show_state()
         else:
             self._begin_feeding(job)
         job.paused_from = None
+
+    def _reloaded(self, job: UserJob) -> None:
+        """The filament change's reload is done. The change goes on in its dialog, which
+        reads `ATTENTION`, while it reheats and the head goes back over the print, and then
+        the print goes on by itself: `M600` runs the whole change in `invoke_loop`, with no
+        pause state and no Resume to press (`Pause::filament_change` in
+        `src/marlin_stubs/pause/pause.cpp`). The F8 and F9 traces read `ATTENTION` from
+        the color question to `PRINTING`. On an MMU it goes on at once."""
+        wait = self.settings.change_return_seconds
+        if self.feed is not MMU and wait > EPSILON:
+            job.enter(JobPhase.RETURN)
+            job.held, job.remaining = job.remaining, wait
+            self._show_state()
+        else:
+            self._end_change(job)
+
+    def _end_change(self, job: UserJob) -> None:
+        """End a filament change and print again."""
+        # The unpark's feed and `restore_retracted_distance` put the filament back at the gap
+        # it had when the change began (`Pause::filament_change` in
+        # `src/marlin_stubs/pause/pause.cpp`).
+        tool, gap = job.restore
+        self._restore_to(self.tools[tool], gap)
+        job.restore = None
+        # A color change in the file ends here, with its `M600`. Until then a power-panic
+        # resume runs it again: the cut saves the file position of the command running,
+        # which is the `M600` itself (`stop_and_save` in `crash_recovery.cpp`,
+        # `get_current_sdpos` in `queue.h`).
+        if job.pending_color_changes and job.pending_color_changes[0] <= job.fed_mm:
+            job.pending_color_changes.pop(0)
+        # A change on another tool changes back to the print's tool after the dialog, with
+        # no E move and no purge (`M600_execute`, `M600.cpp:317-339`).
+        self._pick(self._job_tool(job))
+        self._log("job", f"job {job.id}: the filament change is done")
+        if job.held is not None:
+            job.remaining, job.held = job.held, None
+        self._carry_on(job)
 
     def cancel(self) -> None:
         self._check_cancel()
@@ -2141,16 +2288,34 @@ class SimPrinter:
         # `src/marlin_stubs/pause/pause.cpp`).
         job.restore = (t.index, t.path.tracked())
         self._retract_to(t, self.model.extruder.lengths.retract_mm)
+        if loads is not None:
+            # What the reload writes (`filament::set_type_to_load`). The unload's write of
+            # none keeps the stored type here, which is `loads` whenever there is one.
+            t.kept_type = loads
+        job.enter(JobPhase.WAIT_LOAD, Attention(reason, t.index))
+        s = self.settings
         if self.feed is MMU:
             self._run_steps(t, self._mmu_unload_steps())
             self._log("mmu", f"T{t.index} ejected: load it into the MMU")
+        elif s.change_park_seconds > EPSILON or s.change_unload_seconds > EPSILON:
+            # The change parks, then rams and unloads, in its dialog.
+            steps = self._unload_steps(t, "runout")
+            t.process = UnloadProcess(steps, s.change_unload_seconds, s.change_park_seconds)
         else:
             self._run_steps(t, self._unload_steps(t, "runout"))
-            self._physical_unload(t, str(reason))
-        if loads is not None:
-            t.kept_type = loads  # what the reload writes (`filament::set_type_to_load`)
-        job.enter(JobPhase.WAIT_LOAD, Attention(reason, t.index))
+            self._change_unloaded(t, reason)
         self._show_state()
+
+    def _change_unloaded(self, t: SimTool, reason: Reason) -> None:
+        """The filament change's unload is done, and it counts.
+
+        A runout's tail has already left the sensor. Otherwise the change asks whether the
+        filament came out, and on Yes waits for the extruder's sensor to clear, so the
+        filament stays in the sensor until the user pulls it (`pull`): `unload_process`,
+        `unloaded_ask_process` and `filament_not_in_fs_process` in
+        `src/marlin_stubs/pause/pause.cpp`. The F8 and F9 traces read the filament present
+        from the unload's count until the pull."""
+        self._physical_unload(t, str(reason), at_sensor=reason is not Reason.RUNOUT)
 
     def clear_jam(self) -> None:
         self._check_clear_jam()
@@ -2227,7 +2392,7 @@ class SimPrinter:
             t.process = None
             t.path.boot(self.model.gap_mm)
         self.queue = []  # a change all doesn't survive the cut
-        self.homed, self.message = False, None
+        self.homed, self.message, self.vents_open = False, None, None
         self._log("boot", f"boot id {self.boot_id}")
         if self.mmu is not None and self.mmu.on:
             # `app_setup` starts an MMU that's switched on (`appmain.cpp:186-190`). Its
@@ -2277,6 +2442,7 @@ class SimPrinter:
             JobPhase.HOLD,
             JobPhase.JOIN,
             JobPhase.UNPARK,
+            JobPhase.RETURN,
         )
         # The resume before its end. `resume_print` marks any cut from then on a nested one,
         # until `atomic_reset` clears the mark and erases the saved print at
@@ -2634,7 +2800,8 @@ class SimPrinter:
             raise Invalid(f"T{t.index} has no filament")
         if t.process is not None:
             raise Busy("a load or unload is running")
-        if self.job is not None:
+        # A filament change's unload leaves the filament in the sensor for the user to pull.
+        if self.job is not None and self.job.wait_tool != t.index:
             raise Busy("during a print the sensor sees the filament go: use runout")
 
     def _check_move(self, t: SimTool) -> None:
@@ -2654,6 +2821,19 @@ class SimPrinter:
             raise Invalid(f"T{t.index} isn't the picked tool")
         if not t.path.loaded:
             raise Invalid(f"T{t.index} has no filament")
+
+    def _check_purge(self, t: SimTool) -> None:
+        self._need_power()
+        if self.feed is MMU:
+            raise Invalid("Purge Filament with the MMU isn't modeled")
+        if t.material is None:
+            raise Invalid(f"T{t.index} has no type stored")
+        if not t.path.loaded:
+            raise Invalid(f"T{t.index} has no filament")
+        if t.process is not None or self.state is State.BUSY:
+            raise Busy("a load or unload is already running")
+        if self.job is not None or self.state not in IDLE_STATES:
+            raise Busy(f"can't purge while {self.state}")
 
     def _check_select(self) -> None:
         if self.feed is MMU:
@@ -2886,6 +3066,7 @@ class SimPrinter:
             "load": lambda: self._check_load(t, keep=False),
             "keep": lambda: self._check_load(t, keep=True),
             "unload": lambda: self._check_unload(t),
+            "purge": lambda: self._check_purge(t),
             "pull": lambda: self._check_pull(t),
             "extrude": lambda: self._check_move(t),
             "retract": lambda: self._check_move(t),
@@ -2965,6 +3146,12 @@ class SimPrinter:
 
     def _unload_tick(self, t: SimTool, p: UnloadProcess, dt: float) -> None:
         """Move the unload's share of its steps for dt; record the unload when time is up."""
+        if p.wait > EPSILON:
+            used = min(p.wait, dt)
+            p.wait -= used
+            dt -= used
+            if p.wait > EPSILON:
+                return
         left = sum(abs(st.mm) for st in p.steps if st.phase not in MARKERS)
         most = left * min(dt / p.remaining, 1.0) if p.remaining > EPSILON else left
         p.remaining = max(p.remaining - dt, 0.0)
@@ -2975,6 +3162,11 @@ class SimPrinter:
             return
         self._run_steps(t, p.steps)  # what rounding left
         t.process = None
+        job = self.job
+        if job is not None and job.wait_tool == t.index:
+            self._change_unloaded(t, job.attention.reason)
+            self._show_state()
+            return
         self.feed.end_unload(self, t)
         self._process_done()
 
@@ -3007,7 +3199,7 @@ class SimPrinter:
     def _process_done(self) -> None:
         job = self.job
         if job is not None and job.phase is JobPhase.WAIT_LOAD:
-            job.enter(JobPhase.PAUSED)
+            self._reloaded(job)
         elif job is not None and job.phase is JobPhase.PREVIEW_LOAD:
             # The load's result isn't checked and no sensor is read again: the type check
             # follows (`filament_not_inserted_load` in `marlin_print_preview.cpp`).
@@ -3029,7 +3221,7 @@ class SimPrinter:
                 used = min(job.remaining, dt)
                 job.remaining -= used
                 dt -= used
-                if job.phase is not JobPhase.BLIP:
+                if job.phase not in (JobPhase.BLIP, JobPhase.RETURN):
                     job.time_printing += used
                 if (
                     job.phase is JobPhase.RECOVER
@@ -3038,6 +3230,12 @@ class SimPrinter:
                 ):
                     job.clean_at = None
                     self._nozzle_clean(job)
+                if (
+                    job.phase is JobPhase.PARKING
+                    and job.finalize_at is not None
+                    and job.remaining <= job.finalize_at + EPSILON
+                ):
+                    self._finalize(job)
                 if job.remaining <= EPSILON:
                     self._end_phase(job)
             else:
@@ -3051,6 +3249,8 @@ class SimPrinter:
                 self._after_sync_preview(job)
         elif job.phase is JobPhase.BLIP:
             self._after_blip(job)
+        elif job.phase is JobPhase.VENTS:
+            self._preheat(job)
         elif job.phase is JobPhase.PREHEAT:
             self._begin_feeding(job)
         elif job.phase is JobPhase.RUN and job.homing:
@@ -3068,17 +3268,23 @@ class SimPrinter:
             self._begin_feeding(job)
         elif job.phase is JobPhase.JOIN:
             self._finish_join(job)
+        elif job.phase is JobPhase.RETURN:
+            self._end_change(job)
         else:  # PARKING, the last of the timed phases
             self.job, self.screen = None, job.end_state
             self._log("job", f"job {job.id} {job.end_state.lower()}")
             self._show_state()
 
     def _begin(self, job: UserJob | SyncJob) -> None:
-        """Start the job the preview let through: the blip, then the job itself."""
+        """Start the job the preview let through: the blip, or the vents' move, then the
+        job itself. Both are `PrintInit`, and the move blocks the server where the blip
+        would end, so a print whose vents move shows no blip."""
         if isinstance(job, UserJob):
             job.previewing, job.mapping = False, []
             # A print's start G-code homes; a print declined at the preview never ran it.
             self.homed = True
+            if self._move_vents(job):
+                return
         if self.settings.start_blip:
             job.enter(JobPhase.BLIP)
             job.remaining = self.settings.blip_seconds
@@ -3257,6 +3463,62 @@ class SimPrinter:
         if isinstance(job, SyncJob):
             self._run_sync(job)
             return
+        self._preheat(job)
+
+    def _move_vents(self, job: UserJob) -> bool:
+        """Work the chamber vents as `PrintInit` does once the print has begun; return
+        whether the print waits for their move (`marlin_server.cpp:2461-2473`,
+        `Chamber::manage_ventilation_state` in `src/feature/chamber/chamber.cpp`, which the
+        `WATCHED` rows "the print's vent target" and "the vent rule" guard).
+
+        The target is the highest chamber target among the print's tools, each from its
+        type (`vent_opens`). With no target, or the vents already where it puts them,
+        nothing happens. Manual control only shows a warning, which isn't modeled.
+        Automatic control homes if needed, moves the lever and parks
+        (`automatic_chamber_vents::execute_control`), all inside the server's loop: its
+        nested loops publish the screens but not the server's state (`cycle` in
+        `marlin_server.cpp:913-1039`), so PrusaLink reads the state from before the print
+        began, through the `Printing` screen's `get_print_state`. That is `IDLE` with no
+        job when the preview asked nothing, and `ATTENTION` with the job and `PAUSED` in
+        `/api/v1/job` after a question, as `PrintPreviewQuestions` reads. The job's timer
+        started first, so `time_printing` runs.
+        """
+        control = self.model.vents
+        opens = [self.vent_opens(t, m) for t, m in self._uses(job).items()]
+        known = [o for o in opens if o is not None]
+        if control is None or not known:
+            return False
+        target = all(known)  # any closing target is higher than every opening one
+        if target == self.vents_open:
+            return False
+        self.vents_open = target
+        what = "open" if target else "close"
+        if control is Vents.MANUAL:
+            self._log("job", f"job {job.id}: asks the user to {what} the chamber vents")
+            return False
+        self._log("job", f"job {job.id}: the head moves to {what} the chamber vents")
+        wait = self.settings.vents_seconds
+        if wait <= EPSILON:
+            return False
+        job.enter(JobPhase.VENTS)
+        job.remaining = wait
+        self._show_state()
+        return True
+
+    def vent_opens(self, tool: int, file_type: str | None) -> bool | None:
+        """Whether a print on `tool` opens the vents (True) or closes them (False), or None
+        when its filament has no chamber target. The type is the tool's, else the file's
+        for it (`FilamentType::for_tool_heuristic` in `src/common/filament_tools.cpp`). Its
+        last resort, the type the tool last held, isn't modeled. Every preset of a vent
+        build has a target, and a type that isn't a preset has none: a user filament's
+        target defaults to off."""
+        material = self.tools[tool].material
+        name = material.name if material is not None else file_type
+        if name is None or PRESET_ALIASES.get(name, name) not in self.model.presets:
+            return None
+        return PRESET_ALIASES.get(name, name) in OPEN_VENT_PRESETS
+
+    def _preheat(self, job: UserJob) -> None:
         spec = job.spec
         job.enter(JobPhase.PREHEAT)
         job.remaining = self.settings.preheat_seconds if spec.preheat_s is None else spec.preheat_s
@@ -3290,20 +3552,34 @@ class SimPrinter:
         (`pre_finalize_print`). A stopped print and a sync job run no end G-code."""
         if isinstance(job, UserJob) and end is State.FINISHED:
             self.feed.end_moves(self, job, self._slicer(job))
-        self._end_of_print(job, end)
-        self.feed.rest(self)
+        t = self._head_tool()
+        if t is not None:
+            self._retract_to(t, self.model.extruder.lengths.retract_mm)
         job.enter(JobPhase.PARKING)
-        job.remaining, job.end_state = self.settings.park_seconds, end
+        s = self.settings
+        job.remaining, job.end_state = s.end_park_seconds + s.park_seconds, end
+        job.finalize_at = s.park_seconds
         if isinstance(job, UserJob):
             job.paused_from = None
+        if s.end_park_seconds <= EPSILON:
+            self._finalize(job)
         self._show_state()
 
-    def _end_of_print(self, job: UserJob | SyncJob, end: State) -> None:
-        """What a finished or stopped job does to the filament before it parks, a sync job
-        too (`marlin_server.cpp`).
+    def _finalize(self, job: UserJob | SyncJob) -> None:
+        """`pre_finalize_print`, once the head has parked: the F5 and F7 traces count the
+        end's auto-retract after Z reached its park height, and then stay still until the
+        job ends (`Finishing_*` and `Aborting_*` in `_server_print_loop`,
+        `marlin_server.cpp:2764-2830`)."""
+        job.finalize_at = None
+        self._end_of_print(job, job.end_state)
+        self.feed.rest(self)
 
-        It retracts the picked tool to 8 mm (`retract_and_lift`). Then `pre_finalize_print`
-        stores each tool's valid tracker gap as its auto-retracted distance and
+    def _end_of_print(self, job: UserJob | SyncJob, end: State) -> None:
+        """What a finished or stopped job does to the filament as it parks, a sync job too
+        (`marlin_server.cpp`).
+
+        `_park` has retracted the picked tool to 8 mm (`retract_and_lift`). Then
+        `pre_finalize_print` stores each tool's valid tracker gap as its auto-retracted distance and
         auto-retracts the picked tool, which INDX skips: its 8 mm already counts as fully
         retracted.
 
@@ -3323,8 +3599,6 @@ class SimPrinter:
         """
         ex = self.model.extruder
         t = self._head_tool()
-        if t is not None:
-            self._retract_to(t, ex.lengths.retract_mm)
         if ex.auto_retracts:
             for tool in self.tools.values():
                 if tool.path.gap_valid:
@@ -3336,6 +3610,11 @@ class SimPrinter:
                 self._run_steps(t, self._mmu_unload_steps())
         elif ex.auto_retracts and t is not None:
             self._run_steps(t, [LoadStep(AUTO_RETRACT_STEP)])
+        if self.model.vents is Vents.AUTOMATIC and self.vents_open:
+            # `Chamber::close_vents_after_print` (`marlin_server.cpp:1102-1104`, the `WATCHED`
+            # row "the vents after a print"). The move is part of the park.
+            self.vents_open = False
+            self._log("job", f"job {job.id}: the head moves to close the chamber vents")
 
     def _print_step(self, job: UserJob, dt: float) -> float:
         """Feed for dt, stopping at each segment end and color change. Return the time left."""
@@ -3365,7 +3644,7 @@ class SimPrinter:
                     self._log("job", "no slot selected: nothing changes")
                     job.pending_color_changes.pop(0)
                     continue
-                # It stays pending until the change ends (`resume`).
+                # It stays pending until the change ends (`_end_change`).
                 self._filament_change(tool, Reason.COLOR_CHANGE)
                 return 0.0
             if job.segment == len(spec.segments) - 1:
